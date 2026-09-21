@@ -45,6 +45,7 @@ Each normative sentence has one unique requirement tag. The validator enforces t
 **Manager**: the delegated cgroup `/init`.
 **Services**: the persistent child cgroup `/init/services`.
 **Scope**: the Helper-owned child cgroup `/init/valet-kubernetes`, which is a sibling of Services.
+**Leaf**: the declared launcher cgroup `/init/valet-kubernetes/leaf`.
 **Operation**: one persisted start, stop, or import claim with an immutable random ID.
 
 | Level | Name | Required proof |
@@ -113,10 +114,12 @@ It MUST exclude kmsg `1:11`, wildcard device rules, and cgroup device permission
 Kubernetes 1.35 sandbox nodes MUST set `userNamespaces.idsPerPod:131072`. [K33]
 The image MUST declare UID and GID subordinate ranges `65536:65535` for UID 1500. [K34]
 
-Only capability-enabled image startup MUST perform K36 through K37. [K35]
-Enabled startup MUST create Services, empty Manager, and enable `cpu cpuset memory pids`. [K36]
-Enabled startup MUST delegate Manager control files to UID 1500 without changing outer limits. [K37]
+Docker-enabled or capability-enabled image startup MUST run the generic cgroup bootstrap. [K35]
+Capability-enabled bootstrap MUST create Services, empty Manager, enable `cpu cpuset memory pids`, and preserve outer limits. [K36]
+Enabled startup MUST run bootstrap, fail-closed preflight, optional Docker, and profile readiness in that order. [K37]
 Ordinary sandbox startup MUST NOT install, validate, export, or modify nested Kubernetes state. [K38]
+
+A capability-enabled sandbox runs the bootstrap when Docker is disabled. The preflight keeps the epoch, full-map, device, read-only sys, and pinned-tool checks.
 
 ## 03. Artifact and process contract
 
@@ -155,14 +158,23 @@ Epoch cleanup MUST preserve `<Root>.lock` and every PVC path outside Root. [K55]
 Tests MUST cover crashes before launch, after launch, after readiness, during stop, and during each archive import. [K56]
 A13 MUST prove that pod replacement removes old Cluster data and keeps unrelated PVC data. [K57]
 Stop MUST remove owned Root contents, Root, and Scope while the adjacent exclusive lock remains held. [K58]
+The Helper MUST retry any failed or incomplete Root deletion through /usr/bin/rootlesskit with only the K109 subordinate maps and the exact Root target. [K189]
+A failed direct and RootlessKit deletion MUST persist `state_removal_failed`, emit one corrective error, and emit no stopped success. [K190]
+The RootlessKit deletion uses the same 10-minute budget as the Operation. An interrupted deletion tells the user to retry stop.
+The retry uses a temporary 0700 runtime directory. A temporary-directory cleanup error does not change a verified Root deletion.
 The lock file is outside Root. Stop releases it only after deletion and preserves every other PVC path.
 
-`server.pid.json` records PID, proc start time, boot ID, UID, cgroup, argv digest, epoch, and Operation ID.
-A valid identity MUST match every field, UID 1500, the current epoch, Scope, and K47. [K59]
+`server.pid.json` records PID, proc start time, boot ID, UID, cgroup ownership boundary, argv digest, epoch, and Operation ID.
+A valid identity MUST match every recorded field, UID 1500, the current epoch, the Scope boundary, the K47 digest, and K182 through K188. [K59]
 A live mismatch MUST never receive a signal or authorize state deletion. [K60]
 A dead or reboot-stale identity MUST authorize cleanup only inside Root and Scope. [K61]
 The Helper MUST create Scope as a Manager child and Services sibling. [K62]
-It MUST move only its detached launcher into Scope before exec. [K63]
+It MUST move only its detached launcher before exec. [K63]
+The leader cgroup line MUST equal Scope or start with Scope followed by `/`. [K154]
+Identity validation MUST reject a cgroup line for a sibling whose name starts with the Scope name. [K155]
+Scope MUST stay empty with `cpuset`, `cpu`, `memory`, and `pids` enabled for its children. [K156]
+The Helper MUST create Leaf and move the detached launcher into it before exec. [K157]
+RootlessKit-created leader descendants below Leaf remain inside the Scope ownership boundary.
 
 ## 05. Import and readiness
 
@@ -183,6 +195,37 @@ Ready requires valid identity, a responding API, all nodes Ready, and completed 
 Start readiness MUST use one Operation deadline of 10 minutes. [K73]
 A readiness timeout MUST retain logs, clean owned processes and Scope, persist error, and exit 22. [K74]
 A repeated ready start MUST recheck readiness without replacing the Cluster. [K75]
+An exited owned leader MUST fail immediately with `server_exited`, exit 22, and a fixed reference to `server.log`. [K158]
+`startup_timeout` MUST apply only when the deadline expires with a live owned leader. [K159]
+A live recorded leader outside Scope MUST cause exit 21 without a signal. [K160]
+A zombie recorded leader MUST classify as exited before cmdline and ownership checks. [K161]
+An ownership failure MUST persist `ownership_failure` under the Operation commit guard before exit 21. [K162]
+A server exit MUST clean Scope before it persists `server_exited`. [K163]
+Start recovery MUST classify a zombie recorded leader as exited and clean it before restart. [K164]
+After failed identity validation, the Helper MUST recheck exit state against the recorded PID and start time. [K165]
+The Helper MUST wait for the owned leader to enter `leaf/k3s_evac` before Leaf convergence. [K166]
+Leaf convergence MUST NOT move the recorded leader PID. [K167]
+The Helper MUST move each remaining Leaf process into `k3s_evac` before controller enablement. [K168]
+Each Leaf convergence call MUST use at most ten attempts. [K169]
+Leaf convergence MUST wait 100 ms between attempts. [K170]
+Leaf convergence MUST write only to Leaf and its direct `k3s_evac` child. [K171]
+Leaf convergence MUST enable exactly `cpuset cpu memory pids`. [K172]
+Stop MUST allow owned cleanup when the recorded leader is a zombie. [K173]
+Epoch recovery MUST treat a zombie recorded leader as exited before Root cleanup. [K174]
+A healthy recorded leader MUST classify as owned after successful identity validation. [K175]
+Start recovery MUST reuse a healthy owned leader without a second identity decision. [K176]
+Missing recorded process data MUST classify the leader as exited. [K177]
+Stop MUST allow cleanup for a healthy owned leader. [K178]
+Epoch recovery MUST refuse Root cleanup for each live recorded leader. [K179]
+Stop MUST allow cleanup when no leader record exists. [K180]
+Epoch recovery MUST allow Root cleanup when no leader record exists. [K181]
+Identity validation MUST accept the exact K47 command line. [K182]
+Identity validation MUST accept a nonempty title whose first NUL-delimited token equals `/usr/local/bin/k3s`. [K183]
+Identity validation MUST reject an empty command line. [K184]
+Identity validation MUST reject a foreign binary as the first command-line token. [K185]
+Identity validation MUST reject a binary whose first token only starts with `/usr/local/bin/k3s`. [K186]
+Identity validation MUST accept `/usr/local/bin/k3s server` in one segment followed by NUL padding. [K187]
+Identity validation MUST apply the same first-word match to the whole buffer when the buffer has no NUL. [K188]
 
 ## 06. Commands, locks, and state kernels
 
@@ -255,7 +298,7 @@ Subordinate files MUST grant UID 1500 outer interval `65536:65535` for both UID 
 | Provider grant expansion | INV-1, INV-3 | Manifest golden for K23 to K32 plus live A2 |
 | Map truncation or alias | INV-3, INV-5 | Executed K103 to K109 vectors plus A5 |
 | PID reuse | INV-1 | K59 to K61 identity vectors plus A9 |
-| Cgroup service damage | INV-1 | K62, K63, K99 to K101 tests plus A6 and A10 |
+| Cgroup service damage | INV-1 | K62, K63, K99 to K101, and K154 to K188 tests plus A6 and A10 |
 | Lifecycle race | INV-3, INV-6 | K78 to K90 race vectors plus A8 and A12 |
 | Supply substitution | INV-2, INV-3 | K39 to K44 digest and image tests |
 | Ambient import | INV-2 | K64 to K72 argv vector plus A7 tracing |
@@ -325,3 +368,7 @@ These errata are normative for the stacked implementation. They do not rewrite t
 2. The lifecycle kernel is total. `recover` with no active Operation returns a no-op report. Final-commit guards apply to start, import, and stop. Concurrent import during a live import waits for the owner. The lifecycle vectors define these branches.
 3. K131 and K142 distinguish environment sources. `sandboxEnv` supplies sandbox-global variables. `k3sEnv` supplies launcher-only variables.
 4. The informative L4 rollout range is A1 through A15.
+
+### Archive inspection portability
+
+Archive inspection uses `/usr/bin/tar` on macOS and `/bin/tar` on Linux. Both paths remain absolute. The existing unsafe-archive vectors run on both platforms.

@@ -90,6 +90,15 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
   });
   // The command is installed by sandbox prep. A build without prep (a
   // workflow session node) must not be told to use it.
+  // The command has two subcommands and only `run` was ever named here, so an
+  // agent asked for a vault, item and field it could have discovered.
+  it("names find as the way to reach a credential whose reference is unknown", () => {
+    const withCli = codingSystemPrompt({ secretsCli: true });
+    expect(withCli).toContain("valet-secrets find <name>");
+    expect(withCli).toContain("only after find has come back with nothing");
+    expect(codingSystemPrompt({ secretsCli: false })).not.toContain("valet-secrets find");
+  });
+
   it("composes the secrets paragraph from whether prep installs the CLI", () => {
     const withCli = codingSystemPrompt({ secretsCli: true });
     const without = codingSystemPrompt({ secretsCli: false });

@@ -424,6 +424,56 @@ The existing poller consumes persisted invalidations after a restart. Credential
 Explicit IdP joins invalidate team workflow sources in the membership insert transaction. Duplicate and denied joins do not invalidate sources. Eligibility snapshots alone change no membership and need no refresh. The retired login-time membership writer and its readiness hooks are removed; SSO claim parsing remains. If invalidation fails, the join rolls back. An older sync cannot consume the join refresh.
 
 
+### Workflow model selection (2026-09-13)
+
+The creation dialog recommends a size tier for each starter shape. It saves that tier on each starter `llm` and `session` node. It also saves the tier as `ui.defaultModel`. The blank preset stays a trigger and a stop. The editor applies its saved default when the user adds an `llm` or `session` node. Every editor write that touches `ui` keeps the fields it does not change, so a pan or a zoom holds `ui.defaultModel`. A user override stops preset changes from replacing the selection. The editor uses the org model catalog for later node edits. Creation, edits, and focused updates validate custom provider models against that same catalog. Existing bundled model IDs remain valid. Bare OpenAI and Google IDs resolve through their own provider settings.
+
+Every save path validates against one org model set. The set holds each catalog entry that is active and approved, the bare spelling of an ID that the engine still resolves, the size tiers the organization can serve, and the OpenRouter registry IDs an enabled OpenRouter provider resolves. A save that names a model outside the set fails. The message tells the user to choose a model that the organization approved in Settings > Models.
+
+The set is the authority on every path: a full save, a focused model update, an agent edit, and a template install. The paths differ in one detail only. A focused update reads its ID through the model catalog, which gives the bare spelling to Anthropic IDs alone, so a focused update needs the namespaced `openai/` or `google/` form where a full save also takes the bare one. A template install validates the baked definition against the same set as a full save, because an install writes the definition row itself. The gallery keeps listing a template the organization cannot install: the model policy belongs to the organization, not to the template.
+
+The card says so. `GET /api/templates` stamps `installable` on each summary, and `installBlockedReason` when it is false. The gallery disables that card's Install button and prints the reason below it. One function builds the sentence for the card and for the install refusal, so the two can never disagree. The sentence names the blocked model and both remedies the reader has: the organization approves and activates the model in Settings > Models, or it adds a key for the model's provider on the same page. A size tier is named only when the template uses one, because a tier has its own remedy. A listing that cannot read the model policy lists every card as installable and logs the failure; the install gate still answers on the install itself.
+
+The set holds a size tier only while the organization can reach the model that tier resolves to. A run walks a tier's target list and stops at the first target whose provider is enabled, whether or not a key exists for it. The save gate asks the same list the same question, then tests that one target for a key. A later target in the list never rescues an earlier one, because the run never reaches it. A deployment that holds no Anthropic key therefore refuses a preset that saves the default `m` tier, instead of accepting the save and failing the run for missing credentials. The organization clears the refusal by pointing the tier's first reachable target at a provider it has a key for. Session model resolution keeps its own, wider rule: it still builds a session on a tier whose provider has no key, so the run can ask for the key.
+
+`PATCH /api/workflows/:id/model` and `workflows.update_model` provide focused updates. Both validate active and approved catalog choices. They also accept org size tiers. They update `llm` and `session` nodes, including `foreach` bodies. An update that names no node also moves `ui.defaultModel`, so the next node the user adds carries the new model. An update that names a subset leaves `ui.defaultModel` alone. An `orchestrator` node keeps the selected assistant's model because it has no per-node model field. Existing explicit model values remain unchanged until a user calls an edit path.
+
 ### Workflow hub on narrow screens (2026-09-11)
 
 The hub header and row actions wrap when space is limited. Tabs can scroll horizontally without widening the page. Template columns follow the available content width. Service labels, cadence, and setup actions remain readable without clipping. Template descriptions state the outcome briefly; steps and operational limits remain in the details dialog.
+
+
+### Canvas edge readability (2026-09-14)
+
+Edges show arrowheads, readable branch labels, and separate label positions for sibling branches.
+The initial fit keeps a readable zoom floor; manual Fit view can show the whole graph.
+Clicking an edge label clears the node selection and selects that edge.
+Backspace then removes only the selected edge.
+
+
+### Workflow assistant threads (2026-09-14)
+
+An unattended run reports on its own thread in the selected assistant. The key is `signal:workflow:{runId}`. A run started from an assistant conversation reports in that conversation instead.
+
+One thread per workflow definition was tried first and reverted. A thread is the engine's unit of serial execution and of abort. On a shared thread, one run's approval gate holds every other run of the same workflow until a person answers it or it expires, and the thread's Stop button cancels all of them. Separate threads let runs of one workflow proceed at the same time, and keep Stop on one run.
+
+The thread list stays bounded at the other end. When a run settles, the run host archives the run's thread (`packages/api/src/workflows/run-attention.ts`). An archived thread leaves the default thread list and stays readable under "Show archived". Nothing is deleted, and no sweep or timer archives a thread later: an unsettled run keeps its thread in the list, which is the state the person needs to see. A run started from a conversation keeps that conversation live, because the thread belongs to the person.
+
+A run can settle before the turn it started finishes. An orchestrator node with `wait: { mode: "none" }` completes its checkpoint at dispatch, so the run reaches `stop` with the prompt still queued, and the strike-cap settle aborts no submission. The archive therefore reads the submission the node dispatched and skips a thread whose submission is not settled. One unsettled submission holds the whole thread, because several nodes can report on one thread.
+
+The skip is permanent, and for a `wait: { mode: "none" }` node it is the normal case. Such a run always settles before its turn finishes, so the archive always skips it, and the thread stays in the list after the report lands. The person archives it. The durable fix is a `submission_settled` subscriber that archives a `signal:workflow:{runId}` thread whose run has already settled. It reads the event stream the way `ChannelHost.startOutbound` subscribes to it. That subscriber is not in this change.
+
+Cancellation passes the submission ID to the engine. It aborts only that submission, including its pending gates. Other queued or running submissions remain active. This applies to explicit cancellation, stop nodes, and failed foreach siblings. Legacy callers without a submission ID retain thread-wide abort behavior.
+
+Sibling runs share the parent's thread only under an attended parent. A child run copies the parent's origin, and an unattended parent has none, so each child of an unattended parent reports on its own thread. A wide fan-out therefore adds one thread per child while it runs, and each thread leaves the list when its child settles.
+
+The keyless HTTP integration test starts the same workflow twice through the real API, LocalRunHost, engine, and PGlite store. It substitutes only the model transport. Both runs must complete with separate persisted results on their own threads, and each thread must be archived when its run settles.
+
+
+### Team runs with no acting user (2026-09-14)
+
+A schedule, an event, or a webhook starts a team run with no acting user. The team assistant then calls the workflow tools with the team's own principal id (`team:{id}`) in place of a user id. A membership read of that value can never succeed, so every `workflows.*` call was refused: the list came back empty, and each named workflow read as not found.
+
+The membership gate now applies only when a person acts. The gate reads the acting user id: the turn's author when it has one, and the tool context's own user id when it does not. When that value is the assistant's own team principal id, the call authorizes through the session's server-derived owner. Every other value names a person, and a person's turn always carries an author. A person who left the team keeps no reach through the same assistant: their turn carries their user id, and the membership read still refuses it.
+
+One submitter sets no author and is not a person: an internal signal (`packages/api/src/orchestrator/signals.ts`). A signal therefore reads as a machine turn. The edge rules in `authorizeEdge` bound what that reaches. They admit a parent-to-child or child-to-parent edge, and an org-owned assistant to a user-owned one in the same organization. They deny a user-owned assistant an edge to a team-owned one, and to another user-owned one.

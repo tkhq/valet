@@ -18,6 +18,15 @@ Phase 4 added the orchestrator, memory, signals, and child sessions to the engin
 
 ## Information Architecture
 
+### List query costs
+
+Session lists exclude child sessions and assistants with SQL existence checks. They fetch submission state only for the authorized sessions in the response.
+They do not load deployment-wide child IDs, assistant IDs, or unsettled submissions into application memory.
+This preserves the existing response and workspace visibility rules; it does not add pagination to the session list.
+
+Team lists aggregate member counts and the caller's role in batches of at most 1,000 authorized team IDs.
+Each aggregate is also scoped to the authenticated organization. The list does not load every member record for each team.
+
 Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications bell. "New session" moves into the Sessions page.
 
 ### `/` — Assistant dashboard

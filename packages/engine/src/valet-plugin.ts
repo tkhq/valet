@@ -236,11 +236,9 @@ export interface InboundChannelEvent {
     callbackId: string;
     ref: GatePromptRef;
     /**
-     * Explicit gate id when the transport can embed it in the callback
-     * payload (Slack Block Kit button values hold 2,000 chars). Gates then
-     * survive a host restart. Transports with tiny callback payloads
-     * (Telegram's 64-byte callback_data) omit it, and the host falls back to
-     * its in-memory ref map.
+     * Advisory gate id supplied by a transport. It does not authorize a
+     * callback. The host requires a recorded prompt reference and validates
+     * the acting user's access before resolving the gate.
      */
     gateId?: string;
   };

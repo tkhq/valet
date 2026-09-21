@@ -27,6 +27,11 @@ import { Editor } from "./editor";
  * session socket and whatever is half-typed in its composer.
  */
 let assistantMounts = 0;
+vi.mock("~/api/settings", () => ({
+  useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
+  useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
+}));
+
 function AssistantStub() {
   useEffect(() => {
     assistantMounts += 1;

@@ -5,8 +5,16 @@ import { orgMembers, teamMembers, teamDeletionRequests, teams } from "../schema/
 import { lockTeamForOwnership } from "./teams.js";
 
 export type DeletionResourceType = typeof teamDeletionRequests.$inferSelect.resourceType;
+
+/**
+ * The refusal discriminator for "you are on this team, but you are not an
+ * admin". Every route that refuses a team member for that reason sends this
+ * code, so one client branch covers all of them.
+ */
+export const TEAM_ADMIN_REQUIRED_CODE = "team_admin_required";
+
 export class TeamAdminRequiredError extends Error {
-  readonly code = "team_admin_required";
+  readonly code: typeof TEAM_ADMIN_REQUIRED_CODE = TEAM_ADMIN_REQUIRED_CODE;
   readonly statusCode = 403;
   constructor(readonly teamId: string, readonly resourceType: DeletionResourceType, readonly resourceId: string) {
     super("Only a team admin can delete this. Open a deletion request for an admin to approve or decline.");

@@ -17,6 +17,8 @@ import { Badge, Button, ConfirmDialog, Spinner, Switch } from "~/components/prim
 import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { displayName } from "~/components/integrations/display-name";
+import { useOnePasswordSettings } from "~/api/onepassword";
+import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup";
 
 /**
  * `/settings/connected-accounts` — You · Connected accounts. Renders one
@@ -172,10 +174,54 @@ export function ConnectedAccountsPage() {
       ))}
 
       <GithubRow />
+      <OnePasswordRow />
     </Section>
 
     <CredentialsListSection />
     </>
+  );
+}
+
+const REMOVE_PERSONAL_TOKEN_NOTE =
+  "This token is yours alone. Credentials that read their secret through it stop resolving for " +
+  "you, and other members and the organization token are not affected. You can connect a new " +
+  "token here.";
+
+/**
+ * 1Password sits beside the other accounts you connect yourself. A personal
+ * service account token needs no organization permission, so a member never
+ * has to open an Organization page to set one up (TKAI-487).
+ * Organization · 1Password keeps the org-wide token and opens the same
+ * setup dialog.
+ */
+function OnePasswordRow() {
+  const settingsQ = useOnePasswordSettings();
+
+  if (settingsQ.isLoading) {
+    return (
+      <FieldRow label="1Password">
+        <div className="flex items-center gap-2 text-sm text-muted">
+          <Spinner size={14} /> Loading…
+        </div>
+      </FieldRow>
+    );
+  }
+  if (settingsQ.error || !settingsQ.data) {
+    return (
+      <FieldRow label="1Password">
+        <p className="text-sm text-danger-500">Failed to load 1Password connection status.</p>
+      </FieldRow>
+    );
+  }
+
+  return (
+    <OnePasswordTokenRow
+      scope="personal"
+      connected={settingsQ.data.personalTokenConnected}
+      label="1Password"
+      hint="Let an agent read a credential from your vaults instead of you pasting it. Your token reads your own vaults, for sessions you own."
+      removeNote={REMOVE_PERSONAL_TOKEN_NOTE}
+    />
   );
 }
 
@@ -222,7 +268,7 @@ function GithubRow() {
   async function connect(): Promise<boolean> {
     setConnectError(null);
     try {
-      const res = await connectGithub.mutateAsync();
+      const res = await connectGithub.mutateAsync(undefined);
       window.location.href = res.url;
       return true;
     } catch (err) {
@@ -356,10 +402,10 @@ function CredentialsListSection() {
   // which a boolean would open for every row at once.
   const [confirmRevoke, setConfirmRevoke] = useState<CredentialSummary | null>(null);
 
-  // `github` gets its own richer row above; `onepassword` (the reserved
-  // service holding the personal service-account token itself) is surfaced
-  // by `PersonalTokenRow` instead — this list is every OTHER credential,
-  // including 1Password reference-backed ones (badge below).
+  // `github` gets its own richer row above, and `onepassword` (the reserved
+  // service holding the personal service-account token itself) gets the
+  // 1Password section above. This list is every OTHER credential, including
+  // the 1Password reference-backed ones (badge below).
   const others = (credentialsQ.data?.credentials ?? []).filter(
     (c) => c.service !== "github" && c.service !== "onepassword",
   );

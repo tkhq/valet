@@ -104,7 +104,7 @@ A UNIQUE index on `(org_id, owner_type, owner_id, name)` stops two stored skills
 | `buildChildSession` | `opts.owner` | The child's own principal, copied from its parent. |
 | `buildWorkflowSession` | `opts.owner` | The run's principal, copied from the workflow definition at start time. |
 
-A `user` principal reads its own skills plus its teams' skills. A `team` or `org` principal reads only that team's or org's skills, so one member's personal skills never appear in a session other members read.
+A `user` principal reads its own skills, its teams' skills, and the organization library. A `team` principal reads its skills and the organization library. An `org` principal reads the organization library. Team and organization sessions never read a member's personal skills.
 
 ## Two skills, one name
 
@@ -113,7 +113,7 @@ A skill name is a lookup key, so only one skill can hold a name. A repeated name
 - Two PLUGINS shipping one skill name THROWS. We ship the plugins, so a repeated name is a build-time bug and must be loud.
 - A STORED skill that repeats a name is SHADOWED. The row stays, and it drops out of the assembled set. It never throws: no session builder has a try/catch, so a throw would stop that person from starting any session at all.
 
-Precedence: a plugin skill wins over a stored skill, and a personal skill wins over a team skill. `partitionByName` (`packages/api/src/plugins/assemble.ts`) applies the rule, and `/api/skills` calls the same function, so the rows the page marks `shadowed` are the rows a session drops. The Skills tab shows the warning on the card and on the skill's own page, and names the fix: rename a `local` skill on its own page, and rename a `repo` skill where it came from.
+Precedence: a plugin skill wins over a stored skill. Stored skill precedence is personal, team, then organization. `partitionByName` (`packages/api/src/plugins/assemble.ts`) applies the plugin rule, and `/api/skills` calls the same function, so the rows the page marks `shadowed` are the rows a session drops. The Skills tab shows the warning on the card and on the skill's own page, and names the fix: rename a `local` skill on its own page, and rename a `repo` skill where it came from.
 
 ## Authoring
 
@@ -251,7 +251,7 @@ Three write surfaces exist, and they share one implementation:
 
 - **HTTP.** `POST /api/skills` writes a `local` skill for the caller, or for a team the caller belongs to. `GET`, `PATCH`, and `DELETE /api/skills/stored/:id` read, edit, and remove one.
 - **The web Skills tab.** The HTTP surface with an editor on it. It adds no rule of its own.
-- **Agent actions.** `packages/api/src/services/skills-actions.ts` exposes `skills.list_skills`, `skills.create_skill`, `skills.update_skill`, and `skills.delete_skill` through the plugin catalog, registered in `providers/node.ts` beside the workflow actions. This is how a skill comes out of a conversation: you tell the orchestrator what you learned, and it stores the skill for you.
+- **Agent actions.** `packages/api/src/services/skills-actions.ts` exposes `skills.list_skills`, `skills.create_skill`, `skills.update_skill`, and `skills.delete_skill` through the plugin catalog, registered in `providers/node.ts` beside the workflow actions. The list action uses the session principal, so its result matches the session skill registry. This is how a skill comes out of a conversation: you tell the orchestrator what you learned, and it stores the skill for you.
 
 All three call `services/skills.ts`, so ownership, team membership, and `validateSkillFrontmatter` are applied once, in one place. An agent can write a skill only for the user in its tool context, or for a team that user belongs to; a team the user is not on is reported as not found.
 

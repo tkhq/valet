@@ -11,7 +11,7 @@ function fixture() {
   let duplicate = false;
   const getWithSecrets = vi.fn(async () => ({ title: "Linear", fields: [{ title: "token", fieldType: "Concealed", value: "fake-value" }] }));
   const onePassword = createOnePasswordService({
-    credentials, getAllowPersonal: async () => true,
+    credentials,
     createClient: async (token): Promise<OpClient> => {
       clients.push(token);
       if (token === "fake-revoked") throw new Error("fake-sensitive-upstream-text");
@@ -125,7 +125,7 @@ describe("duplicate 1Password titles", () => {
     await credentials.save({ type: "team", id: "team" }, "onepassword", { type: "service_account", apiKey: "fake" });
     const sentinels: Record<string, string> = { "op://v1/i1/token": "sentinel-1", "op://v1/i2/token": "sentinel-2", "op://v2/Linear/token": "sentinel-3" };
     const svc = createOnePasswordService({
-      credentials, getAllowPersonal: async () => true,
+      credentials,
       createClient: async () => ({
         vaults: { list: async () => [{ id: "v1", title: "Same" }, { id: "v2", title: "Same" }] },
         items: {

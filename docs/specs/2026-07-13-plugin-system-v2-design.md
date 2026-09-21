@@ -255,8 +255,28 @@ prompt changes close this gap:
   carries the same rule as a `## Capabilities` section for every owner kind.
 
 All three distinguish "not connected" from "not possible": an unconnected
-integration is reported with its corrective action (`list_tools` already emits
-that warning), never presented as a capability the agent lacks.
+integration is reported with its corrective action, never presented as a
+capability the agent lacks.
+
+## Capability discovery inventory (2026-09-17)
+
+Every API session now includes `list_tools` and `call_tool`, even when no
+action plugin survives filtering. The catalog description states that it lists
+integration actions only. A search that matches a native tool, or no action,
+directs the model to its visible native tool list and names native matches.
+
+The host records service availability before each filter removes actions. The
+catalog reports `deployment_unconfigured`, `disabled_by_org`,
+`excluded_by_assistant`, and `load_failed` at service level. It never
+reports schemas or action ids for a removed service. Personal credential probes
+report `not_connected` and direct the user to the Integrations page (`/integrations`).
+
+The deployment and org-credential inventory resolves on every `list_tools`
+call. A cached session therefore sees an org credential immediately after an
+admin stores it. The build-time snapshot supplies only the compact description:
+available service names, configurable service names, and gated service markers.
+Native tool names and availability data are plain host inputs, so the engine
+keeps no API dependency.
 
 ## Structured tool output encoding (2026-09-11)
 

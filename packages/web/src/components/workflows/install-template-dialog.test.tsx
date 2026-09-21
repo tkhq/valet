@@ -59,6 +59,7 @@ const withInput: WorkflowTemplateSummary = {
     },
   ],
   caveats: [],
+  installable: true,
 };
 
 /** The same install with nothing to type: the case that carries no body. */
@@ -71,6 +72,7 @@ const withoutInputs: WorkflowTemplateSummary = {
   requires: [],
   inputs: [],
   caveats: [],
+  installable: true,
 };
 
 interface InstallCall {

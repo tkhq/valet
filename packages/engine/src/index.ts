@@ -21,6 +21,8 @@ export {
   SandboxEvictedError,
   SandboxStartupError,
   SandboxPreparationError,
+  SandboxConnectionError,
+  formatSandboxErrorCause,
 } from "./errors.js";
 export {
   REASONING_LEVELS,
@@ -120,6 +122,7 @@ export {
   PolicySandbox,
   SANDBOX_READY_TIMEOUT_MS,
   CONTAINER_DEATH_PATTERN,
+  isSandboxTransportError,
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
 export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
@@ -156,7 +159,10 @@ export {
   type PluginActionContext,
   type PluginActionResult,
   type PluginCatalog,
+  type PluginCatalogAvailabilityOptions,
   type PluginCatalogOptions,
+  type ServiceAvailability,
+  type ServiceAvailabilityState,
   type PinnedActionSpec,
   type PinRejectedHandler,
   type InvokeActionResult,
@@ -245,6 +251,7 @@ export {
   estimateTokens,
   estimateEntryTokens,
   estimateTotalTokens,
+  estimateSummaryEntryTokens,
   estimateContextTokens,
   estimateLiveContextTokens,
   storedToolResultText,
@@ -253,6 +260,8 @@ export {
   usableTokens,
   tailBudget,
   inputSpillThreshold,
+  walkTranscriptDag,
+  selectSummaryCheckpointTail,
   turns,
   selectCutPoint,
   planPrune,
@@ -266,12 +275,14 @@ export {
   type SelectCutPointOptions,
   type SummarizeOptions,
   type SummarizeResult,
+  type SummaryWindowOptions,
   type Turn,
 } from "./compaction.js";
 export {
   entriesToAgentMessages,
   skillInvocationsInContext,
   buildSpilledInputMarker,
+  formatTransientRetryMessage,
   resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";

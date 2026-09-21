@@ -21,17 +21,20 @@ import {
   type WorkflowEdge,
   type WorkflowNode,
   type WorkflowRunListItem,
+  type WorkflowRunOrigin,
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
-import type { ActionPlugin, CredentialStore, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   actionInvocations,
+  assistants,
   contentSources,
   eventSubscriptions,
+  sessionThreads,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
@@ -45,6 +48,7 @@ import {
   listTeamsForUser,
   lockTeamForOwnership,
   TeamHasActiveRunsError,
+  withAuthorizedTeamOwnership,
 } from "../services/teams.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { isOrgAdmin, isOrgMember } from "../services/org.js";
@@ -58,6 +62,7 @@ import type {
   GetWorkflowRunResponse,
   GlobalWorkflowRunSummary,
   ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
   WorkflowDefinitionSummary,
   WorkflowPendingGate,
@@ -76,6 +81,11 @@ export interface WorkflowServiceDeps {
    * caller cannot arm team work that no gate has judged. */
   credentials: CredentialStore;
   onePassword?: OnePasswordService;
+  /** The engine's own session store. `activeWorkflowOrigin` probes it for
+   * the origin thread: an origin that names a thread the engine no longer
+   * holds fails the run's first orchestrator node. Required, so that check
+   * cannot fail open in one caller and hold in another. */
+  engineStore: SessionStore;
   /** Plugin catalog index — enables save-time validation of tool nodes'
    * service/action pairs (validator env hook). Optional so tests that
    * exercise definition CRUD without a plugin catalog stay lightweight. */
@@ -88,10 +98,11 @@ export interface WorkflowServiceDeps {
 export interface WorkflowOwner {
   userId: string;
   orgId: string;
-  /** Set on every HTTP request. A team `vlt_` key pins reach to that team
-   * and skips the creating admin's membership — the key survives them
-   * leaving. Team assistant tools carry the same trusted team principal. */
+  /** The authenticated request, assistant-session, or workflow-run owner. */
   principal?: RequestPrincipal;
+  /** Live team-assistant actions recheck the acting member. Team API keys
+   * and workflow runs authorize through their server-derived principal. */
+  requireTeamMembership?: boolean;
 }
 
 /** The owner types `workflow_definitions.owner_type` holds. Read off the
@@ -250,7 +261,8 @@ export async function isAuthorizedForOwner(
   target: { ownerType: string; ownerId: string },
 ): Promise<boolean> {
   if (owner.principal?.type === "team") {
-    return target.ownerType === "team" && target.ownerId === owner.principal.id;
+    if (target.ownerType !== "team" || target.ownerId !== owner.principal.id) return false;
+    return !owner.requireTeamMembership || isTeamMember(db, owner.principal.id, owner.userId);
   }
   if (target.ownerType === "user") return target.ownerId === owner.userId;
   if (target.ownerType === "team") return isTeamMember(db, target.ownerId, owner.userId);
@@ -279,7 +291,9 @@ export function isAuthorizedForOwnerWith(
   target: { ownerType: string; ownerId: string },
 ): boolean {
   if (owner.principal?.type === "team") {
-    return target.ownerType === "team" && target.ownerId === owner.principal.id;
+    return target.ownerType === "team" &&
+      target.ownerId === owner.principal.id &&
+      teamIds.has(owner.principal.id);
   }
   if (target.ownerType === "user") return target.ownerId === owner.userId;
   if (target.ownerType === "team") return teamIds.has(target.ownerId);
@@ -289,7 +303,12 @@ export function isAuthorizedForOwnerWith(
 /** Ids of every team the caller is a live member of — the one membership
  * read behind `ownedDefinitionFilter` and `triggerAccessSets`. */
 async function callerTeamIds(db: AppDb, owner: WorkflowOwner): Promise<Set<string>> {
-  if (owner.principal?.type === "team") return new Set([owner.principal.id]);
+  if (owner.principal?.type === "team") {
+    if (!owner.requireTeamMembership || await isTeamMember(db, owner.principal.id, owner.userId)) {
+      return new Set([owner.principal.id]);
+    }
+    return new Set();
+  }
   const myTeams = await listTeamsForUser(db, owner.userId);
   return new Set(myTeams.map((t) => t.id));
 }
@@ -365,6 +384,7 @@ function ownedDefinitionFilterWith(
     return and(
       eq(workflowDefinitions.ownerType, "team"),
       eq(workflowDefinitions.ownerId, owner.principal.id),
+      inArray(workflowDefinitions.ownerId, [...teamIds]),
     );
   }
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
@@ -539,7 +559,7 @@ export async function getWorkflowDefinition(
 export async function createWorkflowDefinition(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
-  input: { name: string; definition: unknown; teamId?: string; skipMembershipCheck?: boolean },
+  input: { name: string; definition: unknown; teamId?: string },
 ): Promise<WorkflowDefinitionSummary> {
   const now = Date.now();
   const id = newWorkflowId("wf");
@@ -563,21 +583,22 @@ export async function createWorkflowDefinition(
     // are deleted in the gap between this check and the insert, stranding
     // it permanently (see that lock's own doc comment for why
     // `db.transaction` alone isn't enough here).
-    await deps.db.transaction(async (tx) => {
-      await lockTeamForOwnership(tx, teamId);
-      if (!(await getTeamInOrg(tx, owner.orgId, teamId))) throw new NotFoundError("team", teamId);
-      // Non-member and unknown-team look identical here (both a plain
-      // `false`) — same "cross-owner access 404s, never 403s" convention
-      // as the rest of this file, so a team's existence is never leaked
-      // to a non-member's probe. A team principal skips membership but
-      // still needs the team row, or a delete that commits under this
-      // lock would insert a workflow for a gone team.
-      if (!input.skipMembershipCheck && !(await isTeamMember(tx, teamId, owner.userId))) {
-        throw new NotFoundError("team", teamId);
-      }
-      await validateWorkflowAssistant(tx, owner.orgId, { type: "team", id: teamId }, input.definition);
-      await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
-    });
+    const inserted = await withAuthorizedTeamOwnership(
+      deps.db,
+      {
+        teamId,
+        orgId: owner.orgId,
+        userId: owner.userId,
+        principalTeamId: owner.principal?.type === "team" ? owner.principal.id : null,
+        requireMembership: owner.requireTeamMembership === true,
+      },
+      async (tx) => {
+        await validateWorkflowAssistant(tx, owner.orgId, { type: "team", id: teamId }, input.definition);
+        await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
+        return true;
+      },
+    );
+    if (!inserted) throw new NotFoundError("team", teamId);
     ownerType = "team";
     ownerId = teamId;
   } else {
@@ -1193,17 +1214,74 @@ export async function reapTeamWorkflows(tx: AppQueryable, teamId: string): Promi
   }
 }
 
+/**
+ * Keep an origin only when a run report can still reach it: an active
+ * assistant that belongs to the caller or the run, and a live thread on
+ * that assistant's session. The single validator for every path that
+ * records an origin — a manual start, an assistant's `start_run`, and a
+ * retry, which re-passes the failed run's stored origin.
+ *
+ * A dropped origin is not an error. The run falls back to its own thread
+ * (`signal:workflow:{runId}`), which is where an unattended run reports.
+ * The alternative is a report delivered into a thread the person archived,
+ * or a run that fails at its first orchestrator node.
+ */
+async function activeWorkflowOrigin(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  runOwner: { ownerType: string; ownerId: string },
+  origin: WorkflowRunOrigin,
+): Promise<WorkflowRunOrigin | undefined> {
+  if (origin.assistantSessionId.length === 0 || origin.threadId.length === 0) return undefined;
+  const [assistant] = await deps.db.select().from(assistants)
+    .where(and(eq(assistants.sessionId, origin.assistantSessionId), eq(assistants.orgId, owner.orgId)))
+    .limit(1);
+  if (!assistant || assistant.archivedAt !== null) return undefined;
+  const callerOwner = owner.principal?.type === "team"
+    ? { ownerType: "team", ownerId: owner.principal.id }
+    : { ownerType: "user", ownerId: owner.userId };
+  const belongsToCaller = assistant.ownerType === callerOwner.ownerType && assistant.ownerId === callerOwner.ownerId;
+  const belongsToRun = assistant.ownerType === runOwner.ownerType && assistant.ownerId === runOwner.ownerId;
+  if (!belongsToCaller && !belongsToRun) return undefined;
+
+  // Archive state lives in the app mirror row, not in the engine: the
+  // PATCH that archives a thread stamps `session_threads.archived_at` and
+  // the engine thread is untouched. A missing row means the thread was
+  // never titled or archived, which is the same as not archived — the
+  // thread listing reads it the same way.
+  const [mirror] = await deps.db
+    .select({ archivedAt: sessionThreads.archivedAt })
+    .from(sessionThreads)
+    .where(and(eq(sessionThreads.id, origin.threadId), eq(sessionThreads.sessionId, origin.assistantSessionId)))
+    .limit(1);
+  if (mirror?.archivedAt != null) return undefined;
+
+  // The thread itself must still exist. A retry re-passes the stored
+  // origin of a run that failed months ago, and the delivery side has no
+  // fallback: a missing thread fails the orchestrator node.
+  const thread = await deps.engineStore.getThread(origin.assistantSessionId, origin.threadId);
+  return thread ? origin : undefined;
+}
+
 /** Returns null when the workflow doesn't exist (or isn't owned); an
  * `invalidInput` result when the caller's input fails the trigger's
- * declared dataSchema (routes map that to 400). */
+ * declared dataSchema (routes map that to 400). Invalid origins are omitted. */
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
   input?: Record<string, unknown>,
+  origin?: WorkflowRunOrigin,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
+
+  const runOwner = row.ownerType === "org"
+    ? { ownerType: "user", ownerId: owner.userId }
+    : { ownerType: row.ownerType, ownerId: row.ownerId };
+  const validOrigin = origin
+    ? await activeWorkflowOrigin(deps, owner, runOwner, origin)
+    : undefined;
 
   const definition = row.definition;
   const versionId = definitionVersionId(definition);
@@ -1222,6 +1300,7 @@ export async function startWorkflowRun(
     workflowId,
     definitionVersionId: versionId,
     input: trigger,
+    ...(validOrigin ? { origin: validOrigin } : {}),
   };
 
   // Team and user runs use the definition owner, matching the scheduler,
@@ -1379,6 +1458,77 @@ export async function listRunsForOwner(
     return { ...summary, workflowName: nameById.get(summary.workflowId) ?? summary.workflowId };
   });
   return { runs, nextCursor: result.nextCursor };
+}
+
+/** Lists every active approval or policy gate the calling principal can resolve. */
+export async function listWorkflowActionRequired(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+): Promise<ListWorkflowActionRequiredResponse> {
+  const summaries: GlobalWorkflowRunSummary[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await listRunsForOwner(deps, owner, {
+      status: ["parked"],
+      limit: RUN_PAGE_LIMIT_MAX,
+      cursor,
+    });
+    if (page === null) break;
+    summaries.push(...page.runs.filter((run) => run.needsApproval));
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+
+  const items: ListWorkflowActionRequiredResponse["items"] = [];
+  for (const summary of summaries) {
+    if (!(await ownedRun(deps, owner, summary.runId, "act"))) continue;
+    const detail = await getWorkflowRunDetail(deps, owner, summary.runId);
+    if (detail === null) continue;
+    const trigger = workflowActionTrigger(detail.run.params);
+    const assistantId = parkedRunAssistantId(detail.run.definition);
+    for (const gate of detail.pendingGates) {
+      const iteration = gate.iteration ?? 0;
+      items.push({
+        id: `${summary.runId}:${gate.nodeId}:${iteration}`,
+        runId: summary.runId,
+        workflowId: summary.workflowId,
+        workflowName: summary.workflowName,
+        runCreatedAt: summary.createdAt,
+        owner: detail.owner,
+        ...(assistantId === undefined ? {} : { assistantId }),
+        trigger,
+        gate,
+      });
+    }
+  }
+  items.sort((a, b) => (a.gate.waitingSince ?? a.runCreatedAt) - (b.gate.waitingSince ?? b.runCreatedAt));
+  return { items, count: items.length };
+}
+
+/**
+ * The assistant a parked run executes as. `workflowAssistantId` throws on a
+ * malformed id because it guards writes and dispatch; this list only
+ * reports, and a run with a broken snapshot still needs its approval to be
+ * reachable. Such a run reports no assistant instead of failing the list.
+ */
+function parkedRunAssistantId(definition: unknown): string | undefined {
+  try {
+    return workflowAssistantId(definition);
+  } catch {
+    return undefined;
+  }
+}
+
+function workflowActionTrigger(params: unknown): ListWorkflowActionRequiredResponse["items"][number]["trigger"] {
+  if (typeof params !== "object" || params === null) return { type: "unknown" };
+  const input = (params as Record<string, unknown>).input;
+  if (typeof input !== "object" || input === null) return { type: "unknown" };
+  const value = input as Record<string, unknown>;
+  const allowed = ["manual", "schedule", "webhook", "event", "workflow"] as const;
+  const type = allowed.find((candidate) => candidate === value.type) ?? "unknown";
+  return {
+    type,
+    ...(typeof value.triggerId === "string" ? { triggerId: value.triggerId } : {}),
+  };
 }
 
 /**
@@ -1549,6 +1699,7 @@ export async function retryWorkflowRun(
     owner,
     run.params.workflowId,
     triggerData(run.params.input),
+    run.params.origin,
   );
   if (!started) return "workflow_deleted";
   return started;
@@ -1739,6 +1890,7 @@ export async function getWorkflowRunDetail(
       const gate: WorkflowPendingGate = {
         nodeId,
         kind: "policy_gate",
+        waitingSince: intentCp?.createdAt ?? run.updatedAt,
       };
       if (iteration !== undefined) gate.iteration = iteration;
       if (typeof node.service === "string") gate.service = node.service;
@@ -1771,12 +1923,17 @@ export async function getWorkflowRunDetail(
       pendingGates.push(gate);
     } else {
       // Approval node (non-tool).
+      const intentCp = checkpoints.find(
+        (cp) => cp.nodeId === nodeId && cp.iteration === (iteration ?? 0) && cp.status === "intent",
+      );
       const gate: WorkflowPendingGate = {
         nodeId,
         kind: "approval",
+        waitingSince: intentCp?.createdAt ?? run.updatedAt,
       };
       if (iteration !== undefined) gate.iteration = iteration;
       if (node && typeof node.prompt === "string") gate.prompt = node.prompt;
+      if (node && (node.onDeny === "fail" || node.onDeny === "skip")) gate.onDeny = node.onDeny;
       if (typeof w.timeoutAt === "number") gate.timeoutAt = w.timeoutAt;
       pendingGates.push(gate);
     }

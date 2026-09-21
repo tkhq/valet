@@ -38,6 +38,8 @@ export interface WorkflowAwaitResultOptions {
 }
 
 export interface WorkflowLlmCompleteRequest {
+  /** Identifies the run whose org model catalog resolves the model spec. */
+  runId: string;
   model: string;
   system?: string;
   prompt: string;
@@ -135,7 +137,7 @@ export interface WorkflowEngineDeps {
   ): Promise<SubmissionResult>;
 
   /** Withdraws in-flight engine work for a run being cancelled. */
-  abort(sessionId: string, threadId: string): Promise<void>;
+  abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void>;
 
   /** Non-blocking settlement check, used by the lost-wake sweep (Task 8). */
   isSettled(sessionId: string, queueItemId: string): Promise<boolean>;

@@ -111,12 +111,10 @@ export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
   "chat:write.customize",
 
   // ── V1 parity, held for surfaces that are ported next ───────────────
-  // The scopes below have no v2 consumer yet. They ride along so an
-  // installed app does not need a reinstall when each surface lands —
-  // Slack grants only what the installed manifest declared.
+  // Slack grants only scopes the installed manifest declared.
   // Posting into public channels the bot has not joined.
   "chat:write.public",
-  // Email-based workspace-member lookup in the account-link search.
+  // Email recipient lookup in identity links and slack.lookup_user_by_email.
   "users:read.email",
   // Usergroup read/manage tools.
   "usergroups:read",

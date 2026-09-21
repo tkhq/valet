@@ -10,7 +10,15 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { resolveModelSpec } from "./model-resolution.js";
-import { getOrgTierMap, setOrgTierMap, DEFAULT_TIER_MAP, TIER_TOKENS, type TierMap } from "./model-tiers.js";
+import {
+  getOrgTierMap,
+  resolvableTiers,
+  resolveTier,
+  setOrgTierMap,
+  DEFAULT_TIER_MAP,
+  TIER_TOKENS,
+  type TierMap,
+} from "./model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
 import { getApprovedModels, setApprovedModels } from "./approved-models.js";
 import { tierTargetsNotApproved } from "../routes/model-tiers.js";
@@ -159,6 +167,78 @@ describe("model-tiers", () => {
       // Without db, tier branch is skipped; "l" falls to the regular
       // parse path. There's no model "l" in the Anthropic registry, so null.
       expect(resolved).toBeNull();
+    });
+  });
+
+  describe("resolvableTiers", () => {
+    it("names the spec each tier would use when the default targets have a key", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+      const usable = await resolvableTiers(db, credentials, orgId);
+      expect([...usable.keys()].sort()).toEqual([...TIER_TOKENS].sort());
+      expect(usable.get("m")).toBe("anthropic/claude-sonnet-4-6");
+    });
+
+    it("lists no tier when the target's known kind has no key anywhere", async () => {
+      expect(await resolvableTiers(db, credentials, orgId)).toEqual(new Map());
+    });
+
+    it("lists no tier when the target's row is enabled but holds no key", async () => {
+      await createLlmProvider(db, { orgId, kind: "anthropic", name: "Anthropic" });
+      expect(await resolvableTiers(db, credentials, orgId)).toEqual(new Map());
+    });
+
+    it("accepts a row's own key when the deployment env has none", async () => {
+      const row = await createLlmProvider(db, { orgId, kind: "anthropic", name: "Anthropic" });
+      await saveKey(row.id, "org-anthropic");
+      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("anthropic/claude-sonnet-4-6");
+    });
+
+    it("lists no tier when only an unrelated provider has a key", async () => {
+      vi.stubEnv("OPENAI_API_KEY", "env-openai");
+      expect(await resolvableTiers(db, credentials, orgId)).toEqual(new Map());
+    });
+
+    it("rejects a tier whose FIRST active target is keyless, later targets included", async () => {
+      // A run stops at the first ACTIVE entry. Anthropic has no row, so it
+      // is active on the zero-config rule and the run picks it — the OpenAI
+      // entry behind it never gets a turn. The gate must agree, or the save
+      // passes and the run fails for missing credentials.
+      vi.stubEnv("OPENAI_API_KEY", "env-openai");
+      await setOrgTierMap(db, orgId, {
+        ...DEFAULT_TIER_MAP,
+        m: ["anthropic/claude-sonnet-4-6", "openai/gpt-6-astra"],
+      });
+      expect(await resolveTier(db, credentials, orgId, "m")).toBe("anthropic/claude-sonnet-4-6");
+      const usable = await resolvableTiers(db, credentials, orgId);
+      expect(usable.has("m")).toBe(false);
+      expect(usable.has("l")).toBe(false);
+    });
+
+    it("accepts a tier whose first target is inactive and whose next one is usable", async () => {
+      // A disabled custom row is INACTIVE, so the run itself walks past it.
+      // The gate then key-tests the entry the run lands on.
+      vi.stubEnv("OPENAI_API_KEY", "env-openai");
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://x/v1",
+        models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+      });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+      await setOrgTierMap(db, orgId, {
+        ...DEFAULT_TIER_MAP,
+        m: [`${row.id}/m1`, "openai/gpt-6-astra"],
+      });
+      expect(await resolveTier(db, credentials, orgId, "m")).toBe("openai/gpt-6-astra");
+      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("openai/gpt-6-astra");
+    });
+
+    it("skips a tier whose target provider the org disabled", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+      const row = await createLlmProvider(db, { orgId, kind: "anthropic", name: "Anthropic" });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+      expect(await resolvableTiers(db, credentials, orgId)).toEqual(new Map());
     });
   });
 

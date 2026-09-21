@@ -247,11 +247,12 @@ export function toFlow(definition: WorkflowDefinition): WorkflowFlowState {
 
 export function fromFlow(
   flow: WorkflowFlowState,
-  previous?: Pick<WorkflowDefinition, 'policy' | 'assistantId'>,
+  previous?: Pick<WorkflowDefinition, 'policy' | 'assistantId' | 'ui'>,
 ): WorkflowDefinition {
   const ui: WorkflowEditorState = {
     nodes: Object.fromEntries(flow.nodes.map((node) => [node.id, { position: node.position }])),
     ...(flow.viewport ? { viewport: flow.viewport } : {}),
+    ...(previous?.ui?.defaultModel ? { defaultModel: previous.ui.defaultModel } : {}),
   };
 
   return {
@@ -407,7 +408,11 @@ export function addNode(
   options: { position?: FlowPosition } = {},
 ): AddNodeResult {
   const id = createNodeId(type, definition.nodes.map((node) => node.id));
-  const node = NODE_META[type].defaultNode(id);
+  const defaultNode = NODE_META[type].defaultNode(id);
+  const node =
+    definition.ui?.defaultModel && (defaultNode.type === 'llm' || defaultNode.type === 'session')
+      ? { ...defaultNode, model: definition.ui.defaultModel }
+      : defaultNode;
   const position = options.position ?? nextFreePosition(definition);
 
   return {
@@ -561,8 +566,12 @@ export function setNodePosition(
   };
 }
 
+/** Writes the camera and keeps every other editor field, `defaultModel`
+ * included. The editor calls this on each pan and zoom, and again when it
+ * adopts a refetch, so a rebuilt `ui` here loses a field the server wrote
+ * and the next save persists the loss. */
 export function setViewport(definition: WorkflowDefinition, viewport: FlowViewport): WorkflowDefinition {
-  return { ...definition, ui: { nodes: definition.ui?.nodes ?? {}, viewport } };
+  return { ...definition, ui: { ...definition.ui, nodes: definition.ui?.nodes ?? {}, viewport } };
 }
 
 // ─── auto-layout (BFS depth layering, no dagre/elk) ──────────────────────────

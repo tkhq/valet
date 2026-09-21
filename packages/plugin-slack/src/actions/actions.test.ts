@@ -10,6 +10,7 @@ import type {
   ToolContext,
 } from '@valet/engine';
 import { slackPlugin } from './actions.js';
+import { clearChannelNameCache } from './channel-names.js';
 import { SLACK_TEXT_LIMIT } from '../message-chunking.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
@@ -65,7 +66,10 @@ function jsonResponse(status: number, body: unknown): Response {
  *  before the action's own fetch mocks are consumed. */
 function mockGuardAllowsPublicChannel(fetchMock: ReturnType<typeof vi.fn>): void {
   fetchMock.mockResolvedValueOnce(
-    jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }),
+    jsonResponse(200, {
+      ok: true,
+      channel: { id: 'C1', name: 'general', is_private: false, is_im: false, is_mpim: false },
+    }),
   );
 }
 
@@ -73,6 +77,8 @@ describe('slack actions', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // The name cache lives at module level, so one case must not answer another.
+    clearChannelNameCache();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
@@ -147,6 +153,66 @@ describe('slack actions', () => {
       icon_url: 'https://example.com/a.png',
     });
     expect(result).toEqual({ success: true, data: { ts: '111.222', channel: 'D2' } });
+  });
+
+  it('lookup_user_by_email resolves an explicit email for dm_user', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ok: true,
+        user: { id: 'U123', name: 'ada', profile: { display_name: 'Ada' } },
+      }),
+    );
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'ada@example.com' },
+      pluginCtx(),
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/users.lookupByEmail?email=ada%40example.com');
+    expect(init.method).toBe('GET');
+    expect(result).toEqual({ success: true, data: { id: 'U123', display_name: 'Ada' } });
+  });
+
+  it('lookup_user_by_email rejects a missing recipient email without a fallback', async () => {
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: '   ' },
+      pluginCtx(),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      success: false,
+      error: 'Recipient email is required. Provide the exact Slack account email address.',
+    });
+  });
+
+  it('lookup_user_by_email reports a missing Slack lookup scope', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'missing_scope' }));
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'ada@example.com' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Slack recipient lookup needs the users:read.email bot scope. Reinstall the Slack app to grant it.',
+    });
+  });
+
+  it('lookup_user_by_email reports no matching user without a fallback', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'users_not_found' }));
+
+    const result = await action('slack.lookup_user_by_email').execute(
+      { email: 'nobody@example.com' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'No Slack user matches nobody@example.com. Check the recipient email, then try again.',
+    });
   });
 
   it('add_reaction posts reactions.add with channel/timestamp/name', async () => {
@@ -398,6 +464,219 @@ describe('slack actions', () => {
     expect(result).toMatchObject({ success: true, data: { has_more: false, total: 1 } });
   });
 
+  it('read_history names the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    // The messages carry no user id, so nothing else reads the Slack API and
+    // the request count stays exact.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // The access guard already read conversations.info, so the name needs no
+    // second request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 1 },
+    });
+  });
+
+  it('read_thread names the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'reply', ts: '1.2' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 1 },
+    });
+  });
+
+  it('read_history returns the messages when Slack gives the channel no name', async () => {
+    // conversations.info answers the guard but carries no name, as it does for
+    // a direct message. The read must still return the messages.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, channel: { id: 'C1', is_private: false, is_im: false, is_mpim: false } }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // The name comes from the guard, so an unnamed conversation costs no
+    // second request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ success: true, data: { channel: 'C1', total: 1 } });
+    expect(result).not.toHaveProperty('data.channel_name');
+  });
+
+  it('read_thread returns the replies when a mentioned channel lookup fails', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.2' }], has_more: false }),
+      )
+      // The mentioned channel cannot be read, so its name stays unresolved.
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
+
+    const result = await action('slack.read_thread').execute({ channel: 'C1', thread_ts: '1.1' }, pluginCtx());
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        channel: 'C1',
+        channel_name: 'general',
+        total: 1,
+        messages: [{ text: 'moved to #C2' }],
+      },
+    });
+  });
+
+  it('read_history resolves a channel mention in message text', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.1' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C2', name: 'random' } }));
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    const [mentionUrl] = fetchMock.mock.calls[2] as [string, RequestInit];
+    expect(mentionUrl).toContain('https://slack.com/api/conversations.info');
+    expect(mentionUrl).toContain('channel=C2');
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel_name: 'general', messages: [{ text: 'moved to #random (C2)' }] },
+    });
+  });
+
+  it('read_history keeps the name from the guard when a mention labels the channel it read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    // Slack keeps a mention label as the author wrote it, so an old name can
+    // sit in the history of the channel that was renamed.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'welcome to <#C1|ops-old>', ts: '1.1' }], has_more: false }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // A label costs no request, so the count stays at guard plus history.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        channel: 'C1',
+        channel_name: 'general',
+        messages: [{ text: 'welcome to #general (C1)' }],
+      },
+    });
+  });
+
+  it('read_history keeps a mention label out of a later read', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'see <#C2|payroll-public> please', ts: '1.1' }], has_more: false }),
+    );
+
+    const first = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // The label labels this one message, and it makes no request.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(first).toMatchObject({
+      success: true,
+      data: { messages: [{ text: 'see #payroll-public please' }] },
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          ok: true,
+          channel: { id: 'C3', name: 'eng', is_private: false, is_im: false, is_mpim: false },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'posted in <#C2>', ts: '2.1' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C2', name: 'payroll' } }));
+
+    const second = await action('slack.read_history').execute({ channel: 'C3' }, pluginCtx());
+
+    // The second read asks Slack for the name of C2 instead of reusing the
+    // label from the first read.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const [lookupUrl] = fetchMock.mock.calls[4] as [string, RequestInit];
+    expect(lookupUrl).toContain('https://slack.com/api/conversations.info');
+    expect(lookupUrl).toContain('channel=C2');
+    expect(second).toMatchObject({
+      success: true,
+      data: { channel: 'C3', channel_name: 'eng', messages: [{ text: 'posted in #payroll (C2)' }] },
+    });
+  });
+
+  it('read_history names the channel when a mention lookup throws', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'moved to <#C2>', ts: '1.1' }], has_more: false }),
+      )
+      .mockRejectedValueOnce(new Error('network down'));
+
+    const result = await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // A failed lookup drops the mention name and keeps the read.
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        channel: 'C1',
+        channel_name: 'general',
+        total: 1,
+        messages: [{ text: 'moved to #C2' }],
+      },
+    });
+  });
+
+  it('read_history does not name a channel with a name read for another credential', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, messages: [{ text: 'hello', ts: '1.1' }], has_more: false }),
+    );
+
+    await action('slack.read_history').execute({ channel: 'C1' }, pluginCtx());
+
+    // A second workspace mentions the same ID. Its token cannot read that
+    // channel, so the mention keeps the raw ID.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          ok: true,
+          channel: { id: 'C9', name: 'ops', is_private: false, is_im: false, is_mpim: false },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { ok: true, messages: [{ text: 'pasted <#C1>', ts: '2.1' }], has_more: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'channel_not_found' }));
+
+    const other = await action('slack.read_history').execute(
+      { channel: 'C9' },
+      pluginCtx({ credentials: makeCredentials({ accessToken: 'xoxb-other-workspace' }) }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(other).toMatchObject({
+      success: true,
+      data: { channel: 'C9', channel_name: 'ops', messages: [{ text: 'pasted #C1' }] },
+    });
+  });
+
   it('list_users lists non-bot, non-deleted members', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
@@ -468,6 +747,81 @@ describe('slack actions', () => {
     ]);
   });
 
+  it('fetch_file returns extracted text for a PDF', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx({
+        extractDocument: async () => ({ markdown: '## Quarterly Revenue Report' }),
+      }),
+    );
+
+    // The whole point of the bug: a PDF must come back as readable text, not
+    // as a note saying it cannot be viewed.
+    expect(result).toEqual({
+      success: true,
+      data: {
+        content: '## Quarterly Revenue Report',
+        mimetype: 'application/pdf',
+        filename: 'report.pdf',
+      },
+    });
+  });
+
+  it('fetch_file says why a scanned PDF has no text', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/scan.pdf' },
+      pluginCtx({ extractDocument: async () => null }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('no text layer');
+  });
+
+  it('fetch_file reports a missing extractor instead of blaming the file type', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    // A host that wires no extractor. The old message told the agent the file
+    // type was unviewable, which sent it looking for a tool that does not
+    // exist; name the real reason instead.
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF text extraction is not available');
+  });
+
+  it('fetch_file still returns metadata for a file type it cannot read', async () => {
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/zip' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/bundle.zip' },
+      pluginCtx(),
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { mimetype: 'application/zip' },
+    });
+  });
+
   it('get_pins fetches pinned messages and files', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(
@@ -484,7 +838,14 @@ describe('slack actions', () => {
 
     const [url] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(url).toContain('https://slack.com/api/pins.list');
-    expect(result).toMatchObject({ success: true, data: { total: 2 } });
+    // The action description promises the agent that the result names the
+    // channel, and the spec lists get_pins beside read_history and
+    // read_thread. Pin both fields, or the get_pins half of that promise can
+    // be removed with the suite still green.
+    expect(result).toMatchObject({
+      success: true,
+      data: { channel: 'C1', channel_name: 'general', total: 2 },
+    });
   });
 
   it('get_channel_info returns topic/purpose/creator for a normal channel', async () => {
@@ -729,6 +1090,34 @@ describe('slack actions', () => {
       elements: [{ type: 'mrkdwn', text: '↳ <@U999>' }],
     });
     expect(result.success).toBe(true);
+  });
+
+  it('send_message renders a release report in both the visible block and notification', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '127.891', channel: 'C1' }));
+    const text = '**Release infrastructure**\n\n- **Deployed:** tkhq/gitops#5169\n- **Example:** `tkhq/mono#8158`';
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text },
+      pluginCtx({
+        credentials: makeCredentials({
+          accessToken: 'xoxb-test-token',
+          metadata: { owner_slack_user_id: 'U999' },
+        }),
+      }),
+    );
+
+    expect(result.success).toBe(true);
+    const post = fetchMock.mock.calls[1]?.[1];
+    expect(post).toBeDefined();
+    if (typeof post?.body !== 'string') throw new Error('Expected a JSON Slack request body.');
+    expect(JSON.parse(post.body)).toMatchObject({
+      text: '*Release infrastructure*\n\n- *Deployed:* <https://github.com/tkhq/gitops/issues/5169|tkhq/gitops#5169>\n- *Example:* `tkhq/mono#8158`',
+      blocks: [
+        { type: 'markdown', text: text.replace('tkhq/gitops#5169', '[tkhq/gitops#5169](https://github.com/tkhq/gitops/issues/5169)') },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: '↳ <@U999>' }] },
+      ],
+    });
   });
 
   it('send_message does not add attribution block for DM channels', async () => {

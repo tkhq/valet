@@ -17,7 +17,9 @@
  *      integration's foundation — e.g. the Slack app. One exception: a
  *      team owner that holds its own row for the service (team credentials
  *      design) resolves "manual" — the team token is the integration for
- *      that team alone, and no other owner reads it.
+ *      that team alone, and no other owner reads it. That row is read
+ *      BEFORE the org row, because a team run reads it in that order; a
+ *      row that throws `CredentialReferenceBrokenError` reads as absent.
  *   5. `requires.orgCredential` met       → "org". The org credential IS the
  *      integration; sessions resolve it by owner escalation. There is
  *      nothing for a user to connect, so the UI offers no token entry —
@@ -42,6 +44,7 @@ import type {
   CredentialStore,
   ValetPlugin,
 } from "@valet/engine";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { authCodeEnvReady, findOAuthDeclaration } from "./integration-oauth.js";
 
 export type ConnectMode = "oauth" | "manual" | "org" | "unconfigured";
@@ -83,15 +86,26 @@ export async function connectModeFor(
     return authCodeEnvReady(found.oauth, params.env) ? "oauth" : "unconfigured";
   }
   if (params.decl.requires?.orgCredential) {
+    // The team row comes first, the order a team run reads it in
+    // (`services/credential-resolution.ts#resolveTeamCredentialRead`). A team
+    // that holds its own token acts as that token, so the catalog must not
+    // name the org bot for it.
+    if (params.owner?.type === "team") {
+      try {
+        const teamCredential = await params.credentials.get(params.owner, params.service);
+        if (teamCredential !== null) return "manual";
+      } catch (err) {
+        // A broken delegated row is not a usable team credential. Read it as
+        // an absent row: the org bot behind it still serves the team, and a
+        // member's own credential never does.
+        if (!(err instanceof CredentialReferenceBrokenError)) throw err;
+      }
+    }
     const orgCredential = await params.credentials.get(
       { type: "org", id: params.orgId },
       params.service,
     );
     if (orgCredential !== null) return "org";
-    if (params.owner?.type === "team") {
-      const teamCredential = await params.credentials.get(params.owner, params.service);
-      if (teamCredential !== null) return "manual";
-    }
     return "unconfigured";
   }
   return "manual";
@@ -130,18 +144,43 @@ export function missingClientEnv(
  * services (`decl.service ?? plugin.name`), the same key the credential
  * store and `gateUnavailableActions`'s join use.
  */
-export async function unavailableServiceSet(params: AvailabilityContext): Promise<Set<string>> {
-  const unavailable = new Set<string>();
-  await Promise.all(
-    params.plugins.flatMap((plugin) =>
-      (plugin.credentials ?? []).map(async (decl) => {
-        const service = decl.service ?? plugin.name;
-        const mode = await connectModeFor({ ...params, decl, service });
-        if (mode === "unconfigured") unavailable.add(service);
-      }),
-    ),
+export async function unavailableServiceInventory(params: AvailabilityContext & { actionService?: string }): Promise<{
+  unavailable: Set<string>;
+  failures: Array<{ service: string; reason: string }>;
+}> {
+  // An action service may use a differently named credential declaration.
+  // Preserve every matching prerequisite while skipping unrelated services.
+  const credentialServices = params.actionService === undefined ? undefined : new Set([
+    params.actionService,
+    ...params.plugins.flatMap((plugin) => (plugin.actions ?? [])
+      .filter((action) => action.service === params.actionService)
+      .map((action) => action.credentialService ?? action.service)),
+  ]);
+  const declarations = params.plugins.flatMap((plugin) =>
+    (plugin.credentials ?? []).map((decl) => ({ decl, service: decl.service ?? plugin.name })),
+  ).filter(({ service }) => credentialServices === undefined || credentialServices.has(service));
+  const results = await Promise.allSettled(
+    declarations.map(async ({ decl, service }) => ({
+      service,
+      mode: await connectModeFor({ ...params, decl, service }),
+    })),
   );
-  return unavailable;
+  const unavailable = new Set<string>();
+  const failures = new Map<string, string>();
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    const service = declarations[index].service;
+    if (result.status === "fulfilled") {
+      if (result.value.mode === "unconfigured") unavailable.add(service);
+    } else if (!failures.has(service)) {
+      failures.set(service, result.reason instanceof Error ? result.reason.message : String(result.reason));
+    }
+  }
+  return { unavailable, failures: [...failures].map(([service, reason]) => ({ service, reason })) };
+}
+
+export async function unavailableServiceSet(params: AvailabilityContext): Promise<Set<string>> {
+  return (await unavailableServiceInventory(params)).unavailable;
 }
 
 /**

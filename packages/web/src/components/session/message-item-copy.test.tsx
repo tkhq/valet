@@ -36,14 +36,20 @@ vi.mock("~/api/queries", async (importOriginal) => {
 import { TooltipProvider } from "~/components/primitives";
 import { MessageItem } from "./message-item";
 
-function renderItem(message: StreamMessage) {
-  return render(itemTree(message));
+function renderItem(
+  message: StreamMessage,
+  onReply?: (target: { messageId: string; excerpt: string }) => void,
+) {
+  return render(itemTree(message, onReply));
 }
 
-function itemTree(message: StreamMessage) {
+function itemTree(
+  message: StreamMessage,
+  onReply?: (target: { messageId: string; excerpt: string }) => void,
+) {
   return (
     <TooltipProvider>
-      <MessageItem message={message} />
+      <MessageItem message={message} onReply={onReply} />
     </TooltipProvider>
   );
 }
@@ -112,5 +118,48 @@ describe("MessageItem render isolation", () => {
     view.rerender(itemTree(message));
 
     expect(markdownRender).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MessageItem replies", () => {
+  it("offers Reply only for assistant text and returns a concise snapshot", () => {
+    const onReply = vi.fn();
+    renderItem(
+      msg({
+        id: "assistant-7",
+        completed: true,
+        parts: [{ kind: "text", text: "Use  the\nblue deployment." }],
+      }),
+      onReply,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reply to message" }));
+    expect(onReply).toHaveBeenCalledWith({
+      messageId: "assistant-7",
+      excerpt: "Use the blue deployment.",
+    });
+  });
+
+  it("does not offer Reply until the assistant message is complete", () => {
+    renderItem(
+      msg({ parts: [{ kind: "text", text: "Still streaming" }], completed: false }),
+      vi.fn(),
+    );
+
+    expect(screen.queryByRole("button", { name: "Reply to message" })).toBeNull();
+  });
+
+  it("renders persisted quoted context on a user message", () => {
+    renderItem(
+      msg({
+        role: "user",
+        content: "What about staging?",
+        replyTo: { messageId: "assistant-7", excerpt: "Use the blue deployment." },
+      }),
+    );
+
+    expect(screen.getByText("Replying to Assistant")).toBeTruthy();
+    expect(screen.getByText("Use the blue deployment.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reply to message" })).toBeNull();
   });
 });

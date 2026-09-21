@@ -166,8 +166,34 @@ export interface PinnedActionSpec {
 /** Why one pin was refused. The host logs this text, so it names the fix. */
 export type PinRejectedHandler = (actionId: string, reason: string) => void;
 
-export interface PluginCatalogOptions {
+export type ServiceAvailabilityState =
+  | "available"
+  | "not_connected"
+  | "deployment_unconfigured"
+  | "disabled_by_org"
+  | "excluded_by_assistant"
+  | "load_failed";
+
+export interface ServiceAvailability {
+  service: string;
+  state: ServiceAvailabilityState;
+  reason: string;
+  fix?: string;
+}
+
+export interface PluginCatalogAvailabilityOptions {
+  /** Build-time snapshot used only for the compact tool description. */
+  serviceAvailability?: readonly ServiceAvailability[];
+  /** Live inventory read. A service narrows the check without caching permissions. */
+  resolveServiceAvailability?: (service?: string) =>
+    | readonly ServiceAvailability[]
+    | Promise<readonly ServiceAvailability[]>;
+}
+
+export interface PluginCatalogOptions extends PluginCatalogAvailabilityOptions {
   plugins: ActionPlugin[];
+  /** Native tools are outside this integration-action catalog. */
+  nativeToolNames?: readonly string[];
   /** Clock used for the dynamic-action-resolution TTL cache. Default: Date.now. */
   clock?: () => number;
   /**
@@ -286,8 +312,9 @@ export type PluginCatalog = Catalog;
 export function buildPluginCatalog(
   plugins: ActionPlugin[],
   clock?: () => number,
+  availability: PluginCatalogAvailabilityOptions = {},
 ): PluginCatalog {
-  return buildCatalog(plugins, clock ?? Date.now);
+  return buildCatalog(plugins, clock ?? Date.now, availability);
 }
 
 /**
@@ -299,9 +326,9 @@ export function buildPluginCatalog(
  */
 export function pluginCatalogTools(opts: PluginCatalogOptions): ToolDef[] {
   const now = opts.clock ?? Date.now;
-  const catalog = buildCatalog(opts.plugins, now);
+  const catalog = buildCatalog(opts.plugins, now, opts);
   const pinned = resolvePins(catalog, opts);
-  return [makeListTool(catalog, pinned.nameByActionId), makeCallTool(catalog), ...pinned.tools];
+  return [makeListTool(catalog, pinned.nameByActionId, opts), makeCallTool(catalog), ...pinned.tools];
 }
 
 /**
@@ -318,6 +345,13 @@ export type InvokeActionResult =
   | { kind: "expired-approval" }
   | { kind: "pending-approval" }
   | { kind: "missing-credential"; service: string }
+  | {
+      kind: "service-unavailable";
+      service: string;
+      state: ServiceAvailabilityState;
+      reason: string;
+      fix?: string;
+    }
   | { kind: "error"; message: string }
   | { kind: "resolve-failed"; service: string; message: string };
 
@@ -528,27 +562,47 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
+  let availabilityCheckedService: string | undefined;
+  const dotIdx = actionId.indexOf(".");
+  if (dotIdx > 0) {
+    const prefix = actionId.slice(0, dotIdx);
+    const availability = await checkServiceAvailability(
+      catalog,
+      prefix,
+      serviceRequiresCredential(catalog, prefix),
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) return outcome;
+    availabilityCheckedService = prefix;
+  }
+
   let entry = catalog.byId.get(actionId);
-  if (!entry) {
-    const dotIdx = actionId.indexOf(".");
-    if (dotIdx > 0) {
-      const prefix = actionId.slice(0, dotIdx);
-      const plugin = catalog.dynamicPlugins.find((p) => p.service === prefix);
-      if (plugin) {
-        try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
-          entry = resolvedDyn.byId.get(actionId);
-        } catch (err) {
-          return {
-            kind: "resolve-failed",
-            service: prefix,
-            message: err instanceof Error ? err.message : String(err),
-          };
-        }
+  if (!entry && availabilityCheckedService) {
+    const plugin = catalog.dynamicPlugins.find((p) => p.service === availabilityCheckedService);
+    if (plugin) {
+      try {
+        const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+        entry = resolvedDyn.byId.get(actionId);
+      } catch (err) {
+        return {
+          kind: "resolve-failed",
+          service: availabilityCheckedService,
+          message: err instanceof Error ? err.message : String(err),
+        };
       }
     }
   }
   if (!entry) return { kind: "unknown", toolId: actionId };
+
+  if (availabilityCheckedService !== entry.service) {
+    const availability = await checkServiceAvailability(
+      catalog,
+      entry.service,
+      entry.plugin.requiresCredential === true,
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) return outcome;
+  }
 
   // Gate review and execution must use one defaulted, validated object.
   const prepared = prepareActionArgs(entry.action.parameters, args);
@@ -569,7 +623,6 @@ export async function invokeAction(
   const reviewedArgs = structuredClone(executionArgs);
   if (ctx.suspendedDecision?.approvalReplay && ctx.suspendedDecision.resolution?.actionId !== "approve") return { kind: "denied-approval" };
 
-  // A restart must not apply changed schema defaults after the approval.
   if (ctx.suspendedDecision?.approvalReplay && (
     ctx.suspendedDecision.preparedToolId !== qualifiedId(entry) ||
     ctx.suspendedDecision.preparedArgsDigest !== preparedArgsDigest(reviewedArgs)
@@ -577,7 +630,6 @@ export async function invokeAction(
     return { kind: "error", message: "Approval replay rejected because the approved tool or prepared parameters changed. Ask the user to submit the action again for review." };
   }
 
-  // One bound applies to the gate body, gate context, plugin context, and audit.
   const boundedSummary = truncateApprovalText(summary, 4_000).text;
   const resolver = ctx.policyResolver;
   // A fresh call gets a cryptographically random opaque invocation key.
@@ -603,6 +655,13 @@ export async function invokeAction(
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId === "approve" && approvalArgsPreview(reviewedArgs).incomplete) return { kind: "denied-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
+      const availability = await checkServiceAvailability(
+        catalog,
+        entry.service,
+        entry.plugin.requiresCredential === true,
+      );
+      const outcome = availabilityOutcome(availability);
+      if (outcome) return outcome;
     }
     return executeAction(entry, actionId, executionArgs, boundedSummary, ctx);
   }
@@ -754,6 +813,23 @@ export async function invokeAction(
         ? { kind: "denied-approval", reason: "approval-processing-failed" }
         : { kind: "denied-approval" };
     }
+    const availability = await checkServiceAvailability(
+      catalog,
+      entry.service,
+      entry.plugin.requiresCredential === true,
+    );
+    const outcome = availabilityOutcome(availability);
+    if (outcome) {
+      emitInvocation(resolver, {
+        ...baseRecord,
+        status: outcome.kind === "service-unavailable" ? "rejected" : "error",
+        resolvedMode: "require_approval",
+        provenance: decision.provenance,
+        gateOrdinal,
+        ...(outcome.kind === "error" ? { error: outcome.message } : {}),
+      });
+      return outcome;
+    }
   }
 
   // allow, or an approved require_approval → execute with audit.
@@ -792,6 +868,8 @@ interface Catalog {
   resolved: Map<string, ResolvedDynamic>;
   resolving: Map<string, Promise<ResolvedDynamic>>;
   dynamicUpdate: Promise<void>;
+  serviceAvailability: readonly ServiceAvailability[];
+  resolveServiceAvailability?: PluginCatalogAvailabilityOptions["resolveServiceAvailability"];
   now: () => number;
 }
 
@@ -814,7 +892,11 @@ function buildEntries(
   return { entries, byId };
 }
 
-function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
+function buildCatalog(
+  plugins: ActionPlugin[],
+  now: () => number,
+  availability: PluginCatalogAvailabilityOptions = {},
+): Catalog {
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
   const dynamicPlugins: ActionPlugin[] = [];
@@ -830,7 +912,67 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
     }
     if (plugin.resolveActions) dynamicPlugins.push(plugin);
   }
-  return { entries, byId, dynamicPlugins, resolved: new Map(), resolving: new Map(), dynamicUpdate: Promise.resolve(), now };
+  return {
+    entries,
+    byId,
+    dynamicPlugins,
+    resolved: new Map(),
+    resolving: new Map(),
+    dynamicUpdate: Promise.resolve(),
+    serviceAvailability: availability.serviceAvailability ?? [],
+    resolveServiceAvailability: availability.resolveServiceAvailability,
+    now,
+  };
+}
+
+interface ServiceAvailabilityCheck {
+  unavailable?: ServiceAvailability;
+  error?: string;
+}
+
+function serviceRequiresCredential(catalog: Catalog, service: string): boolean {
+  return [
+    ...catalog.entries.map((entry) => entry.plugin),
+    ...catalog.dynamicPlugins,
+  ].some((plugin) => plugin.service === service && plugin.requiresCredential === true);
+}
+
+async function checkServiceAvailability(
+  catalog: Catalog,
+  service: string,
+  requiresCredential: boolean,
+): Promise<ServiceAvailabilityCheck> {
+  try {
+    const availability = catalog.resolveServiceAvailability
+      ? await catalog.resolveServiceAvailability(service)
+      : catalog.serviceAvailability;
+    return {
+      unavailable: availability.find((item) => item.service === service && item.state !== "available"),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const hasStaticUnavailable = catalog.serviceAvailability.some(
+      (item) => item.service === service && item.state !== "available",
+    );
+    return requiresCredential || hasStaticUnavailable
+      ? { error: `could not verify service availability: ${message}; retry` }
+      : {};
+  }
+}
+
+function availabilityOutcome(check: ServiceAvailabilityCheck): InvokeActionResult | undefined {
+  if (check.unavailable) return serviceUnavailableOutcome(check.unavailable);
+  return check.error ? { kind: "error", message: check.error } : undefined;
+}
+
+function serviceUnavailableOutcome(availability: ServiceAvailability): InvokeActionResult {
+  return {
+    kind: "service-unavailable",
+    service: availability.service,
+    state: availability.state,
+    reason: availability.reason,
+    ...(availability.fix ? { fix: availability.fix } : {}),
+  };
 }
 
 /**
@@ -883,7 +1025,11 @@ const LIST_LIMIT_MAX = 200;
  * the host pins, so hiding the row would make the same catalog answer
  * differently in two deployments. The row names its direct tool instead.
  */
-function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>): ToolDef {
+function makeListTool(
+  catalog: Catalog,
+  pinnedNames: ReadonlyMap<string, string>,
+  opts: PluginCatalogOptions,
+): ToolDef {
   // Name every service in the description. The catalog indirection hides
   // integration actions from the visible tool list, so this line is the only
   // zero-cost signal the model gets that a service exists at all — without
@@ -895,13 +1041,32 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       ...catalog.dynamicPlugins.map((p) => p.service),
     ]),
   ].sort();
-  const serviceLine =
-    services.length > 0 ? ` Available services: ${services.join(", ")}.` : "";
+  const initialUnavailable = new Map(
+    (opts.serviceAvailability ?? [])
+      .filter((item) => item.state !== "available")
+      .map((item) => [item.service, item]),
+  );
+  const availableServices = services.filter((service) => !initialUnavailable.has(service));
+  const configurableServices = [...initialUnavailable.values()]
+    .filter((item) => item.state === "not_connected" || item.state === "deployment_unconfigured")
+    .map((item) => item.service)
+    .sort();
+  const gatedServices = [...initialUnavailable.values()]
+    .filter((item) => item.state !== "not_connected" && item.state !== "deployment_unconfigured")
+    .map((item) => `${item.service} (${item.state})`)
+    .sort();
+  const serviceLine = [
+    availableServices.length > 0 ? ` Available services: ${availableServices.join(", ")}.` : "",
+    configurableServices.length > 0
+      ? ` Configurable but not connected: ${configurableServices.join(", ")}.`
+      : "",
+    gatedServices.length > 0 ? ` Unavailable services: ${gatedServices.join(", ")}.` : "",
+  ].join("");
   return {
     name: "list_tools",
     description:
-      "List available plugin tools. Filter by service or search by name/description. " +
-      "Returns tool_ids plus their parameter schemas; use call_tool to invoke one." +
+      "List integration actions only. Native tools are already on your own tool list and are not listed here. " +
+      "Filter by service or search by name/description. Returns tool_ids plus parameter schemas; use call_tool to invoke one." +
       serviceLine +
       " If a request could be covered by one of these services, check here before " +
       "you say it is not possible. A service that is not connected is reported " +
@@ -943,12 +1108,47 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       if (a.service) entries = entries.filter((e) => e.service === a.service);
       if (query.hasInput) entries = entries.filter((e) => matchesQuery(e.action));
 
-      const warnings: Array<{ service: string; reason: string }> = [];
+      const warnings: Array<{
+        service: string;
+        reason: string;
+        state?: ServiceAvailabilityState;
+        fix?: string;
+      }> = [];
+      let availability = catalog.serviceAvailability;
+      try {
+        availability = catalog.resolveServiceAvailability
+          ? await catalog.resolveServiceAvailability(a.service || undefined)
+          : catalog.serviceAvailability;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push({
+          service: a.service ?? "catalog",
+          reason: `availability check failed: ${message} — availability states may be incomplete; retry`,
+        });
+      }
+      const unavailable = availability.filter((item) => item.state !== "available");
+      for (const item of unavailable) {
+        entries = entries.filter((entry) => entry.service !== item.service);
+      }
+      const warnedUnavailable = unavailable.filter(
+        (item) =>
+          (!a.service || item.service === a.service) &&
+          (!query.hasInput || matchesSearchQuery(query, [item.service])),
+      );
+      for (const item of warnedUnavailable) {
+        warnings.push({
+          service: item.service,
+          state: item.state,
+          reason: item.reason,
+          ...(item.fix ? { fix: item.fix } : {}),
+        });
+      }
 
       // Merge in dynamic (resolveActions-backed) plugins whose service
       // passes the filter. Discovery failures become warnings, not throws.
       const dynamicServicesConsidered = new Set<string>();
       for (const plugin of catalog.dynamicPlugins) {
+        if (unavailable.some((item) => item.service === plugin.service)) continue;
         if (a.service && plugin.service !== a.service) continue;
         dynamicServicesConsidered.add(plugin.service);
         try {
@@ -995,14 +1195,19 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         }
         if (!cred) {
           if (a.service === service) {
-            warnings.push({ service, reason: probeReason ?? "no credential connected" });
+            warnings.push({
+              service,
+              state: "not_connected",
+              reason: probeReason ?? "not connected",
+              fix: `Connect ${service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
+            });
           } else {
             entries = entries.filter((e) => e.service !== service);
             warnings.push({
               service,
-              reason: `not connected — tools hidden. ${
-                probeReason ?? "Connect the integration in Settings, or list with service filter to inspect schemas."
-              }`,
+              state: "not_connected",
+              reason: `not connected; tools hidden. ${probeReason ?? ""}`.trim(),
+              fix: `Connect ${service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
             });
           }
         }
@@ -1027,6 +1232,14 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       });
 
       const total = entries.length;
+      const nativeMatches = nativeToolMatches(a.query, opts.nativeToolNames ?? []);
+      if (total === 0) {
+        const matched = nativeMatches.length > 0 ? ` (matched: ${nativeMatches.join(", ")})` : "";
+        warnings.push({
+          service: "catalog",
+          reason: `no integration action matched; native tools are not listed here — check your own tool list${matched}`,
+        });
+      }
       return {
         text: encodeToolOutput({
           tools,
@@ -1037,6 +1250,26 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       };
     },
   };
+}
+
+function nativeToolMatches(query: string | undefined, names: readonly string[]): string[] {
+  const terms =
+    (query ?? "")
+      .toLowerCase()
+      .match(/[a-z0-9_*.-]+/g)
+      ?.filter((term) => term !== "or" && !term.startsWith("-"))
+      .map((term) => term.replaceAll("*", ""))
+      .filter((term) => term.length > 0) ?? [];
+  if (terms.length === 0) return [];
+  return [...new Set(names)]
+    .filter((name) => terms.some((term) => name.toLowerCase().includes(term)))
+    .sort();
+}
+
+function resolveFailurePrefix(message: string): string {
+  return /(?:auth|unauthori[sz]ed|forbidden|credential|token|\b401\b|\b403\b)/i.test(message)
+    ? "authentication failed: "
+    : "upstream failure: ";
 }
 
 // ── call_tool ────────────────────────────────────────────────────
@@ -1088,7 +1321,9 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
         text: `unknown tool_id: "${toolId}". Use list_tools to find available actions.`,
       };
     case "resolve-failed":
-      return { text: `error resolving ${outcome.service} tools: ${outcome.message}` };
+      return {
+        text: `error resolving ${outcome.service} tools: ${resolveFailurePrefix(outcome.message)}${outcome.message}`,
+      };
     case "denied-policy":
       return { text: `denied: ${toolId} is blocked by ${outcome.scope === "team" ? "team" : "org"} policy` };
     // The LLM tool path has no distinct "pending" state — requestDecision
@@ -1111,7 +1346,11 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       return { text: `invalid params for ${toolId}: ${outcome.error}` };
     case "missing-credential":
       return {
-        text: `${toolId} failed: credential ${outcome.service} not connected`,
+        text: `${toolId} failed: credential ${outcome.service} not connected — Connect ${outcome.service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${outcome.service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,
+      };
+    case "service-unavailable":
+      return {
+        text: `${toolId} unavailable: ${outcome.reason}${outcome.fix ? ` ${outcome.fix}` : ""}`,
       };
     case "error":
       return { text: `error: ${outcome.message}` };

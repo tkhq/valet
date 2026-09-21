@@ -81,6 +81,7 @@ import {
   isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
+  teamMembershipSummaries,
   listTeamsForOrg,
   listTeamsForUser,
   NotTeamMemberError,
@@ -113,9 +114,12 @@ async function rowToSummary(
   db: AppEnv["Variables"]["providers"]["db"],
   row: TeamRow,
   callerUserId: string,
+  membership?: Pick<TeamSummary, "memberCount" | "callerRole">,
 ): Promise<TeamSummary> {
-  const members = await listTeamMembers(db, row.id);
-  const mine = members.find((m) => m.userId === callerUserId);
+  if (!membership) {
+    const members = await listTeamMembers(db, row.id);
+    membership = { memberCount: members.length, callerRole: members.find((m) => m.userId === callerUserId)?.role ?? null };
+  }
   return {
     id: row.id,
     orgId: row.orgId,
@@ -123,9 +127,9 @@ async function rowToSummary(
     origin: row.origin,
     externalId: row.externalId,
     createdAt: row.createdAt,
-    memberCount: members.length,
+    memberCount: membership.memberCount,
     // null = the caller is not on this team (they see it as an org admin).
-    callerRole: mine?.role ?? null,
+    callerRole: membership.callerRole,
     defaultModel: row.defaultModel,
     defaultReasoning: row.defaultReasoning,
   };
@@ -230,8 +234,10 @@ teamsRouter.get("/", async (c) => {
     ? await listTeamsForOrg(db, user.orgId)
     : (await listTeamsForUser(db, user.id)).filter((r) => r.orgId === user.orgId);
 
+  const memberships = await teamMembershipSummaries(db, user.orgId, rows.map((row) => row.id), user.id);
   const body: ListTeamsResponse = {
-    teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id))),
+    teams: await Promise.all(rows.map((r) => rowToSummary(db, r, user.id,
+      memberships.get(r.id) ?? { memberCount: 0, callerRole: null }))),
   };
   return c.json(body);
 });

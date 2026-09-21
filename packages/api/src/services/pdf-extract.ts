@@ -82,3 +82,23 @@ export async function extractPdf(bytes: Uint8Array): Promise<PdfExtractionResult
 export function pdfStubMarkdown(): string {
   return "> PDF has no extractable text layer. OCR is not enabled in this build.";
 }
+
+/**
+ * The `ToolContext.extractDocument` capability the api gives to plugin
+ * actions. A plugin holds bytes it cannot read — a PDF fetched from Slack,
+ * for example — and the native extractor lives here, beside the api bundle.
+ *
+ * Returns `null` when the document carries no extractable text, so the
+ * caller can say why rather than return an empty string. Anything other
+ * than a PDF is `null` too: this is the only format the api can extract.
+ * Throws only when extraction itself is unavailable.
+ */
+export async function extractDocumentText(doc: {
+  data: Uint8Array;
+  mimeType: string;
+  name?: string;
+}): Promise<{ markdown: string } | null> {
+  if (doc.mimeType !== "application/pdf") return null;
+  const result = await extractPdf(doc.data);
+  return result.markdown ? { markdown: result.markdown } : null;
+}

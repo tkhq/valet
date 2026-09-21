@@ -273,12 +273,14 @@ RUN (getent group docker >/dev/null || groupadd docker) \
     && echo "dockerd:65536:65535" >> /etc/subgid
 
 COPY docker/cgroup-delegation.sh /cgroup-delegation.sh
+COPY docker/cgroup-bootstrap.sh /cgroup-bootstrap.sh
 COPY docker/kubernetes-preflight.sh /kubernetes-preflight.sh
 COPY docker/valet-kubernetes.mjs /usr/local/bin/valet-kubernetes
 COPY docker/userns-preflight.sh /userns-preflight.sh
 COPY docker/start-docker.sh /start-docker.sh
 COPY docker/start-headless.sh /start-headless.sh
-RUN chmod +x /cgroup-delegation.sh /kubernetes-preflight.sh /usr/local/bin/valet-kubernetes /userns-preflight.sh /start-docker.sh /start-headless.sh
+RUN chmod +x /cgroup-bootstrap.sh /cgroup-delegation.sh /kubernetes-preflight.sh /userns-preflight.sh /start-docker.sh /start-headless.sh \
+    && chmod 0755 /usr/local/bin/valet-kubernetes
 
 COPY docker/start-full.sh /start-full.sh
 RUN chmod +x /start-full.sh

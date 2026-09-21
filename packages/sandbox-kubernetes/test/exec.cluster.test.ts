@@ -150,6 +150,8 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
     const original = randomBytes(1024 * 1024);
     await writeBinaryInPod(deps, podName, "/workspace/random.bin", new Uint8Array(original));
     const readBack = await readBinaryInPod(deps, podName, "/workspace/random.bin");
+    expect((await execInPod(deps, podName, "wc -c < /workspace/random.bin")).stdout.trim()).toBe(String(original.length));
+    expect(readBack.byteLength).toBe(original.byteLength);
     expect(Buffer.from(readBack).equals(original)).toBe(true);
   }, 30_000);
 
@@ -316,7 +318,7 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
       deps,
       podName,
       execId,
-      "printf hi; printf '\\xf0\\x9f'; sleep 0.3; printf '\\x9a\\x80'; printf END",
+      "printf hi; printf '\\360\\237'; sleep 0.3; printf '\\232\\200'; printf END",
     );
 
     let offset = 0;

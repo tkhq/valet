@@ -24,7 +24,7 @@
  *      kill/restart harness — see the test body for why that's the
  *      disclosed, deliberately narrower choice for this task.
  *   4. Credential-unavailable UX (ungated) — `list_tools`'s output includes
- *      the `no credential connected` warning for a declared-but-unconnected
+ *      the `not connected` warning for a declared-but-unconnected
  *      fixture service, driven by calling the `list_tools` `ToolDef.execute`
  *      directly (via `pluginSessionExtras`) with a minimal `ToolContext`
  *      built from the booted providers — no model involved.
@@ -382,7 +382,7 @@ describe("api integration: plugin system exit criteria — credential-unavailabl
       warnings?: Array<{ service: string; reason: string }>;
     };
     expect(filteredParsed.tools.map((t) => t.tool_id)).toEqual(["demo.ping"]);
-    expect(filteredParsed.warnings?.[0]?.reason).toBe("no credential connected");
+    expect(filteredParsed.warnings?.[0]?.reason).toBe("not connected");
   });
 });
 

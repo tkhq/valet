@@ -6,11 +6,12 @@
  * primitive to build. The outcome then picks the steps and the store:
  *
  *  - Reply to Slack mentions → a required multi-channel picker (or the
- *    explicit "Any channel" opt-out), which assistant answers, and a "Keep
- *    following the thread" toggle. POSTs an event subscription on
- *    `slack.app_mention` with an orchestrator target that carries `follow`.
- *    The server scopes personal rules to the creator's linked Slack user
- *    (TKAI-299, `events/mention-scope.ts`), so the step says so up front.
+ *    explicit "Any channel" opt-out), which assistant answers, a "Keep
+ *    following the thread" toggle, and the optional prompt templates. POSTs
+ *    an event subscription on `slack.app_mention` with an orchestrator target
+ *    that carries `follow`. The server scopes personal rules to the creator's
+ *    linked Slack user (TKAI-299, `events/mention-scope.ts`), so the step says
+ *    so up front.
  *  - Run a workflow on an event → the event picker, then a workflow target.
  *  - Send a notification → the event picker, then an orchestrator target.
  *  - Advanced / custom trigger → the raw event + filter + target flow.
@@ -41,10 +42,16 @@ import {
   LoadingRow,
 } from "~/components/primitives";
 import type {
+  EventSubscriptionAudienceWire,
   EventSubscriptionCollisionsWire,
   EventSubscriptionFilterWire,
 } from "@valet/api/wire";
 import { CollisionNotice, collisionsFromError } from "~/components/events/collision-notice";
+import {
+  PromptFields,
+  promptFieldsToTarget,
+  type PromptFieldsValue,
+} from "~/components/events/prompt-fields";
 import {
   FilterEditor,
   incompleteFilterRow,
@@ -52,6 +59,7 @@ import {
   toWireFilters,
   type FilterField,
   type UiFilterRow,
+  NO_CHANNEL_MATCH_HELP,
 } from "~/components/events/filter-editor";
 import { useAssistants } from "~/api/assistants";
 import { assistantLabel } from "~/components/session/assistant-rail";
@@ -205,6 +213,12 @@ export function AutomationWizard({
   const [cron, setCron] = useState("");
   const [timezone, setTimezone] = useState(defaultTimezone());
   const [prompt, setPrompt] = useState("");
+  // The assistant target's optional prompt templates. Empty by default, so a
+  // reader who never opens the fields creates the rule the wizard always did.
+  const [promptTemplates, setPromptTemplates] = useState<PromptFieldsValue>({
+    systemPrompt: "",
+    userPromptTemplate: "",
+  });
   // Seeded from the active workspace at mount, then resynced when the
   // workspace changes (below) unless the reader already picked a target.
   const [target, setTarget] = useState<TargetChoice>(() => initialTarget(scopedTeamId));
@@ -215,6 +229,11 @@ export function AutomationWizard({
   // where the same flag rides a raw `slack.app_mention` selection.
   const [replyChannels, setReplyChannels] = useState<SelectedChannel[]>([]);
   const [anyChannel, setAnyChannel] = useState(false);
+  // Who may invoke a team assistant by mention. A bot invited into a channel
+  // answers everyone in that channel by default; team-only stays one click
+  // away. Read only for a team reply target, so a personal or org rule posts
+  // no audience at all.
+  const [audience, setAudience] = useState<EventSubscriptionAudienceWire>("organization");
   const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // The collision report of the last create attempt (TKAI-294).
@@ -371,12 +390,19 @@ export function AutomationWizard({
                 labels: replyChannels.map((ch) => ch.label),
               },
             ];
+      const mentionTarget = mentionTargetFrom(target);
       createSubscription.mutate(
         {
           name: name.trim(),
           eventKeys: [SLACK_APP_MENTION],
           filters: channelFilters,
-          target: { ...mentionTargetFrom(target), follow },
+          // The reply step collects the same optional templates the Then step
+          // collects for the other assistant outcomes. Empty fields are left
+          // off, so the rule posts the target it always did.
+          target: { ...mentionTarget, follow, ...promptFieldsToTarget(promptTemplates) },
+          // Only a team assistant has an audience; the server refuses one
+          // on any other target.
+          ...(mentionTarget.orchestrator === "team" ? { audience } : {}),
           ...(anyChannel ? { anyChannel: true } : {}),
           ...(allowCollision ? { allowCollision: true } : {}),
         },
@@ -401,10 +427,16 @@ export function AutomationWizard({
         return;
       }
       // The notify outcome speaks to an assistant, never follows a thread.
+      // An assistant target carries the prompt templates; a workflow target
+      // has its own prompt configuration on its nodes, and the server refuses
+      // these fields there.
+      const templates = promptFieldsToTarget(promptTemplates);
       const eventTarget: EventSubscriptionTarget =
         outcome === "notify"
-          ? { ...orchestratorTargetFrom(target), follow: false }
-          : target;
+          ? { ...orchestratorTargetFrom(target), follow: false, ...templates }
+          : target.kind === "orchestrator"
+            ? { ...target, ...templates }
+            : target;
       createSubscription.mutate(
         {
           name: name.trim(),
@@ -487,8 +519,12 @@ export function AutomationWizard({
               target={mentionTargetFrom(target)}
               onTargetChange={chooseTarget}
               scopedTeam={scopedTeam}
+              audience={audience}
+              onAudienceChange={setAudience}
               follow={follow}
               onFollowChange={setFollow}
+              promptTemplates={promptTemplates}
+              onPromptTemplatesChange={setPromptTemplates}
             />
           )}
 
@@ -528,6 +564,8 @@ export function AutomationWizard({
               allowOrchestrator={outcome !== "workflow"}
               prompt={prompt}
               onPromptChange={setPrompt}
+              promptTemplates={promptTemplates}
+              onPromptTemplatesChange={setPromptTemplates}
             />
           )}
 
@@ -544,6 +582,7 @@ export function AutomationWizard({
                 cron,
                 timezone,
                 target: outcome === "reply" ? mentionTargetFrom(target) : target,
+                audience,
                 follow,
                 workflows,
                 teams,
@@ -602,8 +641,14 @@ export function AutomationWizard({
 }
 
 /** The subscription target the event branch posts. A workflow target has no
- * follow flag; an orchestrator target may. */
-type EventSubscriptionTarget = TargetChoice | (OrchestratorChoice & { follow: boolean });
+ * follow flag and no prompt templates; an orchestrator target may have both. */
+type EventSubscriptionTarget =
+  | { kind: "workflow"; workflowId: string }
+  | (OrchestratorChoice & {
+      follow?: boolean;
+      systemPrompt?: string;
+      userPromptTemplate?: string;
+    });
 
 function StepHeader({ step, plan }: { step: Step; plan: { labels: string[]; count: Step } }) {
   return (
@@ -666,9 +711,10 @@ function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Ou
 
 /**
  * The reply outcome's one config step: the channels to reply in (required,
- * unless "Any channel" is chosen), which assistant answers, and the follow
- * toggle. No raw event key is shown — the event is always
- * `slack.app_mention`. Personal rules need the creator's linked Slack user.
+ * unless "Any channel" is chosen), which assistant answers, the follow
+ * toggle, and the optional prompt templates. No raw event key is shown. The
+ * event is always `slack.app_mention`. Personal rules need the creator's
+ * linked Slack user.
  *
  * Team assistant rules accept mentions from linked, current team members.
  */
@@ -681,8 +727,12 @@ function ReplyStep({
   target,
   onTargetChange,
   scopedTeam,
+  audience,
+  onAudienceChange,
   follow,
   onFollowChange,
+  promptTemplates,
+  onPromptTemplatesChange,
 }: {
   fixedTeam?: boolean;
   channels: SelectedChannel[];
@@ -692,8 +742,12 @@ function ReplyStep({
   target: OrchestratorChoice;
   onTargetChange: (t: TargetChoice) => void;
   scopedTeam: { id: string; name: string } | undefined;
+  audience: EventSubscriptionAudienceWire;
+  onAudienceChange: (v: EventSubscriptionAudienceWire) => void;
   follow: boolean;
   onFollowChange: (v: boolean) => void;
+  promptTemplates: PromptFieldsValue;
+  onPromptTemplatesChange: (v: PromptFieldsValue) => void;
 }) {
   // The server refuses a mention rule from a creator with no linked Slack
   // account, so warn here instead of at the failed create.
@@ -701,11 +755,12 @@ function ReplyStep({
   const slackLink = linksQ.data?.links.find((l) => l.provider === "slack");
   const slackUnlinked = slackLink !== undefined && !slackLink.linked;
   const reach = target.orchestrator === "org" ? "the org assistant" : "your assistant";
+  const teamName = scopedTeam?.name ?? "the team";
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted">
         {target.orchestrator === "team"
-          ? "This rule uses the organization’s Slack bot. It fires when any linked team member @-mentions the app. Unlinked senders and nonmembers cannot invoke the team assistant."
+          ? "This rule uses the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A sender with no linked Slack account is always denied."
           : <>This rule fires only when <span className="text-ink">you</span> @-mention the app.
             Mentions by other people do not reach {reach}.</>}
       </p>
@@ -787,6 +842,41 @@ function ReplyStep({
         </div>
       </div>
 
+      {target.orchestrator === "team" && (
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-muted">Who can mention it</p>
+          <div className="space-y-1.5">
+            <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+              <input
+                type="radio"
+                name="automation-reply-audience"
+                checked={audience === "organization"}
+                onChange={() => onAudienceChange("organization")}
+              />
+              Anyone in the organization
+            </label>
+            <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+              <input
+                type="radio"
+                name="automation-reply-audience"
+                checked={audience === "team"}
+                onChange={() => onAudienceChange("team")}
+              />
+              Only members of {teamName}
+            </label>
+          </div>
+          <p className="mt-1.5 text-xs text-muted">
+            Either way, the assistant answers explicit mentions in the selected channels, and
+            everyone in those channels sees the replies. While it keeps following a thread, it
+            also reads later messages in a thread it has answered, from anyone in that thread.
+            A sender outside the team cannot see or change the assistant's sessions, settings,
+            or credentials, but whatever they ask it to do runs with the team's access and
+            tools. It answers questions and runs its tools. It does not run or change the
+            team's workflows for senders outside the team.
+          </p>
+        </div>
+      )}
+
       <label className="flex min-h-11 items-start gap-2 text-sm text-ink sm:min-h-0">
         <input
           type="checkbox"
@@ -798,10 +888,17 @@ function ReplyStep({
           Keep following the thread
           <span className="block text-xs text-muted">
             After the first reply, later messages in that thread reach the assistant without a
-            new mention.
+            new mention, whoever sends them.
           </span>
         </span>
       </label>
+
+      <PromptFields
+        idPrefix="automation-reply"
+        value={promptTemplates}
+        onChange={onPromptTemplatesChange}
+        followsThread={follow}
+      />
     </div>
   );
 }
@@ -923,7 +1020,19 @@ function ChannelMultiSelect({
         >
           {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
           {!optionsQ.isLoading && options.length === 0 && (
-            <p className="px-2 py-1 text-xs text-muted">No matches</p>
+            // Same rule as the filter picker: a rejected lookup is empty too,
+            // and inviting the app would not fix an outage. `reason` is read
+            // inline rather than from the latched state, because that state is
+            // set in an effect and lands one render late. Without the inline
+            // read, an unconnected Slack painted the invite advice for one
+            // frame before the fallback replaced it.
+            <p className="px-2 py-1 text-xs text-muted">
+              {optionsQ.data === undefined
+                ? "Could not load the channels. Check your connection and try again."
+                : optionsQ.data.reason !== undefined
+                  ? optionsQ.data.reason
+                  : NO_CHANNEL_MATCH_HELP}
+            </p>
           )}
           {options.map((o) => {
             const picked = channels.some((c) => c.id === o.id);
@@ -1139,6 +1248,8 @@ function ThenStep({
   allowOrchestrator,
   prompt,
   onPromptChange,
+  promptTemplates,
+  onPromptTemplatesChange,
 }: {
   target: TargetChoice;
   onTargetChange: (t: TargetChoice) => void;
@@ -1149,6 +1260,8 @@ function ThenStep({
   allowOrchestrator: boolean;
   prompt: string;
   onPromptChange: (v: string) => void;
+  promptTemplates: PromptFieldsValue;
+  onPromptTemplatesChange: (v: PromptFieldsValue) => void;
 }) {
   return (
     <div className="space-y-1.5">
@@ -1263,6 +1376,17 @@ function ThenStep({
           />
         </div>
       )}
+
+      {/* An event rule that notifies an assistant may shape what the assistant
+          reads. A schedule carries its own prompt above, and a workflow target
+          keeps its prompts on its nodes. */}
+      {!isSchedule && allowOrchestrator && target.kind === "orchestrator" && (
+        <PromptFields
+          idPrefix="automation"
+          value={promptTemplates}
+          onChange={onPromptTemplatesChange}
+        />
+      )}
     </div>
   );
 }
@@ -1359,6 +1483,8 @@ export function summarize(args: {
   cron: string;
   timezone: string;
   target: TargetChoice;
+  /** Read only for a team reply target. */
+  audience: EventSubscriptionAudienceWire;
   follow: boolean;
   workflows: { id: string; name: string }[];
   teams: { id: string; name: string }[];
@@ -1375,7 +1501,13 @@ export function summarize(args: {
         : "";
     const trailing = args.follow ? " Later thread messages reach the assistant too." : "";
     if (args.target.kind === "orchestrator" && args.target.orchestrator === "team") {
-      return `When any linked team member @-mentions the app${where}, ${then}. Unlinked senders and nonmembers do not fire it.${trailing}`;
+      const teamId = args.target.teamId;
+      const teamName = args.teams.find((t) => t.id === teamId)?.name ?? args.scopedTeam?.name ?? "the team";
+      const who =
+        args.audience === "organization"
+          ? "any member of the organization"
+          : `any linked member of ${teamName}`;
+      return `When ${who} @-mentions the app${where}, ${then}. A sender with no linked Slack account does not fire it.${trailing}`;
     }
     return `When you @-mention the app${where}, ${then}. Mentions by other people do not fire it.${trailing}`;
   }

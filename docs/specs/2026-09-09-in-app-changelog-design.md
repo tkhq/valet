@@ -71,7 +71,7 @@ The parser accepts `build`, `chore`, `ci`, `docs`, `refactor`, `test`, and `deps
 
 The pull request guard validates `base.sha..head.sha` for pull requests into `dev-v2`. It does not validate the base commit or old history. Each failure names the commit SHA and the required correction. The generator uses the same parser. Thus, it includes all commits that pass as user-facing.
 
-A `Changelog:` body trailer becomes the entry description. Historical entries can use their existing `User impact:` line. If metadata is absent, the generator creates category-specific copy and flags the entry for follow-up. Each entry retains commit and PR identifiers.
+A `Changelog:` body trailer becomes the entry description. Historical entries can use their existing `User impact:` line. If metadata is absent, the generator creates category-specific copy and flags the entry for follow-up. Each entry retains its commit author timestamp, commit identifier, and PR identifier.
 
 A checkpoint with no included changes has an empty entry list. The generator prints a warning. The UI shows an explicit zero-entry message. This behavior does not block rolling or versioned builds.
 
@@ -81,11 +81,11 @@ A checkpoint with no included changes has an empty entry list. The generator pri
 
 The `/changelog` page defaults to newest-first checkpoint order. Users can reverse this order, filter entries by change type, and search entry text or source identifiers. The page omits checkpoints with no matching entries while a filter or search is active. It shows a clear empty state when no entries match.
 
-Each checkpoint groups entries by change type. Features appear first. Improvements, fixes, and security changes follow in that order. The page paginates whole checkpoints and does not split one checkpoint across pages. The URL stores the type, search, sort, and page state. A filter, search, or sort change resets the page to the first valid page.
+Each checkpoint groups entries by change type. Features appear first. Improvements, fixes, and security changes follow in that order. Each group sorts entries by commit author time, newest first. Equal timestamps sort by commit SHA ascending. Missing or invalid timestamps sort after dated entries by SHA. The page paginates whole checkpoints and does not split one checkpoint across pages. The URL stores the type, search, sort, and page state. A filter, search, or sort change resets the page to the first valid page.
 
 The page labels an unreleased checkpoint `Unreleased`. It keeps the build time, build SHA, build link, pull request links, and commit links available. Entry rows use a compact horizontal layout on wide screens and stack source links on narrow screens.
 
-The client stores the newest displayed checkpoint ID in local storage. The key includes the user ID. The page snapshots unread checkpoints before it updates storage. A replaced unreleased ID marks only the new unreleased checkpoint unread. Promotion recognizes a released checkpoint with the same SHA as already seen.
+The client stores the newest displayed checkpoint ID and the visible unreleased entry commit SHAs in local storage. The key includes the user ID. The page snapshots unread checkpoints and entries before it updates storage. A replaced unreleased ID marks only the new unreleased checkpoint unread. In a previously seen unreleased checkpoint, only entries absent from the snapshot show a row accent and a `New` badge. A legacy rolling checkpoint ID uses its build SHA to locate the matching entry. Entries newer than that entry show the accent and badge. If the SHA is absent, the client does not mark entries new. Promotion recognizes a released checkpoint with the same SHA as already seen.
 
 Only application tags reachable from the build commit define changelog checkpoints. Legacy tags on other branches are excluded.
 The first application checkpoint includes the complete first-parent history. Until then, builds show this history as Unreleased.

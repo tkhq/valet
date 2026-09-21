@@ -24,8 +24,16 @@ async function checkPrivateChannelAccess(
   token: string,
   channelId: string,
   ownerSlackUserId: string | undefined,
-): Promise<{ allowed: boolean; isPrivate: boolean; error?: string }>
+): Promise<{ allowed: boolean; isPrivate: boolean; name?: string; error?: string }>
 ```
+
+The helper reads `conversations.info`, so it returns the channel name with the
+access answer. `guardPrivateChannel` in `actions.ts` hands that name to the
+action, which returns it as `channel_name`. An action that labels the channel
+then needs no second request, and the label in a message cannot reach the
+field. The name is absent for a conversation Slack gives no name, such as a
+direct message, and for a denied check. See the channel name section of
+`2026-05-01-slack-data-enrichment-design.md`.
 
 Logic:
 1. Call `conversations.info` to get channel metadata
@@ -49,8 +57,19 @@ Each channel-targeting action calls the helper before proceeding:
 | `slack.dm_owner` | No check (DM conversation). |
 | `slack.dm_user` | No check (DM conversation). |
 | `slack.list_users` | No check (workspace-level). |
+| `slack.lookup_user_by_email` | No check (workspace-level). |
 
 Error message for denied actions: `"Access denied: you are not a member of this private channel"`
+
+### Workflow recipient lookup
+
+`slack.dm_user` stays ID-only. A workflow that has an explicit recipient email
+must first call `slack.lookup_user_by_email`, then pass the returned `id` to
+`slack.dm_user`. The lookup uses the organization bot and Slack
+`users.lookupByEmail`; it needs the `users:read.email` bot scope. A missing
+email, missing scope, or no matching member returns an error. The workflow
+must stop on that error. It must not select the owner, an assistant, or another
+workspace member as a fallback.
 
 ### Inbound webhook enforcement
 

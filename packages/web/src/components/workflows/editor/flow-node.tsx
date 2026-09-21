@@ -347,6 +347,8 @@ export function FlowNode({ data, selected }: NodeProps<FlowXyNode>) {
             position={Position.Right}
             id={output}
             data-testid={`handle-source-${output}`}
+            aria-label={`${output} branch connector`}
+            title={`${output} branch`}
             style={{ top: `${35 + index * 30}%` }}
           >
             {/* The word is an authoring affordance. A read-only surface

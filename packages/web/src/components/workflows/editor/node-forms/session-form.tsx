@@ -1,5 +1,7 @@
 import type { SessionNode } from "@valet/workflow";
 import { JsonTextarea, LabeledInput, LabeledTextarea, SelectField } from "../fields";
+import { Label } from "~/components/primitives";
+import { ModelCombobox } from "~/components/settings/model-combobox";
 
 export function SessionForm({
   node,
@@ -12,7 +14,16 @@ export function SessionForm({
     <div className="flex flex-col gap-3">
       <LabeledTextarea label="Prompt" value={node.prompt} onChange={(value) => onChange({ prompt: value })} />
       <LabeledInput label="Title" value={node.title ?? ""} onChange={(value) => onChange({ title: value || undefined })} />
-      <LabeledInput label="Model" value={node.model ?? ""} onChange={(value) => onChange({ model: value || undefined })} />
+      <div className="grid gap-1">
+        <Label>Model</Label>
+        <ModelCombobox
+          value={node.model ?? null}
+          onSelect={(model) => onChange({ model })}
+          onClear={() => onChange({ model: undefined })}
+          emptyLabel="Use the session default"
+          ariaLabel="Model"
+        />
+      </div>
       <JsonTextarea
         label="Output schema (JSON)"
         value={node.outputSchema}

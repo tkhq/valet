@@ -4,14 +4,17 @@
  * mocked principal.
  */
 import { describe, expect, it, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as authModule from "../auth/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { TEAM_KEY_ADMIN_REQUIRED } from "./team-api-keys.js";
+import { isTeamMember } from "../services/teams.js";
 import { apikey, orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import type {
+  CreateInviteResponse,
   CreateTeamApiKeyResponse,
   CreateTeamResponse,
   GetMeResponse,
@@ -53,6 +56,48 @@ async function createTeam(baseUrl: string, cookie: string, name: string): Promis
   expect(res.status).toBe(201);
   const body = (await res.json()) as CreateTeamResponse;
   return body.team.id;
+}
+
+/**
+ * A second (or third) person in the same org. Only the first signup is
+ * admitted without an invite, so the org admin issues one first.
+ */
+async function inviteAndSignUp(
+  baseUrl: string,
+  adminCookie: string,
+  email: string,
+  name: string,
+  role: "admin" | "member",
+): Promise<string> {
+  const inviteRes = await fetch(`${baseUrl}/api/org/invites`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: adminCookie },
+    body: JSON.stringify({ role }),
+  });
+  expect(inviteRes.status).toBe(200);
+  const invite = (await inviteRes.json()) as CreateInviteResponse;
+  const res = await fetch(`${baseUrl}/api/auth/sign-up/email`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, email, password: "correct-horse-battery", inviteCode: invite.code }),
+  });
+  expect(res.status).toBe(200);
+  return extractSessionCookie(res.headers.get("set-cookie"));
+}
+
+async function userIdByEmail(target: TestApi, email: string): Promise<string> {
+  const rows = await target.providers.db.select().from(users).where(eq(users.email, email)).limit(1);
+  const id = rows[0]?.id;
+  if (!id) throw new Error(`Expected a user row for ${email}`);
+  return id;
+}
+
+function createTeamKey(baseUrl: string, cookie: string, teamId: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/teams/${teamId}/api-keys`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ name: "proxy-key" }),
+  });
 }
 
 describe("team API keys", () => {
@@ -138,6 +183,66 @@ describe("team API keys", () => {
 
     const dead = await fetch(`${api.baseUrl}/api/me`, { headers: { "x-api-key": created.key } });
     expect(dead.status).toBe(401);
+  });
+
+  it("creation answers a team member with the admin rule, and admits both admin kinds", async () => {
+    api = await bootTestApi({ auth: true });
+    const { baseUrl, providers: { db } } = api;
+    const adminCookie = await signUp(baseUrl, "admin@nowhere.test", "First Admin");
+    const teamId = await createTeam(baseUrl, adminCookie, "Platform");
+
+    // 1. A plain org member who belongs to the team.
+    const memberCookie = await inviteAndSignUp(baseUrl, adminCookie, "member@nowhere.test", "Member", "member");
+    const memberId = await userIdByEmail(api, "member@nowhere.test");
+    await db.insert(teamMembers).values({ teamId, userId: memberId, role: "member" });
+
+    const refused = await createTeamKey(baseUrl, memberCookie, teamId);
+    expect(refused.status).toBe(403);
+    const refusal = (await refused.json()) as { error: string; code?: string; teamId?: string };
+    // The contract, not the wiring: the text names the two admin roles, the
+    // ask, and the personal route. Comparing it with the constant the route
+    // returns would pass for any copy at all.
+    expect(refusal.error).toContain("team admin");
+    expect(refusal.error).toContain("organization admin");
+    expect(refusal.error).toContain("Ask an admin");
+    expect(refusal.error).toContain("Personal");
+    // The same discriminator the delete path on this resource sends.
+    expect(refusal.code).toBe("team_admin_required");
+    expect(refusal.teamId).toBe(teamId);
+    expect(await db.select().from(apikey).where(eq(apikey.teamId, teamId))).toEqual([]);
+
+    // The same member creates a personal key without an admin. That is the
+    // action the refusal names, so it has to work.
+    const personal = await fetch(`${baseUrl}/api/auth/api-key/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: memberCookie },
+      body: JSON.stringify({ name: "proxy-key" }),
+    });
+    expect(personal.status).toBe(200);
+    expect(((await personal.json()) as { key: string }).key.startsWith("vlt_")).toBe(true);
+
+    // 2. An org member who is not on the team cannot learn that it exists.
+    const outsiderCookie = await inviteAndSignUp(baseUrl, adminCookie, "outsider@nowhere.test", "Outsider", "member");
+    const hidden = await createTeamKey(baseUrl, outsiderCookie, teamId);
+    expect(hidden.status).toBe(404);
+    expect(((await hidden.json()) as { error: string }).error).toBe("team not found");
+
+    // 3. A team admin who is a plain org member creates the key.
+    await db
+      .update(teamMembers)
+      .set({ role: "admin" })
+      .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, memberId)));
+    const byTeamAdmin = await createTeamKey(baseUrl, memberCookie, teamId);
+    expect(byTeamAdmin.status).toBe(201);
+    expect(((await byTeamAdmin.json()) as CreateTeamApiKeyResponse).createdBy).toBe(memberId);
+
+    // 4. An org admin who never joined the team creates one too.
+    const orgAdminCookie = await inviteAndSignUp(baseUrl, adminCookie, "orgadmin@nowhere.test", "Org Admin", "admin");
+    const orgAdminId = await userIdByEmail(api, "orgadmin@nowhere.test");
+    expect(await isTeamMember(db, teamId, orgAdminId)).toBe(false);
+    const byOrgAdmin = await createTeamKey(baseUrl, orgAdminCookie, teamId);
+    expect(byOrgAdmin.status).toBe(201);
+    expect(((await byOrgAdmin.json()) as CreateTeamApiKeyResponse).createdBy).toBe(orgAdminId);
   });
 
   it("the key still works after the creating admin leaves the team", async () => {
@@ -274,8 +379,12 @@ describe("team API keys", () => {
           if (!created) throw new Error("Expected better-auth to mint a key");
           mintedId = created.id;
           mintedKey = created.key;
-          // The real mint has committed, but the route has not received it.
-          // Complete the competing operation here without timing or sleeps.
+          // The real mint has committed, but the route has not received it,
+          // so this is the window BETWEEN the mint and the ownership lock.
+          // It is not the window inside the locked transaction: membership
+          // writers take no team ownership lock, so that window is not
+          // serialized and no test here can pin it. Complete the competing
+          // operation now, without timing or sleeps.
           await afterMint(created.id);
           return created;
         });
@@ -318,7 +427,18 @@ describe("team API keys", () => {
         headers: { "content-type": "application/json", cookie },
         body: JSON.stringify({ name: "CI" }),
       });
-      expect(response.status).toBe(interleaving === "team deleted" || interleaving === "admin demoted" ? 404 : 500);
+      // A demotion leaves the caller on the team, so the answer names the
+      // admin rule. A deleted team stays hidden.
+      const expected = { "team deleted": 404, "admin demoted": 403, "key missing": 500, "pin throws": 500 };
+      expect(response.status).toBe(expected[interleaving]);
+      if (interleaving === "admin demoted") {
+        // The lock re-check answers with the body the first check sends.
+        expect(await response.clone().json()).toMatchObject({
+          error: TEAM_KEY_ADMIN_REQUIRED,
+          code: "team_admin_required",
+          teamId,
+        });
+      }
       expect(await response.text()).not.toContain(mintedKey);
       expect(mintedId).not.toBe("");
       expect(await db.select().from(apikey).where(eq(apikey.id, mintedId))).toEqual([]);

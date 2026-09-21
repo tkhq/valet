@@ -6,6 +6,13 @@ export const INTERNAL_TYPES = Object.freeze(["build", "chore", "ci", "docs", "re
 const ACCEPTED_TYPES = new Set([...USER_FACING_TYPES, ...INTERNAL_TYPES]);
 const USER_FACING_TYPE_SET = new Set(USER_FACING_TYPES);
 const USER_VISIBLE_MARKER = /\[user-visible\]/i;
+/**
+ * Trailer values that mean "keep this out of the changelog". Authors reach
+ * for these on a user-facing type whose change no user can see — a test
+ * fixture, a pinned assertion. The value used to be read as the user impact
+ * and published verbatim, so the changelog showed the word "none".
+ */
+const CHANGELOG_OPT_OUT = new Set(["none", "n/a", "na", "-", "skip", "internal"]);
 const SUBJECT = /^([a-z]+)(?:\(([^()\r\n]+)\))?(!)?:\s+(\S.*)$/;
 const TYPE_PREFIX = /^([^\s:()]+)(?:\([^)]*\))?!?:/;
 
@@ -32,7 +39,11 @@ export function parseCommitMessage({ subject, body = "" }) {
     return { ok: false, correction: correctionForSubject(subject) };
   }
   const explicit = USER_VISIBLE_MARKER.test(subject);
-  const changelog = changelogTrailer(body);
+  const trailer = changelogTrailer(body);
+  const changelogOptOut = trailer !== null && CHANGELOG_OPT_OUT.has(trailer.toLowerCase());
+  // An opt-out is a declaration, not an impact line. It satisfies the guard
+  // and leaves no description for the generator to publish.
+  const changelog = changelogOptOut ? null : trailer;
   const userFacing = USER_FACING_TYPE_SET.has(type) || explicit;
   return {
     ok: true,
@@ -42,8 +53,9 @@ export function parseCommitMessage({ subject, body = "" }) {
     summary: match[4].trim(),
     explicit,
     changelog,
+    changelogOptOut,
     userFacing,
-    metadataValid: !userFacing || explicit || changelog !== null,
+    metadataValid: !userFacing || explicit || trailer !== null,
   };
 }
 

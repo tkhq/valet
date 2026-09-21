@@ -63,6 +63,7 @@ import {
 } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { extractDocumentText } from "../services/pdf-extract.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
@@ -900,6 +901,8 @@ function buildActionContext(
     threadId: "invoke",
     actionId,
     service: req.service,
+    owner: ctx.owner,
+    sessionPurpose: "workflow",
     // `WorkflowInvokeActionRequest` carries no summary field (the `tool`
     // node executor's `engine.invokeAction` call never sets one) — left
     // undefined rather than guessing at a value the type doesn't offer.
@@ -914,6 +917,13 @@ function buildActionContext(
       return assistant ? assistantSenderIdentity(assistant) : undefined;
     },
     sandbox: throwingSandbox(sessionId),
+    // Unlike the capabilities stubbed out below, document extraction is
+    // genuinely available here: it is a pure call over bytes against the
+    // native extractor in this process, needing no session, thread or
+    // sandbox. Leaving it unset made a workflow node reading a PDF report
+    // that extraction is unavailable on the deployment, which was wrong
+    // about the deployment and only true of this context.
+    extractDocument: extractDocumentText,
     signal: AbortSignal.timeout(ACTION_TIMEOUT_MS),
     requestDecision: () =>
       Promise.reject(

@@ -209,8 +209,10 @@ follow the persona's "answer by name". These fixes make one inbound view:
 - `renderSignalEnvelope` renders `addressed="true"|"false"` from the origin's
   reply mode, so the agent tells an addressed mention (answer normally) from an
   overheard follow (reply only via `reply_to_origin`) without guessing.
-- The transcript resolves in-text mentions to names, keeps a `[shared: file]`
-  marker for a file-only message, attributes the bot's own prior posts as "You",
+- The transcript resolves in-text mentions to names, names a message's files in
+  a `[shared: file]` marker beside its text (adding `+N unnamed` for entries
+  Slack sends without a name, such as a tombstoned deletion), attributes the
+  bot's own prior posts as "You",
   and preserves the thread's opening message when it trims a long thread.
 
 ### Gap re-hydration (TKAI-284, added 2026-09-01)
@@ -300,9 +302,35 @@ this order:
 
 ### Transcript line boundaries (TKAI-434)
 
+Until 2026-09-17 the file marker was a FALLBACK for an empty message body, so
+a file posted with a caption went unmentioned: the transcript carried the
+caption and nothing else. An assistant asked about that file then reported,
+accurately about its input, that it could see no attachment. The marker now
+rides beside the text. Because it is built for every captioned message rather
+than only file-only posts, it reads each entry defensively: a throw inside the
+per-message map would reject the enclosing `Promise.all`, and the caller turns
+that into a null transcript, so one malformed entry would cost the whole
+thread. It names the file rather than fetching it, because
+`read_thread` already returns each file with its `url` and
+`slack.fetch_file` reads a PDF, and downloading every file in a thread to
+seed one turn would cost far more than naming them.
+
 Thread hydration replaces line breaks in message text, speaker names, and file markers with a visible `⏎` separator. Each Slack message occupies one attributed line. This prevents embedded newlines from creating a second speaker line; it does not make message content trusted.
 
 Thread hydration and overheard digests share the engine's `formatTranscriptText` helper through Slack's existing engine dependency.
 The helper scans whitespace runs in linear time, including long runs with no line break.
 Runs containing CR, LF, VT, FF, NEL, LS, or PS become one visible `⏎` separator.
 It preserves internal whitespace without line breaks and trims outer whitespace. Legitimate multiline lists retain visible boundaries between steps.
+
+### Sender authority on followed messages
+
+A followed thread does not delegate its binding actor's authority to participants.
+Each live message requires a linked Slack identity and current organization membership.
+Personal assistants accept their owner's messages. Team assistants also require the
+binding rule's current invocation audience. Organization assistants accept current
+members of their owning organization. Unknown owner types fail closed.
+
+The delivery uses the authorized sender as its actor and message author. Missing,
+unlinked, or unauthorized senders do not trigger a turn, normalization, or history fetch.
+The existing binding membership check remains in effect. Historical messages remain
+explicitly labeled context only; they do not establish authority for a live delivery.

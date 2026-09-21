@@ -36,8 +36,8 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { definitionVersionId } from "./definition-version.js";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Usage } from "@earendil-works/pi-ai/compat";
 import { bundledModel } from "@valet/engine/model-catalog";
-import type { Api, Model, Usage } from "@earendil-works/pi-ai/compat";
 import {
   parseAssistantSessionId,
   parsePrincipal,
@@ -61,8 +61,10 @@ import type {
   WorkflowPromptOrchestratorOptions,
   WorkflowPromptOrchestratorResult,
   WorkflowPromptReceipt,
+  WorkflowRunOrigin,
   WorkflowStore,
 } from "@valet/workflow";
+import { isTeamMember } from "../services/teams.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
@@ -70,12 +72,12 @@ import { workflowDefinitions } from "../schema/index.js";
 import {
   ArchivedAssistantError,
   loadAssistant,
+  loadAssistantBySessionId,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { workflowAssistantId } from "./service.js";
-
-type PiModel = Model<Api>;
+import { resolveModelSpec } from "../services/model-resolution.js";
 
 export interface WorkflowEngineDepsOpts {
   host: EngineHost;
@@ -163,11 +165,22 @@ export function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdPart
   return { runId, nodeId, iteration };
 }
 
+/**
+ * The key of the assistant thread one unattended run reports on. One
+ * thread per run: the engine runs a thread's queue in series and aborts it
+ * as a whole, so runs of one workflow must not share one. Read back by
+ * `run-attention.ts`, which archives the thread at settlement.
+ */
+export function workflowRunThreadKey(runId: string): string {
+  return `signal:workflow:${runId}`;
+}
+
 interface RunContext {
   orgId: string;
   actorUserId: string;
   owner: Principal;
   assistantId?: string;
+  origin?: WorkflowRunOrigin;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -193,7 +206,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   }
 
   return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
-    assistantId: workflowAssistantId(run.definition) };
+    assistantId: workflowAssistantId(run.definition), origin: run.params.origin };
 }
 
 /**
@@ -378,7 +391,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       });
     },
 
-    async abort(sessionId: string, threadId: string): Promise<void> {
+    async abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void> {
       // A retired assistant has nothing left to abort — the delete already
       // tore its session down. Throwing here would break run cancellation.
       let session;
@@ -388,7 +401,11 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         if (err instanceof ArchivedAssistantError) return;
         throw err;
       }
-      await session.abort({ threadId });
+      if (queueItemId) {
+        await session.threadById(threadId)?.abortSubmission(queueItemId);
+      } else {
+        await session.abort({ threadId });
+      }
     },
 
     async isSettled(sessionId: string, queueItemId: string): Promise<boolean> {
@@ -397,14 +414,29 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     },
 
     async llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult> {
-      const model = resolveWorkflowModel(req.model);
+      const ctx = await resolveRunContext(opts, req.runId);
+      // Resolve the provider before reading its settings. An unrelated disabled
+      // Anthropic provider must not block legacy bare OpenAI or Google IDs.
+      let modelSpec = req.model;
+      if (!modelSpec.includes("/")) {
+        for (const provider of ["anthropic", "openai", "google"] as const) {
+          if (!bundledModel(provider, modelSpec)) continue;
+          modelSpec = `${provider}/${modelSpec}`;
+          break;
+        }
+      }
+      const resolved = await resolveModelSpec(opts.db, opts.credentials, ctx.orgId, modelSpec);
+      if (!resolved) {
+        throw new Error(`workflow engine-deps: unknown or unavailable model "${req.model}"`);
+      }
       const result = await completeSimple(
-        model,
+        resolved.model,
         {
           systemPrompt: req.system,
           messages: [{ role: "user", content: [{ type: "text", text: req.prompt }], timestamp: Date.now() }],
         },
         {
+          apiKey: resolved.apiKey,
           temperature: req.temperature,
           maxTokens: req.maxOutputTokens,
         },
@@ -430,16 +462,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
      * `thread.submitPrompt` calls already have for the `session` node), so
      * it submits directly rather than waiting on that extension.
      *
-     * Thread selection: one thread per workflow RUN, keyed
-     * `signal:workflow:{runId}` — the bare-key get-or-create convention
-     * `orchestrator/signals.ts` documents for cross-orchestrator messages
-     * (`signal:{senderId}`), with the workflow run standing in for the
-     * "sender". This groups every llm/orchestrator-node prompt a given run
-     * sends to this orchestrator (including repair rounds, which reuse the
-     * same runId) onto one thread, so the orchestrator's inbox reads as one
-     * conversation per run rather than one row per node/dispatch. Node,
-     * iteration, and repair identity is carried by `dispatchId`
-     * (idempotency) and the signal body — not by thread fragmentation.
+     * An explicit assistant origin reuses its exact durable session and
+     * thread. Every other run reports on its own thread. A missing origin
+     * thread must not create a replacement.
      */
     async promptOrchestrator(
       promptText: string,
@@ -454,24 +479,53 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       }
       const ctx = await resolveRunContext(opts, runId);
 
-      // Explicit routing comes from the run snapshot. Older workflows use
-      // the owner's default assistant. No `agent_sessions` app row is written
-      // here: like the `wf:` sessions above, a workflow-woken session is
-      // owned by the run, and the app row is backfilled the first time a
-      // human opens the assistant (`POST /api/teams/:id/orchestrator`).
-      const assistant = ctx.assistantId
-        ? await loadAssistant(opts.db, ctx.assistantId)
-        : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
-      if (!assistant || assistant.orgId !== ctx.orgId || assistant.ownerType !== principal.type || assistant.ownerId !== principal.id) {
+      // An explicit conversation origin takes precedence over definition
+      // routing. Older and unattended runs keep the snapshot/default route.
+      //
+      // The origin resolves through the assistants table, never through an
+      // id prefix: rows migrated from `orchestrator_identities` keep legacy
+      // `orchestrator:*` session ids that no prefix parse recognizes
+      // (`assistants/service.ts#loadAssistantBySessionId`). A prefix parse
+      // here failed every orchestrator node of every run such a thread
+      // started. The lookup is by session id, so the loaded row always
+      // carries the origin's own session id.
+      const assistant = ctx.origin
+        ? await loadAssistantBySessionId(opts.db, ctx.origin.assistantSessionId)
+        : ctx.assistantId
+          ? await loadAssistant(opts.db, ctx.assistantId)
+          : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+      const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
+      const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
+      if (!assistant || assistant.orgId !== ctx.orgId ||
+          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor))) {
         throw new Error("Workflow orchestrator is unavailable. Select an orchestrator owned by this workflow's workspace.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
+      if (ctx.origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
+          !(await isTeamMember(opts.db, principal.id, ctx.actorUserId))) {
+        throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
+      }
       const session = await opts.host.assistantSessionFor(
         assistant.id,
         { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
         { sessionId: assistant.sessionId },
       );
-      const thread = session.thread(`signal:workflow:${runId}`);
+      // One thread per run. A thread is the engine's unit of serial
+      // execution and of abort: a shared thread makes one run's approval
+      // gate hold every other run of the same workflow, and makes the
+      // thread's Stop button cancel all of them. `run-attention.ts`
+      // archives the thread when the run settles, so the sidebar does not
+      // fill up. An attended run reports into the thread it was started
+      // from instead.
+      const thread = ctx.origin
+        ? session.threadById(ctx.origin.threadId)
+        : session.thread(workflowRunThreadKey(runId));
+      if (!thread) {
+        throw new Error(
+          `Workflow origin thread ${ctx.origin?.threadId} is missing from session ${session.id}. ` +
+            "Start a new run from an active assistant thread.",
+        );
+      }
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
       // string-valued by contract (`SignalContent`), and nothing set it
@@ -537,16 +591,6 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
   };
 }
 
-/**
- * Resolves an `LlmNode.model` string to a pi-ai `Model` — `provider/model`
- * form used as-is; a bare id tried under a small set of common providers
- * (anthropic first, matching the engine's own anthropic-default
- * convention in `thread.ts#resolveModelId` / `EngineHost.resolveModel`).
- * Throws descriptively on no match — the `llm` executor treats any throw
- * from `llmComplete` as a node failure, so an unknown model surfaces as a
- * readable per-node error instead of a generic crash.
- */
-
 /** Pure so it's unit-testable without a live completion — the network
  * boundary this maps across (pi-ai's `completeSimple`) isn't itself worth
  * mocking, but the mapping logic is. Exported for that test. */
@@ -559,25 +603,6 @@ export function mapPiAiUsage(usage: Usage): WorkflowLlmUsage {
     totalTokens: usage.totalTokens,
     costUsd: usage.cost.total,
   };
-}
-
-function resolveWorkflowModel(spec: string): PiModel {
-  const slash = spec.indexOf("/");
-  if (slash > 0) {
-    const provider = spec.slice(0, slash);
-    const modelId = spec.slice(slash + 1);
-    const model = bundledModel(provider, modelId);
-    if (model) return model;
-    throw new Error(`workflow engine-deps: unknown model "${spec}"`);
-  }
-  const tryProviders = ["anthropic", "openai", "google"] as const;
-  for (const provider of tryProviders) {
-    const model = bundledModel(provider, spec);
-    if (model) return model;
-  }
-  throw new Error(
-    `workflow engine-deps: unknown model "${spec}" (tried bare id under ${tryProviders.join(", ")}; use "provider/model" for anything else)`,
-  );
 }
 
 /**

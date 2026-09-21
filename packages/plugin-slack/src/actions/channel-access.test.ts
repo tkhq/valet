@@ -109,6 +109,30 @@ describe('checkPrivateChannelAccess', () => {
     expect(slackGetMock).toHaveBeenCalledTimes(3);
   });
 
+  it('returns the channel name for a public channel', async () => {
+    slackGetMock.mockResolvedValueOnce(
+      mockSlackResponse({
+        channel: { id: 'C123', name: 'general', is_private: false, is_im: false, is_mpim: false },
+      }),
+    );
+
+    const result = await checkPrivateChannelAccess('xoxb-token', 'C123', 'U999');
+    expect(result).toEqual({ allowed: true, isPrivate: false, name: 'general' });
+  });
+
+  it('returns the channel name for a private channel the owner is in', async () => {
+    slackGetMock
+      .mockResolvedValueOnce(
+        mockSlackResponse({
+          channel: { id: 'C123', name: 'secret-plans', is_private: true, is_im: false, is_mpim: false },
+        }),
+      )
+      .mockResolvedValueOnce(mockSlackResponse({ members: ['U999'], response_metadata: {} }));
+
+    const result = await checkPrivateChannelAccess('xoxb-token', 'C123', 'U999');
+    expect(result).toEqual({ allowed: true, isPrivate: true, name: 'secret-plans' });
+  });
+
   it('handles conversations.info API error gracefully', async () => {
     slackGetMock.mockResolvedValueOnce(mockSlackError('channel_not_found'));
 

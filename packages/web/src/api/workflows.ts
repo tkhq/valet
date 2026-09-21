@@ -7,6 +7,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
   type UseMutationResult,
   type UseQueryOptions,
 } from "@tanstack/react-query";
@@ -21,6 +22,7 @@ import type {
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
   ListAllWorkflowRunsResponse,
+  ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ListWorkflowTriggersResponse,
@@ -64,6 +66,7 @@ export const qkWorkflows = {
   allRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) =>
     ["workflows", "all-runs", ...(owner ? [owner.ownerType, owner.ownerId] : []), ...(page ? [page] : [])] as const,
   triggerCatalog: () => ["workflows", "trigger-catalog"] as const,
+  actionRequired: () => ["workflows", "action-required"] as const,
   // Sits under the `detail(id)` prefix on purpose: saving the definition
   // invalidates the detail, and the predictions must follow the definition.
   permissions: (id: string) => ["workflows", id, "permissions"] as const,
@@ -176,10 +179,16 @@ export function useRuns(
   });
 }
 
-export function useWorkflowVersions(
-  id: string,
-  opts?: Partial<UseQueryOptions<ListWorkflowVersionsResponse>>,
-) {
+/** Every active workflow gate the calling principal can resolve. */
+export function useWorkflowActionRequired() {
+  return useQuery<ListWorkflowActionRequiredResponse>({
+    queryKey: qkWorkflows.actionRequired(),
+    queryFn: () => api.listWorkflowActionRequired(),
+    refetchInterval: 5000,
+  });
+}
+
+export function useWorkflowVersions(id: string, opts?: Partial<UseQueryOptions<ListWorkflowVersionsResponse>>) {
   return useQuery<ListWorkflowVersionsResponse>({
     queryKey: qkWorkflows.versions(id),
     queryFn: () => api.listWorkflowVersions(id),
@@ -345,6 +354,33 @@ export function useStartRun(id: string) {
   });
 }
 
+export function removeResolvedWorkflowAction(
+  qc: Pick<QueryClient, "setQueryData" | "invalidateQueries">,
+  runId: string,
+  nodeId: string,
+  iteration: number | undefined,
+) {
+  qc.setQueryData<ListWorkflowActionRequiredResponse>(qkWorkflows.actionRequired(), (current) => {
+    if (current === undefined) return current;
+    const items = current.items.filter(
+      (item) => item.runId !== runId || item.gate.nodeId !== nodeId || (item.gate.iteration ?? 0) !== (iteration ?? 0),
+    );
+    return { items, count: items.length };
+  });
+  qc.invalidateQueries({
+    queryKey: qkWorkflows.actionRequired(),
+    refetchType: "none",
+  });
+  qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+  qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
+}
+
+export function invalidateWorkflowApprovalState(qc: Pick<QueryClient, "invalidateQueries">, runId: string) {
+  qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+  qc.invalidateQueries({ queryKey: qkWorkflows.actionRequired() });
+  qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
+}
+
 export function useResolveApproval(runId: string) {
   const qc = useQueryClient();
   return useMutation<
@@ -353,14 +389,14 @@ export function useResolveApproval(runId: string) {
     { nodeId: string; body: ResolveWorkflowApprovalRequest }
   >({
     mutationFn: ({ nodeId, body }) => api.resolveWorkflowApproval(runId, nodeId, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+    onSuccess: (_data, variables) => {
+      removeResolvedWorkflowAction(qc, runId, variables.nodeId, variables.body.iteration);
     },
     onError: () => {
       // Invalidate on error too: a 409 "already resolved" means the run has
       // moved on, and the 5-s poll would leave the stale card visible until
       // the next tick. Invalidating here collapses the wait.
-      qc.invalidateQueries({ queryKey: qkWorkflows.run(runId) });
+      invalidateWorkflowApprovalState(qc, runId);
     },
   });
 }
@@ -380,7 +416,9 @@ export function useRetryRun(runId: string) {
     onSuccess: () => {
       const detail = qc.getQueryData<GetWorkflowRunResponse>(qkWorkflows.run(runId));
       if (detail) {
-        qc.invalidateQueries({ queryKey: qkWorkflows.runs(detail.run.workflowId) });
+        qc.invalidateQueries({
+          queryKey: qkWorkflows.runs(detail.run.workflowId),
+        });
       }
     },
   });

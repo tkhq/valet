@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@valet/engine": "workspace:*",
+    "mdast-util-from-markdown": "^2.0.2",
     "typebox": "^1.1.24"
   },
   "devDependencies": {

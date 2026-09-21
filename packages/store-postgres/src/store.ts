@@ -332,7 +332,6 @@ export class PgSessionStore implements SessionStore {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
-         active_leaf_entry_id = EXCLUDED.active_leaf_entry_id,
          queue_mode = EXCLUDED.queue_mode,
          paused = EXCLUDED.paused,
          model = EXCLUDED.model,
@@ -635,6 +634,30 @@ export class PgSessionStore implements SessionStore {
     return list;
   }
 
+  async getThreadSnapshot(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    return this.db.transaction(async (tx) => {
+      // Lock the thread row before reading entries. appendEntries updates this
+      // row last, so the pair is either wholly before or wholly after an append.
+      const threadResult = await tx.query(
+        "SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2 FOR SHARE",
+        [sessionId, threadId],
+      );
+      const rawThread = threadResult.rows[0];
+      if (!rawThread) return null;
+      const entryResult = await tx.query(
+        "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
+        [sessionId, threadId],
+      );
+      return {
+        thread: rowToThread(rawToThreadRow(rawThread)),
+        entries: entryResult.rows.map(rawToEntryRow).map(rowToEntry),
+      };
+    });
+  }
+
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
     const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = $1 AND id = $2", [
       sessionId,
@@ -676,13 +699,18 @@ export class PgSessionStore implements SessionStore {
     );
   }
 
-  async listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]> {
-    const result = threadId
-      ? await this.db.query("SELECT * FROM engine_decision_gates WHERE session_id = $1 AND thread_id = $2", [
-          sessionId,
-          threadId,
-        ])
-      : await this.db.query("SELECT * FROM engine_decision_gates WHERE session_id = $1", [sessionId]);
+  async listDecisionGates(sessionId: string, threadId?: string, status?: DecisionGate["status"]): Promise<DecisionGate[]> {
+    const params = [sessionId];
+    const conditions = ["session_id = $1"];
+    if (threadId !== undefined) {
+      params.push(threadId);
+      conditions.push(`thread_id = $${params.length}`);
+    }
+    if (status !== undefined) {
+      params.push(status);
+      conditions.push(`status = $${params.length}`);
+    }
+    const result = await this.db.query(`SELECT * FROM engine_decision_gates WHERE ${conditions.join(" AND ")}`, params);
     return result.rows.map((r) => rowToGate(rawToGateRow(r)));
   }
 
@@ -1004,7 +1032,23 @@ export class PgSessionStore implements SessionStore {
     return toNumOrNull(result.rows[0]?.latest, "latest");
   }
 
-  async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
+  async listAllUnsettledSubmissions(sessionIds?: readonly string[]): Promise<(QueueItem & { sessionId: string })[]> {
+    if (sessionIds !== undefined) {
+      const items: (QueueItem & { sessionId: string })[] = [];
+      const ids = [...new Set(sessionIds)];
+      for (let offset = 0; offset < ids.length; offset += 1_000) {
+        const batch = ids.slice(offset, offset + 1_000);
+        const result = await this.db.query(
+          `SELECT * FROM engine_queue_items WHERE status != 'settled' AND session_id IN (${batch.map((_, i) => `$${i + 1}`).join(",")})`,
+          batch,
+        );
+        for (const r of result.rows) {
+          const row = rawToQueueItemRow(r);
+          items.push({ ...queueItemRowToItem(row), sessionId: row.sessionId });
+        }
+      }
+      return items;
+    }
     const result = await this.db.query("SELECT * FROM engine_queue_items WHERE status != 'settled'");
     return result.rows.map((r) => {
       const row = rawToQueueItemRow(r);
@@ -1046,9 +1090,16 @@ export class PgSessionStore implements SessionStore {
     });
   }
 
-  async requestAbort(sessionId: string, threadId?: string): Promise<void> {
+  async requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void> {
     const now = Date.now();
-    if (threadId) {
+    if (queueItemId) {
+      await this.db.query(
+        `UPDATE engine_queue_items SET abort_requested_at = $1, updated_at = $2
+         WHERE session_id = $3 AND id = $4 AND ($5::text IS NULL OR thread_id = $5)
+           AND status != 'settled' AND abort_requested_at IS NULL`,
+        [now, now, sessionId, queueItemId, threadId ?? null],
+      );
+    } else     if (threadId) {
       await this.db.query(
         `UPDATE engine_queue_items SET abort_requested_at = $1, updated_at = $2
          WHERE session_id = $3 AND thread_id = $4 AND status != 'settled' AND abort_requested_at IS NULL`,

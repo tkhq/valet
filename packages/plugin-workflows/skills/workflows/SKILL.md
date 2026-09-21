@@ -15,6 +15,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.get_workflow` — full definition by id
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
 - `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
+- `workflows.update_model` — set an approved model or org size tier on selected `llm` and `session` nodes
 - `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept)
 - `workflows.start_run` — start a run; returns `runId`
 - `workflows.get_run` — run status, per-node checkpoints, pending waits
@@ -64,6 +65,10 @@ Node types:
 - `stop` — terminal node (`outcome`, optional `output`, `message`)
 
 Edges may carry `"when"` (an expression) to gate a branch.
+
+## Model selection
+
+Use a size tier (`xs`, `s`, `m`, `l`, or `xl`) when the org should control the concrete model. Use an approved catalog id when the workflow needs a fixed model. An `llm` node requires `model`. A `session` node uses its `model` when set and otherwise uses the session default. An `orchestrator` node has no model field. It uses the selected assistant's saved model. `update_model` changes `llm` and `session` nodes only, including a `foreach` body.
 
 ## Templates: reading data between nodes
 

@@ -107,3 +107,26 @@ The team key form states its mutation authority and lifetime before creation. Th
 TKAI-430 narrows workflow-definition deletion to human administrators. Team-key copy names this restriction; session deletion and other allowed workflow operations remain available.
 
 Team key controls discard drafts and revealed secrets after access errors or loss of admin rights. Late creation responses cannot reveal secrets after those transitions. The notice distinguishes visible key names from secrets, which are shown only once at creation.
+
+
+### Create refusal copy (TKAI-483)
+
+`POST /api/teams/:id/api-keys` answered every rejected caller with a 404 and the text "team not found". That answer is correct for a caller who cannot see the team. It is wrong for a member of the team, who already sees the team, its key names, and the workspace switcher entry. The member reads it as a broken route.
+
+The create path now sorts the caller into three cases through one helper:
+
+- A team admin or an organization admin creates the key.
+- A member of the team who is not an admin gets a 403 that names the rule and two actions: ask an admin of this team, or switch to the personal workspace and create a personal key.
+- Everyone else keeps the 404 that hides the team.
+
+The same helper runs again inside the team ownership lock, so a demotion that committed before the lock was taken gets the same answer as one that landed before the create began. The minted key is still deleted on every refusal, and no secret is returned.
+
+A demotion committing while the transaction runs is serialized too, but not by the advisory lock. The membership writers in `services/teams.ts` and the organization role writer in `services/org.ts` take no team ownership lock, so they commit independently of it. The create transaction therefore holds the two rows the gate reads, the caller's `team_members` row and their `org_members` row, with a share lock before it reads them. A role update or a membership delete blocks on that until the create commits, so the re-check cannot read a role that is about to change. `services/team-deletion-access.ts` holds the same two rows the same way.
+
+Share rather than update, because two concurrent creates on one team need not serialize against each other, only against a writer. A caller with no row locks nothing, which is the promotion direction rather than the revocation one: somebody holding no membership cannot lose an authority they never had, and the read that follows refuses them.
+
+The wider gap stands. Every other team-scoped write that re-checks authority under the ownership lock has the same exposure, because the membership writers still take no lock. Closing it in general means those writers sharing the advisory lock, which is a change to them rather than to this route.
+
+The 403 body carries `code: "team_admin_required"` and `teamId`, the same discriminator `TeamAdminRequiredError` sends when the delete path on this resource refuses a member. One client branch therefore answers both refusals, and a client can tell this 403 from the signed-out 403 on the same endpoint. The create refusal does not reuse the error class: that class carries deletion-request wording and a `teamAdminRefusal` lookup for a pending request. A create has no such request, so the body carries no `requestId`.
+
+This changes no permission. A member could not create a team key before, and cannot now.

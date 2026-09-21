@@ -65,7 +65,8 @@ export class InMemorySessionStore implements SessionStore {
 
   async saveThread(sessionId: string, thread: ThreadData): Promise<void> {
     const r = this.row(sessionId);
-    r.threads.set(thread.id, thread);
+    const activeLeafEntryId = r.threads.get(thread.id)?.activeLeafEntryId;
+    r.threads.set(thread.id, { ...thread, activeLeafEntryId });
     if (!r.entriesByThread.has(thread.id)) r.entriesByThread.set(thread.id, []);
   }
 
@@ -183,6 +184,19 @@ export class InMemorySessionStore implements SessionStore {
     return all;
   }
 
+  async getThreadSnapshot(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null> {
+    const r = this.row(sessionId);
+    const thread = r.threads.get(threadId);
+    if (!thread) return null;
+    return {
+      thread: { ...thread },
+      entries: [...(r.entriesByThread.get(threadId) ?? [])],
+    };
+  }
+
   async getThread(sessionId: string, threadId: string): Promise<ThreadData | null> {
     return this.row(sessionId).threads.get(threadId) ?? null;
   }
@@ -207,10 +221,9 @@ export class InMemorySessionStore implements SessionStore {
     return [...result];
   }
 
-  async listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]> {
+  async listDecisionGates(sessionId: string, threadId?: string, status?: DecisionGate["status"]): Promise<DecisionGate[]> {
     const all = [...this.row(sessionId).gates.values()];
-    if (threadId) return all.filter((g) => g.threadId === threadId);
-    return all;
+    return all.filter((g) => (!threadId || g.threadId === threadId) && (!status || g.status === status));
   }
 
   async getDecisionGate(sessionId: string, gateId: string): Promise<DecisionGate | null> {
@@ -499,9 +512,11 @@ export class InMemorySessionStore implements SessionStore {
     return false;
   }
 
-  async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
+  async listAllUnsettledSubmissions(sessionIds?: readonly string[]): Promise<(QueueItem & { sessionId: string })[]> {
     const out: (QueueItem & { sessionId: string })[] = [];
+    const selected = sessionIds === undefined ? undefined : new Set(sessionIds);
     for (const [sessionId, r] of this.rows) {
+      if (selected && !selected.has(sessionId)) continue;
       for (const item of r.queueItems.values()) {
         if (item.status !== "settled") out.push({ ...item, sessionId });
       }
@@ -531,11 +546,12 @@ export class InMemorySessionStore implements SessionStore {
     return { ...item };
   }
 
-  async requestAbort(sessionId: string, threadId?: string): Promise<void> {
+  async requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void> {
     const r = this.row(sessionId);
     const now = Date.now();
     for (const item of r.queueItems.values()) {
       if (threadId && item.threadId !== threadId) continue;
+      if (queueItemId && item.id !== queueItemId) continue;
       if (item.status === "settled") continue;
       if (item.abortRequestedAt !== undefined) continue; // first write wins
       item.abortRequestedAt = now;

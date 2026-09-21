@@ -41,6 +41,7 @@ import {
   normalizeInputType,
   triggerDataSchema,
   type ForeachNode,
+  type ValidateEnvironment,
   type WorkflowDefinition,
   type WorkflowInputDefinition,
 } from "@valet/workflow";
@@ -62,7 +63,8 @@ import {
   withNextStep,
   type TeamServiceReadiness,
 } from "./team-service-readiness.js";
-import { buildValidateEnvironment } from "./validation-env.js";
+import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
+import { TIER_SET } from "../services/model-tiers.js";
 import { nextFireAt } from "./schedule-service.js";
 import { toolNodesOf, workflowCallsOf } from "./tool-nodes.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
@@ -288,6 +290,67 @@ function foreachNodesOf(definition: WorkflowDefinition): ForeachNode[] {
 }
 
 /**
+ * The model specs a definition names, top level or in a foreach body. Only
+ * `llm` and `session` nodes carry one; every other node type inherits the
+ * run's own model.
+ */
+function modelSpecsOf(definition: WorkflowDefinition): string[] {
+  const specs: string[] = [];
+  const read = (node: WorkflowDefinition["nodes"][number] | ForeachNode["body"]): void => {
+    if (node.type !== "llm" && node.type !== "session") return;
+    if (typeof node.model === "string" && node.model.trim() !== "") specs.push(node.model);
+  };
+  for (const node of definition.nodes) {
+    read(node);
+    if (node.type === "foreach") read(node.body);
+  }
+  return [...new Set(specs)];
+}
+
+/**
+ * Why this organization cannot install the template, or null when it can.
+ *
+ * One function answers for the gallery card and for the install gate, so
+ * the card never disables a button the install would have accepted, and the
+ * install never refuses a card that read as ready. The message names both
+ * remedies the reader has: the organization approves and activates the
+ * model, or it adds a key for the model's provider. Both live on the same
+ * settings page.
+ *
+ * A size tier is named only when the template uses one. A tier the
+ * organization cannot serve has its own remedy — repoint the tier — and a
+ * template that names no tier must not send the reader to look for one.
+ */
+export function orgModelBlockReason(
+  templateId: string,
+  definition: WorkflowDefinition,
+  env: ValidateEnvironment,
+): string | null {
+  const isKnown = env.isKnownModel;
+  if (!isKnown) return null;
+  const blocked = modelSpecsOf(definition).filter((spec) => isKnown(spec) !== true);
+  if (blocked.length === 0) return null;
+  const tiers = blocked.filter((spec) => TIER_SET.has(spec.trim().toLowerCase()));
+  const models = blocked.filter((spec) => !TIER_SET.has(spec.trim().toLowerCase()));
+  const remedies: string[] = [];
+  if (models.length > 0) {
+    const named = models.map((spec) => `"${spec}"`).join(", ");
+    remedies.push(
+      `In Settings > Models, approve and activate ${named}, or add a key for the provider that serves ${models.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  if (tiers.length > 0) {
+    const named = tiers.map((spec) => `"${spec}"`).join(", ");
+    remedies.push(
+      `In Settings > Models, point size ${tiers.length === 1 ? "tier" : "tiers"} ${named} at a provider this organization holds a key for.`,
+    );
+  }
+  return (
+    `Template "${templateId}" names a model this organization cannot use. ${remedies.join(" ")}`
+  );
+}
+
+/**
  * The credential-service key a tool node's service resolves to, and
  * whether that service needs a connection at all.
  *
@@ -472,11 +535,19 @@ export interface SummarizeResult {
 /**
  * Summarizes one template, or reports why it cannot be offered.
  *
- * The definition goes through `validateDefinitionInput` with the SAME
- * environment `POST /api/workflows` uses, so a template that names an
- * unknown model, an unknown action, or a wrong node-reference path is
- * caught here — at list time, with the validator's own message — instead
- * of on the first run.
+ * The definition goes through `validateDefinitionInput` with the ORG-LESS
+ * environment, so a template that names an unknown model, an unknown
+ * action, or a wrong node-reference path is caught here — at list time,
+ * with the validator's own message — instead of on the first run. A
+ * failure here means the SHIPPED template is broken, which is why the
+ * gallery logs it and the install route answers 500.
+ *
+ * The org's own model policy is deliberately not applied here. It belongs
+ * to the org, not to the template, and applying it would empty the gallery
+ * for an organization whose approved list omits the bundled models, under a
+ * log line that calls every shipped template invalid. `installWorkflowTemplate`
+ * applies it instead, on the baked definition, so an install can never
+ * write a workflow the organization could not have saved itself.
  */
 export function summarizeTemplate(
   owned: OwnedTemplate,
@@ -518,6 +589,10 @@ export function summarizeTemplate(
           ...authored,
           ...templateCaveats(definition, actionPluginByService, schedule !== undefined, authored),
         ],
+        // The org's answer is stamped by `listWorkflowTemplateSummaries`,
+        // which holds the org environment. A summary taken without it is
+        // installable as far as this function can tell.
+        installable: true,
       },
     },
   };
@@ -628,6 +703,25 @@ export async function listWorkflowTemplateSummaries(
   // set it up.
   const connected = new Set([...personal.map((cred) => cred.service), ...orgProvided]);
 
+  // The org's model policy, read once for the whole listing. It decides the
+  // `installable` flag on each card: the install gate refuses a template
+  // whose model this org cannot run, and a card that hides that fact offers
+  // an Install button that always fails.
+  //
+  // Not fatal. A listing that cannot read the policy still lists every
+  // card, and each one stays installable — the install gate answers on the
+  // install itself, so the worst case is the behavior this flag replaced.
+  let orgEnv: ValidateEnvironment | undefined;
+  try {
+    orgEnv = await buildOrgValidateEnvironment(deps, caller.orgId);
+  } catch (err) {
+    console.error(
+      `workflow templates: could not read the model policy of org ${caller.orgId}; ` +
+        "listing every template as installable:",
+      err,
+    );
+  }
+
   const listed: SummarizeResult[] = [];
   for (const owned of await listCatalogTemplatesForOwner(deps, caller)) {
     const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
@@ -649,6 +743,13 @@ export async function listWorkflowTemplateSummaries(
           `${blocked.join(", ")}, which is not available yet.`,
       );
       continue;
+    }
+    const reason = orgEnv
+      ? orgModelBlockReason(owned.template.id, result.value.definition, orgEnv)
+      : null;
+    if (reason !== null) {
+      result.value.summary.installable = false;
+      result.value.summary.installBlockedReason = reason;
     }
     listed.push(result.value);
   }
@@ -1066,6 +1167,30 @@ export async function installWorkflowTemplate(
       code: "invalid_input",
       error: "The supplied values produced a workflow that cannot run. Check the values and install again.",
       errors: revalidated.errors,
+    };
+  }
+
+  // The organization's own model policy, on the SAME environment
+  // `POST /api/workflows` validates against. An install writes the row
+  // directly, so without this gate an organization whose approved list or
+  // provider settings exclude a template's model installs a workflow it can
+  // never save again — the editor refuses the first edit and says nothing
+  // about how the workflow got there.
+  const orgEnv = await buildOrgValidateEnvironment(deps, owner.orgId);
+  const orgChecked = validateDefinitionInput(definition, orgEnv);
+  if (!orgChecked.ok) {
+    // `orgModelBlockReason` names the blocked models and both remedies, and
+    // the gallery card shows the same sentence. It answers null when the
+    // refusal is not about a model, and the generic line covers that.
+    const reason = orgModelBlockReason(templateId, definition, orgEnv);
+    return {
+      ok: false,
+      code: "invalid_input",
+      error:
+        reason ??
+        `Template "${templateId}" produced a workflow this organization cannot save. ` +
+          "Read the errors, correct the template, then install again.",
+      errors: orgChecked.errors,
     };
   }
 

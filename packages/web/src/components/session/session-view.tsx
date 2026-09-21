@@ -33,6 +33,7 @@ import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-sessio
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
+import type { MessageReplyReference } from "@valet/api/wire";
 
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
@@ -61,6 +62,7 @@ export function SessionView({
   onOpenChild,
   activeTab,
   onTabChange,
+  enableReplies = false,
 }: {
   sessionId: string;
   /** Renders the compact slide-over header instead of `SessionHeader`. */
@@ -91,6 +93,8 @@ export function SessionView({
   activeTab?: SandboxTabId;
   /** Required alongside a controlled `activeTab`; ignored otherwise. */
   onTabChange?: (tab: SandboxTabId) => void;
+  /** Enable message-level replies on an orchestrator chat surface. */
+  enableReplies?: boolean;
 }) {
   const session = useSession(sessionId);
   // Keep the header's model picker honest for switches this client did not
@@ -131,6 +135,8 @@ export function SessionView({
     undefined,
   )?.id;
   const effectiveThreadId = activeThreadId ?? newestThreadId ?? undefined;
+  const [replyTarget, setReplyTarget] = useState<MessageReplyReference>();
+  useEffect(() => setReplyTarget(undefined), [effectiveThreadId]);
 
   // Load this thread's persisted messages from REST and pipe into the
   // stream store. Background refetches are disabled (see `useMessages`) so
@@ -250,6 +256,7 @@ export function SessionView({
             agentBusy={agentBusy}
             pendingIds={threadQueueState?.pendingIds}
             viewerId={me.data?.id}
+            onReply={enableReplies ? setReplyTarget : undefined}
           />
           {compacting && (
             <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
@@ -274,6 +281,8 @@ export function SessionView({
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
+            replyTarget={replyTarget}
+            onCancelReply={() => setReplyTarget(undefined)}
           />
         </PageDropTarget>
       ) : null}

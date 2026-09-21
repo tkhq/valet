@@ -9,6 +9,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import type {
@@ -16,13 +17,15 @@ import type {
   CredentialOwner,
   CredentialStore,
   PluginAction,
+  PluginActionContext,
   StoredCredential,
   ValetPlugin,
 } from "@valet/engine";
+import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs } from "../schema/index.js";
+import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teams, workflowDefinitions } from "../schema/index.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -30,6 +33,8 @@ import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword.js";
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
+import { workflowsActionPlugin } from "../workflows/actions.js";
+import { InMemoryWorkflowStore } from "@valet/workflow";
 import { createAssistant } from "../assistants/service.js";
 import { slackPlugin } from "@valet/plugin-slack/actions";
 
@@ -137,6 +142,55 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: false } });
     expect(fixture.calls()).toBe(1);
+  });
+
+  it("a workflow tool action can extract a document, the same as a session action", async () => {
+    // Document extraction needs no session, thread or sandbox: it is a pure
+    // call over bytes, and the native extractor lives in this process. A
+    // workflow node that reads a PDF must not be told extraction is
+    // unavailable on the deployment when the deployment can do it.
+    let seen: PluginActionContext["extractDocument"];
+    const probe = countingAction({
+      execute: async (_args, ctx) => {
+        seen = ctx.extractDocument;
+        return { success: true, data: {} };
+      },
+    });
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [probe.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+
+    await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:extract" },
+      userOwner,
+    );
+
+    expect(typeof seen).toBe("function");
+  });
+
+  it("the workflow extractor reads a real PDF and declines a non-PDF", async () => {
+    let extract: NonNullable<PluginActionContext["extractDocument"]> | undefined;
+    const probe = countingAction({
+      execute: async (_args, ctx) => {
+        extract = ctx.extractDocument;
+        return { success: true, data: {} };
+      },
+    });
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [probe.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:extract2" },
+      userOwner,
+    );
+
+    const pdf = new Uint8Array(readFileSync(new URL("../services/__fixtures__/sample.pdf", import.meta.url)));
+    // Wired to the real extractor, not a stub that resolves to null.
+    await expect(
+      extract?.({ data: pdf, mimeType: "application/pdf", name: "sample.pdf" }),
+    ).resolves.toMatchObject({ markdown: expect.stringContaining("Quarterly Revenue Report") });
+    // Anything the api cannot extract answers null, so the caller says why.
+    await expect(
+      extract?.({ data: new Uint8Array([1, 2, 3]), mimeType: "application/zip", name: "x.zip" }),
+    ).resolves.toBeNull();
   });
 
   it("dedup: a duplicate invocationId returns the ORIGINAL result without re-invoking execute", async () => {
@@ -283,6 +337,123 @@ describe("buildActionInvoker", () => {
     expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org"] });
   });
 
+  // TKAI-487 / R3. The personal 1Password scope belongs to exactly one owner
+  // type. A team- or org-owned run is prompted and read by people other than
+  // the actor frozen onto it, so its reads must never reach that actor's own
+  // vault — the run's OWNER picks the scopes, never the actor.
+  describe("the personal 1Password scope follows the run owner, not the actor", () => {
+    /** Records every scope the vault lookup is asked for. */
+    function scopeRecordingOnePassword(): { onePassword: OnePasswordService; scopes: () => string[] } {
+      const seen: string[] = [];
+      const unused = () => {
+        throw new Error("not exercised by this suite");
+      };
+      return {
+        scopes: () => seen,
+        onePassword: {
+          tokenConnected: unused,
+          listVaults: unused,
+          resolveReference: unused,
+          findCandidates: async () => [],
+          resolveCredential: unused,
+          findCredentialForService: async (scope) => {
+            seen.push(scope);
+            return null;
+          },
+        },
+      };
+    }
+
+    async function invokeWith(owner: ActionInvocationContext, onePassword: OnePasswordService) {
+      const db = await makeDb();
+      await db.insert(orgs).values({ id: "org1", name: "Org", createdAt: 1 });
+      if (owner.owner.type === "team") {
+        await db.insert(teams).values({ id: owner.owner.id, orgId: "org1", name: "Team", createdAt: 1 });
+      }
+      const fixture = countingAction();
+      const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+      const invoke = buildActionInvoker({
+        db,
+        credentials: new FakeCredentialStore(),
+        actionPluginByService,
+        onePassword,
+      });
+      return invoke(
+        { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+        owner,
+      );
+    }
+
+    it("a user-owned run consults the personal vault", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(userOwner, onePassword);
+      expect(scopes()).toContain("personal");
+    });
+
+    // The acting member here is a real person with a real user id, which is
+    // the whole hazard: it is inert only because the owner picks the scopes.
+    it("a team-owned run reads the team vault and never the acting member's personal one", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(
+        { userId: "member-who-clicked", orgId: "org1", owner: { type: "team", id: "t1" } },
+        onePassword,
+      );
+      expect(scopes()).toContain("team");
+      expect(scopes()).not.toContain("personal");
+    });
+
+    it("an org-owned run never reads the acting member's personal vault", async () => {
+      const { onePassword, scopes } = scopeRecordingOnePassword();
+      await invokeWith(
+        { userId: "member-who-clicked", orgId: "org1", owner: { type: "org", id: "org1" } },
+        onePassword,
+      );
+      expect(scopes()).not.toContain("personal");
+    });
+  });
+
+  it("team-owned run propagates its principal into a workflows tool action", async () => {
+    const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Org", createdAt: 1 });
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    const workflowStore = new InMemoryWorkflowStore();
+    const workflows = workflowsActionPlugin(() => ({
+      db,
+      workflowStore,
+      // save_workflow does not start or resume runs, and records no origin.
+      workflowRunHost: null as never,
+      engineStore: new InMemorySessionStore(),
+      credentials: new FakeCredentialStore(),
+    }));
+    const invoke = buildActionInvoker({
+      db,
+      credentials: new FakeCredentialStore(),
+      actionPluginByService: actionPluginByServiceOf("workflows", workflows),
+    });
+
+    const result = await invoke(
+      {
+        service: "workflows",
+        action: "save_workflow",
+        params: {
+          name: "Created by tool node",
+          definition: {
+            version: "dag/v1",
+            nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop" }],
+            edges: [{ from: "start", to: "done" }],
+          },
+        },
+        invocationId: "workflow:r1:workflows-save",
+      },
+      { userId: "former-member", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(await db.select().from(workflowDefinitions)).toEqual([
+      expect.objectContaining({ ownerType: "team", ownerId: "t1", name: "Created by tool node" }),
+    ]);
+  });
+
   it("team-owned run: resolves a direct team credential", async () => {
     const store = new FakeCredentialStore();
     store.seed({ type: "team", id: "t1" }, "demo", { type: "api_key", apiKey: "team-tok" });
@@ -336,6 +507,41 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { token: "org-bot" } });
     expect(seenOwnerId).toBeUndefined();
+  });
+
+  it("team workflow posts with the organization bot without a personal Slack identity", async () => {
+    const db = await makeDb();
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]),
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: "C1", is_private: false, is_im: false, is_mpim: false } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, ts: "1.2", channel: "C1" })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await invoke(
+        { service: "slack", action: "send_message", params: { channel: "C1", text: "Deploy complete" }, invocationId: "workflow:r1:team-slack-send" },
+        { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+
+      expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "C1" } });
+      expect((fetchMock.mock.calls[1] as [string, RequestInit])[1].headers).toMatchObject({
+        Authorization: "Bearer org-bot",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("workflow slack.send_message posts as the owner's configured assistant", async () => {
@@ -953,6 +1159,40 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { token: "org-tok" } });
     expect(seenOwnerId).toBeUndefined();
+  });
+
+  it("keeps slack.dm_owner fail-closed for a team owner with no identity", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-tok" });
+    const db = await makeDb();
+    // A member's identity link must not be stamped onto a team-owned run.
+    await linkIdentity(db, { provider: "slack", externalId: "U123LINKED", userId: "u1" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]),
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await invoke(
+        { service: "slack", action: "dm_owner", params: { text: "Hello" }, invocationId: "workflow:r1:team-dm-owner" },
+        { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error: "Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("prefers the run owner's OWN credential over the org one", async () => {

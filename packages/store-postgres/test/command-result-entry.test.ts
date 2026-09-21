@@ -104,6 +104,7 @@ function runCommandResultSuite(label: string, getDb: () => PgDb) {
         id: "e-cmd-1",
         type: "command_result",
         createdAt: 1000,
+        sequence: expect.any(Number),
       });
 
       // Type-guard and verify all fields

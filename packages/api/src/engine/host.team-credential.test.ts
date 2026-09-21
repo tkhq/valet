@@ -18,7 +18,7 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
 import { EngineHost, sessionPrincipal } from "./host.js";
 import { githubTokenArgsForOwner, isUsableGithubRow } from "../services/session-github-token.js";
-import { agentSessions, orgs } from "../schema/index.js";
+import { agentSessions, orgs, teamMembers, teams } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { createAssistant } from "../assistants/service.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
@@ -56,6 +56,10 @@ describe("EngineHost team-owned session credentials", () => {
 
   async function harness(): Promise<{ appDb: AppDb; credentials: PgCredentialStore }> {
     const { appDb, pgdb } = await freshTestPgDb();
+    // Actor mode holds only while the actor is on the owning team, so the
+    // roster is part of the world every case here runs in.
+    await appDb.insert(teams).values({ id: teamId, orgId, name: "Team", createdAt: NOW });
+    await appDb.insert(teamMembers).values({ teamId, userId, role: "member" });
     return { appDb, credentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")) };
   }
 
@@ -351,6 +355,29 @@ describe("EngineHost team-owned session credentials", () => {
       const cred = await session.credentialProvider().get("linear");
 
       expect(cred?.accessToken).toBe("member-linear");
+    });
+
+    // An organization-audience Slack mention can make a nonmember the actor
+    // of a team assistant turn. A legacy actor-mode session must not then
+    // read that person's personal vault on the team's behalf.
+    it("an actor who is not on the owning team resolves the team's credential, not their own", async () => {
+      const { appDb, credentials } = await harness();
+      const outsider = "org-only-user";
+      await credentials.save({ type: "user", id: outsider }, "linear", {
+        type: "api_key",
+        apiKey: "outsider-linear-must-not-win",
+      });
+      await credentials.save({ type: "team", id: teamId }, "linear", {
+        type: "api_key",
+        apiKey: "team-linear",
+      });
+      fixture = startGithubFixture();
+      const h = makeHost(appDb, credentials, fixture.url);
+
+      const session = await h.sessionFor("sess-legacy-team-outsider", { ...legacyTeamMeta, userId: outsider });
+      const cred = await session.credentialProvider().get("linear");
+
+      expect(cred?.accessToken).toBe("team-linear");
     });
 
     it("actor mode resolves GitHub through the acting member's row, not the App", async () => {

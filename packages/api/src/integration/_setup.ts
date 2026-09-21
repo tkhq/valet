@@ -55,12 +55,12 @@ import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createOnePasswordService } from "../services/onepassword.js";
-import { getAllowPersonalOnePassword } from "../services/org.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
 import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
@@ -335,7 +335,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     opts.onePassword ??
     createOnePasswordService({
       credentials: engineCredentials,
-      getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
     });
   const engineHost = new EngineHost({
     engineStore,
@@ -356,6 +355,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     onePassword,
     db,
     apiBaseUrl,
+    sandboxTokenMaster: "test-key",
     plugins,
     actionPluginByService,
     childSpawner: (req, ctx) => {
@@ -440,6 +440,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     sweepIntervalMs: 0,
   });
 
+  const workflowStore = new PgWorkflowStore(pgdb);
+
   const channelHost = new ChannelHost({
     db,
     engineHost,
@@ -447,6 +449,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventStream,
     engineCredentials,
     plugins,
+    workflowStore,
+    actionPluginByService,
     publicUrl: opts.channelPublicUrl,
     resolveOrgId: () => resolveOrgId(db),
     onePassword,
@@ -454,8 +458,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   if (opts.startChannelHost) {
     await channelHost.start();
   }
-
-  const workflowStore = new PgWorkflowStore(pgdb);
 
   // Never started on its timer in tests (matches the dispatcher/scheduler
   // convention) — drive `reclaimRun`/`sweep` manually; behavior is tested
@@ -513,6 +515,14 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalGrant,
+    // The settle observers `providers/node.ts` wires, so an integration
+    // test sees what a real settle does: the failed-run notification and
+    // the archive of the run's own assistant thread. The sandbox reclaim
+    // stays manual here, for the reason given above it.
+    onRunSettled: async (info) => {
+      await buildRunSettledAttention({ db, store: workflowStore })(info);
+      await buildRunThreadArchive({ db, store: workflowStore, engineStore })(info);
+    },
   });
   const workflowRunHost = opts.workflowRunHost ?? realWorkflowRunHost;
   // Only start the host loop when it's the real one under test control — a
@@ -548,6 +558,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     }),
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
+    plugins,
   });
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });

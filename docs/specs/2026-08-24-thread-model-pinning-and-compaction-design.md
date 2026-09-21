@@ -352,7 +352,14 @@ It replaces the overlapping suffix with the REST tail. If no row overlaps,
 the tail replaces the thread. The store keeps only rows marked `optimistic`
 or `streaming` after that tail. REST confirmation
 removes a client row with the same message id or queue item id. A complete
-response replaces canonical rows for the thread.
+response replaces canonical rows for the thread. The merge records the prior and
+next canonical row on each client-only row. Each anchor includes the store sequence.
+These anchors survive REST snapshots that omit a canonical row. If both anchor IDs
+are absent, the merge uses canonical `(createdAt, sequence)` order. If sequence
+metadata is absent, equal timestamps do not establish order. The merge keeps the
+client row before that equal-time window. The bounded prefix drops client rows that
+REST confirms later in the tail. The merge indexes IDs, queue items, and user
+content, then uses forward scans. Reconciliation is linear in stored and fresh rows.
 
 ## Out of scope
 
@@ -367,3 +374,120 @@ response replaces canonical rows for the thread.
 This change edits the same `makeResolveModel` seam as the spend-limits spec —
 whichever lands second rebases. The small-fixes spec (2026-08-24) defers its
 split-brain candidates 2 and 5 and its silent-downgrade fix to this document.
+
+Transient provider failures show the provider, retry delay, and attempt count. The notice suggests a model change if retries fail. A parsed request ID supports troubleshooting without showing the raw provider error.
+
+## Amendment (2026-09-13, TKAI-211): child compaction keeps the active task
+
+The transcript store is a DAG. Each new entry now points to the thread's active
+leaf. The thread serializes entry appends, so a command cannot race an agent
+message and create two accidental leaves. Only entry append operations can
+advance the durable leaf. A general thread settings save cannot rewind it.
+
+The store returns the thread row and entries as one coherent snapshot. The
+Postgres store locks the thread row before it reads entries. An append updates
+that row after it inserts entries, so the snapshot is wholly before or wholly
+after the append. The reader follows parent links from the snapshot's active
+leaf and excludes inactive branches.
+
+For old transcripts, the reader keeps the latest legacy compaction entry and
+the chronological null-parent suffix that follows it. Legacy compaction entries
+pointed to their covered head while later entries still had null parents. This
+rule preserves the checkpoint and post-compaction work without admitting linked
+inactive branches.
+
+Compaction now selects, prunes, and summarizes entries from the active path.
+The compaction entry points to the prior active leaf. Its `coveredEntryIds`
+contains the part of the path prefix this summary describes. The summarizer
+input has a 64,000-token limit, and it is allocated in one order: the head
+first, the recent tail second. The head takes its window from the entries the
+active checkpoint has not covered yet, so neither the newest turn nor history a
+previous summary already carries can pull the window off the entries this
+checkpoint will replace. The recent tail
+then takes what the head leaves, up to 8,000 estimated tokens, and it is
+trimmed to what fits. A newest entry that alone exceeds that budget leaves no
+tail evidence. The tail stays verbatim in live context either way. Existing
+per-block limits still apply.
+
+The window is budgeted with the same caps the payload uses. The conversion to
+summarizer messages caps prose at 20,000 chars, and it caps each tool result at
+the configured tool-output limit, 2,000 chars by default. A 300,000-char
+assistant run therefore costs about 5,000 tokens of input, not 75,000. A budget
+walk over raw sizes rejected entries whose real payload fits many times over.
+
+A budget cap can cut into a turn. The window keeps that shape: it is the
+newest entries that fit, with no alignment to a user entry. The summarizer
+prepends a synthetic user message when its input starts with an assistant
+message. Several providers reject that shape with a plain 400 error, and that
+error is not an overflow, so it would abort the overflow retry. An earlier
+version aligned the window forward to the next user entry, which dropped the
+entries in front of it, and returned an empty window when no later user entry
+existed. The summarizer then wrote a summary from nothing.
+
+Some entries render into no summarizer message: a command result, a decision
+gate, a prior checkpoint, an assistant step that held only thinking. They cost
+no budget, so a window can stop on them alone. The selection steps back to the
+newest entry the summarizer can read, and `summarize` refuses an input that
+converts to an empty transcript.
+
+`coveredEntryIds` records what the summary describes, and the rebuild drops
+every covered entry from model context. One pass therefore claims two sets: the
+window it sent the summarizer, and whatever the checkpoint it supersedes already
+covered. The carried half reaches the new summary through `previousSummary`, and
+the rebuild reads only the newest checkpoint, so a pass that dropped the carried
+half would put earlier covered entries back into the context.
+
+Head entries outside the window are not claimed. They keep their place in live
+context, and the next pass sees a shorter pending head. A head larger than the
+summarizer input budget is compacted over several passes. On a 400-entry head
+worth about 403,000 summarizer tokens, 62 entries fit one window;
+`compaction-pure.test.ts` pins that measurement.
+
+The chain converges. Each written checkpoint covers at least one head entry that
+was not covered before, because the window is selected from the pending head
+alone and the guard below rejects a window with no readable entry in it. The
+count of uncovered head entries therefore falls with every pass, and a pass that
+finds every head entry already covered reclaims nothing and reports `noop`,
+which the caller counts toward the breaker. A repeated pass on one shape cannot
+spin without progress.
+
+Two blocked cases report separately, and compaction repairs neither.
+
+- The pending head carries no text the summarizer reads. The pass emits
+  `compaction_coverage_gap`, records the `valet.compaction.coverage_gap`
+  counter, and reports the `coverage_gap` outcome. It writes no checkpoint, so
+  the head stays in live context. `/compact` prints this cause and tells the
+  user to start a fresh thread. Shortening the newest turn cannot help here,
+  which is why this outcome is separate from `insufficient` and carries its own
+  message.
+- The turn that hit the limit cannot be helped by summarizing the head at all.
+  The pass reports `insufficient` with `context_overflow_unrecoverable`.
+
+Both outcomes are final for the turn that produced them. A reactive pass that
+reports one of them counts one failure toward the breaker, and the post-turn
+proactive check stands down for the rest of that turn. The error reaches the
+user once, the counter records one violation, and the breaker advances by one.
+The next turn starts clear, because its transcript may be one compaction can
+help.
+
+The compaction span carries the deferred remainder on
+`valet.compaction.head_entries_deferred` and
+`valet.compaction.head_tokens_deferred`. Deferred entries are live context, not
+lost history, so this is a size signal and not a violation.
+
+The overflow retry shrinks the input in the same order it was allocated: tail
+evidence first, then the oldest half of the head, and it stops before a slice
+that carries no head content.
+
+The summary has a `Continuation Checkpoint` section. It records the branch,
+commit, changed files, worktree status, last command, failure output, next
+action, and acceptance checklist. A field uses `(unknown)` or `(none)` when the
+transcript does not contain that fact. The portable engine does not run Git
+commands or enforce repository policy.
+
+A proactive compaction continues inside the same queue item. The engine appends
+the hidden continuation prompt to the active path, then runs the agent again.
+It does not admit a second queue item. The original submission settles only
+after this continuation ends. A stale fenced prompt append stops the
+continuation before another model call. A child watcher therefore cannot report
+`child.settled` at the compaction boundary.

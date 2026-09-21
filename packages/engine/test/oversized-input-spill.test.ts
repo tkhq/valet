@@ -86,6 +86,30 @@ describe("marker helpers", () => {
     expect(marker).toContain("sed -n '1,400p'");
     expect(marker.length).toBeLessThan(600); // the pointer is small, not the paste
   });
+
+  it("keeps reply context around a spilled marker during rehydration", () => {
+    const entry: MessageEntry = {
+      id: "e-reply-spill",
+      sessionId: "s1",
+      threadId: "t1",
+      parentId: null,
+      type: "message",
+      role: "user",
+      content: "large original text",
+      metadata: {
+        valetSpilledInputPath: "/workspace/.valet/large-inputs/e-reply-spill.txt",
+        replyTo: { messageId: "assistant-7", excerpt: "Use the blue deployment." },
+      },
+      createdAt: 1,
+    };
+
+    const messages = entriesToAgentMessages([entry], { api: "a", provider: "p", id: "m" });
+    const text = (messages[0].content as Array<{ type: string; text?: string }>)[0].text;
+    expect(text).toContain("<reply-context>");
+    expect(text).toContain("assistant-7");
+    expect(text).toContain("[Large input saved to a file]");
+    expect(text).not.toContain("large original text");
+  });
 });
 
 describe("oversized input spill (integration)", () => {

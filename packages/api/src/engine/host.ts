@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   Engine,
+  builtinTools,
   assistantSessionId,
   parseAssistantSessionId,
   NoCredentialsError,
@@ -23,6 +24,7 @@ import {
   type SessionData,
   type SessionStartRef,
   type SessionStore,
+  type ServiceAvailability,
   type Thread,
   type StoredCredential,
   type ResolvedModel,
@@ -32,8 +34,8 @@ import {
 import type { ValetPlugin } from "@valet/engine";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { pluginStore } from "../services/plugin-store.js";
+import { extractDocumentText } from "../services/pdf-extract.js";
 import {
-  buildPluginCatalog,
   loadRoleFromMarkdown,
   type ActionPlugin,
   type CommandContext,
@@ -116,7 +118,7 @@ import { personaPrefixText } from "../assistants/persona.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
   deriveSandboxJwtSecret,
-  mintSandboxToken,
+  getOrCreateSandboxToken,
   mintSandboxJwt,
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
@@ -141,8 +143,9 @@ import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
-import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
+import { unavailableServiceInventory } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
+import { isTeamMember } from "../services/teams.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
 
@@ -167,6 +170,47 @@ import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
  * it up in the engagement's `config_persona_markdown` map). Absent means no repo
  * role was stashed for this persona; the function then falls back.
  */
+function actionServices(plugins: readonly ValetPlugin[]): Set<string> {
+  return new Set(plugins.flatMap((plugin) => (plugin.actions ?? []).map((action) => action.service)));
+}
+
+function removedActionServices(
+  before: readonly ValetPlugin[],
+  after: readonly ValetPlugin[],
+): string[] {
+  const afterServices = actionServices(after);
+  return [...actionServices(before)].filter((service) => !afterServices.has(service)).sort();
+}
+
+function unavailableActionServices(
+  plugins: readonly ValetPlugin[],
+  unavailableCredentials: ReadonlySet<string>,
+): string[] {
+  return [
+    ...new Set(
+      plugins.flatMap((plugin) =>
+        (plugin.actions ?? [])
+          .filter((action) =>
+            unavailableCredentials.has(action.credentialService ?? action.service),
+          )
+          .map((action) => action.service),
+      ),
+    ),
+  ].sort();
+}
+
+function mergeServiceAvailability(
+  ...groups: readonly ServiceAvailability[][]
+): ServiceAvailability[] {
+  const merged = new Map<string, ServiceAvailability>();
+  for (const group of groups) {
+    for (const item of group) {
+      if (!merged.has(item.service)) merged.set(item.service, item);
+    }
+  }
+  return [...merged.values()].sort((a, b) => a.service.localeCompare(b.service));
+}
+
 export function securityRolesForCell(
   persona: string,
   repoRoleMarkdown?: string,
@@ -243,6 +287,8 @@ export interface EngineHostOpts {
    * so dev keeps working without `BETTER_AUTH_SECRET`.
    */
   sandboxJwtMaster?: string;
+  /** Stable instance encryption key used to recover sandbox bearers. */
+  sandboxTokenMaster?: string;
   /**
    * The API's own externally-reachable base URL, injected into every
    * sandbox's env as `VALET_API_URL` (Task 8, auth-v2 plan) —
@@ -287,6 +333,8 @@ export interface EngineHostOpts {
    * instance.
    */
   plugins?: ValetPlugin[];
+  /** Plugins that the host quarantined before assembly. */
+  pluginLoadFailures?: ServiceAvailability[];
   /**
    * Assembled service→ActionPlugin index (plugin-system-v2 Task 4's
    * `assemblePlugins` output). Used only to look up a plugin's
@@ -672,6 +720,16 @@ export class EngineHost {
    * same key). De-duping in-flight calls collapses the race.
    */
   private inflight = new Map<string, Promise<Session>>();
+  private teardown = new Map<string, Promise<void>>();
+  private lifecycleEpoch = new Map<string, number>();
+
+  private assertSessionBuildAllowed(sessionId: string, epoch = this.lifecycleEpoch.get(sessionId) ?? 0): number {
+    if (this.teardown.has(sessionId) || epoch !== (this.lifecycleEpoch.get(sessionId) ?? 0)) {
+      throw new Error("Session teardown interrupted this request. Start a new session and retry.");
+    }
+    return epoch;
+  }
+
   private threadCreations = new WeakMap<Session, Map<string, Promise<Thread>>>();
   /** Bumped by `evictCache`. A build captures the epoch when it starts and
    * refuses to cache (rebuilds instead) when it changed mid-build — without
@@ -705,16 +763,6 @@ export class EngineHost {
    * `latestActivityAt`, taking whichever is more recent.
    */
   private gatewayTouch = new Map<string, number>();
-
-  /**
-   * In-memory `sessionId -> Date.now()` of the last sandbox-token mint for
-   * that session (sandbox-reconciliation plan, Task 12). Stamped by
-   * `mintSandboxEnv` on every session build (create/restore). Read by
-   * `startRotateSweep` to decide whether a token is older than the rotation
-   * threshold (default 12 h). Cleared in `evictAll` alongside the rest of
-   * the session state.
-   */
-  private tokenMintedAt = new Map<string, number>();
 
   /**
    * Lazily-built, host-wide policy resolver (action-policies plan, Task 3).
@@ -875,6 +923,7 @@ export class EngineHost {
    * a new engine session and persist it via the store.
    */
   async sessionFor(sessionId: string, meta: SessionMeta): Promise<Session> {
+    const lifecycleEpoch = this.assertSessionBuildAllowed(sessionId);
     // Assistant ids must always wake through `assistantSessionFor` so they
     // get persona/memory-snapshot/mem_* tools/queueMode reconstructed from
     // configuration, never the generic `buildSession` path. Every caller of
@@ -905,6 +954,7 @@ export class EngineHost {
     // lands in the same maps under the same key.
     if (this.opts.db) {
       const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      this.assertSessionBuildAllowed(sessionId, lifecycleEpoch);
       if (assistant) {
         return this.assistantSessionFor(
           assistant.id,
@@ -960,7 +1010,14 @@ export class EngineHost {
     // team's skills, not the prompting member's. SessionOptions.owner below
     // uses the same principal.
     const principal = sessionPrincipal(meta);
-    const extras = await this.sessionExtras(principal, meta.orgId, [], extraPlugins);
+    const extras = await this.sessionExtras(
+      principal,
+      meta.orgId,
+      [],
+      extraPlugins,
+      null,
+      isSecurityRunner ? buildSecurityRunnerTools().map((tool) => tool.name) : [],
+    );
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, extraPlugins);
 
     const engine = new Engine({
@@ -1042,6 +1099,7 @@ export class EngineHost {
       sessionId,
       () => builtSession,
       specProvider !== undefined,
+      extras.pluginCatalog,
     );
     // Repo AGENTS.md instructions (agents-md spec, decision 5): same lazy
     // `builtSession` accessor as the command options above.
@@ -1153,6 +1211,7 @@ export class EngineHost {
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
@@ -1179,6 +1238,7 @@ export class EngineHost {
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+          extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
@@ -1313,42 +1373,70 @@ export class EngineHost {
     // plugins keep shadow priority.
     extraPlugins: readonly ValetPlugin[] = [],
     behavior: AssistantBehavior | null = null,
+    appendedNativeToolNames: readonly string[] = [],
   ): Promise<PluginSessionExtras> {
     const assembled = [...this.basePlugins(), ...extraPlugins];
-    // Org entitlement filter (plugin-entitlements design): drop any GATEABLE
-    // plugin the owner's org disables for the owner, so a disabled
-    // action-plugin's tools never reach a normal session. Best-effort — a
-    // lookup failure leaves the plugin in place (default to allowed) and logs,
-    // so an entitlement read can never break a build. Security rides its
-    // create-route gate primarily; this covers future action-plugins.
-    const allPlugins = await this.filterEntitledPlugins(assembled, owner, orgId);
-    // Availability gate (integration-availability design): a service whose
-    // deployment/org prerequisite is missing never reaches the catalog, so
-    // `list_tools` has nothing to hide. Per-build, not process-static: the
-    // org-credential half of availability changes when an admin connects or
-    // removes the org app. `owner` lets a team session keep a service the
-    // team holds its own row for.
-    const gated = gateUnavailableActions(
-      allPlugins,
-      await unavailableServiceSet({
-        plugins: allPlugins,
+    const assembledServices = actionServices(assembled);
+    const loadFailures = (this.opts.pluginLoadFailures ?? []).filter(
+      (item) => !assembledServices.has(item.service),
+    );
+    const entitled = await this.filterEntitledPlugins(assembled, owner, orgId);
+    const plugins = applyBehaviorToPlugins(entitled, behavior, pinnedIdSet(pins));
+
+    const disabledServices = removedActionServices(assembled, entitled).map((service) => ({
+      service,
+      state: "disabled_by_org" as const,
+      reason: "the organization disabled this plugin",
+      fix: `An org admin must enable the ${service} plugin.`,
+    }));
+    const excludedServices = removedActionServices(entitled, plugins).map((service) => ({
+      service,
+      state: "excluded_by_assistant" as const,
+      reason: "this assistant's behavior excludes the service",
+      fix: `This assistant's configuration excludes ${service}; edit the assistant's Integrations settings on its editor page (/assistants/$assistantId).`,
+    }));
+    const resolveServiceAvailability = async (actionService?: string): Promise<ServiceAvailability[]> => {
+      const inventory = await unavailableServiceInventory({
+        plugins: entitled,
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
         owner,
-      }),
-    );
-    // Behavior filter AFTER availability gating: both subtract, order only
-    // matters for the wrapper identity, and gating first keeps its
-    // unavailable-service messages accurate. The pin set rides along so the
-    // filter never gates a pinned action (assistant-editor design, "Never
-    // gated") — pins resolve from this same filtered catalog below.
-    const plugins = applyBehaviorToPlugins(gated, behavior, pinnedIdSet(pins));
-    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
+        actionService,
+      });
+      const unavailable = inventory.unavailable;
+      const availabilityFailures = inventory.failures.map(({ service, reason }) => ({
+        service,
+        state: "load_failed" as const,
+        reason: `availability check failed: ${reason}`,
+      }));
+      const deploymentServices = unavailableActionServices(plugins, unavailable).map((service) => ({
+        service,
+        state: "deployment_unconfigured" as const,
+        reason: "the deployment or organization credential is not configured",
+        fix: `An org admin must configure ${service} (org settings → /settings/organization). After configuration, call list_tools (service: "${service}") to confirm — actions appear when the configuration worked; otherwise this warning returns with the reason.`,
+      }));
+      return mergeServiceAvailability(
+        loadFailures,
+        availabilityFailures,
+        disabledServices,
+        excludedServices,
+        deploymentServices,
+      );
+    };
+    const serviceAvailability = await resolveServiceAvailability();
+    const catalogOptions = {
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...appendedNativeToolNames],
+      serviceAvailability,
+      resolveServiceAvailability,
+    };
+
+    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins, catalogOptions);
     return pluginSessionExtras(
       plugins,
       filterSkillSources(await listSkillSourcesFor(this.opts.db, owner, orgId), behavior),
       pins,
+      catalogOptions,
     );
   }
 
@@ -1401,11 +1489,9 @@ export class EngineHost {
   }
 
   /**
-   * Mints a fresh long-lived sandbox bearer token (an ADDITIONAL token — it
-   * does NOT revoke prior live ones, so a rebuild while an earlier build's
-   * sandbox is still running never 401s that sandbox; see `mintSandboxToken`)
-   * and derives this session's JWT secret, returning the five env vars every
-   * sandbox
+   * Adopts this session's durable sandbox bearer and derives its JWT secret.
+   * The instance encryption key recovers the same bearer after API restart.
+   * Returns the five env vars every sandbox
    * gets at provision time: `VALET_SANDBOX_TOKEN`, `VALET_API_URL`,
    * `VALET_SANDBOX_JWT_SECRET` (Task 8, auth-v2 plan), plus `VALET_SESSION_ID`
    * and `VALET_SANDBOX_PROFILE` (sandbox auth gateway plan, Task 5).
@@ -1429,8 +1515,10 @@ export class EngineHost {
     profile: "headless" | "full",
   ): Promise<{ env: Record<string, string>; credsFiles: Record<string, string> } | undefined> {
     if (!this.opts.db) return undefined;
-    const { token } = await mintSandboxToken(this.opts.db, { sessionId, userId, orgId });
-    this.tokenMintedAt.set(sessionId, Date.now());
+    const { token } = await getOrCreateSandboxToken(
+      this.opts.db, { sessionId, userId, orgId },
+      this.opts.sandboxTokenMaster ?? this.resolveSandboxJwtMaster(),
+    );
     const secret = deriveSandboxJwtSecret(this.resolveSandboxJwtMaster(), sessionId);
     return {
       env: {
@@ -1617,6 +1705,9 @@ export class EngineHost {
    *    fallback above and the team's 1Password scope, which is the contract
    *    every session had before team-owner resolution. The principal the
    *    engine hands over is ignored for the read; it still owns the session.
+   *    This holds only while that actor is a current member of the owning
+   *    team: a nonmember actor (an organization-audience Slack mention)
+   *    reads as the team, never as their own vault.
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -1683,8 +1774,20 @@ export class EngineHost {
       // session reads as the principal the engine hands over. The scope
       // follows the OWNER either way: a shared session never reaches the
       // frozen actor's personal vault.
-      const owner: CredentialOwner = actingMember ? { type: "user", id: userId } : sessionOwner;
-      const scopes = onePasswordScopesFor(actingMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
+      //
+      // "The member prompting it" must still be a member. An
+      // organization-audience Slack mention can make a person who is on no
+      // team the actor of a team assistant turn
+      // (`events/team-slack-gate.ts`), and their personal vault would then
+      // back the team's tool calls for everyone in the channel. Such an
+      // actor reads as the owning team instead. Checked live, per read, the
+      // same contract `isTeamMember` holds everywhere else.
+      let actsAsMember = actingMember;
+      if (actsAsMember && sessionOwner.type === "team") {
+        actsAsMember = db ? await isTeamMember(db, sessionOwner.id, userId) : false;
+      }
+      const owner: CredentialOwner = actsAsMember ? { type: "user", id: userId } : sessionOwner;
+      const scopes = onePasswordScopesFor(actsAsMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -2077,6 +2180,7 @@ export class EngineHost {
     sessionId: string,
     getSession: () => Session | undefined,
     hasPrep: boolean,
+    pluginCatalog: PluginCatalog,
     behavior: AssistantBehavior | null = null,
     pinnedActionIds: ReadonlySet<string> = new Set(),
   ): Promise<
@@ -2119,8 +2223,6 @@ export class EngineHost {
     const pluginCommands = plugins.flatMap((p) =>
       (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
     );
-    const actionPlugins: ActionPlugin[] = plugins.flatMap((p) => p.actions ?? []);
-    const pluginCatalog = buildPluginCatalog(actionPlugins);
 
     return {
       ...(workspaceSkillsProvider ? { workspaceSkillsProvider } : {}),
@@ -2374,6 +2476,7 @@ export class EngineHost {
     },
   ): Promise<Session> {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
+    this.assertSessionBuildAllowed(sessionId);
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
@@ -2499,7 +2602,14 @@ export class EngineHost {
     // (`use-workflow-assistant.ts`), so this scope costs the panel nothing.
     const pins = principal.type === "user" ? PINNED_ACTIONS : [];
     const pinnedIds = pinnedIdSet(pins);
-    const extras = await this.sessionExtras(principal, meta.orgId, pins, [], behavior);
+    const extras = await this.sessionExtras(
+      principal,
+      meta.orgId,
+      pins,
+      [],
+      behavior,
+      buildMemoryTools().map((tool) => tool.name),
+    );
 
     // The profile comes from the app row, not from the caller's meta. An
     // assistant session is woken by many callers — the web, a channel
@@ -2533,6 +2643,7 @@ export class EngineHost {
       sessionId,
       () => builtSession,
       false,
+      extras.pluginCatalog,
       behavior,
       pinnedIds,
     );
@@ -2548,6 +2659,7 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
@@ -2686,6 +2798,20 @@ export class EngineHost {
    * exists.
    */
   async destroy(sessionId: string): Promise<void> {
+    const pending = this.teardown.get(sessionId);
+    if (pending) return pending;
+    // Invalidate cold wakes that are still doing lookups before registering a
+    // build. New requests are blocked until this teardown finishes.
+    this.lifecycleEpoch.set(sessionId, (this.lifecycleEpoch.get(sessionId) ?? 0) + 1);
+    const promise = this.destroySession(sessionId).finally(() => this.teardown.delete(sessionId));
+    this.teardown.set(sessionId, promise);
+    return promise;
+  }
+
+  private async destroySession(sessionId: string): Promise<void> {
+    // A build can still be inserting its token. Settle it before revocation,
+    // including failed builds that may have written only part of their state.
+    await this.inflight.get(sessionId)?.catch(() => undefined);
     const entry = this.cache.get(sessionId);
     if (!entry) {
       // Cold session: nothing cached in this process, but every caller of
@@ -2756,7 +2882,6 @@ export class EngineHost {
     this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
     this.cache.get(sessionId)?.session.suspendTimers();
     this.cache.delete(sessionId);
-    this.tokenMintedAt.delete(sessionId);
   }
 
   /**
@@ -2832,57 +2957,6 @@ export class EngineHost {
     } catch (err) {
       console.error(`EngineHost: markSessionUsed failed for session ${sessionId}:`, err);
     }
-  }
-
-  /**
-   * Narrow accessor for the rotate sweep (sandbox-reconciliation plan, Task
-   * 12). Returns a snapshot of every cached session whose attachment is in a
-   * state the sweep can act on (`ready` or `suspended`). Exposes only the
-   * fields the sweep needs — does NOT export raw cache entries or the
-   * attachment object itself.
-   *
-   * `mintedAt` is the wall-clock ms of the last `mintSandboxEnv` call for
-   * that session (0 when the host has no record — should not happen for a
-   * cached session, but defensive).
-   */
-  listRotatableSessions(): Array<{
-    sessionId: string;
-    sandboxId: string | undefined;
-    state: "ready" | "suspended";
-    mintedAt: number;
-    userId: string;
-    orgId: string;
-  }> {
-    const result: Array<{
-      sessionId: string;
-      sandboxId: string | undefined;
-      state: "ready" | "suspended";
-      mintedAt: number;
-      userId: string;
-      orgId: string;
-    }> = [];
-    for (const [sessionId, entry] of this.cache) {
-      const state = entry.session.attachment.state;
-      if (state !== "ready" && state !== "suspended") continue;
-      result.push({
-        sessionId,
-        sandboxId: entry.session.attachment.sandboxId,
-        state,
-        mintedAt: this.tokenMintedAt.get(sessionId) ?? 0,
-        userId: entry.session.options.userId,
-        orgId: entry.session.options.orgId,
-      });
-    }
-    return result;
-  }
-
-  /**
-   * Records a fresh mint time for a session — called by the rotate sweep
-   * after it mints and pushes a new token via `updateCreds`, so a second
-   * sweep pass within the rotation window is a no-op.
-   */
-  recordTokenMintedAt(sessionId: string, mintedAt: number): void {
-    this.tokenMintedAt.set(sessionId, mintedAt);
   }
 
   /** The cached session's org, or null when uncached — the capacity
@@ -3423,6 +3497,7 @@ export class EngineHost {
       credentialOwnerMode?: CredentialOwnerMode;
     },
   ): Promise<Session> {
+    this.assertSessionBuildAllowed(childSessionId);
     const cached = this.cache.get(childSessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(childSessionId);
@@ -3614,6 +3689,7 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
@@ -3716,6 +3792,7 @@ export class EngineHost {
       modelId?: string;
     },
   ): Promise<Session> {
+    this.assertSessionBuildAllowed(sessionId);
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
@@ -3772,6 +3849,7 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,

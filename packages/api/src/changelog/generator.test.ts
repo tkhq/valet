@@ -60,6 +60,7 @@ describe("changelog generation", () => {
       "two",
       "fix(web): keep the screen open (#12)",
       "User impact: Users no longer lose the open screen after a refresh.",
+      "2026-09-09T11:00:00Z",
     );
 
     const checkpoint = generateCheckpoint({
@@ -72,6 +73,7 @@ describe("changelog generation", () => {
 
     expect(checkpoint.id).toBe(`1.2.3@${releaseSha}`);
     expect(checkpoint.releasedAt).toBe("2026-09-09T19:00:00.000Z");
+    expect(Date.parse(checkpoint.entries[0]?.authoredAt ?? "")).toBe(Date.parse("2026-09-09T11:00:00Z"));
     expect(checkpoint.entries).toEqual([
       expect.objectContaining({
         title: "Keep the screen open",
@@ -294,5 +296,20 @@ describe("changelog generation", () => {
     expect(() => upsertCheckpoint(once, { ...first, releasedAt: "2026-01-02T00:00:00Z" })).toThrow(
       "immutable",
     );
+  });
+
+  it("never publishes an opt-out trailer as the entry description", () => {
+    // Defense in depth: shouldIncludeCommit already drops these, so this
+    // guards the path that builds an entry anyway.
+    const entry = entryFromCommit({
+      commitSha: "abc1234",
+      authoredAt: "2026-09-17T08:23:00Z",
+      subject: "fix(slack): name the channel in Slack read results (#729)",
+      body: "Changelog: none",
+      files: ["packages/plugin-slack/src/actions/actions.test.ts"],
+    });
+    expect(entry.description).toBe("Fixed: Name the channel in Slack read results.");
+    expect(entry.description).not.toContain("none");
+    expect(entry.followUp).toBe(true);
   });
 });

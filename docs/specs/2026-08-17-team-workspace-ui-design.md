@@ -236,3 +236,15 @@ Slack status uses the catalog's organization-derived `connect` mode, never the p
 Manual token entry asks for the intended account's token without assuming bot or service-account support. If the team credential read fails, the open connection form closes and discards its token and consent. Recovery does not reopen the form. Legacy Slack and GitHub removal dialogs explain that team setup cannot recreate those connections. Organization access is managed separately and can have different permissions.
 
 Workflow template setup links point to integration access. Their copy does not require sharing a personal account, because access can come from organization apps or direct team connections.
+
+### Rows badge the assistant that owns them (2026-09-15)
+
+Decision 2 put a badge where ownership varies inside one view, and `OwnerBadge` named the owning team. A team owns many assistants now, so on a row that names one, the team is no longer the useful answer.
+
+Workflow rows and event subscription rows badge the assistant that owns the work. The badge links to `/assistants/$assistantId`, the editor for the assistant's model, persona, and tools. A named assistant, a persona or a renamed default, reads by its own name. An unnamed default reads by its owner, the team name or "Org", because "Default Orchestrator" on every row of a cross-workspace list names nothing. The tooltip names the assistant, and adds the team name for a team row.
+
+The client resolves the assistant from lists these pages already load. A workflow row uses the assistant its definition pins, or the owner's default. A subscription row uses the assistant its target pins, or the target owner's default. An approvals row is the exception: the API reports the assistant from the run's own definition snapshot, because that row sits beside a permission decision. If the assistants list holds no match, a team row keeps the unlinked team-name badge, so a failed lookup does not remove the ownership signal.
+
+A personal row stays quiet while the reader's own default assistant owns it. It gets a badge when a persona owns it instead.
+
+Skills and skill repositories keep `OwnerBadge`. A skill has no owning assistant, so the team name remains the complete answer for those rows.

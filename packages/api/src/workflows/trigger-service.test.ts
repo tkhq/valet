@@ -6,12 +6,15 @@
  * are never invoked here, only `catalog`.
  */
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { teamMembers, workflowDefinitions } from "../schema/index.js";
+import { eventSubscriptions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { createWorkflowTrigger, deleteWorkflowTrigger, listWorkflowTriggers } from "./trigger-service.js";
+import { deleteTeam, lockTeamForOwnership } from "../services/teams.js";
+import * as readiness from "./team-service-readiness.js";
+import { reapTeamWorkflows } from "./service.js";
 
 const FIXTURE_PLUGINS: ValetPlugin[] = [
   {
@@ -51,7 +54,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await buildAppQueryable(pglite).query(
-    `TRUNCATE workflow_definitions, event_subscriptions, team_members RESTART IDENTITY CASCADE`,
+    `TRUNCATE workflow_definitions, event_subscriptions, teams, team_members RESTART IDENTITY CASCADE`,
   );
 });
 
@@ -141,6 +144,10 @@ describe("createWorkflowTrigger team readiness", () => {
   const MEMBER = { userId: "member-1", orgId: "org-1" };
 
   async function seedTeamWorkflow(id: string): Promise<void> {
+    await db
+      .insert(teams)
+      .values({ id: TEAM, orgId: MEMBER.orgId, name: "Team", createdAt: 1_000 })
+      .onConflictDoNothing();
     await db.insert(teamMembers).values({ teamId: TEAM, userId: MEMBER.userId, role: "member" });
     await db.insert(workflowDefinitions).values({
       id,
@@ -195,6 +202,87 @@ describe("createWorkflowTrigger team readiness", () => {
       eventKeys: ["fixture.thing_happened"],
     });
 
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ── Team ownership lock at insert time (mirrors #709's schedule fix) ──────
+//
+// `deleteTeam` deletes a team's own event_subscriptions rows under
+// `lockTeamForOwnership` (services/teams.ts). A trigger insert that already
+// passed `teamArmBlock`'s readiness check before the delete's transaction
+// commits, but writes after, lands as an orphan pointing at a reaped
+// workflow. `it.each` forces the race deterministically: the mock still
+// calls through to the real `teamArmBlock` first, then reaps the team's
+// workflow (or the whole team) before the insert can run.
+
+describe("createWorkflowTrigger team ownership lock", () => {
+  const RACE_TEAM = "team-trigger-race";
+  const RACE_MEMBER = { userId: "member-trigger-race", orgId: "org-1" };
+
+  async function seedRaceTeamWorkflow(workflowId: string): Promise<void> {
+    await db
+      .insert(teams)
+      .values({ id: RACE_TEAM, orgId: RACE_MEMBER.orgId, name: "Race team", createdAt: 1_000 })
+      .onConflictDoNothing();
+    await db
+      .insert(teamMembers)
+      .values({ teamId: RACE_TEAM, userId: RACE_MEMBER.userId, role: "member" })
+      .onConflictDoNothing();
+    await db.insert(workflowDefinitions).values({
+      id: workflowId,
+      orgId: RACE_MEMBER.orgId,
+      ownerType: "team",
+      ownerId: RACE_TEAM,
+      name: "target",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+  }
+
+  function raceArmDeps(credentials: InMemoryCredentialStore) {
+    return { db, credentials, plugins: FIXTURE_PLUGINS, env: {} as NodeJS.ProcessEnv };
+  }
+
+  it.each([false, true])(
+    "rejects trigger creation after readiness when its target is deleted (whole team: %s)",
+    async (wholeTeam) => {
+      await seedRaceTeamWorkflow("wf_trigger_race");
+      const original = readiness.teamArmBlock;
+      const gate = vi.spyOn(readiness, "teamArmBlock").mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        if (wholeTeam) {
+          await deleteTeam(db, { teamId: RACE_TEAM, reapOwnedWorkflows: (tx) => reapTeamWorkflows(tx, RACE_TEAM) });
+        } else {
+          await db.transaction(async (tx) => {
+            await lockTeamForOwnership(tx, RACE_TEAM);
+            await reapTeamWorkflows(tx, RACE_TEAM);
+          });
+        }
+        return result;
+      });
+      try {
+        const result = await createWorkflowTrigger(raceArmDeps(new InMemoryCredentialStore()), RACE_MEMBER, {
+          workflowId: "wf_trigger_race",
+          name: "trig",
+          eventKeys: ["fixture.thing_happened"],
+        });
+        expect(result.ok).toBe(false);
+        expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+      } finally {
+        gate.mockRestore();
+      }
+    },
+  );
+
+  it("arms a trigger for a normal, non-racing team create", async () => {
+    await seedRaceTeamWorkflow("wf_trigger_ok");
+    const result = await createWorkflowTrigger(raceArmDeps(new InMemoryCredentialStore()), RACE_MEMBER, {
+      workflowId: "wf_trigger_ok",
+      name: "trig-ok",
+      eventKeys: ["fixture.thing_happened"],
+    });
     expect(result.ok).toBe(true);
   });
 });

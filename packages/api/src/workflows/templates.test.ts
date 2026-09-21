@@ -10,7 +10,7 @@ import { generateKeyPairSync } from "node:crypto";
  * failure with a database constraint and asserts the first two rows are
  * gone too.
  */
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { and, eq } from "drizzle-orm";
 import type {
@@ -27,7 +27,8 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { PgDb } from "@valet/store-postgres";
-import { githubInstallations, eventSubscriptions, teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { githubInstallations, eventSubscriptions, orgs, teamMembers, teams, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import { setApprovedModels } from "../services/approved-models.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import {
   bakeInputs,
@@ -491,8 +492,17 @@ async function seedTeam(teamId: string, memberIds: string[]): Promise<void> {
 }
 
 beforeEach(async () => {
+  // Install validates the baked definition against the org's model
+  // environment, exactly as `POST /api/workflows` does. The bundled
+  // templates name Anthropic models, so the org needs a key it can reach or
+  // every install is refused for a reason none of these tests is about.
+  vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
   await boot();
   credentials = new InMemoryCredentialStore();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 afterAll(async () => {
@@ -897,6 +907,75 @@ describe("installWorkflowTemplate", () => {
     if (!result.ok) throw new Error(result.error);
     expect(result.scheduleId).toBeUndefined();
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("refuses an install whose model this organization cannot use", async () => {
+    // The gallery lists the template — it is a valid template. The org just
+    // cannot run its model, and an install writes the definition row
+    // directly, so the gate has to be here or the workflow lands in the
+    // editor and refuses its own first save.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    await connect("gmail");
+    const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("invalid_input");
+    expect(result.error).toContain("Settings > Models");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+    expect(await db.select().from(workflowVersions)).toHaveLength(0);
+  });
+
+  it("refuses an install whose model the organization removed from its approved list", async () => {
+    await db.insert(orgs).values({ id: OWNER.orgId, name: "Org", createdAt: Date.now() });
+    await setApprovedModels(db, OWNER.orgId, ["anthropic/claude-opus-4-7"]);
+    await connect("gmail");
+    const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    if (result.code !== "invalid_input") throw new Error(`expected invalid_input, got ${result.code}`);
+    expect(result.errors.join(" ")).toContain("Settings > Models");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+
+  it("still lists a template this organization cannot install", async () => {
+    // The org's model policy belongs to the org, not to the template, so it
+    // must not empty the gallery or brand a shipped template invalid.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    await connect("gmail");
+    const list = await listWorkflowTemplateSummaries(deps(), OWNER);
+    expect(list.map((t) => t.id)).toContain("gmail-sweep");
+  });
+
+  it("marks a template this organization cannot install, with both remedies", async () => {
+    // The card stays, and it says why the Install button is off. Without
+    // this the button is live and every press answers 400.
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    await connect("gmail");
+    const card = (await listWorkflowTemplateSummaries(deps(), OWNER)).find((t) => t.id === "gmail-sweep");
+    expect(card?.installable).toBe(false);
+    const reason = card?.installBlockedReason ?? "";
+    expect(reason).toContain("gmail-sweep");
+    expect(reason).toContain("Settings > Models");
+    expect(reason).toContain("add a key for the provider");
+    // The bundled templates name model ids, never a size tier, so the tier
+    // remedy would send the reader to look for something that is not there.
+    expect(reason).not.toContain("size tier");
+    // The install gate refuses with the same sentence, so the card and the
+    // install can never disagree.
+    const refusal = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    expect(refusal.ok).toBe(false);
+    if (refusal.ok) throw new Error("expected a refusal");
+    expect(refusal.error).toBe(reason);
+  });
+
+  it("marks a template this organization can install", async () => {
+    await connect("gmail");
+    const card = (await listWorkflowTemplateSummaries(deps(), OWNER)).find((t) => t.id === "gmail-sweep");
+    expect(card?.installable).toBe(true);
+    expect(card?.installBlockedReason).toBeUndefined();
   });
 
   it("refuses a template whose service the caller has not connected", async () => {

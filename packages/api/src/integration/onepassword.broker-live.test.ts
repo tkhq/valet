@@ -48,7 +48,6 @@ function realService(token: string, scope: "org" | "personal" = "org", userId = 
   return {
     service: createOnePasswordService({
       credentials: store,
-      getAllowPersonal: async () => true,
     }),
     ready: store.save(owner, ONEPASSWORD_SERVICE, {
       type: "service_account",

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statfsSync, statSync, fstatSync,
+  readFileSync, readdirSync, realpathSync, renameSync, rmSync, statfsSync, statSync, fstatSync, mkdtempSync,
   unlinkSync, writeFileSync, chmodSync, rmdirSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -11,8 +11,12 @@ import { dirname, join } from "node:path";
 export const ROOT = "/home/dockerd/.local/state/valet/kubernetes";
 export const LOCK = `${ROOT}.lock`;
 export const SCOPE = "/sys/fs/cgroup/init/valet-kubernetes";
+export const LEAF = `${SCOPE}/leaf`;
 export const KUBECONFIG = `${ROOT}/kubeconfig.yaml`;
 export const MINIMUM_FREE_BYTES = 2147483648;
+export const STATE_REMOVAL_TIMEOUT_MS = 600_000;
+export const LEAF_CONTROLLERS = ["cpuset", "cpu", "memory", "pids"];
+export const LEAF_CONVERGENCE = { attempts: 10, delayMs: 100 };
 export const K3S_ENV = {
   HOME: "/home/dockerd", USER: "dockerd", PATH: "/usr/local/bin:/usr/bin:/bin",
   XDG_RUNTIME_DIR: `${ROOT}/run`, XDG_CONFIG_HOME: `${ROOT}/config`, K3S_DATA_DIR: `${ROOT}/data`,
@@ -123,29 +127,110 @@ function atomicJson(path, value) {
   renameSync(temp, path);
   const parent = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY); fsyncSync(parent); closeSync(parent);
 }
-function procIdentity(pid) {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+function procIdentity(pid, procRoot = "/proc") {
+  const stat = readFileSync(`${procRoot}/${pid}/stat`, "utf8");
   const end = stat.lastIndexOf(")");
   const fields = stat.slice(end + 2).split(" ");
   return {
-    pid, startTime: fields[19], bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
-    uid: Number(readFileSync(`/proc/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1]), epoch: EPOCH,
+    pid, startTime: fields[19], bootId: readFileSync(`${procRoot}/sys/kernel/random/boot_id`, "utf8").trim(),
+    uid: Number(readFileSync(`${procRoot}/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1]), epoch: EPOCH,
   };
 }
-function recordLive(record) {
-  try {
-    const now = procIdentity(record.pid);
-    return now.startTime === record.startTime && now.bootId === record.bootId;
-  } catch { return false; }
+export function cgroupMembershipKernel(line, owned = "/init/valet-kubernetes") {
+  return line === `0::${owned}` || line.startsWith(`0::${owned}/`);
 }
-function identityValid(record) {
+export function cmdlineIdentityKernel(cmdline, argv = K3S_ARGV) {
+  const exact = Buffer.from(`${argv.join("\0")}\0`);
+  if (cmdline.equals(exact)) return true;
+  if (cmdline.length === 0) return false;
+  const separator = cmdline.indexOf(0);
+  const title = separator >= 0 ? cmdline.subarray(0, separator) : cmdline;
+  const space = title.indexOf(0x20);
+  const executable = space >= 0 ? title.subarray(0, space) : title;
+  return executable.equals(Buffer.from("/usr/local/bin/k3s"));
+}
+export function startupKernel({ leader, deadlineExpired }) {
+  if (leader === "exited") return "server_exited";
+  if (leader === "foreign") return "ownership_failure";
+  return deadlineExpired ? "startup_timeout" : "continue";
+}
+export function leafConvergenceKernel({ leaderLocation, leafProcs, enabled, required }) {
+  if (leaderLocation !== "evac") return "none";
+  if (required.every((controller) => enabled.includes(controller))) return "done";
+  return leafProcs.length > 0 ? "evacuate" : "enable";
+}
+export function convergeLeaf(leaf, evac, controllers = LEAF_CONTROLLERS, io = {}) {
+  const leafPath = `${leaf}/`;
+  if (dirname(evac) !== leaf || evac !== join(leaf, "k3s_evac")) return false;
+  const read = io.read ?? ((path) => readFileSync(path, "utf8"));
+  const exists = io.exists ?? existsSync;
+  const mkdir = io.mkdir ?? ((path) => mkdirSync(path, { mode: 0o700 }));
+  const movePid = io.movePid ?? ((_source, target, pid) => writeFileSync(target, `${pid}\n`));
+  const enable = io.enable ?? ((path, required) => writeFileSync(path, `${required.map((value) => `+${value}`).join(" ")}\n`));
+  const wait = io.sleep ?? sleep;
+  const procsPath = join(leaf, "cgroup.procs");
+  const controlPath = join(leaf, "cgroup.subtree_control");
+  if (!procsPath.startsWith(leafPath) || !controlPath.startsWith(leafPath)) return false;
+  for (let attempt = 0; attempt < LEAF_CONVERGENCE.attempts; attempt += 1) {
+    try {
+      const leafProcs = read(procsPath).trim().split(/\s+/).filter((pid) => pid && pid !== String(io.protectedPid ?? ""));
+      const enabled = read(controlPath).trim().split(/\s+/).filter(Boolean);
+      const action = leafConvergenceKernel({ leaderLocation: "evac", leafProcs, enabled, required: controllers });
+      if (action === "done") return true;
+      if (action === "evacuate") {
+        if (!exists(evac)) {
+          // Pinned RootlessKit uses os.MkdirAll, so it accepts this existing directory.
+          try { mkdir(evac); } catch (error) { if (error?.code !== "EEXIST") throw error; }
+        }
+        const target = join(evac, "cgroup.procs");
+        for (const pid of leafProcs) {
+          try { movePid(procsPath, target, pid); } catch (error) {
+            if (error?.code !== "ESRCH" && error?.code !== "ENOENT") throw error;
+          }
+        }
+      }
+      const remaining = read(procsPath).trim().split(/\s+/).filter(Boolean);
+      if (remaining.length === 0) enable(controlPath, controllers);
+      const verified = read(controlPath).trim().split(/\s+/).filter(Boolean);
+      if (controllers.every((controller) => verified.includes(controller))) return true;
+    } catch {}
+    if (attempt + 1 < LEAF_CONVERGENCE.attempts) wait(LEAF_CONVERGENCE.delayMs);
+  }
+  return false;
+}
+export function convergeStartupLeaf({ leader, record, procRoot = "/proc", leaf = LEAF, controllers = LEAF_CONTROLLERS, converge = convergeLeaf }) {
+  if (leader !== "owned" || !record) return null;
+  const evacMembership = "0::/init/valet-kubernetes/leaf/k3s_evac";
   try {
-    const now = procIdentity(record.pid);
+    const leaderInEvac = readFileSync(`${procRoot}/${record.pid}/cgroup`, "utf8").split("\n")
+      .some((line) => line === evacMembership || line.startsWith(`${evacMembership}/`));
+    return leaderInEvac ? converge(leaf, join(leaf, "k3s_evac"), controllers, { protectedPid: record.pid }) : null;
+  } catch { return null; }
+}
+
+export function startupPollIteration({ op, launchExited, leafControllersConverged, procRoot = "/proc" }, io = {}) {
+  const current = (io.readOperation ?? (() => readJson(OP_PATH, null)))();
+  const validOwner = io.ownerValid ?? ownerValid;
+  if (!current || current.id !== op.id || current.cancelRequested || !validOwner(current.owner)) {
+    return { action: "abandon", leafControllersConverged };
+  }
+  const record = (io.readRecord ?? (() => readJson(PID_PATH, null)))();
+  const leader = launchExited ? "exited" : (io.leaderState ?? ((value) => leaderState(value, procRoot)))(record);
+  const startupFailure = startupKernel({ leader, deadlineExpired: (io.now ?? Date.now)() >= op.deadline });
+  if (startupFailure !== "continue") return { action: "failure", leafControllersConverged, startupFailure };
+  const convergence = leafControllersConverged || (io.convergeStartupLeaf ?? convergeStartupLeaf)({ leader, record, procRoot });
+  if (convergence === null) return { action: "continue", delayMs: 10, leafControllersConverged: false };
+  return { action: (io.readiness ?? readiness)() ? "ready" : "continue", leafControllersConverged: convergence };
+}
+export function identityValid(record, procRoot = "/proc") {
+  try {
+    const now = procIdentity(record.pid, procRoot);
+    const owned = record.cgroup === SCOPE ? "/init/valet-kubernetes" : null;
     return now.startTime === record.startTime && now.bootId === record.bootId && now.uid === 1500 &&
-      record.uid === 1500 && record.epoch === EPOCH && record.cgroup === SCOPE &&
+      record.uid === 1500 && record.epoch === EPOCH && owned !== null &&
       record.argvDigest === createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") &&
-      readFileSync(`/proc/${record.pid}/cmdline`).equals(Buffer.from(`${K3S_ARGV.join("\0")}\0`)) &&
-      readFileSync(`/proc/${record.pid}/cgroup`, "utf8").split("\n").some((line) => line === "0::/init/valet-kubernetes");
+      cmdlineIdentityKernel(readFileSync(`${procRoot}/${record.pid}/cmdline`), K3S_ARGV) &&
+      readFileSync(`${procRoot}/${record.pid}/cgroup`, "utf8").split("\n").some((line) => cgroupMembershipKernel(line, owned));
   } catch { return false; }
 }
 function ownerValid(owner) {
@@ -185,10 +270,10 @@ export function withLock(shared, fn) {
     closeSync(fd);
   }
 }
-function stateSnapshot() {
-  const stored = readJson(STATUS_PATH, { state: "stopped", error: null });
-  const pid = readJson(PID_PATH, null);
-  return { stored, identity: pid && identityValid(pid) ? "valid" : "dead" };
+export function stateSnapshot(procRoot = "/proc", paths = { status: STATUS_PATH, pid: PID_PATH }) {
+  const stored = readJson(paths.status, { state: "stopped", error: null });
+  const pid = readJson(paths.pid, null);
+  return { stored, identity: pid && identityValid(pid, procRoot) ? "valid" : "dead" };
 }
 function stateReport(readiness = "unknown", snapshot = stateSnapshot()) {
   return statusKernel({ persisted: snapshot.stored.state, identity: snapshot.identity, readiness, errorReason: snapshot.stored.error });
@@ -196,6 +281,46 @@ function stateReport(readiness = "unknown", snapshot = stateSnapshot()) {
 function emit(report) { process.stdout.write(report.stdout); return report.exit; }
 function fail(message, exitCode) { process.stderr.write(`Error: ${message}\n`); return exitCode; }
 function commandOk(argv, env = process.env, timeout = 30_000) { return spawnSync(argv[0], argv.slice(1), { env, timeout, stdio: "ignore" }).status === 0; }
+function stateRemovalError(interrupted = false) {
+  const message = interrupted
+    ? "Kubernetes state removal was interrupted (state_removal_failed). Retry stop."
+    : "Kubernetes state removal failed (state_removal_failed). Recreate the sandbox, then retry.";
+  return Object.assign(new Error(message), { code: "state_removal_failed", exitCode: 22 });
+}
+export function removeStateRoot(root, io = {}) {
+  if (root !== ROOT) {
+    throw Object.assign(new Error("The Kubernetes state removal path is unsafe. Recreate the sandbox before retrying."), { exitCode: 21 });
+  }
+  const remove = io.remove ?? ((path) => rmSync(path, { recursive: true, force: true }));
+  const exists = io.exists ?? existsSync;
+  let rootPresent = true;
+  try { remove(root); rootPresent = exists(root); } catch {}
+  if (!rootPresent) return;
+
+  let temporaryRoot;
+  try {
+    temporaryRoot = (io.makeTemporaryRoot ?? (() => mkdtempSync("/tmp/valet-kubernetes-remove-")))();
+    const runtime = join(temporaryRoot, "run");
+    mkdirSync(runtime, { mode: 0o700 });
+    const result = (io.removeInUserNamespace ?? ((target) => spawnSync(
+      "/usr/bin/rootlesskit",
+      ["--state-dir=" + join(runtime, "state"), "/bin/rm", "-rf", "--", target],
+      { env: { ...process.env, HOME: "/home/dockerd", XDG_RUNTIME_DIR: runtime }, stdio: "ignore", timeout: STATE_REMOVAL_TIMEOUT_MS },
+    )))(root);
+    const status = typeof result === "number" ? result : result.status;
+    const interrupted = typeof result === "object" && result !== null &&
+      ((result.signal !== null && result.signal !== undefined) || result.error?.code === "ETIMEDOUT");
+    if (status !== 0 || exists(root)) throw stateRemovalError(interrupted);
+  } catch (error) {
+    if (error?.code === "state_removal_failed") throw error;
+    throw stateRemovalError();
+  } finally {
+    if (temporaryRoot) {
+      try { (io.removeTemporaryRoot ?? ((path) => rmSync(path, { recursive: true, force: true })))(temporaryRoot); }
+      catch {}
+    }
+  }
+}
 
 function checks() {
   const results = {};
@@ -211,7 +336,7 @@ function checks() {
   check("sysReadOnly", () => commandOk(["/bin/sh", "-c", "probe=/sys/.valet-write-test; ! touch \"$probe\" 2>/dev/null || { rm -f \"$probe\"; exit 1; }"]), "Mount the broad /sys path read-only.");
   check("cgroup", () => ["cpu", "cpuset", "memory", "pids"].every((v) => readFileSync("/sys/fs/cgroup/init/cgroup.controllers", "utf8").split(/\s+/).includes(v)), "Delegate cpu, cpuset, memory, and pids below /init.");
   check("slirp4netns", () => { const found = spawnSync("/usr/bin/dpkg-query", ["-W", "-f=${Version}", "slirp4netns"], { encoding: "utf8" }); return realpathSync("/usr/bin/slirp4netns") === "/usr/bin/slirp4netns" && found.status === 0 && found.stdout === "1.2.0-1"; }, "Install Debian Bookworm slirp4netns=1.2.0-1.");
-  for (const tool of ["/usr/local/bin/k3s", "/usr/local/bin/kubectl", "/usr/bin/tini", "/usr/bin/flock"]) check(tool.split("/").pop(), () => statSync(tool).isFile(), "Rebuild the sandbox image from the normative lock.");
+  for (const tool of ["/usr/local/bin/k3s", "/usr/local/bin/kubectl", "/usr/bin/tini", "/usr/bin/flock", "/usr/bin/rootlesskit"]) check(tool.split("/").pop(), () => statSync(tool).isFile(), "Rebuild the sandbox image from the normative lock.");
   return results;
 }
 function diagnose() {
@@ -232,8 +357,11 @@ function prepareRoot() {
   }
   if (existsSync(ROOT) && readJson(STATUS_PATH, {}).epoch !== EPOCH) {
     const recorded = readJson(PID_PATH, null);
-    if (recorded && recordLive(recorded)) throw Object.assign(new Error("The prior server identity is still live. Recreate the sandbox before cleanup."), { exitCode: 21 });
-    rmSync(ROOT, { recursive: true, force: true });
+    if (epochRecoveryKernel(recorded) === "refuse-live") throw Object.assign(new Error("The prior server identity is still live. Recreate the sandbox before cleanup."), { exitCode: 21 });
+    try { removeStateRoot(ROOT); } catch (error) {
+      if (error?.code === "state_removal_failed") atomicJson(STATUS_PATH, { state: "error", error: "state_removal_failed", epoch: null });
+      throw error;
+    }
   }
   mkdirSync(ROOT, { recursive: true, mode: 0o700 });
   chmodSync(ROOT, 0o700);
@@ -259,23 +387,57 @@ function normalizeKubeconfig() {
   if (context === "default") return commandOk(["/usr/local/bin/kubectl", "config", "rename-context", "default", "valet-kubernetes"], env);
   return context === "valet-kubernetes";
 }
+export function createScope(scope = SCOPE) {
+  mkdirSync(scope, { mode: 0o700 });
+  writeFileSync(join(scope, "cgroup.subtree_control"), "+cpuset +cpu +memory +pids\n");
+  const leaf = join(scope, "leaf");
+  mkdirSync(leaf, { mode: 0o700 });
+  return leaf;
+}
+export function launcherScript(leaf = LEAF) {
+  return `printf '%s\n' $$ > ${leaf}/cgroup.procs && exec "$@"`;
+}
+function recordExited(record, procRoot = "/proc") {
+  try {
+    const stat = readFileSync(`${procRoot}/${record.pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const bootId = readFileSync(`${procRoot}/sys/kernel/random/boot_id`, "utf8").trim();
+    return fields[19] !== record.startTime || bootId !== record.bootId || fields[0] === "Z";
+  } catch { return true; }
+}
+export function leaderState(record, procRoot = "/proc", validateIdentity = identityValid) {
+  if (!record || recordExited(record, procRoot)) return "exited";
+  if (validateIdentity(record, procRoot)) return "owned";
+  return recordExited(record, procRoot) ? "exited" : "foreign";
+}
+export function startRecoveryKernel(record, procRoot = "/proc") {
+  const leader = leaderState(record, procRoot);
+  return leader === "foreign" ? "refuse-foreign" : leader === "owned" ? "reuse-owned" : "clean-restart";
+}
+export function stopGuardKernel(record, procRoot = "/proc") {
+  return leaderState(record, procRoot) === "foreign" ? "refuse-foreign" : "allow-cleanup";
+}
+export function epochRecoveryKernel(record, procRoot = "/proc") {
+  return leaderState(record, procRoot) === "exited" ? "clean-root" : "refuse-live";
+}
 function start() {
   const bad = Object.values(checks()).find((value) => !value.ok);
   if (bad) return fail(`${bad.action} Run valet-kubernetes diagnose for details.`, 20);
-  let op = null; let join = false; let alreadyRunning = false; let staleImportId = null;
+  let op = null; let joinExisting = false; let alreadyRunning = false; let staleImportId = null;
   withLock(false, () => {
     prepareRoot();
     const current = readJson(OP_PATH, null);
     const pid = readJson(PID_PATH, null);
     const stored = readJson(STATUS_PATH, { state: "stopped" });
     if (current?.type === "import" && !ownerValid(current.owner)) staleImportId = current.id;
-    if (pid && recordLive(pid) && !identityValid(pid)) throw Object.assign(new Error("The server identity is not owned. Recreate the sandbox before cleanup."), { exitCode: 21 });
+    const recovery = startRecoveryKernel(pid);
+    if (recovery === "refuse-foreign") throw Object.assign(new Error("The server identity is not owned. Recreate the sandbox before cleanup."), { exitCode: 21 });
     if (current && ownerValid(current.owner)) {
-      if (current.type === "start") { op = current; join = true; return; }
+      if (current.type === "start") { op = current; joinExisting = true; return; }
       throw Object.assign(new Error("Another Kubernetes operation is active. Retry after it finishes."), { exitCode: 24 });
     }
     if (stored.state === "stopping") throw Object.assign(new Error("Kubernetes is stopping. Retry after stop finishes."), { exitCode: 4 });
-    if (pid && identityValid(pid)) {
+    if (recovery === "reuse-owned") {
       if (current) unlinkSync(OP_PATH);
       alreadyRunning = true;
       return;
@@ -292,7 +454,7 @@ function start() {
     return emit(stateReport("ready"));
   }
   if (!op) return fail("The start Operation is missing. Retry the command.", 1);
-  if (join) {
+  if (joinExisting) {
     while (Date.now() < op.deadline) {
       const snapshot = withLock(true, () => stateSnapshot());
       const report = stateReport(snapshot.stored.state === "ready" && readiness() ? "ready" : "unknown", snapshot);
@@ -303,25 +465,29 @@ function start() {
     return fail("The joined start did not become ready. Run valet-kubernetes diagnose.", 22);
   }
   if (existsSync(SCOPE) && !cleanupOwned()) throw Object.assign(new Error("The prior Kubernetes cgroup is unsafe or populated. Recreate the sandbox before retrying."), { exitCode: 21 });
-  if (!join) {
-    mkdirSync(SCOPE, { mode: 0o700 });
+  let launchExited = false;
+  if (!joinExisting) {
+    const leaf = createScope();
     const log = openSync(LOG_PATH, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY, 0o600); chmodSync(LOG_PATH, 0o600);
     const env = { ...K3S_ENV, KUBECONFIG, VALET_SANDBOX_KUBERNETES: "1" };
-    const launcher = spawn("/bin/sh", ["-c", `printf '%s\n' $$ > ${SCOPE}/cgroup.procs && exec "$@"`, "launcher", ...K3S_ARGV], { detached: true, env, stdio: ["ignore", log, log] });
+    const launcher = spawn("/bin/sh", ["-c", launcherScript(leaf), "launcher", ...K3S_ARGV], { detached: true, env, stdio: ["ignore", log, log] });
     launcher.unref(); closeSync(log);
-    atomicJson(PID_PATH, { ...procIdentity(launcher.pid), cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex"), operationId: op.id });
+    let identity;
+    try { identity = procIdentity(launcher.pid); } catch { launchExited = true; }
+    if (identity) atomicJson(PID_PATH, { ...identity, cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex"), operationId: op.id });
     const execDeadline = Date.now() + 5_000;
-    while (Date.now() < execDeadline && !identityValid(readJson(PID_PATH, null))) {
+    while (!launchExited && Date.now() < execDeadline && !identityValid(readJson(PID_PATH, null))) {
       if (processGone(launcher.pid)) break;
       sleep(10);
     }
   }
-  while (Date.now() < op.deadline) {
-    const current = readJson(OP_PATH, null);
-    if (!current || current.id !== op.id || current.cancelRequested || !ownerValid(current.owner)) return 4;
-    const pid = readJson(PID_PATH, null);
-    if (!pid || !identityValid(pid)) break;
-    if (readiness()) {
+  let startupFailure; let leafControllersConverged = false;
+  for (;;) {
+    const poll = startupPollIteration({ op, launchExited, leafControllersConverged });
+    leafControllersConverged = poll.leafControllersConverged;
+    if (poll.action === "abandon") return 4;
+    if (poll.action === "failure") { startupFailure = poll.startupFailure; break; }
+    if (poll.action === "ready") {
       if (!normalizeKubeconfig()) return fail("The kubeconfig context is invalid. Stop the cluster, then retry.", 22);
       let committed = false;
       withLock(false, () => {
@@ -331,22 +497,34 @@ function start() {
       });
       return committed ? emit(stateReport("ready")) : 4;
     }
-    sleep(1000);
+    sleep(poll.delayMs ?? 1000);
   }
-  const cleaned = cleanupOwned();
+  const settled = settleStartupFailure(startupFailure, op);
+  if (!settled.committed) return 4;
+  if (startupFailure === "ownership_failure") {
+    return fail("The server identity is not owned. Recreate the sandbox before cleanup.", 21);
+  }
+  if (!settled.cleaned) return fail("Kubernetes startup cleanup did not drain its cgroup. Recreate the sandbox before retrying.", 21);
+  return startupFailure === "server_exited"
+    ? fail("Kubernetes server exited during startup. Inspect server.log.", 22)
+    : fail("Kubernetes startup timed out. Inspect server.log and run valet-kubernetes diagnose.", 22);
+}
+function commitStartupError(op, error) {
   let committed = false;
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
     if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
-    atomicJson(STATUS_PATH, { state: "error", error: cleaned ? "startup_timeout" : "startup_failed", epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
+    atomicJson(STATUS_PATH, { state: "error", error, epoch: EPOCH }); unlinkSync(OP_PATH); committed = true;
   });
-  if (!committed) return 4;
-  return cleaned
-    ? fail("Kubernetes startup timed out. Inspect server.log and run valet-kubernetes diagnose.", 22)
-    : fail("Kubernetes startup cleanup did not drain its cgroup. Recreate the sandbox before retrying.", 21);
+  return committed;
 }
-function processGone(pid) {
-  try { return readFileSync(`/proc/${pid}/status`, "utf8").match(/^State:\s+(.)/m)?.[1] === "Z"; } catch { return true; }
+export function settleStartupFailure(startupFailure, op, cleanup = cleanupOwned, commit = commitStartupError) {
+  const cleaned = startupFailure === "ownership_failure" ? null : cleanup();
+  const error = cleaned === false ? "startup_failed" : startupFailure;
+  return { cleaned, committed: commit(op, error) };
+}
+function processGone(pid, procRoot = "/proc") {
+  try { return readFileSync(`${procRoot}/${pid}/status`, "utf8").match(/^State:\s+(.)/m)?.[1] === "Z"; } catch { return true; }
 }
 function terminate(pid) {
   try { process.kill(-pid, "SIGTERM"); } catch {}
@@ -387,13 +565,13 @@ function cleanupOwned() {
   } catch { return false; }
 }
 function stoppedReport() { process.stdout.write(statusKernel({ persisted: "stopped", identity: "dead", readiness: "unknown" }).stdout); return 0; }
-function stop() {
+export function stop(procRoot = "/proc", cleanup = cleanupOwned, removeRoot = removeStateRoot) {
   let stopped = false; let unsafe = false; let active = null;
   withLock(false, () => {
     const status = readJson(STATUS_PATH, { state: "stopped" });
     const pid = readJson(PID_PATH, null);
     if (status.state === "stopped" && !pid && !existsSync(ROOT)) { stopped = true; return; }
-    if (pid && recordLive(pid) && !identityValid(pid)) { unsafe = true; return; }
+    if (stopGuardKernel(pid, procRoot) === "refuse-foreign") { unsafe = true; return; }
     active = readJson(OP_PATH, null);
     if (active && ownerValid(active.owner)) { active.cancelRequested = true; atomicJson(OP_PATH, active); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH }); }
   });
@@ -411,22 +589,27 @@ function stop() {
     if (current && ownerValid(current.owner)) throw Object.assign(new Error("Another Kubernetes operation became active. Retry stop."), { exitCode: 24 });
     op = operation("stop"); atomicJson(OP_PATH, op); atomicJson(STATUS_PATH, { state: "stopping", error: null, epoch: EPOCH });
   });
-  if (!cleanupOwned()) {
+  if (!cleanup()) {
     withLock(false, () => {
       const claim = readJson(OP_PATH, null);
       if (claim?.id === op.id && !claim.cancelRequested && ownerValid(claim.owner)) { atomicJson(STATUS_PATH, { state: "error", error: "stop_failed", epoch: EPOCH }); unlinkSync(OP_PATH); }
     });
     return fail("Kubernetes cleanup did not drain its owned cgroup. Retry stop.", 22);
   }
-  let committed = false;
+  let committed = false; let removalFailure = null;
   withLock(false, () => {
     const claim = readJson(OP_PATH, null);
     if (claim?.id !== op.id || claim.cancelRequested || !ownerValid(claim.owner)) return;
-    rmSync(ROOT, { recursive: true, force: true }); committed = true;
+    try { removeRoot(ROOT); committed = true; }
+    catch (error) {
+      if (error?.code !== "state_removal_failed") throw error;
+      atomicJson(STATUS_PATH, { state: "error", error: "state_removal_failed", epoch: null });
+      if (existsSync(OP_PATH)) unlinkSync(OP_PATH);
+      removalFailure = error;
+    }
   });
-  return committed
-    ? stoppedReport()
-    : fail("The stop Operation was superseded. Retry the command.", 4);
+  if (removalFailure) return fail(removalFailure.message, removalFailure.exitCode);
+  return committed ? stoppedReport() : fail("The stop Operation was superseded. Retry the command.", 4);
 }
 export function validateArchive(path, freeBytes = statfsSync(ROOT).bavail * statfsSync(ROOT).bsize) {
   if (!path.startsWith("/")) return "Use an absolute archive path.";
@@ -434,8 +617,9 @@ export function validateArchive(path, freeBytes = statfsSync(ROOT).bavail * stat
   catch { return "Select an existing regular OCI-layout or Docker-save tar archive."; }
 }
 export function archiveKind(path) {
+  const tar = process.platform === "darwin" ? "/usr/bin/tar" : "/bin/tar";
   const inspect = String.raw`{ name=$0; sub(/^\.\//, "", name); count=split(name, part, "/"); if (substr(name, 1, 1)=="/") bad=1; for (i=1; i<=count; i++) if (part[i]=="..") bad=1; if (name=="manifest.json") docker=1; if (name=="oci-layout") layout=1; if (name=="index.json") hasIndex=1 } END { if (bad) print "unsafe"; else if (docker) print "docker"; else if (layout && hasIndex) print "oci"; else print "unknown" }`;
-  const listed = spawnSync("/bin/bash", ["-o", "pipefail", "-c", 'exec /bin/tar --list --file "$1" | /usr/bin/awk "$2"', "archive", path, inspect], {
+  const listed = spawnSync("/bin/bash", ["-o", "pipefail", "-c", 'exec "$3" --list --file "$1" | /usr/bin/awk "$2"', "archive", path, inspect, tar], {
     encoding: "utf8", timeout: 30_000, maxBuffer: 1024, stdio: ["ignore", "pipe", "ignore"],
   });
   if (listed.error?.code === "ETIMEDOUT") return { error: "Archive inspection timed out. Use a valid OCI-layout or Docker-save tar archive." };

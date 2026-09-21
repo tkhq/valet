@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -14,6 +14,7 @@ import {
   users,
   workflowDefinitions,
   workflowRuns,
+  workflowSchedules,
 } from "../schema/index.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
 import {
@@ -25,6 +26,7 @@ import {
   isLiveIdpMirror,
   LastAdminError,
   listTeamMembers,
+  teamMembershipSummaries,
   listTeamsForOrg,
   listTeamsForUser,
   NotOrgMemberError,
@@ -53,6 +55,38 @@ describe("teams service", () => {
     await seedUser(db, "u1", orgId);
     await seedUser(db, "u2", orgId);
     await seedUser(db, "u3", orgId);
+  });
+
+  it("aggregates membership in bounded batches without including another org", async () => {
+    await db.insert(orgs).values({ id: "other-org", name: "Other", createdAt: Date.now() });
+    await db.insert(teams).values([
+      { id: "one", orgId, name: "One", createdAt: 1 },
+      { id: "two", orgId, name: "Two", createdAt: 1 },
+      { id: "empty", orgId, name: "Empty", createdAt: 1 },
+      { id: "foreign", orgId: "other-org", name: "Foreign", createdAt: 1 },
+    ]);
+    await db.insert(teamMembers).values([
+      { teamId: "one", userId: "u1", role: "admin" },
+      { teamId: "one", userId: "u2", role: "member" },
+      { teamId: "two", userId: "u2", role: "admin" },
+      { teamId: "foreign", userId: "u1", role: "admin" },
+    ]);
+    const reads = vi.spyOn(db, "select");
+    try {
+      expect(await teamMembershipSummaries(db, orgId, [], "u1")).toEqual(new Map());
+      expect(reads).not.toHaveBeenCalled();
+      const result = await teamMembershipSummaries(db, orgId, [
+        "one", "foreign", "empty", ...Array.from({ length: 1_001 }, (_, i) => `absent-${i}`), "two",
+      ], "u1");
+      expect(result).toEqual(new Map([
+        ["one", { memberCount: 2, callerRole: "admin" }],
+        ["two", { memberCount: 1, callerRole: null }],
+      ]));
+      expect(reads).toHaveBeenCalledTimes(2);
+      expect((await teamMembershipSummaries(db, orgId, ["one"], "u2")).get("one")?.callerRole).toBe("member");
+    } finally {
+      reads.mockRestore();
+    }
   });
 
   // Teams written before the seed shipped have no default assistant, and a
@@ -286,12 +320,29 @@ describe("teams service", () => {
     expect(teams.map((t) => t.id)).toEqual([t1.id]);
   });
 
-  it("deleteTeam removes the team and its memberships when it owns no workflows", async () => {
+  it("deleteTeam removes the team, memberships, and team orchestrator schedules", async () => {
     const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(workflowSchedules).values({
+      id: "team_schedule",
+      orgId,
+      ownerType: "team",
+      ownerId: team.id,
+      targetKind: "orchestrator",
+      prompt: "Review work",
+      name: "Team schedule",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      enabled: true,
+      nextFireAt: 2_000,
+      createdBy: "u1",
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
     await deleteTeam(db, { teamId: team.id });
 
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
   });
 
   it("deleteTeam drops team-owned credential rows including the 1Password grant", async () => {

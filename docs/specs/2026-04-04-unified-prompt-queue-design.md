@@ -292,3 +292,15 @@ This spec covers the prompt queue dispatch model for user prompts. It does NOT c
 - **Approval gates / proposals** — separate system, not affected by queue changes.
 - **Child session events** — routed through the queue with `queue_type = 'prompt'` but identified by non-null `child_session_id`. Exempt from single-slot constraint — they can stack alongside user prompts.
 - **Message editing after dispatch** — once a message enters the chat (at dispatch time), editing is a separate concern.
+
+
+### Submission-scoped cancellation (2026-09-14)
+
+`Thread.abortSubmission(queueItemId)` cancels one submission on a shared thread.
+The store writes abort intent using the session, thread, and queue-item IDs.
+Only the matching running turn is interrupted, and only its pending gates are withdrawn.
+Queued targets settle without running. Other submissions retain their state and continue in FIFO order.
+The existing thread-wide abort remains available for session and thread cancellation.
+
+The engine rechecks durable abort intent after asynchronous model resolution and before starting or resuming a model call.
+Cancellation during turn setup must not start new provider work after the setup resolves.

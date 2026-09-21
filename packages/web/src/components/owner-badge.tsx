@@ -1,13 +1,16 @@
 /**
  * "A team owns this" — one badge, wherever the product says it.
  *
- * Workflows, skills, and skill repositories all carry an owner, and every
- * list used to resolve the owning team's name for itself. Four copies drifted
- * into four looks, and the skill card never resolved the name at all.
+ * Skills and skill repositories carry an owner, and every list used to
+ * resolve the owning team's name for itself. Four copies drifted into four
+ * looks, and the skill card never resolved the name at all.
  *
- * The badge links to the team's default assistant. An owned row is the
- * shortest path to the assistant that owns it, so a flat list also becomes a
- * way in. The `?assistant=` search param on `/chat` selects it.
+ * A skill has no owning assistant: every assistant in the workspace may use
+ * it. So the team is the whole answer here, and the badge links to the
+ * team's default assistant — an owned row is the shortest path to an
+ * assistant that can use it. The `?assistant=` search param on `/chat`
+ * selects it. Rows that DO name an assistant (workflows, event
+ * subscriptions) badge that assistant instead, through `AssistantBadge`.
  *
  * A personal row gets no badge: everything on these pages already belongs to
  * the reader, so a badge on each one carries no information.

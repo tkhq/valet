@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal } from "@valet/engine";
@@ -188,28 +188,20 @@ export async function listStandaloneSessions(db: AppDb, userId: string, owner?: 
       ? or(mine, teamRows)
       : mine;
 
-  const [rows, childRows, assistantRows] = await Promise.all([
-    db
+  const rows = await db
       .select()
       .from(agentSessions)
-      .where(and(scope, inArray(agentSessions.status, ["active", "hibernated"])))
-      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${agentSessions.updatedAt})`)),
-    db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
-    // The assistants table, not the id prefix, decides which sessions are
-    // assistant sessions: migrated rows keep legacy `orchestrator:*` ids
-    // the prefix parse cannot recognize. The prefix check below stays as a
-    // belt for `assistant:` ids whose row is gone.
-    db.select({ sessionId: assistants.sessionId }).from(assistants),
-  ]);
-
-  const childIds = new Set(childRows.map((r) => r.childSessionId));
-  const assistantSessionIds = new Set(assistantRows.map((r) => r.sessionId));
-  return rows.filter(
-    (r) =>
-      !assistantSessionIds.has(r.id) &&
-      parseAssistantSessionId(r.id) === null &&
-      !childIds.has(r.id),
-  );
+      .where(and(
+        scope,
+        inArray(agentSessions.status, ["active", "hibernated"]),
+        notExists(db.select({ id: childWatches.childSessionId }).from(childWatches)
+          .where(eq(childWatches.childSessionId, agentSessions.id))),
+        notExists(db.select({ id: assistants.sessionId }).from(assistants)
+          .where(eq(assistants.sessionId, agentSessions.id))),
+      ))
+      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${agentSessions.updatedAt})`));
+  // Retain the prefix fallback for assistant rows whose metadata is gone.
+  return rows.filter((r) => parseAssistantSessionId(r.id) === null);
 }
 
 sessionsRouter.get("/", async (c) => {
@@ -250,21 +242,15 @@ sessionsRouter.get("/", async (c) => {
     return c.json({ error: "kind must be 'code' or 'security'." }, 400);
   }
 
-  // Three round trips, whatever the number of sessions: the two
-  // `listStandaloneSessions` makes, plus ONE cross-session read of every
-  // unsettled submission (the same call the admin submissions route uses).
-  // `groupSubmissionsBySession` then indexes it by session id. A per-row
-  // query here would make an ordinary list cost one query per session.
-  const [standalone, unsettled] = await Promise.all([
-    listStandaloneSessions(db, userId, owner),
-    engineStore.listAllUnsettledSubmissions(),
-  ]);
-  const bySession = groupSubmissionsBySession(unsettled);
-
+  const standalone = await listStandaloneSessions(db, userId, owner);
   const filtered =
     kindFilter === undefined
       ? standalone
       : standalone.filter((row) => (row.kind === "security" ? "security" : "code") === kindFilter);
+
+  // Fetch queue state only for authorized sessions that enter this response.
+  const unsettled = await engineStore.listAllUnsettledSubmissions(filtered.map((row) => row.id));
+  const bySession = groupSubmissionsBySession(unsettled);
 
   const body: ListSessionsResponse = {
     sessions: filtered.map((row) =>

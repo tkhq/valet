@@ -375,6 +375,8 @@ export interface BaseEntry {
   threadId: string;
   parentId: string | null;
   createdAt: number;
+  /** Store insertion order, used as the stable tie-break for equal timestamps. */
+  sequence?: number;
   metadata?: Record<string, unknown>;
   /** The submission that produced this entry — the transcript↔submission linkage. */
   queueItemId?: string;
@@ -725,6 +727,21 @@ export interface ToolContext {
    * hosts (and tests) that wire no store.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /**
+   * Host-provided text extraction for a document the model cannot read on
+   * its own. A PDF is the case that matters: no sandbox image carries a PDF
+   * text tool, and the extractor ships as a native binary beside the host,
+   * so a plugin action cannot do this itself.
+   *
+   * Returns `null` when the document holds no extractable text (a scanned
+   * page), and throws when extraction is unavailable. Absent on hosts that
+   * wire no extractor — callers must degrade, not fail.
+   */
+  extractDocument?: (doc: {
+    data: Uint8Array;
+    mimeType: string;
+    name?: string;
+  }) => Promise<{ markdown: string } | null>;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /**
    * Optional host policy resolver consulted by `call_tool` before invoking a
@@ -1567,7 +1584,7 @@ export type EngineEvent =
       type: "message_end";
       threadId: string;
       messageId: string;
-      reason: "end_turn" | "error" | "abort";
+      reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
   | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
@@ -1746,6 +1763,11 @@ export interface ListOpts {
 export interface SessionStore {
   saveSession(session: SessionData): Promise<void>;
   saveThread(sessionId: string, thread: ThreadData): Promise<void>;
+  /** Read a thread row and its entries from one coherent store snapshot. */
+  getThreadSnapshot(
+    sessionId: string,
+    threadId: string,
+  ): Promise<{ thread: ThreadData; entries: SessionEntry[] } | null>;
   // CHANGED: optional fence; store MUST reject with StaleAttemptError when a
   // fence is provided and does not name the item's current attempt.
   appendEntries(
@@ -1867,8 +1889,10 @@ export interface SessionStore {
    * `QueueItem` elsewhere (always accessed via an already-known sessionId),
    * these carry `sessionId` explicitly since callers have no other way to
    * tell which session each cross-session result belongs to.
+   * Pass authorized session IDs to restrict a user-facing list. An empty
+   * list returns no rows; omit it only for the operator-wide surface.
    */
-  listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]>;
+  listAllUnsettledSubmissions(sessionIds?: readonly string[]): Promise<(QueueItem & { sessionId: string })[]>;
   /**
    * Operator escape hatch: CAS any non-settled status → settled with the given
    * outcome; deletes attempt markers. Throws ConflictError if already settled,
@@ -1881,7 +1905,8 @@ export interface SessionStore {
     error?: string,
   ): Promise<QueueItem>;
   /** Stamp abortRequestedAt on unsettled submissions in scope. First write wins; NOT terminal. */
-  requestAbort(sessionId: string, threadId?: string): Promise<void>;
+  /** With queueItemId, stamp only that item within the session/thread scope. */
+  requestAbort(sessionId: string, threadId?: string, queueItemId?: string): Promise<void>;
   /** Fenced two-phase settlement for claimed turns: running|blocked→terminalizing, recording the outcome. */
   reserveSettlement(
     sessionId: string,
@@ -1975,7 +2000,8 @@ export interface SessionStore {
     threadId: string,
     opts?: MessageQuery,
   ): Promise<SessionEntry[]>;
-  listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]>;
+  /** Filter status in the store so periodic sweeps do not load settled gates. */
+  listDecisionGates(sessionId: string, threadId?: string, status?: DecisionGate["status"]): Promise<DecisionGate[]>;
   getDecisionGate(sessionId: string, gateId: string): Promise<DecisionGate | null>;
   /** Latest gate (any status) for a (queueItemId, resumeKey) pair, or null. */
   getLatestGateForResume(
@@ -2303,6 +2329,15 @@ export interface CreateSessionOptions {
    * `buildToolContext`. Absent === no `pluginStore` on plugin actions.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /**
+   * Threaded onto `ToolContext.extractDocument` via `buildToolContext`.
+   * Absent === plugin actions get no document extraction.
+   */
+  extractDocument?: (doc: {
+    data: Uint8Array;
+    mimeType: string;
+    name?: string;
+  }) => Promise<{ markdown: string } | null>;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;

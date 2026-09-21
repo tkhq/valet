@@ -16,13 +16,13 @@ import { Hono } from "hono";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
-import { authorizedSubscriptionMatchesEvent } from "../events/team-slack-gate.js";
+import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
@@ -31,7 +31,7 @@ import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { armableDefinitionRow } from "../workflows/service.js";
 import { checkAssistantForOwner } from "../assistants/service.js";
-import { isTeamMember } from "../services/teams.js";
+import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -102,6 +102,14 @@ function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): EventSu
     eventKeys: row.eventKeys as string[],
     filters: row.filters as EventSubscriptionFilterWire[],
     target: row.target as EventSubscriptionTargetWire,
+    // Only a team assistant rule has an audience, so only those rows carry
+    // one on the wire. Filling it everywhere would hand a read-modify-write
+    // client a field the write path refuses on its own target. Null on such a
+    // row reads as `team`: the resolved value goes out, so no reader has to
+    // know the default.
+    ...(isTeamAssistantRule(row.ownerType, row.target)
+      ? { audience: row.audience ?? ("team" as const) }
+      : {}),
     enabled: row.enabled,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
@@ -575,6 +583,9 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   );
   if (!write.ok) return c.json({ error: write.error }, 400);
   const filters = write.filters;
+  // Absent stays null in the row, so an untouched rule keeps reading as
+  // team-only however the default is spelled later.
+  const audience = write.audience ?? null;
 
   // A workflow target must be OWNED by the caller, not only exist in their
   // org: org scope alone lets any member wire automation onto another's.
@@ -656,27 +667,78 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   }
 
   const now = Date.now();
-  const id = randomUUID();
-  const inserted = await db
-    .insert(eventSubscriptions)
-    .values({
-      id,
-      orgId: user.orgId,
-      ownerType,
-      ownerId,
-      name: body.name,
-      eventKeys: body.eventKeys,
-      filters,
-      target: body.target,
-      enabled,
-      createdBy: user.id,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
+  const values = {
+    id: randomUUID(),
+    orgId: user.orgId,
+    ownerType,
+    ownerId,
+    name: body.name,
+    eventKeys: body.eventKeys,
+    filters,
+    target: body.target,
+    audience,
+    enabled,
+    createdBy: user.id,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  let insertedRow: typeof eventSubscriptions.$inferSelect | undefined;
+  if (ownerType === "team") {
+    // `deleteTeam` deletes a team's own event_subscriptions rows, reaps its
+    // workflows, and archives its assistants — all under this same lock
+    // (services/teams.ts). Without it, a create that already passed the
+    // ownership/membership/assistant checks above can still insert after
+    // the team (or its target workflow/assistant) is gone, landing as a
+    // permanent orphan — the race #709 closed for schedules.
+    const rows = await withAuthorizedTeamOwnership(
+      db,
+      { teamId: ownerId, orgId: user.orgId, userId: user.id, principalTeamId: null, requireMembership: true },
+      async (tx) => {
+        if (body.target.kind === "workflow") {
+          const [targetWorkflow] = await tx
+            .select({ id: workflowDefinitions.id })
+            .from(workflowDefinitions)
+            .where(
+              and(
+                eq(workflowDefinitions.id, body.target.workflowId),
+                eq(workflowDefinitions.orgId, user.orgId),
+                eq(workflowDefinitions.ownerType, "team"),
+                eq(workflowDefinitions.ownerId, ownerId),
+              ),
+            );
+          if (!targetWorkflow) return [];
+        }
+        // Mirrors the pre-lock check above (schedule-service.ts:255-257):
+        // `deleteTeam` archives a team's assistants under this same lock, so
+        // a named assistant needs the same in-lock recheck as the workflow
+        // target does.
+        if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
+          const bad = await checkAssistantForOwner(
+            tx,
+            user.orgId,
+            { type: ownerType, id: ownerId },
+            body.target.assistantId,
+          );
+          if (bad) return [];
+        }
+        return tx.insert(eventSubscriptions).values(values).returning();
+      },
+    );
+    if (!rows?.[0]) {
+      return c.json(
+        { error: "Team or subscription target is no longer available. Refresh and select an active target." },
+        400,
+      );
+    }
+    insertedRow = rows[0];
+  } else {
+    const inserted = await db.insert(eventSubscriptions).values(values).returning();
+    insertedRow = inserted[0];
+  }
 
   const resp: CreateEventSubscriptionResponse = {
-    ...rowToSubscription(inserted[0]),
+    ...rowToSubscription(insertedRow!),
     ...(collisions !== undefined ? { collisions } : {}),
   };
   return c.json(resp, 201);
@@ -775,6 +837,25 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     }
   }
 
+  // The prompt templates are the other part of `target` a patch may rewrite,
+  // and only on an orchestrator target. `null` clears the field, so the rule
+  // delivers the default body again; the merged re-validation below checks a
+  // new template against the rule's events. Shape only here: the template
+  // language is `events/prompt-template.ts`'s to judge.
+  for (const field of ["systemPrompt", "userPromptTemplate"] as const) {
+    const patched = body[field];
+    if (patched === undefined) continue;
+    if (patchedTarget.kind !== "orchestrator") {
+      return c.json({ error: `${field} is only valid on an orchestrator target` }, 400);
+    }
+    if (patched === null) {
+      const { [field]: _cleared, ...rest } = patchedTarget;
+      patchedTarget = rest;
+    } else {
+      patchedTarget = { ...patchedTarget, [field]: patched };
+    }
+  }
+
   // Re-validate the row as it would exist after the patch — provided fields
   // get full validation in the context of the untouched ones.
   const merged = {
@@ -782,6 +863,9 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     eventKeys: body.eventKeys ?? row.eventKeys,
     filters: body.filters ?? row.filters,
     target: patchedTarget,
+    // An absent audience keeps the stored one, which must still be legal
+    // against the patched target.
+    audience: body.audience ?? row.audience ?? undefined,
   };
   // Mention scoping is keyed to the CREATOR and skipped for a patch that
   // does not change the match — so an enabled-only or name-only patch still
@@ -797,9 +881,11 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       row.eventKeys as string[],
       row.filters as SubscriptionFilter[],
     ),
+    storedAudience: row.audience,
   });
   if (!write.ok) return c.json({ error: write.error }, 400);
   const filters = write.filters;
+  const audience = write.audience ?? null;
 
   // Collision gate (TKAI-294), against the row as it would exist after the
   // patch, minus itself. Runs when the result can fire AND the patch changes
@@ -854,6 +940,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       eventKeys: merged.eventKeys,
       filters,
       target: patchedTarget,
+      audience,
       enabled: willBeEnabled,
       updatedAt: Date.now(),
     })

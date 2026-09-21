@@ -146,30 +146,6 @@ vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
 }));
 
-// The teams panel links to each team's DEFAULT assistant, whose id only the
-// assistants list carries.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({
-      data: {
-        assistants: [
-          {
-            id: "asst_team_1",
-            owner: { type: "team" as const, id: "team_1" },
-            sessionId: "assistant:asst_team_1",
-            isDefault: true,
-            createdAt: 1,
-          },
-        ],
-      },
-      isLoading: false,
-      error: null,
-    }),
-  };
-});
-
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
 vi.mock("~/components/settings/team-deletion-requests", () => ({
@@ -484,6 +460,19 @@ describe("OrganizationTeamsPage", () => {
     render(<OrganizationTeamsPage />);
     expect(screen.getByText("Platform")).toBeTruthy();
     expect(screen.getByText("1 member")).toBeTruthy();
+  });
+
+  it("does not link multi-team organization rows to the active workspace assistants", () => {
+    teamsData = {
+      teams: [
+        ...teamsData.teams,
+        { id: "team_2", orgId: "org_1", name: "Support", origin: "local", externalId: null, createdAt: 1, memberCount: 2, callerRole: "member", defaultModel: null },
+      ],
+    };
+    render(<OrganizationTeamsPage />);
+    expect(screen.getByText("Platform")).toBeTruthy();
+    expect(screen.getByText("Support")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Assistant" })).toBeNull();
   });
 
   it("creating a team fires the create mutation", () => {

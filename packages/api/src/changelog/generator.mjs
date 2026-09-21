@@ -60,6 +60,9 @@ function fallbackDescription(title, category) {
 
 function descriptionFromBody(body, title, category) {
   const parsed = parseCommitMessage({ subject: `feat: ${title}`, body });
+  // `parsed.changelog` is already null for an opt-out trailer, so the
+  // sentinel can never become the description even on a path that builds an
+  // entry for a commit `shouldIncludeCommit` would have dropped.
   const marked = (
     (parsed.ok ? parsed.changelog : null) ?? /^user impact:\s*(.+)$/im.exec(body)?.[1]
   )
@@ -74,6 +77,10 @@ function descriptionFromBody(body, title, category) {
 export function shouldIncludeCommit(change) {
   const parsed = parseCommitMessage(change);
   if (!parsed.ok || !parsed.userFacing) return false;
+  // "Changelog: none" is the author saying this change is invisible to
+  // users. It decides even against a [user-visible] subject marker, because
+  // the trailer is the signal that speaks about the changelog entry.
+  if (parsed.changelogOptOut) return false;
   if (parsed.metadataValid) return true;
   if (DEPENDENCY_TITLE.test(change.subject)) return false;
   return change.files.length === 0 || change.files.some((path) => !INTERNAL_PATH.test(path));
@@ -88,6 +95,7 @@ export function entryFromCommit(change) {
     title,
     description,
     category,
+    authoredAt: change.authoredAt,
     sources: {
       commitSha: change.commitSha,
       ...(pr ? { pullRequest: Number(pr) } : {}),

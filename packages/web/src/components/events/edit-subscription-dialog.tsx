@@ -1,10 +1,10 @@
 /**
  * EditSubscriptionDialog — edit an existing event subscription: name, event
- * keys, and filters, through the same match step the AutomationWizard's
- * advanced outcome uses. The target is shown read-only: the server pins the
- * target's kind and owner on PATCH (only a same-owner `assistantId` re-point
- * is accepted, which this dialog does not offer yet), so pointing a rule at
- * a different target is a delete-and-recreate, not an edit.
+ * keys, filters, and, for an assistant target, its prompt templates. The
+ * target itself is shown read-only: the server pins the target's kind and
+ * owner on PATCH (only a same-owner `assistantId` re-point is accepted, which
+ * this dialog does not offer yet), so pointing a rule at a different target is
+ * a delete-and-recreate, not an edit.
  *
  * A save sends only the changed fields (`buildSubscriptionPatch`), with the
  * wizard's collision handling: a 409 shows the colliding rules and offers
@@ -43,6 +43,11 @@ import {
   toWireFilters,
   type UiFilterRow,
 } from "./filter-editor";
+import {
+  PromptFields,
+  promptFieldsFrom,
+  type PromptFieldsValue,
+} from "./prompt-fields";
 import { buildSubscriptionPatch } from "./subscription-patch";
 
 export function EditSubscriptionDialog({
@@ -66,6 +71,11 @@ export function EditSubscriptionDialog({
   const [keys, setKeys] = useState<Set<string>>(() => new Set(sub.eventKeys));
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>(() => fromWireFilters(sub.filters));
   const [anyChannel, setAnyChannel] = useState(() => storedAnyChannel(sub.eventKeys, sub.filters));
+  // Seeded from the stored target at mount, which is open time (see the
+  // header comment). Only an assistant target renders a template.
+  const [prompts, setPrompts] = useState<PromptFieldsValue>(() =>
+    promptFieldsFrom(sub.target.kind === "orchestrator" ? sub.target : {}),
+  );
   const [error, setError] = useState<string | null>(null);
   // See the wizard: `committed: false` is a refused write (409) with a "Save
   // anyway" path; `committed: true` is a saved write that still overlaps.
@@ -128,6 +138,7 @@ export function EditSubscriptionDialog({
       eventKeys: [...keys],
       filters,
       anyChannel,
+      prompts,
     });
     if (body === null) {
       onOpenChange(false);
@@ -197,6 +208,16 @@ export function EditSubscriptionDialog({
               This dialog cannot change the target. To use a different target, create a new
               automation and delete this one.
             </p>
+            {/* The target stays fixed, but what the assistant reads is a field
+                of this rule, so it is editable here. */}
+            {sub.target.kind === "orchestrator" && (
+              <PromptFields
+                idPrefix="edit-subscription"
+                value={prompts}
+                onChange={setPrompts}
+                followsThread={sub.target.follow === true}
+              />
+            )}
           </div>
 
           {collisions !== null && (

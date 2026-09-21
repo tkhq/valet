@@ -80,7 +80,23 @@ vi.mock("~/api/repos", () => ({
   }),
 }));
 
+let onePasswordSettings: { orgTokenConnected: boolean; personalTokenConnected: boolean } | undefined = {
+  orgTokenConnected: false,
+  personalTokenConnected: false,
+};
+
+vi.mock("~/api/onepassword", () => ({
+  useOnePasswordSettings: () => ({ data: onePasswordSettings, isLoading: false, error: null }),
+}));
+
 vi.mock("~/api/integrations", () => ({
+  useConnectCredential: () => ({
+    mutate: vi.fn(),
+    mutateAsync: vi.fn().mockResolvedValue({ ok: true }),
+    isPending: false,
+    error: null,
+    reset: vi.fn(),
+  }),
   useCredentials: () => ({
     data: credentialsData,
     isLoading: credentialsLoading,
@@ -262,7 +278,7 @@ describe("ConnectedAccountsPage", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
 
-      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalledWith(undefined));
       await waitFor(() =>
         expect(window.location.href).toBe("https://github.com/login/oauth/authorize?x=1"),
       );
@@ -289,7 +305,7 @@ describe("ConnectedAccountsPage", () => {
       expect(screen.getByText(/sign-in only/i)).toBeTruthy();
       const btn = screen.getByRole("button", { name: "Connect GitHub" });
       fireEvent.click(btn);
-      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalledWith(undefined));
       expect(confirm).not.toHaveBeenCalled();
       expect(screen.queryByRole("dialog")).toBeNull();
     });
@@ -349,7 +365,7 @@ describe("ConnectedAccountsPage", () => {
       const dialog = await screen.findByRole("dialog");
       fireEvent.click(within(dialog).getByRole("button", { name: "Reconnect GitHub" }));
 
-      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalled());
+      await waitFor(() => expect(connectGithubMutateAsync).toHaveBeenCalledWith(undefined));
       await waitFor(() => expect(window.location.href).toBe("https://github.com/x"));
     });
 
@@ -684,5 +700,29 @@ describe("ConnectedAccountsPage", () => {
       ).toHaveProperty("href", "https://t.me/valet_bot?start=xyz");
       expect(screen.getByText("xyz")).toBeTruthy();
     });
+  });
+});
+
+describe("1Password row", () => {
+  beforeEach(() => {
+    onePasswordSettings = { orgTokenConnected: false, personalTokenConnected: false };
+  });
+
+  // TKAI-487: a personal token is a personal credential, so it belongs with
+  // the rest of them here. A member never has to open an Organization page
+  // to finish their own setup.
+  it("offers Connect 1Password with no organization permission anywhere in play", () => {
+    render(<ConnectedAccountsPage />);
+    const row = within(screen.getByRole("group", { name: "1Password" }));
+    expect(row.getByRole("button", { name: "Connect 1Password" })).toBeTruthy();
+  });
+
+  it("shows the connected state with Replace and Remove", () => {
+    onePasswordSettings = { orgTokenConnected: true, personalTokenConnected: true };
+    render(<ConnectedAccountsPage />);
+    const row = within(screen.getByRole("group", { name: "1Password" }));
+    expect(row.getByText("Connected")).toBeTruthy();
+    expect(row.getByRole("button", { name: "Replace" })).toBeTruthy();
+    expect(row.getByRole("button", { name: "Remove token" })).toBeTruthy();
   });
 });

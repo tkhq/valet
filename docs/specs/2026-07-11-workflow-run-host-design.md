@@ -168,8 +168,14 @@ interface RunParams {
   definitionVersionId: string;
   triggerId?: string;
   input?: unknown;            // JSON-serializable trigger/manual input
+  origin?: {
+    assistantSessionId: string;
+    threadId: string;          // scoped to assistantSessionId
+  };
 }
 ```
+
+An assistant action stores an `origin` only when the action runs in the caller's active assistant session. The start service accepts an active origin owned by the caller or run principal. This permits a personal assistant to start an authorized team workflow. Delegated child sessions do not qualify. Workflow-call child runs copy the origin and actor. Retries keep a valid origin and omit an inactive origin. An orchestrator node uses the exact origin session and thread. If that durable thread is missing, the node fails instead of creating a replacement. For a team run with a personal origin, each dispatch checks that the origin owner is still a team member. Scheduled, webhook, event, and HTTP starts omit the origin and report on the run's own thread, `signal:workflow:{runId}`. The run host archives that thread when the run settles.
 
 The port is deliberately this small. Everything correctness-critical (checkpoints, signals, leases, idempotent dispatch) lives in the interpreter + store, where it is testable in-memory and identical across platforms.
 
@@ -268,3 +274,28 @@ claim of a healthy long-lived run too. `WorkflowFenceError` never counts
 clears the count, so transient failures keep the original posture. The
 counter is process-local by design; a run that keeps failing across
 restarts re-earns its strikes in minutes.
+
+**Run origin resolution (2026-09-14).** A run can record the assistant
+conversation that started it: `params.origin` holds the assistant session
+id and the thread id. `promptOrchestrator` resolved that session id with a
+prefix parse, which accepts `assistant:*` only. Assistants migrated from
+`orchestrator_identities` keep an `orchestrator:*` session id, so every
+orchestrator node of a run started from such a thread threw before it
+dispatched. The throw poisoned the drive, and the run failed after the
+strike cap with no node diagnostic; a retry and every child run inherited
+the same origin and failed the same way. The origin now resolves through
+the assistants table (`loadAssistantBySessionId`), which is the authority
+on which session ids belong to an assistant. The org, owner, and archived
+checks are unchanged.
+
+**Origin admission checks (2026-09-14).** An origin was admitted on the
+assistant row alone. Archiving a thread stamps `session_threads.archived_at`
+in the app mirror and leaves the engine thread in place, so a run started
+from an archived thread delivered its report into a conversation the person
+had put away. A retry re-passes the failed run's stored origin unchanged, so
+a run whose origin thread no longer exists failed again at its first
+orchestrator node. Admission now also drops an origin whose mirror row is
+archived, and one whose thread the engine store no longer holds. A dropped
+origin is not an error: the run reports on its own thread. Delivery keeps
+its own check for a thread that disappears after admission, and that error
+names the corrective action.

@@ -17,7 +17,8 @@ import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
   resolutionApproves,
-  toolApprovalGateContext,
+  SANDBOX_READY_TIMEOUT_MS,
+  type ActionPlugin,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -37,9 +38,11 @@ import {
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
+import type { WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { agentSessions, users } from "../schema/index.js";
+import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
+import { agentSessions, users, workflowDefinitions } from "../schema/index.js";
 import {
   ArchivedAssistantError,
   assistantSenderIdentity as senderIdentityForAssistant,
@@ -49,11 +52,13 @@ import {
 } from "../assistants/service.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { canResolveSessionGate } from "../services/session-access.js";
+import { canResolveSessionGate, type SessionOwnerLike } from "../services/session-access.js";
+import { isOrgAdmin } from "../services/org.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import { digestGate, safeChannelActions } from "./gate-digest.js";
@@ -68,6 +73,10 @@ export interface ChannelHostDeps {
   eventStream: EventStream;
   engineCredentials: CredentialStore;
   plugins: ValetPlugin[];
+  /** Workflow store for workflow-owned gate callbacks. */
+  workflowStore?: WorkflowStore;
+  /** Action catalog used when restoring a workflow session for a callback. */
+  actionPluginByService?: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   /** Public base URL for webhook mode; undefined → long-poll. */
   publicUrl?: string;
   /** Resolves the single org id (single-org assumption, same as auth middleware). */
@@ -111,6 +120,13 @@ function gateResolutionLabel(
   return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}${by}`;
 }
 
+/** Outcome lines for the two endings that carry no decision. Each one names
+ * the next action: the card is the reader's only sign that the work stopped,
+ * and neither ending leaves a button to press. */
+const GATE_EXPIRED_LABEL = "⏳ Expired: no one answered in time. Start the run again in Valet.";
+const GATE_WITHDRAWN_LABEL =
+  "🚫 Withdrawn: the run was stopped. Start it again in Valet if you still need it.";
+
 const LOCALDEV_SUFFIX = ".localdev";
 
 /**
@@ -152,6 +168,15 @@ function turnOrigin(entries: SessionEntry[], queueItemId: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Runtime shape check for a gate-prompt reference. The field is typed, but it
+ * arrives from a transport's parser, so both readers of an inbound callback
+ * check it before they key a map with it.
+ */
+function isGatePromptRef(value: unknown): value is GatePromptRef {
+  return isRecord(value) && typeof value.conversationKey === "string" && typeof value.messageId === "string";
 }
 
 type OriginReplyState = "none" | "pending" | "succeeded" | "failed";
@@ -245,6 +270,8 @@ export class ChannelHost {
    * one attention DM per recipient. Resolution edits every one of them. */
   private gatePrompts = new Map<string, GatePromptRef[]>();
   private gateActions = new Map<string, DecisionAction[]>();
+  /** Serializes same-gate callbacks so only the first concurrent decision wins. */
+  private gateCallbackChains = new Map<string, Promise<void>>();
   /** Recent gate resolutions, bounded FIFO (cap `DEDUP_CAP`). A prompt can be
    * recorded AFTER its gate settled — `routeAttention` fires deliverers
    * without awaiting them, so a fast resolution legitimately beats an
@@ -530,7 +557,20 @@ export class ChannelHost {
   startOutbound(): void {
     if (this.outboundUnsub) return;
     this.outboundUnsub = this.deps.eventStream.subscribe(
-      { eventTypes: ["message_end", "tool_end", "decision_gate", "decision_gate_resolved", "command_result"] },
+      {
+        eventTypes: [
+          "message_end",
+          "tool_end",
+          "decision_gate",
+          "decision_gate_resolved",
+          // An ending without a decision still has to clear the card:
+          // otherwise a cancelled or timed-out run leaves live buttons in the
+          // channel for the life of the process.
+          "decision_gate_expired",
+          "decision_gate_withdrawn",
+          "command_result",
+        ],
+      },
       (event) => {
         // Serialize per (session, thread): each handler awaits transport
         // sends, and two concurrent handlers can land out of order — the
@@ -580,6 +620,10 @@ export class ChannelHost {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
         await this.deliverGateResolution(e.gateId, e.resolution);
+      } else if (e.type === "decision_gate_expired") {
+        await this.settleGatePrompts(e.gateId, GATE_EXPIRED_LABEL, { resolvedAtMs: event.timestamp });
+      } else if (e.type === "decision_gate_withdrawn") {
+        await this.settleGatePrompts(e.gateId, GATE_WITHDRAWN_LABEL, { resolvedAtMs: event.timestamp });
       } else if (e.type === "command_result") {
         await this.deliverCommandResult(event.sessionId, e.threadId, e.entry);
       }
@@ -595,7 +639,7 @@ export class ChannelHost {
     trigger: {
       messageId?: string;
       queueItemId?: string;
-      reason?: "end_turn" | "error" | "abort";
+      reason?: "end_turn" | "tool_use" | "error" | "abort";
     },
   ): Promise<void> {
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
@@ -610,7 +654,7 @@ export class ChannelHost {
     const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
     if (!queueItemId) return;
     const dedupeKey = `${sessionId}:first-reply:${queueItemId}`;
-    if (trigger.reason !== undefined && trigger.reason !== "end_turn") {
+    if (trigger.reason === "error" || trigger.reason === "abort") {
       if (trigger.reason === "abort") this.markDelivered(dedupeKey);
       return;
     }
@@ -834,17 +878,35 @@ export class ChannelHost {
     if (!refs || refs.length === 0) return;
     const actions = this.gateActions.get(gateId) ?? [];
     const label = gateResolutionLabel(actions, resolution, await this.userName(resolution.resolvedBy));
+    await this.settleGatePrompts(gateId, label, {
+      ...(resolution.actionId !== undefined ? { actionId: resolution.actionId } : {}),
+      resolvedAtMs: resolution.resolvedAt,
+    });
+  }
 
-    for (const ref of refs) {
+  /**
+   * Writes the outcome line onto every prompt message for a gate, then drops
+   * the gate from all three gate maps. The single place a gate's channel
+   * state ends: a decision, an expiry, and a withdrawal all arrive here.
+   *
+   * One window stays open. A prompt whose send is still in flight has no ref
+   * yet, so this settles nothing for it, and `sendAndRecordGatePrompt`
+   * re-seeds the maps when that send lands. Only a decision is replayed onto
+   * such a prompt (`settledGates` holds a resolution), so an expiry or a
+   * withdrawal in that window leaves that one message with live buttons
+   * until someone clicks and reads the answer.
+   */
+  private async settleGatePrompts(
+    gateId: string,
+    label: string,
+    outcome: { actionId?: string; resolvedAtMs?: number } = {},
+  ): Promise<void> {
+    for (const ref of this.gatePrompts.get(gateId) ?? []) {
       const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
       const transport = this.transports.get(channelType);
       if (transport) {
         try {
-          await transport.updateGatePrompt(ref, {
-            actionId: resolution.actionId,
-            label,
-            resolvedAtMs: resolution.resolvedAt,
-          });
+          await transport.updateGatePrompt(ref, { ...outcome, label });
         } catch (err) {
           // One stale message (deleted DM, revoked scope) must not keep the
           // other copies of the same prompt un-updated.
@@ -936,7 +998,13 @@ export class ChannelHost {
     }
 
     if (event.kind === "gate_callback") {
-      await this.handleGateCallback(transport, event, orgId, userId, channelType);
+      const callback = event.gateCallback;
+      const callbackRef = callback && isGatePromptRef(callback.ref) ? callback.ref : undefined;
+      const mappedGateId = callbackRef ? this.gateForRef(callbackRef)?.gateId : undefined;
+      // Never use gateId from the callback payload. It is untrusted input and
+      // must not let a forged button join another gate's serialization chain.
+      const key = mappedGateId ?? `${callbackRef?.conversationKey ?? event.conversationKey}#${callbackRef?.messageId ?? ""}`;
+      await this.serializeGateCallback(key, () => this.handleGateCallback(transport, event, orgId, userId, channelType));
       return;
     }
 
@@ -993,6 +1061,35 @@ export class ChannelHost {
     await this.dropLog(orgId, "verify_failed", undefined, `${channelType} webhook verification failed`);
   }
 
+  /**
+   * Puts one non-image channel attachment into the session sandbox.
+   *
+   * Returns `undefined` when the file cannot be stored, so the caller can
+   * degrade to a note. The sandbox has to be awake to hold the file; the
+   * turn that follows needs it awake anyway, and the Slack webhook already
+   * answered 200 before this runs, so the wait costs no provider timeout.
+   */
+  private async storeChannelFile(
+    session: Session,
+    fetched: { data: Uint8Array; mimeType: string; name?: string },
+  ): Promise<IngestedChannelFile | undefined> {
+    const attachment = session.attachment;
+    if (attachment.state === "released") return undefined;
+    try {
+      const { sandbox } = await attachment.ensureReady({ timeoutMs: SANDBOX_READY_TIMEOUT_MS });
+      const stored = await ingestChannelFile({
+        sandbox,
+        name: fetched.name ?? "attachment",
+        mimeType: fetched.mimeType,
+        data: fetched.data,
+      });
+      return stored ?? undefined;
+    } catch (err) {
+      console.error("[channel-host] could not store a channel attachment", err);
+      return undefined;
+    }
+  }
+
   private async maybeReplyUnlinked(transport: ChannelTransport | undefined, conversationKey: string): Promise<void> {
     const now = this.now();
     const last = this.unlinkedReplyAt.get(conversationKey);
@@ -1038,18 +1135,25 @@ export class ChannelHost {
         text += "\n\n[attachment skipped: too large or unavailable]";
         continue;
       }
-      if (!fetched.mimeType.startsWith("image/")) {
-        text += `\n\n[attachment skipped: unsupported media type ${fetched.mimeType}]`;
+      if (fetched.mimeType.startsWith("image/")) {
+        // Signal content is persisted before the turn runs. Keep image data
+        // JSON-safe across that queue boundary.
+        attachments.push({
+          type: "image",
+          url: `data:${fetched.mimeType};base64,${Buffer.from(fetched.data).toString("base64")}`,
+          mimeType: fetched.mimeType,
+          name: fetched.name,
+        });
         continue;
       }
-      // Signal content is persisted before the turn runs. Keep image data
-      // JSON-safe across that queue boundary.
-      attachments.push({
-        type: "image",
-        url: `data:${fetched.mimeType};base64,${Buffer.from(fetched.data).toString("base64")}`,
-        mimeType: fetched.mimeType,
-        name: fetched.name,
-      });
+      // A PDF, spreadsheet or archive cannot ride an image content block, so
+      // it goes to the sandbox instead and the agent reads it from there.
+      const file = await this.storeChannelFile(session, fetched);
+      if (!file) {
+        text += `\n\n[attachment skipped: could not store ${fetched.mimeType}]`;
+        continue;
+      }
+      attachments.push({ type: "file", ...file });
     }
 
     const content: SignalContent = {
@@ -1084,6 +1188,90 @@ export class ChannelHost {
 
   }
 
+  private async serializeGateCallback(key: string, callback: () => Promise<void>): Promise<void> {
+    const previous = this.gateCallbackChains.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(callback);
+    this.gateCallbackChains.set(key, next);
+    try {
+      await next;
+    } finally {
+      if (this.gateCallbackChains.get(key) === next) this.gateCallbackChains.delete(key);
+    }
+  }
+
+  /**
+   * Decides whether a user may resolve the gates of a workflow session.
+   *
+   * Reads rows only. It builds no session, so asking the question for one
+   * more recipient on one more transport costs queries and nothing else —
+   * `workflowGateSessionFor` builds the session, and only the path that
+   * actually resolves a gate calls it.
+   */
+  private async authorizeWorkflowGate(
+    sessionId: string,
+    orgId: string,
+    userId: string,
+  ): Promise<
+    | { ok: true; owner: SessionOwnerLike; orgId: string }
+    | { ok: false; reason: "workflow_session_malformed" | "workflow_session_missing" | "workflow_session_deleted" | "workflow_session_cross_org" | "unauthorized" }
+  > {
+    if (!this.deps.workflowStore || !this.deps.actionPluginByService || !sessionId.startsWith("wf:")) {
+      return { ok: false, reason: "workflow_session_malformed" };
+    }
+    let parts: ReturnType<typeof parseWorkflowSessionId>;
+    try {
+      parts = parseWorkflowSessionId(sessionId);
+    } catch {
+      return { ok: false, reason: "workflow_session_malformed" };
+    }
+    const run = await this.deps.workflowStore.getRun(parts.runId);
+    if (!run) return { ok: false, reason: "workflow_session_missing" };
+    if (!run.owner) return { ok: false, reason: "workflow_session_deleted" };
+    const rows = await this.deps.db
+      .select({ orgId: workflowDefinitions.orgId })
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, run.params.workflowId))
+      .limit(1);
+    const workflowOrgId = rows[0]?.orgId;
+    if (!workflowOrgId) return { ok: false, reason: "workflow_session_deleted" };
+    if (workflowOrgId !== orgId) return { ok: false, reason: "workflow_session_cross_org" };
+    if (!(await this.deps.engineStore.getSession(sessionId))) {
+      return { ok: false, reason: "workflow_session_deleted" };
+    }
+    const owner: SessionOwnerLike = {
+      ownerType: run.owner.ownerType,
+      ownerId: run.owner.ownerId,
+      userId: run.owner.ownerType === "user" ? run.owner.ownerId : "",
+    };
+    const authorized = owner.ownerType === "org"
+      ? await isOrgAdmin(this.deps.db, workflowOrgId, userId)
+      : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
+    if (!authorized) return { ok: false, reason: "unauthorized" };
+    return { ok: true, owner, orgId: workflowOrgId };
+  }
+
+  /**
+   * Builds the engine session for a workflow gate the caller already
+   * authorized with `authorizeWorkflowGate`. Throws when the workflow
+   * dependencies are absent, which that check refuses first.
+   */
+  private async workflowGateSessionFor(sessionId: string): Promise<Session> {
+    const { workflowStore, actionPluginByService } = this.deps;
+    if (!workflowStore || !actionPluginByService) {
+      throw new Error("workflow gate session requires the workflow store and action plugins");
+    }
+    return ensureWorkflowSession({
+      host: this.deps.engineHost,
+      store: workflowStore,
+      db: this.deps.db,
+      engineStore: this.deps.engineStore,
+      actionPluginByService,
+      plugins: this.deps.plugins,
+      credentials: this.deps.engineCredentials,
+      onePassword: this.deps.onePassword,
+    }, sessionId);
+  }
+
   private async handleGateCallback(
     transport: ChannelTransport | undefined,
     event: InboundChannelEvent,
@@ -1092,19 +1280,13 @@ export class ChannelHost {
     channelType: string,
   ): Promise<void> {
     const gateCallback = event.gateCallback;
-    if (!gateCallback) {
-      await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "gate_callback missing payload");
+    if (!gateCallback || !isRecord(gateCallback) || !isGatePromptRef(gateCallback.ref)) {
+      const callbackId = isRecord(gateCallback) && typeof gateCallback.callbackId === "string" ? gateCallback.callbackId : undefined;
+      await transport?.answerCallback?.(callbackId ?? "", "This approval has expired — resolve it on the web.");
+      await this.dropLog(orgId, "malformed_callback", event.conversationKey, "gate_callback missing valid ref payload");
       return;
     }
-    let mapped = this.gateForRef(gateCallback.ref);
-    if (!mapped && gateCallback.gateId) {
-      // Fallback: the ref key is rebuilt by the transport from the clicked
-      // message and can drift from the recorded one (thread-ts codecs, LRU
-      // eviction of the send-side key). The gate id embedded in the button
-      // payload recovers the mapping while the gate is still tracked.
-      const firstRef = this.gatePrompts.get(gateCallback.gateId)?.[0];
-      if (firstRef) mapped = this.gateForRef(firstRef);
-    }
+    const mapped = this.gateForRef(gateCallback.ref);
     if (!mapped) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
@@ -1122,7 +1304,28 @@ export class ChannelHost {
       .where(eq(agentSessions.id, mapped.sessionId))
       .limit(1);
     const sessionRow = rows[0];
-    if (!sessionRow || !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
+    let workflow: Awaited<ReturnType<ChannelHost["authorizeWorkflowGate"]>> | null = null;
+    try {
+      workflow = mapped.sessionId.startsWith("wf:")
+        ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId)
+        : null;
+    } catch (err) {
+      console.error("[channels] workflow gate authorization failed", err);
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        "Valet could not process this approval. Open the session in Valet to resolve it.",
+      );
+      return;
+    }
+    if ((workflow && !workflow.ok) || (!sessionRow && !workflow)) {
+      // No app row and no workflow run behind the id: nothing authorizes this
+      // click. It is an unknown or deleted ordinary session, not a workflow.
+      const reason = workflow?.reason ?? "unauthorized";
+      await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
+      await this.dropLog(orgId, reason, event.conversationKey, reason === "unauthorized" ? "sender may not resolve this session's gates" : reason);
+      return;
+    }
+    if (sessionRow && (sessionRow.orgId !== orgId || (!workflow?.ok && !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
       return;
@@ -1131,7 +1334,8 @@ export class ChannelHost {
     // Same backstop as the web resolve route, via the same shared guard:
     // `always_allow` widens policy for the SESSION's org, so a non-admin's
     // click must fail here with a clear answer, not late inside the engine.
-    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && !(await canApplyAlwaysAllow(this.deps.db, sessionRow.orgId, userId))) {
+    const sessionOrgId = sessionRow?.orgId ?? (workflow?.ok ? workflow.orgId : undefined);
+    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && sessionOrgId && !(await canApplyAlwaysAllow(this.deps.db, sessionOrgId, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
       return;
@@ -1155,10 +1359,15 @@ export class ChannelHost {
     // failure must answer too, not escape to handleUpdate's log-only catch.
     let session: Session;
     try {
-      const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
-      session = assistant
-        ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
-        : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+      if (workflow?.ok) {
+        session = await this.workflowGateSessionFor(mapped.sessionId);
+      } else {
+        if (!sessionRow) throw new Error("missing session row for channel gate callback");
+        const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
+        session = assistant
+          ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
+          : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+      }
     } catch (err) {
       console.error("[channels] gate resolve wake failed", err);
       await transport?.answerCallback?.(
@@ -1170,9 +1379,15 @@ export class ChannelHost {
       return;
     }
     const gate = (await session.pendingDecisionGates()).find((candidate) => candidate.id === mapped.gateId);
-    const approval = gate?.type === "approval" ? toolApprovalGateContext(gate.context) : null;
-    const channelReviewIncomplete = gate ? digestGate(gate).reviewIncomplete === true : false;
-    if (gate && channelReviewIncomplete && resolutionApproves(gate, { actionId: gateCallback.actionId, resolvedBy: "", resolvedAt: 0 })) {
+    if (!gate || gate.status !== "pending" || !gate.actions.some((action) => action.id === gateCallback.actionId)) {
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        "This approval was already resolved. Open the session in Valet to see the outcome.",
+      );
+      return;
+    }
+    const channelReviewIncomplete = digestGate(gate).reviewIncomplete === true;
+    if (channelReviewIncomplete && resolutionApproves(gate, { actionId: gateCallback.actionId, resolvedBy: "", resolvedAt: 0 })) {
       await transport?.answerCallback?.(gateCallback.callbackId, "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request.");
       return;
     }
@@ -1228,31 +1443,23 @@ export class ChannelHost {
             // can be broader than the resolver set (org admins for an
             // org-owned session), and a button that always answers "expired"
             // is worse than the plain summary.
-            if (event.gate && event.sessionId) {
-              const rows = await this.deps.db
-                .select()
-                .from(agentSessions)
-                .where(eq(agentSessions.id, event.sessionId))
-                .limit(1);
-              const sessionRow = rows[0];
-              if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
-                await this.sendAndRecordGatePrompt(
-                  transport,
-                  conversationKey,
-                  {
-                    gateId: event.gate.id,
-                    title: event.title,
-                    body: this.attentionBody(event),
-                    fields: event.gate.fields,
-                    actions: event.gate.actions,
-                  },
-                  event.sessionId,
-                );
-                continue;
-              }
-              // Recipient cannot resolve this gate (or its app row is gone):
-              // fall through to the plain summary with the web link.
+            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId))) {
+              await this.sendAndRecordGatePrompt(
+                transport,
+                conversationKey,
+                {
+                  gateId: event.gate.id,
+                  title: event.title,
+                  body: this.attentionBody(event),
+                  fields: event.gate.fields,
+                  actions: event.gate.actions,
+                },
+                event.sessionId,
+              );
+              continue;
             }
+            // No gate, a recipient who cannot resolve it, or a lookup that
+            // failed: fall through to the plain summary with the web link.
             const sender = event.sessionId
               ? await this.assistantSenderIdentity(event.sessionId)
               : undefined;
@@ -1266,6 +1473,41 @@ export class ChannelHost {
         }
       },
     };
+  }
+
+  /**
+   * May this recipient resolve the gate on `sessionId`, so the attention DM
+   * can carry real buttons?
+   *
+   * Answering costs two or three reads, and any of them can fail. A failed
+   * read costs the buttons, never the message: the caller then sends the
+   * plain summary, which carries the web link. Throwing here instead would
+   * lose the whole notification for a run that is waiting on it.
+   */
+  private async mayResolveGateOverDm(sessionId: string, userId: string): Promise<boolean> {
+    try {
+      const rows = await this.deps.db
+        .select()
+        .from(agentSessions)
+        .where(eq(agentSessions.id, sessionId))
+        .limit(1);
+      const sessionRow = rows[0];
+      if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
+        return true;
+      }
+      // A `wf:` id is authorized by its run, the same way the click path
+      // authorizes it — a workflow session can also own an app row.
+      if (!sessionId.startsWith("wf:")) return false;
+      const workflow = await this.authorizeWorkflowGate(
+        sessionId,
+        this.orgId ?? (await this.deps.resolveOrgId()),
+        userId,
+      );
+      return workflow.ok;
+    } catch (err) {
+      console.error("[channels] gate DM authorization failed", err);
+      return false;
+    }
   }
 
   /** The one composer of the web deep link, shared by every outbound path. */

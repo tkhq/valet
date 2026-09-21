@@ -12,9 +12,13 @@ import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries } from "./ingest.js";
 import { validateRegexPattern, type SubscriptionFilter } from "./match.js";
-import { enforceMentionScope } from "./mention-scope.js";
+import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
+import { validatePromptTemplate } from "./prompt-template.js";
+import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
+/** The optional prompt templates an orchestrator target may carry. */
+const PROMPT_FIELDS = ["systemPrompt", "userPromptTemplate"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
 // no workflow node parks on the `event:{key}` signal shape the dispatcher
 // would emit, so a signal-target subscription would validate and then
@@ -131,9 +135,25 @@ export function validateSubscription(
     if (target.assistantId !== undefined && (typeof target.assistantId !== "string" || target.assistantId.length === 0)) {
       return "assistantId must be a non-empty string";
     }
+    // Both prompt templates are validated against the SELECTED catalog
+    // entries, the same set a filter field is held to: a template addresses
+    // exactly the payload fields this rule's events declare.
+    for (const field of PROMPT_FIELDS) {
+      const value = target[field];
+      if (value === undefined) continue;
+      const error = validatePromptTemplate(value, field, selectedEntries);
+      if (error) return error;
+    }
   }
-  if (target.kind === "workflow" && target.assistantId !== undefined) {
-    return "assistantId is only valid on an orchestrator target";
+  if (target.kind === "workflow") {
+    if (target.assistantId !== undefined) {
+      return "assistantId is only valid on an orchestrator target";
+    }
+    // A workflow keeps its own prompt configuration on its llm and session
+    // nodes. A prompt field here would name a prompt nothing renders.
+    for (const field of PROMPT_FIELDS) {
+      if (target[field] !== undefined) return `${field} is only valid on an orchestrator target`;
+    }
   }
   return null;
 }
@@ -154,32 +174,45 @@ export interface SubscriptionWriteScope {
    * (`storedAnyChannelState`), so an edit that leaves channel scope alone
    * needs no re-asserted flag. */
   storedAnyChannel?: boolean;
+  /** Patches only: the row's stored invocation audience, so a write that
+   * repeats what the row already means passes as a no-op. */
+  storedAudience?: string | null;
 }
 
 /**
  * Validate + scope one subscription write. Returns the filters to store —
- * the validated input plus any filter the mention gate injected — or the
- * refusal to answer with. The casts narrow shapes `validateSubscription`
- * just accepted.
+ * the validated input plus any filter the mention gate injected — and the
+ * invocation audience to store, or the refusal to answer with. An absent
+ * audience means `team`, so the caller stores null. The casts narrow shapes
+ * `validateSubscription` just accepted.
  */
 export async function validateSubscriptionWrite(
   db: AppDb,
   plugins: ValetPlugin[],
-  body: { name: unknown; eventKeys: unknown; filters: unknown; target: unknown },
+  body: { name: unknown; eventKeys: unknown; filters: unknown; target: unknown; audience?: unknown },
   scope: SubscriptionWriteScope,
-): Promise<{ ok: true; filters: SubscriptionFilter[] } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; filters: SubscriptionFilter[]; audience: MentionAudience | undefined }
+  | { ok: false; error: string }
+> {
   const error = validateSubscription(plugins, body);
   if (error) return { ok: false, error };
   const filters = body.filters as SubscriptionFilter[];
-  if (!scope.matchChanged) return { ok: true, filters };
-  return enforceMentionScope(db, plugins, scope.creatorUserId, {
+  // The audience is read on every write, including one that changes nothing
+  // about the match: a patch may set it alone.
+  const audience = readMentionAudience(body.audience, {
+    ownerType: scope.ownerType,
+    target: body.target,
+    current: scope.storedAudience,
+  });
+  if (!audience.ok) return { ok: false, error: audience.error };
+  if (!scope.matchChanged) return { ok: true, filters, audience: audience.audience };
+  const scoped = await enforceMentionScope(db, plugins, scope.creatorUserId, {
     eventKeys: body.eventKeys as string[],
     filters,
     anyChannel: scope.anyChannel,
     storedAnyChannel: scope.storedAnyChannel,
-    teamAssistant: typeof body.target === "object" && body.target !== null &&
-      "kind" in body.target && body.target.kind === "orchestrator" &&
-      (scope.ownerType === "team" || (scope.ownerType === undefined &&
-        "orchestrator" in body.target && body.target.orchestrator === "team")),
+    teamAssistant: isTeamAssistantRule(scope.ownerType, body.target),
   });
+  return scoped.ok ? { ...scoped, audience: audience.audience } : scoped;
 }

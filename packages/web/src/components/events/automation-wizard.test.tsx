@@ -169,6 +169,56 @@ describe("AutomationWizard", () => {
     });
   });
 
+  it("homepage setup opens on the organization audience and posts it", () => {
+    assistantsData = { assistants: [
+      { id: "a-team", name: "Reviewer", isDefault: true, owner: { type: "team", id: "t_platform" } },
+    ] };
+    render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
+    const anyone = screen.getByLabelText(/Anyone in the organization/) as HTMLInputElement;
+    expect(anyone.checked).toBe(true);
+    expect((screen.getByLabelText(/Only members of Platform/) as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByText(/answers explicit mentions in the selected channels/)).toBeTruthy();
+    // Thread following is on by default, so the copy must not read as
+    // "explicit mentions only".
+    expect(screen.getByText(/from anyone in that thread/)).toBeTruthy();
+    expect(screen.getByText(/whoever sends them/)).toBeTruthy();
+    expect(screen.getByText(/runs with the team's access and tools/)).toBeTruthy();
+    expect(screen.getByText(/does not run or change the team's workflows/)).toBeTruthy();
+    addReplyChannel("C123");
+    fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-team" } });
+    clickNext();
+    expect(screen.getByText(/any member of the organization/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(createSubscription.mock.calls[0][0].audience).toBe("organization");
+  });
+
+  it("the team-only audience posts audience team", () => {
+    assistantsData = { assistants: [
+      { id: "a-team", name: "Reviewer", isDefault: true, owner: { type: "team", id: "t_platform" } },
+    ] };
+    render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
+    fireEvent.click(screen.getByLabelText(/Only members of Platform/));
+    addReplyChannel("C123");
+    fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-team" } });
+    clickNext();
+    expect(screen.getByText(/any linked member of Platform/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(createSubscription.mock.calls[0][0].audience).toBe("team");
+  });
+
+  it("a personal reply rule carries no audience", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    clickNext();
+    expect(screen.queryByLabelText(/Anyone in the organization/)).toBeNull();
+    addReplyChannel("C123");
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Mine" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    expect(createSubscription.mock.calls[0][0].audience).toBeUndefined();
+  });
+
   it("reply outcome posts slack.app_mention with the picked channel and follow ON", () => {
     // The team workspace seeds the team assistant.
     scopeTeamId = "t_platform";
@@ -179,7 +229,7 @@ describe("AutomationWizard", () => {
 
     // Step 2 — Reply: channels are required now, so add one, and leave
     // follow ON (default). The team radio is available.
-    expect(screen.getByText(/any linked team member/)).toBeTruthy();
+    expect(screen.getByText(/The team owns and administers the assistant/)).toBeTruthy();
     addReplyChannel("C123");
     const teamRadio = screen.getByLabelText(/Platform's assistant/) as HTMLInputElement;
     expect(teamRadio.disabled).toBe(false);
@@ -210,9 +260,9 @@ describe("AutomationWizard", () => {
     expect(screen.getByText(/An assistant answers Slack @-mentions/)).toBeTruthy();
     clickNext();
     expect(screen.getByText(/This rule uses the organization/)).toBeTruthy();
-    expect(screen.getByText(/any linked team member/)).toBeTruthy();
+    expect(screen.getByText(/Choose below who may invoke it by mention/)).toBeTruthy();
     expect((screen.getByLabelText(/Platform's assistant/) as HTMLInputElement).disabled).toBe(false);
-    expect(screen.getByText(/Unlinked senders and nonmembers/)).toBeTruthy();
+    expect(screen.getByText(/no linked Slack account is always denied/)).toBeTruthy();
     // The review describes the selected team's member scope.
     addReplyChannel("C123");
     clickNext();
@@ -391,6 +441,92 @@ describe("AutomationWizard", () => {
       orchestrator: "team",
       teamId: "t_platform",
     });
+  });
+
+  // The server refuses a bad template by naming the wire field, the way every
+  // sibling refusal in that validator does. If the form does not show the same
+  // name, a reader told to move a variable to userPromptTemplate is looking for
+  // a box that does not exist under that name.
+  it("names the wire field beside each prompt label, so a server refusal points somewhere", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+
+    const system = screen.getByLabelText(/Instructions for the assistant/);
+    const user = screen.getByLabelText(/Event message/);
+    expect(system.closest("div")?.textContent).toContain("systemPrompt");
+    expect(user.closest("div")?.textContent).toContain("userPromptTemplate");
+  });
+
+  it("reply outcome posts the prompt templates it collected on the mention target", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    clickNext(); // What. The reply outcome is the default.
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+    fireEvent.change(screen.getByLabelText(/Instructions for the assistant/), {
+      target: { value: "Answer in one sentence." },
+    });
+    fireEvent.change(screen.getByLabelText(/Event message/), {
+      target: { value: "Mention: {{event.body}}" },
+    });
+    clickNext(); // Reply
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Slack replies" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({
+      kind: "orchestrator",
+      orchestrator: "user",
+      follow: true,
+      systemPrompt: "Answer in one sentence.",
+      userPromptTemplate: "Mention: {{event.body}}",
+    });
+  });
+
+  it("notify outcome posts the prompt templates it collected on the assistant target", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Send a notification/);
+    clickNext(); // What
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext(); // Match
+
+    // Step 3, Then: your assistant, plus what it should read.
+    fireEvent.change(screen.getByLabelText(/Instructions for the assistant/), {
+      target: { value: "Triage it. Answer in one sentence." },
+    });
+    fireEvent.change(screen.getByLabelText(/Event message/), {
+      target: { value: "{{event.summary}} on {{refs.repo}}" },
+    });
+    clickNext();
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "PR triage" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({
+      kind: "orchestrator",
+      orchestrator: "user",
+      follow: false,
+      systemPrompt: "Triage it. Answer in one sentence.",
+      userPromptTemplate: "{{event.summary}} on {{refs.repo}}",
+    });
+  });
+
+  it("offers no prompt template on a workflow target, whose prompts live on its nodes", () => {
+    workflowsData = { workflows: [{ id: "wf-1", name: "Deploy" }] };
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    pickOutcome(/Run a workflow on an event/);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext();
+
+    expect(screen.queryByLabelText(/Instructions for the assistant/)).toBeNull();
+    expect(screen.queryByLabelText(/Event message/)).toBeNull();
   });
 
   it("schedule outcome posts a schedule with a cron and an orchestrator prompt", () => {

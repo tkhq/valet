@@ -1,4 +1,6 @@
-import { readFileSync, writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, mkdtempSync, symlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,19 +8,44 @@ import { NESTED_KUBERNETES_IDENTITY } from "../src/index.js";
 import {
   archiveKind,
   capabilityKernel,
+  cgroupMembershipKernel,
+  cmdlineIdentityKernel,
+  epochRecoveryKernel,
   K3S_ARGV,
   K3S_ENV,
+  LEAF_CONTROLLERS,
+  LEAF_CONVERGENCE,
+  leaderState,
+  leafConvergenceKernel,
   lifecycleKernel,
   mapKernel,
+  SCOPE,
+  STATE_REMOVAL_TIMEOUT_MS,
+  startupKernel,
+  startRecoveryKernel,
   statusKernel,
+  stopGuardKernel,
   readImportResult,
+  removeStateRoot,
+  ROOT,
   validateArchive,
 } from "../../../docker/valet-kubernetes.mjs";
 
 interface Vector<TInput, TExpected> { id: string; mode?: string; input: TInput; expected: TExpected; covers?: string[] }
+interface CmdlineInput { bytes: string }
+type CmdlineVectorId = `cmdline-${string}`;
+interface LeaderInput { state: "S" | "Z" | "S->Z" | "missing"; cmdline: CmdlineVectorId; cgroup: "owned" | "foreign" }
 interface Vectors {
   capabilityVectors: Vector<{ requested: boolean; provider: false | "v1" }, string>[];
   mapVectors: Vector<number[][], boolean>[];
+  cgroupVectors: Vector<string, boolean>[];
+  cmdlineIdentityVectors: Vector<CmdlineInput, boolean>[];
+  startupVectors: Vector<{ leader: string; deadlineExpired: boolean }, string>[];
+  leafConvergenceVectors: Vector<{ leaderLocation: "leaf" | "evac" | "other"; leafProcs: string[]; enabled: string[]; required: string[]; evacExists: boolean }, string>[];
+  leaderStateVectors: Vector<LeaderInput, string>[];
+  startRecoveryVectors: Vector<LeaderInput, string>[];
+  stopGuardVectors: Vector<LeaderInput | null, string>[];
+  epochRecoveryVectors: Vector<LeaderInput | null, string>[];
   lifecycleVectors: Vector<Record<string, unknown>, Record<string, unknown>>[];
   statusVectors: Vector<Record<string, unknown>, { exit: number; persistedAfter: string; stdout: string }>[];
   acceptanceVectors: { id: string; mode: string; step: string; check: string; expected: string; covers: string[] }[];
@@ -26,8 +53,45 @@ interface Vectors {
   artifacts: { arch: string; name: string; version: string; url: string; sha256: string }[];
   k3sArgv: string[];
   k3sEnv: Record<string, string>;
+  leafControllers: string[];
+  leafConvergence: { attempts: number; delayMs: number };
 }
-const vectors = JSON.parse(readFileSync("../../docs/specs/nested-kubernetes-v1-vectors.json", "utf8")) as Vectors;
+const vectors = JSON.parse(
+  readFileSync(
+    new URL("../../../docs/specs/nested-kubernetes-v1-vectors.json", import.meta.url),
+    "utf8",
+  ),
+) as Vectors;
+
+function cmdlineFixture(input: CmdlineInput): Buffer {
+  return Buffer.from(input.bytes, "latin1");
+}
+
+function namedCmdline(id: CmdlineVectorId): Buffer {
+  const vector = vectors.cmdlineIdentityVectors.find((candidate) => candidate.id === id);
+  if (!vector) throw new Error(`missing cmdline vector ${id}`);
+  return cmdlineFixture(vector.input);
+}
+
+function leaderFixture(input: LeaderInput) {
+  const proc = mkdtempSync(join(tmpdir(), "valet-kubernetes-proc-"));
+  const pid = 4242;
+  mkdirSync(join(proc, "sys/kernel/random"), { recursive: true });
+  writeFileSync(join(proc, "sys/kernel/random/boot_id"), "boot-test\n");
+  if (input.state !== "missing") {
+    const initialState = input.state === "S->Z" ? "S" : input.state;
+    mkdirSync(join(proc, String(pid)), { recursive: true });
+    writeFileSync(join(proc, String(pid), "stat"), `${pid} (k3s) ${initialState} ${Array(18).fill("0").join(" ")} 123 0\n`);
+    writeFileSync(join(proc, String(pid), "status"), `Name:\tk3s\nState:\t${initialState}\nUid:\t1500\t1500\t1500\t1500\n`);
+    writeFileSync(join(proc, String(pid), "cmdline"), namedCmdline(input.cmdline));
+    writeFileSync(join(proc, String(pid), "cgroup"), input.cgroup === "owned" ? "0::/init/valet-kubernetes/leaf\n" : "0::/init/foreign\n");
+  }
+  const record = { pid, startTime: "123", bootId: "boot-test", uid: 1500, epoch: process.env.VALET_SANDBOX_EPOCH ?? "", cgroup: SCOPE, argvDigest: createHash("sha256").update(JSON.stringify(K3S_ARGV)).digest("hex") };
+  return { proc, record };
+}
+function guardFixture(input: LeaderInput | null) {
+  return input === null ? { proc: "/missing", record: null } : leaderFixture(input);
+}
 
 describe("nested Kubernetes normative vectors", () => {
   it.each(vectors.capabilityVectors)("executes $id", ({ input, expected }) => {
@@ -35,6 +99,38 @@ describe("nested Kubernetes normative vectors", () => {
   });
   it.each(vectors.mapVectors)("executes $id", ({ input, expected }) => {
     expect(mapKernel(input)).toBe(expected);
+  });
+  it.each(vectors.cgroupVectors)("executes $id", ({ input, expected }) => {
+    expect(cgroupMembershipKernel(input)).toBe(expected);
+  });
+  it.each(vectors.cmdlineIdentityVectors)("executes $id", ({ input, expected }) => {
+    expect(cmdlineIdentityKernel(cmdlineFixture(input), K3S_ARGV)).toBe(expected);
+  });
+  it.each(vectors.startupVectors)("executes $id", ({ input, expected }) => {
+    expect(startupKernel(input)).toBe(expected);
+  });
+  it.each(vectors.leafConvergenceVectors)("executes $id", ({ input, expected }) => {
+    expect(leafConvergenceKernel(input)).toBe(expected);
+  });
+  it.each(vectors.leaderStateVectors)("executes $id at the proc seam", ({ input, expected }) => {
+    const { proc, record } = leaderFixture(input);
+    const transition = input.state === "S->Z" ? () => {
+      writeFileSync(join(proc, String(record.pid), "stat"), `${record.pid} (k3s) Z ${Array(18).fill("0").join(" ")} 123 0\n`);
+      return false;
+    } : undefined;
+    expect(leaderState(record, proc, transition)).toBe(expected);
+  });
+  it.each(vectors.startRecoveryVectors)("executes $id through the start recovery guard", ({ input, expected }) => {
+    const { proc, record } = leaderFixture(input);
+    expect(startRecoveryKernel(record, proc)).toBe(expected);
+  });
+  it.each(vectors.stopGuardVectors)("executes $id through the stop guard", ({ input, expected }) => {
+    const { proc, record } = guardFixture(input);
+    expect(stopGuardKernel(record, proc)).toBe(expected);
+  });
+  it.each(vectors.epochRecoveryVectors)("executes $id through the epoch guard", ({ input, expected }) => {
+    const { proc, record } = guardFixture(input);
+    expect(epochRecoveryKernel(record, proc)).toBe(expected);
   });
   it.each(vectors.lifecycleVectors)("executes $id", ({ input, expected }) => {
     expect(lifecycleKernel(input)).toEqual(expected);
@@ -50,10 +146,13 @@ describe("nested Kubernetes normative vectors", () => {
   it("uses the normative process contract", () => {
     expect(K3S_ARGV).toEqual(vectors.k3sArgv);
     expect(K3S_ENV).toEqual(vectors.k3sEnv);
+    expect(LEAF_CONTROLLERS).toEqual(["cpuset", "cpu", "memory", "pids"]);
+    expect(LEAF_CONTROLLERS).toEqual(vectors.leafControllers);
+    expect(LEAF_CONVERGENCE).toEqual(vectors.leafConvergence);
   });
 
   it("requires unique, non-vacuous safety kernel vectors", () => {
-    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
+    const groups = [vectors.capabilityVectors, vectors.mapVectors, vectors.cgroupVectors, vectors.cmdlineIdentityVectors, vectors.startupVectors, vectors.leafConvergenceVectors, vectors.leaderStateVectors, vectors.startRecoveryVectors, vectors.stopGuardVectors, vectors.epochRecoveryVectors, vectors.lifecycleVectors, vectors.statusVectors, vectors.acceptanceVectors];
     const all = groups.flat();
     expect(new Set(all.map(({ id }) => id)).size).toBe(all.length);
     for (const vector of all) {
@@ -61,7 +160,10 @@ describe("nested Kubernetes normative vectors", () => {
       expect(vector.covers?.length).toBeGreaterThan(0);
       expect(vector.expected).not.toBeUndefined();
     }
-    const design = readFileSync("../../docs/specs/2026-09-12-nested-kubernetes-design.md", "utf8");
+    const design = readFileSync(
+      new URL("../../../docs/specs/2026-09-12-nested-kubernetes-design.md", import.meta.url),
+      "utf8",
+    );
     const required = new Set([...design.matchAll(/\[K(\d+)\]/g)].map((match) => Number(match[1])));
     const covered = new Set<number>();
     for (const vector of all) for (const range of vector.covers ?? []) {
@@ -86,13 +188,89 @@ describe("nested Kubernetes normative vectors", () => {
   });
 
   it("installs every locked artifact with its URL and checksum", () => {
-    const dockerfile = readFileSync("../../docker/Dockerfile.sandbox-k8s", "utf8");
+    const dockerfile = readFileSync(
+      new URL("../../../docker/Dockerfile.sandbox-k8s", import.meta.url),
+      "utf8",
+    );
     for (const artifact of vectors.artifacts) {
       expect(dockerfile).toContain(artifact.url);
       expect(dockerfile).toContain(artifact.sha256);
       expect(dockerfile).toContain(artifact.version);
     }
     expect(dockerfile).not.toMatch(/curl[^\n]*rootlesskit/i);
+  });
+});
+
+describe("state root removal", () => {
+  it("allows the namespaced remover to use the operation budget", () => {
+    expect(STATE_REMOVAL_TIMEOUT_MS).toBe(600_000);
+    const helper = readFileSync(new URL("../../../docker/valet-kubernetes.mjs", import.meta.url), "utf8");
+    expect(helper).toContain("timeout: STATE_REMOVAL_TIMEOUT_MS");
+  });
+
+  it("retries access failures in the subordinate-mapped user namespace", () => {
+    let present = true;
+    let namespacedTarget = "";
+    removeStateRoot(ROOT, {
+      remove: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+      exists: () => present,
+      removeInUserNamespace: (target: string) => { namespacedTarget = target; present = false; return 0; },
+    });
+    expect(namespacedTarget).toBe(ROOT);
+  });
+
+  it("retries every direct removal error", () => {
+    let present = true;
+    removeStateRoot(ROOT, {
+      remove: () => { throw Object.assign(new Error("busy"), { code: "EBUSY" }); },
+      exists: () => present,
+      removeInUserNamespace: () => { present = false; return 0; },
+    });
+    expect(present).toBe(false);
+  });
+
+  it("fails closed when direct and namespaced removal both fail", () => {
+    let failure: unknown;
+    try {
+      removeStateRoot(ROOT, {
+        remove: () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); },
+        exists: () => true,
+        removeInUserNamespace: () => 1,
+      });
+    } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ code: "state_removal_failed", exitCode: 22 });
+  });
+
+  it("reports an interrupted namespaced removal as retryable", () => {
+    let failure: unknown;
+    try {
+      removeStateRoot(ROOT, {
+        remove: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+        exists: () => true,
+        removeInUserNamespace: () => spawnSync("/bin/sh", ["-c", "sleep 1"], { timeout: 20 }),
+      });
+    } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ code: "state_removal_failed", exitCode: 22 });
+    expect(String(failure)).toContain("Retry stop");
+    expect(String(failure)).not.toContain("Recreate the sandbox");
+  });
+
+  it("ignores temporary cleanup failure after Root is absent", () => {
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "valet-kubernetes-cleanup-"));
+    let present = true;
+    expect(() => removeStateRoot(ROOT, {
+      remove: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+      exists: () => present,
+      makeTemporaryRoot: () => temporaryRoot,
+      removeInUserNamespace: () => { present = false; return 0; },
+      removeTemporaryRoot: () => { throw new Error("cleanup failed"); },
+    })).not.toThrow();
+    expect(present).toBe(false);
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it("refuses every removal target except the exact state root", () => {
+    expect(() => removeStateRoot(ROOT + "/data")).toThrow("state removal path is unsafe");
   });
 });
 

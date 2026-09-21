@@ -133,6 +133,7 @@ export interface EntryRow {
   cost: string | null;
   attachments: string | null;
   createdAt: number;
+  sequence: number;
 }
 
 /** Narrows a raw `engine_entries` row (as returned by pg's query()) into an EntryRow. */
@@ -168,6 +169,7 @@ export function rawToEntryRow(raw: Record<string, unknown>): EntryRow {
     cost: asStringOrNull(raw.cost, "cost"),
     attachments: asStringOrNull(raw.attachments, "attachments"),
     createdAt: toNum(raw.created_at, "created_at"),
+    sequence: toNum(raw.seq, "seq"),
   };
 }
 
@@ -343,6 +345,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         attachments: parseJson(row.attachments),
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -361,6 +364,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         fileContext: parseJson(row.fileContext),
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -377,6 +381,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         summary: row.summary ?? "",
         metadata: parseJson(row.metadata),
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -399,6 +404,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         withdrawnReason: (row.withdrawnReason as DecisionGateEntry["withdrawnReason"]) ?? undefined,
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;
@@ -419,6 +425,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         channel: parseJson(row.channel),
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
+        sequence: row.sequence,
         queueItemId: row.queueItemId ?? undefined,
       };
       return e;

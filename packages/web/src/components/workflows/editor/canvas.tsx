@@ -27,19 +27,20 @@
  * line of steps draws none. Per-node fan-in/fan-out counts ride along on
  * `FlowNodeData.parallel`.
  *
- * Edge "when" badges: xyflow's default (bezier) edge type accepts a plain
- * `label` prop and renders it centered on the path with its own pill
- * background — that already reads as a badge in the token palette without
- * a custom edge component, so there is no `flow-edge.tsx` in this task. If
- * the when-badge ever needs bespoke styling beyond what
- * `labelStyle`/`labelBgStyle` can express, that's the seam to add one.
+ * Edge labels: `flow-edge.tsx` uses an orthogonal path and a viewport-portal
+ * badge. It keeps long conditions compact, preserves the full condition for
+ * assistive technology, and offsets sibling labels so branch labels do not
+ * share one midpoint.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Maximize, Minus, Plus } from "lucide-react";
 import {
   Background,
+  ControlButton,
   Controls,
   MarkerType,
   ReactFlow,
+  useReactFlow,
   ViewportPortal,
   applyEdgeChanges,
   applyNodeChanges,
@@ -47,10 +48,13 @@ import {
   type Edge,
   type EdgeChange,
   type EdgeMarker,
+  type EdgeTypes,
+  type FitViewOptions,
   type NodeChange,
   type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { FlowEdge, edgeLabelOffsets, type FlowEdgeData } from "./flow-edge";
 import {
   FlowNode,
   NODE_CARD_MAX_HEIGHT,
@@ -68,6 +72,17 @@ import {
 } from "../editor-model";
 
 const nodeTypes = { workflow: FlowNode };
+const edgeTypes: EdgeTypes = { workflow: FlowEdge };
+type CanvasEdge = Edge<FlowEdgeData, "workflow">;
+
+/**
+ * A first-open camera should use the available canvas, not preserve xyflow's
+ * conservative default. The floor protects readable card and label text on
+ * a complex graph. A saved viewport always takes precedence.
+ */
+export const INITIAL_FIT_OPTIONS: FitViewOptions = { padding: 0.16, minZoom: 0.5, maxZoom: 1.1 };
+/** A manual fit must show the whole graph, even when that requires smaller text. */
+export const MANUAL_FIT_OPTIONS: FitViewOptions = { padding: 0.16 };
 
 /**
  * The arrowhead that makes a directed graph readable without tracing it.
@@ -117,7 +132,7 @@ export function routeNodeChanges(
   }
 }
 
-export function routeEdgeChanges(changes: EdgeChange<Edge>[], callbacks: { onRemoveEdge?: (edgeId: string) => void }): void {
+export function routeEdgeChanges<EdgeType extends Edge>(changes: EdgeChange<EdgeType>[], callbacks: { onRemoveEdge?: (edgeId: string) => void }): void {
   for (const change of changes) {
     if (change.type === "remove") {
       callbacks.onRemoveEdge?.(change.id);
@@ -238,19 +253,87 @@ export function waveBands(flow: WorkflowFlowState, concurrency: ConcurrencyModel
   return bands;
 }
 
-function toXyEdges(flow: WorkflowFlowState): Edge[] {
+export function toXyEdges(
+  flow: WorkflowFlowState,
+  onSelect?: (edgeId: string) => void,
+): CanvasEdge[] {
+  const offsets = edgeLabelOffsets(flow.edges);
   return flow.edges.map((edge) => ({
     id: edge.id,
+    type: "workflow",
     source: edge.source,
     target: edge.target,
     sourceHandle: edge.sourceHandle,
-    label: edge.data.when,
-    labelStyle: { fill: "var(--ink)", fontSize: 11 },
-    labelBgStyle: { fill: "var(--paper)", stroke: "var(--line)" },
-    labelBgPadding: [4, 2],
-    labelBgBorderRadius: 4,
+    data: {
+      ...edge.data,
+      ...(offsets.has(edge.id) ? { labelOffsetY: offsets.get(edge.id) } : {}),
+      ...(onSelect ? { onSelect } : {}),
+    },
     markerEnd: ARROW_END,
   }));
+}
+
+/**
+ * The first movement after an unsaved canvas mounts is React Flow's automatic
+ * fit. Consume only that one movement. Subsequent moves can be user actions,
+ * including Controls buttons that do not provide a DOM event.
+ */
+export function viewportMoveResult(initialFitPending: boolean): {
+  persist: boolean;
+  initialFitPending: boolean;
+} {
+  return initialFitPending
+    ? { persist: false, initialFitPending: false }
+    : { persist: true, initialFitPending: false };
+}
+
+function WorkflowControls({
+  readOnly,
+  onUserViewportIntent,
+}: {
+  readOnly: boolean;
+  onUserViewportIntent: () => void;
+}) {
+  const { fitView, zoomIn, zoomOut } = useReactFlow();
+  return (
+    <Controls
+      showZoom={false}
+      showFitView={false}
+      showInteractive={!readOnly}
+      className="max-sm:[&>button]:min-h-11 max-sm:[&>button]:min-w-11"
+    >
+      <ControlButton
+        aria-label="Zoom in"
+        title="Zoom in"
+        onClick={() => {
+          onUserViewportIntent();
+          void zoomIn();
+        }}
+      >
+        <Plus className="h-4 w-4" aria-hidden />
+      </ControlButton>
+      <ControlButton
+        aria-label="Zoom out"
+        title="Zoom out"
+        onClick={() => {
+          onUserViewportIntent();
+          void zoomOut();
+        }}
+      >
+        <Minus className="h-4 w-4" aria-hidden />
+      </ControlButton>
+      <ControlButton
+        aria-label="Fit view"
+        title="Fit view"
+        onClick={() => {
+          onUserViewportIntent();
+          void fitView(MANUAL_FIT_OPTIONS);
+        }}
+      >
+        <Maximize className="h-4 w-4" aria-hidden />
+      </ControlButton>
+    </Controls>
+  );
 }
 
 export function Canvas({
@@ -273,12 +356,26 @@ export function Canvas({
   // afterwards comes in. The set is rebuilt per snapshot rather than added
   // to, so a node that is removed and later restored arrives again.
   const drawnIds = useRef<ReadonlySet<string> | null>(null);
+  const initialFitPending = useRef(!flow.viewport);
+  const edgeSelectRef = useRef(onSelectEdge);
+  edgeSelectRef.current = onSelectEdge;
   const concurrency = useMemo(() => analyzeConcurrency(flow), [flow]);
   const bands = useMemo(() => waveBands(flow, concurrency), [flow, concurrency]);
   const [nodes, setNodes] = useState<FlowXyNode[]>(() =>
     toXyNodes(flow, errors, EMPTY_IDS, concurrency, gateByNodeId),
   );
-  const [edges, setEdges] = useState<Edge[]>(() => toXyEdges(flow));
+  const [edges, setEdges] = useState<CanvasEdge[]>(() =>
+    toXyEdges(flow, selectEdgeFromLabel),
+  );
+
+  function selectEdgeFromLabel(edgeId: string) {
+    // Labels render in a viewport portal, outside xyflow's edge group. Mirror
+    // the library's selected state before informing the editor, so its moss
+    // selected styling remains visible after a label click.
+    setNodes((current) => current.map((node) => ({ ...node, selected: false })));
+    setEdges((current) => current.map((edge) => ({ ...edge, selected: edge.id === edgeId })));
+    edgeSelectRef.current(edgeId);
+  }
 
   // The model is the source of truth; whenever the parent hands us a new
   // snapshot (add/remove/duplicate/connect/patch), re-derive local state
@@ -312,7 +409,7 @@ export function Canvas({
   }, [gateByNodeId]);
 
   useEffect(() => {
-    setEdges(toXyEdges(flow));
+    setEdges(toXyEdges(flow, selectEdgeFromLabel));
   }, [flow]);
 
   function handleNodesChange(changes: NodeChange<FlowXyNode>[]) {
@@ -321,9 +418,9 @@ export function Canvas({
     routeNodeChanges(changes, { onNodePositionChange, onRemoveNode });
   }
 
-  function handleEdgesChange(changes: EdgeChange<Edge>[]) {
+  function handleEdgesChange(changes: EdgeChange<CanvasEdge>[]) {
     if (readOnly) changes = changes.filter((change) => change.type === "select");
-    setEdges((current) => applyEdgeChanges(changes, current));
+    setEdges((current) => applyEdgeChanges<CanvasEdge>(changes, current));
     routeEdgeChanges(changes, { onRemoveEdge });
   }
 
@@ -336,8 +433,20 @@ export function Canvas({
     });
   }
 
+  function markUserViewportIntent() {
+    initialFitPending.current = false;
+  }
+
+  function handleMoveStart(event: unknown) {
+    // Pointer and wheel gestures carry an event. Controls call the marker
+    // directly because their viewport API calls have no DOM event.
+    if (event instanceof Event) markUserViewportIntent();
+  }
+
   function handleMoveEnd(_event: unknown, viewport: Viewport) {
-    onViewportChange?.(viewport);
+    const result = viewportMoveResult(initialFitPending.current);
+    initialFitPending.current = result.initialFitPending;
+    if (result.persist) onViewportChange?.(viewport);
   }
 
   return (
@@ -350,6 +459,7 @@ export function Canvas({
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={handleNodesChange}
         onEdgesChange={handleEdgesChange}
         onConnect={handleConnect}
@@ -359,9 +469,11 @@ export function Canvas({
           onSelectNode(null);
           onSelectEdge(null);
         }}
+        onMoveStart={handleMoveStart}
         onMoveEnd={handleMoveEnd}
         defaultViewport={flow.viewport}
         fitView={!flow.viewport}
+        fitViewOptions={INITIAL_FIT_OPTIONS}
         minZoom={0.1}
         // Arrowheads carry an inline fill, which outranks the stylesheet,
         // so the library's hardcoded light grey would survive into dark
@@ -409,7 +521,7 @@ export function Canvas({
           ))}
         </ViewportPortal>
         <Background />
-        <Controls showInteractive={!readOnly} className="max-sm:[&>button]:min-h-11 max-sm:[&>button]:min-w-11" />
+        <WorkflowControls readOnly={readOnly} onUserViewportIntent={markUserViewportIntent} />
       </ReactFlow>
     </div>
   );

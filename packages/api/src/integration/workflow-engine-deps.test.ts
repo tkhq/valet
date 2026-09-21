@@ -12,12 +12,16 @@
  *    `llmComplete` seam (pi-ai `getModel` + `completeSimple`) actually
  *    drives a node to completion, not just a bare API call.
  *
- * Skipped without `ANTHROPIC_API_KEY`.
+ * Real-provider cases skip without `ANTHROPIC_API_KEY`. A keyless HTTP
+ * regression verifies repeated orchestrator runs with a substituted model transport.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { eq } from "drizzle-orm";
+import * as piAi from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage } from "@valet/engine/test-helpers";
 import { bootTestApi } from "./_setup.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import type {
   CreateWorkflowResponse,
@@ -177,3 +181,77 @@ describeIfKey("api integration: workflow engine-deps", () => {
     45_000,
   );
 });
+
+
+it("HTTP workflow runs keep separate orchestrator threads and archive each on settle, without an LLM key", async () => {
+  const original = piAi.getApiProvider("anthropic-messages");
+  const stream: piAi.ApiStreamSimpleFunction = () => {
+    const events = piAi.createAssistantMessageEventStream();
+    events.end(fauxAssistantMessage("workflow completed"));
+    return events;
+  };
+  piAi.registerApiProvider({ api: "anthropic-messages", stream, streamSimple: stream }, "workflow-http-regression");
+  vi.stubEnv("ANTHROPIC_API_KEY", "test-key-no-network");
+  let cleanup: (() => Promise<void>) | undefined;
+  try {
+    const api = await bootTestApi();
+    cleanup = api.cleanup;
+    const create = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "repeated-orchestrator-e2e", definition: {
+        version: "dag/v1",
+        nodes: [{ id: "trigger", type: "trigger" }, { id: "ask", type: "orchestrator", prompt: "Complete this workflow." }, { id: "stop", type: "stop" }],
+        edges: [{ from: "trigger", to: "ask" }, { from: "ask", to: "stop" }],
+      } }),
+    });
+    expect(create.status).toBe(201);
+    // Response types follow the API wire contract; assertions verify the fields used below.
+    const workflow = await create.json() as CreateWorkflowResponse;
+    const receipts: Array<{ runId: string; threadId: string; queueItemId: string; sessionId: string }> = [];
+    for (let index = 0; index < 2; index++) {
+      const start = await fetch(`${api.baseUrl}/api/workflows/${workflow.id}/runs`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      expect(start.status).toBe(201);
+      const { runId } = await start.json() as StartWorkflowRunResponse;
+      await vi.waitFor(async () => {
+        const response = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`);
+        const detail = await response.json() as GetWorkflowRunResponse;
+        expect(detail.run.status).toBe("settled");
+        expect(detail.run.outcome).toBe("completed");
+        expect(detail.checkpoints.find((cp) => cp.nodeId === "ask")?.result).toMatchObject({ response: "workflow completed" });
+      }, { timeout: 20_000, interval: 100 });
+      const checkpoints = await api.providers.workflowStore.getCheckpoints(runId);
+      const effects = checkpoints.find((cp) => cp.nodeId === "ask")?.effects;
+      const receipt = effects?.receipt;
+      if (typeof effects?.sessionId !== "string" || typeof receipt !== "object" || receipt === null || !("threadId" in receipt) || typeof receipt.threadId !== "string" || !("queueItemId" in receipt) || typeof receipt.queueItemId !== "string") {
+        throw new Error("Workflow checkpoint must contain its durable submission receipt.");
+      }
+      receipts.push({ runId, sessionId: effects.sessionId, threadId: receipt.threadId, queueItemId: receipt.queueItemId });
+    }
+    // One assistant, one thread per run: neither run can block or abort
+    // the other.
+    expect(receipts[0]?.sessionId).toBe(receipts[1]?.sessionId);
+    expect(receipts[0]?.threadId).not.toBe(receipts[1]?.threadId);
+    expect(receipts[0]?.queueItemId).not.toBe(receipts[1]?.queueItemId);
+    for (const receipt of receipts) {
+      expect((await api.providers.engineStore.getQueueItem(receipt.sessionId, receipt.queueItemId))?.status).toBe("settled");
+      const threads = await api.providers.engineStore.listThreads(receipt.sessionId);
+      expect(threads.filter((thread) => thread.key === `signal:workflow:${receipt.runId}`)).toHaveLength(1);
+      // The settle hook archives the run's thread, so repeated runs do not
+      // fill the assistant's thread list.
+      const [mirror] = await api.providers.db
+        .select().from(sessionThreads).where(eq(sessionThreads.id, receipt.threadId)).limit(1);
+      expect(mirror?.archivedAt).toBeGreaterThan(0);
+    }
+  } finally {
+    try {
+      await cleanup?.();
+    } finally {
+      piAi.unregisterApiProviders("workflow-http-regression");
+      if (original) piAi.registerApiProvider(original);
+      vi.unstubAllEnvs();
+    }
+  }
+}, 60_000);

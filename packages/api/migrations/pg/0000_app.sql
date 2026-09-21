@@ -1030,6 +1030,11 @@ CREATE TABLE "event_subscriptions" (
 	"filters" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"target" jsonb NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- Who may invoke a team assistant by mention: 'team' (the owning team's
+	-- current members) or 'organization' (any current member of the
+	-- organization). NULL reads as 'team', so every row written before this
+	-- column keeps its meaning. Only a team assistant target may set it.
+	"audience" text,
 	-- `repo` rows are armed from a mirrored workflow file. The sync updates
 	-- and deletes only these, so a trigger a person armed on the same
 	-- workflow is never touched.
@@ -1053,7 +1058,12 @@ CREATE TABLE "followed_threads" (
 	"created_at" bigint NOT NULL,
 	"last_activity_at" bigint NOT NULL,
 	"last_seen_ts" text,
-	"assistant_id" text
+	"assistant_id" text,
+	-- The mention rule that bound this thread. The follow router reads that
+	-- rule's CURRENT invocation audience, so a rule narrowed back to the team
+	-- narrows the threads it opened, and a disabled or deleted rule narrows
+	-- them too. NULL, like a rule that is gone, reads as team-only.
+	"subscription_id" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");

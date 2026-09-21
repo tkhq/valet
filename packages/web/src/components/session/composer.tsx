@@ -8,7 +8,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { ArrowUp, Paperclip, Square } from "lucide-react";
+import { ArrowUp, Paperclip, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
@@ -51,6 +51,7 @@ import {
   type ComposerFile,
 } from "./composer-files";
 import { useFileUpload } from "~/hooks/use-file-upload";
+import type { MessageReplyReference } from "@valet/api/wire";
 
 /**
  * What the submit button does with the text in the composer.
@@ -97,6 +98,8 @@ export function Composer({
   sessionId,
   threadId,
   agentStatus,
+  replyTarget,
+  onCancelReply,
 }: {
   sessionId: string;
   /**
@@ -107,6 +110,8 @@ export function Composer({
    */
   threadId?: string;
   agentStatus: AgentStatus;
+  replyTarget?: MessageReplyReference;
+  onCancelReply?: () => void;
 }) {
   // The draft (text, images, files, intake errors) lives in the per-thread
   // draft store, NOT component state: a draft typed for one thread must not
@@ -120,6 +125,9 @@ export function Composer({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [selected, setSelected] = useState(false);
   useAutosizeTextarea(inputRef, text);
+  useEffect(() => {
+    if (replyTarget) inputRef.current?.focus();
+  }, [replyTarget]);
 
   // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
   // update this" sets this store then navigates to `/chat`; the next
@@ -529,13 +537,14 @@ export function Composer({
     // the next WS init (page reload). The next init replaces this row with
     // the server's persisted copy. File chips are not rendered optimistically
     // — the server owns their sandbox paths; they appear on the next init.
-    const localId = addUserMessage(sessionId, t, threadId, attachments);
+    const localId = addUserMessage(sessionId, t, threadId, attachments, replyTarget);
     try {
       const res = await send.mutateAsync({
         text: t,
         threadId,
         attachments,
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
+        ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
         ...(working ? { queueMode: "followup" as const } : {}),
       });
       // `messageId` on the response is the engine's queue item id (see
@@ -543,6 +552,7 @@ export function Composer({
       // `submission.settled` can match this exact message instead of
       // falling back to a recency heuristic. Null for slash commands —
       // they never queue, so there is nothing to link.
+      onCancelReply?.();
       if (res.messageId) {
         const itemId = res.messageId;
         setMessageQueueItemId(sessionId, localId, itemId);
@@ -726,9 +736,17 @@ export function Composer({
     }
   });
 
-  const expanded = selected || text.length > 0 || images.length > 0 || files.length > 0
-    || imageErrors.length > 0 || fileErrors.length > 0 || Boolean(submitError)
-    || dragActive || send.isPending;
+  const expanded =
+    selected ||
+    text.length > 0 ||
+    images.length > 0 ||
+    files.length > 0 ||
+    !!replyTarget ||
+    imageErrors.length > 0 ||
+    fileErrors.length > 0 ||
+    Boolean(submitError) ||
+    dragActive ||
+    send.isPending;
 
   return (
     <form
@@ -768,6 +786,22 @@ export function Composer({
         expanded ? "p-2" : "p-1",
       )}>
         <QueueIndicator queueState={queueState} />
+        {replyTarget && (
+          <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2 text-xs">
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-ink">Replying to Assistant</p>
+              <p className="mt-0.5 line-clamp-2 text-muted">{replyTarget.excerpt}</p>
+            </div>
+            <button
+              type="button"
+              onClick={onCancelReply}
+              className="rounded p-1 text-muted hover:text-ink"
+              aria-label="Cancel reply"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+        )}
         {dragActive && (
           <p className="mb-2 text-xs text-muted">
             {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}

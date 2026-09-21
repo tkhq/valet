@@ -72,6 +72,12 @@ establish_cgroup_topology "$tree" "$USER_NAME" "cpu cpuset memory pids"
 contains "$enable_log" '+cpu +cpuset +memory +pids'
 ! grep -qw io "$tree/init/cgroup.subtree_control" || fail "the requested controller path enabled io"
 
+# The allowlist checks direct Manager children only. Scope descendants remain private to the Helper.
+tree=$TMP/owned-descendants; make_tree "$tree"
+mkdir -p "$tree/init/valet-kubernetes/leaf/k3s_evac"
+install_fake_cgroup "$tree"
+establish_cgroup_topology "$tree" "$USER_NAME" "cpu cpuset memory pids"
+
 # A bounded second pass handles one arrival. Persistent arrivals fail closed.
 tree=$TMP/race; make_tree "$tree"; echo 1 > "$tree/init/cgroup.procs"; install_fake_cgroup "$tree"
 arrival=0; cgroup_move_pid() {
@@ -145,30 +151,138 @@ run_fails writable "$tree" "$USER_NAME"; contains "$TMP/writable.err" "is not wr
 
 # The disabled gate and local rootless branch do not call the helper.
 VALET_SANDBOX_DOCKER=0 bash "$ROOT/start-docker.sh"
+contains "$ROOT/Dockerfile.sandbox-k8s" 'COPY docker/cgroup-bootstrap.sh /cgroup-bootstrap.sh'
 contains "$ROOT/Dockerfile.sandbox-k8s" 'COPY docker/cgroup-delegation.sh /cgroup-delegation.sh'
 sed '/^# ── Rootless dockerd/,$c\exit 0' "$ROOT/start-docker.sh" > "$TMP/gate.sh"
 ! grep -q '^+ /cgroup-delegation.sh' <(VALET_SANDBOX_DOCKER=1 VALET_DOCKER_USERNS=0 bash -x "$TMP/gate.sh" 2>&1) \
   || fail "local rootless Docker called cgroup topology setup"
 
-# Both profiles propagate setup failure.
-fail_docker=$TMP/fail-docker; printf '#!/bin/sh\nexit 42\n' > "$fail_docker"; chmod +x "$fail_docker"
-for profile in headless full; do
-  sed -e "s|/start-docker.sh|$fail_docker|g" -e "s|WORK_DIR=/workspace|WORK_DIR=$TMP/workspace|" \
-    "$ROOT/start-$profile.sh" > "$TMP/start-$profile.sh"
-  set +e; bash "$TMP/start-$profile.sh"; status=$?; set -e
-  expected=42
-  [ "$status" -eq "$expected" ] || fail "$profile returned $status instead of $expected"
+# Generic bootstrap migrates root members and is safe to repeat.
+bootstrap_root=$TMP/bootstrap-root; mkdir -p "$bootstrap_root/init"
+printf 'cpu cpuset io memory pids\n' > "$bootstrap_root/cgroup.controllers"
+printf '7\n8\n' > "$bootstrap_root/cgroup.procs"
+: > "$bootstrap_root/cgroup.subtree_control"; : > "$bootstrap_root/init/cgroup.procs"
+mkdir "$TMP/bootstrap-bin"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/bootstrap-bin/mount"
+cat > "$TMP/bootstrap-bin/xargs" <<'SH'
+#!/bin/sh
+cat
+: > "$FAKE_ROOT/cgroup.procs"
+SH
+cat > "$TMP/bootstrap-delegation" <<'SH'
+#!/bin/sh
+printf '%s|%s\n' "$#" "$*" >> "$FAKE_ROOT/delegation.log"
+mkdir -p "$FAKE_ROOT/init/services"
+: > "$FAKE_ROOT/init/cgroup.procs"
+SH
+chmod +x "$TMP/bootstrap-bin/"* "$TMP/bootstrap-delegation"
+sed -e "s|/sys/fs/cgroup|$bootstrap_root|g" \
+  -e "s|/cgroup-delegation.sh|$TMP/bootstrap-delegation|g" \
+  -e "s|LOG=/var/log/valet/dockerd.log|LOG=$TMP/bootstrap.log|" \
+  -e 's|mkdir -p /var/log/valet|:|' "$ROOT/cgroup-bootstrap.sh" > "$TMP/cgroup-bootstrap.sh"
+for _ in 1 2; do
+  FAKE_ROOT=$bootstrap_root PATH="$TMP/bootstrap-bin:$PATH" VALET_SANDBOX_KUBERNETES=1 bash "$TMP/cgroup-bootstrap.sh"
 done
-for error in "$TMP"/*.err; do contains "$error" 'valet-docker RuntimeClass'; done
-# Headless Kubernetes startup must propagate preflight failure without later side effects.
-fail_preflight=$TMP/fail-preflight; printf '#!/bin/sh\nexit 37\n' > "$fail_preflight"; chmod +x "$fail_preflight"
-side_effect=$TMP/headless-side-effect
-fake_docker=$TMP/fake-docker; printf '#!/bin/sh\necho docker >> "%s"\n' "$side_effect" > "$fake_docker"; chmod +x "$fake_docker"
-sed -e "s|/kubernetes-preflight.sh|$fail_preflight|" -e "s|/start-docker.sh|$fake_docker|" \
-  -e "s|exec tail -f /dev/null|echo tail >> '$side_effect'|" "$ROOT/start-headless.sh" > "$TMP/start-headless-k8s.sh"
-set +e; VALET_SANDBOX_KUBERNETES=1 bash "$TMP/start-headless-k8s.sh"; status=$?; set -e
-[ "$status" -eq 37 ] || fail "headless preflight returned $status"
-[ ! -e "$side_effect" ] || fail "headless startup continued after preflight failure"
+[ ! -s "$bootstrap_root/cgroup.procs" ] || fail "bootstrap left root members"
+[ -d "$bootstrap_root/init/services" ] || fail "bootstrap did not create services"
+[ "$(tail -n1 "$bootstrap_root/delegation.log")" = "3|$bootstrap_root dockerd cpu cpuset memory pids" ] \
+  || fail "bootstrap did not pass one controller-list argument"
+: > "$bootstrap_root/delegation.log"
+FAKE_ROOT=$bootstrap_root PATH="$TMP/bootstrap-bin:$PATH" VALET_SANDBOX_KUBERNETES=0 VALET_DOCKER_USERNS=0 bash "$TMP/cgroup-bootstrap.sh"
+[ ! -s "$bootstrap_root/delegation.log" ] || fail "ordinary bootstrap changed cgroups"
+
+# Missing and partial topologies fail before delegation.
+for failure in missing-procs missing-controller; do
+  bad_root=$TMP/bootstrap-$failure; cp -a "$bootstrap_root" "$bad_root"
+  : > "$bad_root/delegation.log"
+  if [ "$failure" = missing-procs ]; then
+    rm "$bad_root/cgroup.procs"
+  else
+    sed -i 's/cpuset //g' "$bad_root/cgroup.controllers"
+  fi
+  sed "s|$bootstrap_root|$bad_root|g" "$TMP/cgroup-bootstrap.sh" > "$TMP/bootstrap-$failure.sh"
+  set +e; FAKE_ROOT=$bad_root PATH="$TMP/bootstrap-bin:$PATH" VALET_SANDBOX_KUBERNETES=1 \
+    bash "$TMP/bootstrap-$failure.sh" 2> "$TMP/$failure.err"; status=$?; set -e
+  [ "$status" -eq 1 ] || fail "$failure topology returned $status"
+  [ ! -s "$bad_root/delegation.log" ] || fail "$failure topology delegated cgroups"
+done
+contains "$TMP/missing-procs.err" 'topology is incomplete'
+contains "$TMP/missing-controller.err" 'cpuset cgroup controller is unavailable'
+
+# An unwritable topology fails before delegation or later startup effects.
+bad_root=$TMP/bootstrap-unwritable; cp -a "$bootstrap_root" "$bad_root"
+rm -rf "$bad_root/init"; : > "$bad_root/delegation.log"
+sed -e "s|$bootstrap_root|$bad_root|g" -e "s|mkdir -p $bad_root/init|false|" \
+  "$TMP/cgroup-bootstrap.sh" > "$TMP/bootstrap-unwritable.sh"
+set +e; FAKE_ROOT=$bad_root PATH="$TMP/bootstrap-bin:$PATH" VALET_SANDBOX_KUBERNETES=1 \
+  bash "$TMP/bootstrap-unwritable.sh" 2> "$TMP/unwritable.err"; status=$?; set -e
+[ "$status" -eq 1 ] || fail "unwritable topology returned $status"
+[ ! -s "$bad_root/delegation.log" ] || fail "unwritable topology delegated cgroups"
+contains "$TMP/unwritable.err" 'pod cgroup is not writable'
+
+# Direct rootful-userns Docker startup bootstraps unless already marked.
+direct_log=$TMP/direct.log
+printf '#!/bin/sh\necho bootstrap >> "%s"\n' "$direct_log" > "$TMP/direct-bootstrap"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/direct-preflight"
+mkdir "$TMP/direct-bin"
+for command in mkdir chown touch su; do printf '#!/bin/sh\nexit 0\n' > "$TMP/direct-bin/$command"; done
+chmod +x "$TMP/direct-bootstrap" "$TMP/direct-preflight" "$TMP/direct-bin/"*
+sed -e "s|/cgroup-bootstrap.sh|$TMP/direct-bootstrap|" \
+  -e "s|/userns-preflight.sh|$TMP/direct-preflight|" \
+  -e "s|ROOT_SOCK=/var/run/docker.sock|ROOT_SOCK=$TMP/missing.sock|" \
+  -e '/# overlay2 on/,$c\echo docker >> "'"$direct_log"'"; exit 0\
+fi' \
+  "$ROOT/start-docker.sh" > "$TMP/direct-docker.sh"
+for marked in 0 1; do
+  : > "$direct_log"
+  PATH="$TMP/direct-bin:$PATH" VALET_SANDBOX_DOCKER=1 VALET_DOCKER_USERNS=1 VALET_CGROUP_BOOTSTRAPPED=$marked \
+    bash "$TMP/direct-docker.sh"
+  expected=docker; [ "$marked" = 1 ] || expected=$'bootstrap\ndocker'
+  [ "$(cat "$direct_log")" = "$expected" ] || fail "direct Docker bootstrap marker=$marked"
+done
+
+# Startup uses bootstrap, preflight, Docker, and readiness in that order.
+startup_log=$TMP/startup.log
+for helper in bootstrap preflight docker; do
+  cat > "$TMP/$helper" <<SH
+#!/bin/sh
+[ "\${FAIL_STAGE:-}" != $helper ] || exit 4
+echo $helper >> "$startup_log"
+SH
+  chmod +x "$TMP/$helper"
+done
+sed -i '/echo docker/i [ "${VALET_SANDBOX_DOCKER:-0}" = 1 ] || exit 0\
+[ "${VALET_CGROUP_BOOTSTRAPPED:-0}" = 1 ] || exit 5' "$TMP/docker"
+for profile in headless full; do
+  sed -e "s|/cgroup-bootstrap.sh|$TMP/bootstrap|g" \
+    -e "s|/kubernetes-preflight.sh|$TMP/preflight|g" \
+    -e "s|/start-docker.sh|$TMP/docker|g" \
+    -e "s|WORK_DIR=/workspace|WORK_DIR=$TMP/workspace|" \
+    -e "s|exec tail -f /dev/null|echo ready >> '$startup_log'|" \
+    "$ROOT/start-$profile.sh" > "$TMP/start-$profile.sh"
+  for kubernetes in 0 1; do for docker in 0 1; do
+    : > "$startup_log"
+    VALET_SANDBOX_KUBERNETES=$kubernetes VALET_SANDBOX_DOCKER=$docker bash "$TMP/start-$profile.sh"
+    expected=""
+    [ "$kubernetes$docker" = 00 ] || expected=bootstrap
+    [ "$kubernetes" = 0 ] || expected="${expected:+$expected$'\n'}preflight"
+    [ "$docker" = 0 ] || expected="${expected:+$expected$'\n'}docker"
+    expected="${expected:+$expected$'\n'}ready"
+    [ "$(cat "$startup_log")" = "$expected" ] \
+      || fail "$profile kubernetes=$kubernetes docker=$docker startup order"
+  done; done
+  for stage in bootstrap preflight docker; do
+    : > "$startup_log"; set +e
+    FAIL_STAGE=$stage VALET_SANDBOX_KUBERNETES=1 VALET_SANDBOX_DOCKER=1 bash "$TMP/start-$profile.sh"
+    status=$?; set -e
+    [ "$status" -eq 4 ] || fail "$profile $stage failure returned $status"
+    case $stage in bootstrap) forbidden='preflight|docker|ready';; preflight) forbidden='docker|ready';; *) forbidden=ready;; esac
+    ! grep -Eq "$forbidden" "$startup_log" || fail "$profile continued after $stage failure"
+  done
+  : > "$startup_log"
+  VALET_SANDBOX_KUBERNETES=0 VALET_SANDBOX_DOCKER=0 bash "$TMP/start-$profile.sh"
+  [ "$(cat "$startup_log")" = ready ] || fail "$profile ordinary startup changed"
+done
 
 # Kubernetes-only preflight forces the full outer map check.
 map_probe=$TMP/map-probe; cat > "$map_probe" <<'SH'

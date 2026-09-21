@@ -1,10 +1,11 @@
-import { Bot, User as UserIcon, FileText } from "lucide-react";
+import { Bot, User as UserIcon, FileText, Reply } from "lucide-react";
 import { memo, useMemo } from "react";
 import type {
   MessagePart,
   MessageSkillInvocation,
   PromptImageAttachment,
   PromptFileAttachment,
+  MessageReplyReference,
 } from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
@@ -56,6 +57,7 @@ export const MessageItem = memo(function MessageItem({
   suppressEmptyPlaceholder = false,
   queued = false,
   viewerId,
+  onReply,
 }: {
   message: StreamMessage;
   /** True for the last message while the agent is mid-turn — an empty
@@ -65,6 +67,8 @@ export const MessageItem = memo(function MessageItem({
   queued?: boolean;
   /** The signed-in user's id — see `MessageList`'s prop doc. */
   viewerId?: string;
+  /** Selects a completed assistant text message as the composer reply target. */
+  onReply?: (target: MessageReplyReference) => void;
 }) {
   const isUser = message.role === "user";
   const copyText = messageCopyText(message);
@@ -112,6 +116,17 @@ export const MessageItem = memo(function MessageItem({
             )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
             <div className="ml-auto flex items-center gap-1">
+              {message.role === "assistant" && message.completed === true && copyText && onReply && (
+                <button
+                  type="button"
+                  onClick={() => onReply({ messageId: message.id, excerpt: replyExcerpt(copyText) })}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[10px] opacity-0 transition-opacity hover:text-ink group-hover:opacity-100 focus:opacity-100"
+                  aria-label="Reply to message"
+                >
+                  <Reply className="h-3 w-3" aria-hidden />
+                  Reply
+                </button>
+              )}
               {message.role === "assistant" && <MessageRating message={message} />}
               {copyText && (
                 <CopyButton
@@ -123,6 +138,12 @@ export const MessageItem = memo(function MessageItem({
             </div>
           </div>
           <div className="space-y-2">
+            {isUser && message.replyTo && (
+              <blockquote className="rounded border-l-2 border-moss bg-moss-wash px-3 py-2 text-xs text-muted">
+                <span className="font-medium text-ink">Replying to Assistant</span>
+                <p className="mt-1 line-clamp-3">{message.replyTo.excerpt}</p>
+              </blockquote>
+            )}
             {isUser && message.attachments && message.attachments.length > 0 && (
               <UserAttachmentStrip attachments={message.attachments} />
             )}
@@ -179,6 +200,14 @@ export function isEmptyAssistantMessage(message: StreamMessage): boolean {
  * transcript (session header) covers those. Empty string means no button.
  * Exported for tests.
  */
+export function replyExcerpt(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const codepoints = Array.from(normalized);
+  return codepoints.length <= 280
+    ? normalized
+    : codepoints.slice(0, 279).join("").trimEnd() + "…";
+}
+
 export function messageCopyText(message: StreamMessage): string {
   const texts = message.parts
     .filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text")

@@ -218,6 +218,153 @@ export function tailBudget(usable: number, cfg?: CompactionConfig): number {
   return Math.max(min, capped);
 }
 
+// ── Transcript DAG traversal ───────────────────────────────────────
+
+/**
+ * Return the active transcript path in root-to-leaf order. Entries on other
+ * branches stay durable but do not enter compaction or model context.
+ */
+export function walkTranscriptDag(
+  entries: readonly SessionEntry[],
+  activeLeafEntryId: string | undefined,
+): SessionEntry[] {
+  if (activeLeafEntryId === undefined) return [...entries];
+
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const path: SessionEntry[] = [];
+  const visited = new Set<string>();
+  let entryId: string | null = activeLeafEntryId;
+  while (entryId !== null) {
+    if (visited.has(entryId)) {
+      throw new Error(`Transcript DAG contains a cycle at entry ${entryId}.`);
+    }
+    visited.add(entryId);
+    const entry = byId.get(entryId);
+    if (!entry) {
+      throw new Error(`Transcript DAG is missing entry ${entryId}.`);
+    }
+    path.push(entry);
+    entryId = entry.parentId;
+  }
+  path.reverse();
+
+  // Before TKAI-211, normal entries had null parents but compaction entries
+  // pointed at the covered head. Keep the latest legacy checkpoint and the
+  // chronological null-parent suffix that leads to this path's root. Linked
+  // entries in that range belong to inactive branches and stay excluded.
+  const rootIndex = entries.findIndex((entry) => entry.id === path[0]?.id);
+  const prefix = entries.slice(0, rootIndex);
+  let checkpointIndex = -1;
+  for (let index = prefix.length - 1; index >= 0; index--) {
+    if (prefix[index].type === "compaction") {
+      checkpointIndex = index;
+      break;
+    }
+  }
+  const legacyPrefix = prefix
+    .slice(checkpointIndex < 0 ? 0 : checkpointIndex)
+    .filter((entry, index) =>
+      entry.parentId === null || (checkpointIndex >= 0 && index === 0),
+    );
+  return [...legacyPrefix, ...path];
+}
+
+/**
+ * Size one entry the way the summarizer payload will carry it.
+ *
+ * `estimateEntryTokens` counts raw content. The conversion to summarizer
+ * messages caps prose at SUMMARY_PROSE_MAX_CHARS, caps tool args and results
+ * at `toolOutputMaxChars`, drops thinking, and skips every non-message
+ * entry. A 300,000-char assistant run therefore costs about 5,000 tokens of
+ * summarizer input, not 75,000. The summarizer window budgets with this
+ * ruler, so a window cannot reject entries whose real payload would have fit
+ * many times over (TKAI-461). It returns 0 for an entry the summarizer reads
+ * as nothing.
+ */
+export function estimateSummaryEntryTokens(
+  entry: SessionEntry,
+  opts?: { toolOutputMaxChars?: number; attributeAuthors?: boolean },
+): number {
+  const messages = entriesToSummaryMessages([entry], {
+    toolOutputMaxChars: opts?.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
+    attributeAuthors: opts?.attributeAuthors ?? false,
+  });
+  let total = 0;
+  for (const message of messages) {
+    const content = message.content;
+    if (typeof content === "string") {
+      total += estimateTokens(content);
+      continue;
+    }
+    for (const block of content) {
+      if (block.type === "text") total += estimateTokens(block.text);
+    }
+  }
+  return total;
+}
+
+export interface SummaryWindowOptions {
+  /**
+   * Size one entry for the budget walk. The default counts raw content;
+   * callers that feed the result to the summarizer pass
+   * `estimateSummaryEntryTokens`, so the window and the payload measure
+   * with one ruler.
+   */
+  sizeOf?: (entry: SessionEntry) => number;
+  /**
+   * Keep the newest entry even when it alone exceeds `maxTokens`. Set for a
+   * window that must not come back empty (the head). Clear it for optional
+   * evidence, which is trimmed to what the budget holds.
+   */
+  keepNewest?: boolean;
+}
+
+/**
+ * Select the newest entries that fit a token budget, for the summarizer.
+ *
+ * The window is a budgeted suffix, and it carries no user-first constraint:
+ * `summarize` prepends its own preface, so a window that opens in the middle
+ * of a turn is a legal provider payload. An earlier version aligned the
+ * window forward to the next user entry and dropped the entries in front of
+ * it, and it returned NOTHING when the window held no later user entry. The
+ * caller then summarized an empty transcript while its checkpoint still
+ * recorded the whole head as covered, and that head left the model context
+ * for good (TKAI-461).
+ *
+ * With `keepNewest`, the result is never empty for a non-empty input. Pass
+ * the payload ruler as `sizeOf` for the second guarantee: the window then
+ * never converts to an empty summarizer transcript.
+ */
+export function selectSummaryCheckpointTail(
+  entries: readonly SessionEntry[],
+  maxTokens: number,
+  opts?: SummaryWindowOptions,
+): SessionEntry[] {
+  const sizeOf = opts?.sizeOf ?? estimateEntryTokens;
+  const keepNewest = opts?.keepNewest ?? true;
+  let start = entries.length;
+  let tokens = 0;
+  while (start > 0) {
+    const next = sizeOf(entries[start - 1]);
+    if ((start < entries.length || !keepNewest) && tokens + next > maxTokens) break;
+    start--;
+    tokens += next;
+  }
+  const window = entries.slice(start);
+  // Some entries render into no summarizer message at all: a command result,
+  // a decision gate, a prior checkpoint, an assistant step that held only
+  // thinking. They cost nothing, so the budget walk can stop with a window
+  // made only of them. That window converts to an empty transcript, and the
+  // summary is then written from the prompt template alone. Step back to the
+  // nearest entry the summarizer can read.
+  if (window.length > 0 && window.every((entry) => sizeOf(entry) === 0)) {
+    for (let index = start - 1; index >= 0; index--) {
+      if (sizeOf(entries[index]) > 0) return entries.slice(index);
+    }
+  }
+  return window;
+}
+
 // ── Turn segmentation ──────────────────────────────────────────────
 
 export interface Turn {
@@ -556,6 +703,16 @@ After the analysis, output exactly the Markdown structure shown inside <template
 ## Active Tools & Skills
 - [tools, skills, or integrations in active use — name each and what it is being used for, or "(none)"]
 
+## Continuation Checkpoint
+- Branch: [current branch, or "(unknown)"]
+- Commit: [current commit, or "(unknown)"]
+- Changed Files: [changed paths, or "(none)"]
+- Worktree Status: [clean/dirty plus relevant status, or "(unknown)"]
+- Last Command: [exact command, or "(none)"]
+- Failure Output: [exact unresolved failure, or "(none)"]
+- Next Action: [one concrete action]
+- Acceptance Checklist: [remaining acceptance checks, or "(none)"]
+
 ## Next Steps
 - [ordered next actions or "(none)"; for the immediate next step, include a verbatim quote from the most recent messages showing exactly where work left off, so there is no drift in task interpretation]
 
@@ -637,11 +794,40 @@ export function stripAnalysisScratchpad(text: string): string {
     .trim();
 }
 
+/**
+ * Prepended when the summarizer input opens on an assistant message. Several
+ * providers reject a transcript whose first message is not from the user, and
+ * that rejection is a plain 400, not an overflow, so it aborts the overflow
+ * retry loop. The preface makes any budgeted window a legal payload and
+ * frees the selection from a user-first constraint (TKAI-461).
+ */
+const SUMMARY_MIDTURN_PREFACE =
+  "The conversation history below starts in the middle of a turn. The user message that started that turn is not included.";
+
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
   const messages = entriesToSummaryMessages(opts.headEntries, {
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
     attributeAuthors: opts.attributeAuthors ?? false,
   });
+  if (messages.length === 0) {
+    // Non-message entries (command results, decision gates, checkpoints) and
+    // assistant entries that held only thinking render into nothing. An
+    // input made only of those leaves the model filling the template from
+    // the prompt alone, and the caller stores that as a summary of history
+    // nothing ever read (TKAI-461).
+    throw new Error(
+      "The summarizer input holds no conversation history, so the summary would be written from nothing. " +
+        "Run /compact again, or start a new thread.",
+    );
+  }
+  const firstMessage = messages[0];
+  if (firstMessage?.role === "assistant") {
+    messages.unshift({
+      role: "user",
+      content: [{ type: "text", text: SUMMARY_MIDTURN_PREFACE }],
+      timestamp: firstMessage.timestamp,
+    });
+  }
   const anchor = opts.previousSummary
     ? [
         "Update the anchored summary below using the conversation history above.",

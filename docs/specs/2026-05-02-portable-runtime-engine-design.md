@@ -2555,6 +2555,22 @@ Required behavior:
 
 ## Conformance
 
+### Background database work
+
+Result waiters issue at most one durable read at a time. After a read completes, the fallback waits one second before another read.
+Settlement events request an immediate recheck. An event received during a read requests one recheck after that read completes.
+Failed reads retry through the fallback. Cancellation and timeout stop future checks without changing the submission.
+
+Each resident session permits one sweep and one lease-renewal pass at a time. Concurrent calls join the existing pass.
+Sweeps group unsettled submissions and pending gates by thread. Idle historical threads cause no per-thread database reads.
+Reconciliation refreshes submissions after repairing expired leases. Startup digest repair also uses one grouped snapshot.
+Starting a thread drive does not block completion of a sweep. Durable gate expiry, collect deadlines, and submission recovery remain required.
+
+Store gate lists accept an optional status filter. Cross-session submission lists accept optional session IDs, with an empty list returning no rows.
+Postgres splits session ID filters into batches of at most 1,000. Unfiltered submission lists remain available to operator surfaces.
+
+### Contract suites
+
 The prose in this spec defines intent; executable contract suites define conformance. The engine ships reusable test suites that any provider implementation must pass:
 
 - **SessionStore contract** — entity round-trips, `updateEntry` in-place transitions, entry/queue/gate persistence.

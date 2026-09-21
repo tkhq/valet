@@ -19,7 +19,7 @@ import {
 import { PgWorkflowStore } from "./pg-store.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkflowServiceDeps, WorkflowOwner } from "./service.js";
-import { InMemoryCredentialStore } from "@valet/engine";
+import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 
 const stubRunHost: RunHost = {
   async start() {},
@@ -45,6 +45,7 @@ beforeAll(async () => {
     db,
     workflowStore: new PgWorkflowStore(boot.pgdb),
     workflowRunHost: stubRunHost,
+    engineStore: new InMemorySessionStore(),
     credentials: new InMemoryCredentialStore(),
   };
 });
