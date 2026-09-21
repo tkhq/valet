@@ -14,8 +14,10 @@
  * anonymous when nothing resolves; unrecognized hosts 403.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
+import { githubHost } from "../repos/github-host.js";
 import { sessionRepos } from "../schema/index.js";
 import type { PostSandboxGitCredentialResponse, SandboxGitCredential } from "../wire/types.js";
 
@@ -74,6 +76,26 @@ function post(token: string | undefined, body: unknown): Promise<Response> {
 }
 
 describe("POST /api/sandbox/git-credential", () => {
+  it("keeps token resolution at spy zero when credential policy denies", async () => {
+    api = await bootTestApi();
+    const resolveGitToken = vi.spyOn(githubHost, "resolveGitToken");
+    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request) => ({
+      schemaVersion: 1,
+      requestId: request.requestId,
+      requestSubjectDigest: "a".repeat(64),
+      inputDigest: "b".repeat(64),
+      policyDigest: "c".repeat(64),
+      sourceBundleDigest: "d".repeat(64),
+      evaluator: { kind: "local_valet", engineDigest: "e".repeat(64) },
+      decision: { effect: "deny", reasonCode: "test", matchedRuleIds: ["test.rule"], obligations: [], redactions: [] },
+      evaluatedAtMs: 1,
+    } satisfies PolicyDecisionEnvelope));
+
+    const res = await post(await mintToken(), { host: "github.com", owner: "acme" });
+    expect(res.status).toBe(403);
+    expect(resolveGitToken).not.toHaveBeenCalled();
+  });
+
   it("returns {username, password} for a bound owner with a usable credential", async () => {
     api = await bootTestApi();
     await bindRepo();
