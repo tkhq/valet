@@ -91,6 +91,7 @@ async function seedPrebuild(
     commitSha: string;
     createdAt: number;
     recipe?: unknown;
+    sizeBytes?: number | null;
   },
 ): Promise<void> {
   await db.insert(bakes).values({
@@ -102,6 +103,7 @@ async function seedPrebuild(
     status: opts.status,
     builderBackend: "docker",
     recipe: opts.recipe ?? { recipe: [], setup: [], image: undefined },
+    sizeBytes: opts.sizeBytes ?? null,
     error: null,
     logTail: null,
     startedAt: opts.createdAt,
@@ -138,6 +140,7 @@ describe("resolvePrebuildImage", () => {
       commitSha: "newsha",
       createdAt: NOW + 1000,
       recipe: { recipe: [{ id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" }], setup: [] },
+      sizeBytes: 1_545_723_949,
     });
 
     const res = await resolvePrebuildImage(db, meta(), fakeProvider(true));
@@ -146,6 +149,7 @@ describe("resolvePrebuildImage", () => {
       prebuildId: "pb-new",
       bakedSha: "newsha",
       recipe: [{ id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" }],
+      sizeBytes: 1_545_723_949,
     });
   });
 

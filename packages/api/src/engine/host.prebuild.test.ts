@@ -58,6 +58,8 @@ describe("EngineHost prebuild resolution at session create", () => {
       status: "pushed",
       builderBackend: "docker",
       recipe: { recipe: [], setup: [], image: undefined },
+      // ~1.47 GiB compressed -> image-aware workspace floor of 3Gi (TKAI-538).
+      sizeBytes: 1_545_723_949,
       error: null,
       logTail: null,
       startedAt: now,
@@ -105,6 +107,9 @@ describe("EngineHost prebuild resolution at session create", () => {
     expect(provider.createCalls.length).toBeGreaterThan(0);
     for (const call of provider.createCalls) {
       expect(call.image).toBe(IMAGE_REF);
+      // The workspace claim is sized to fit the resolved image, from the same
+      // bake that selected it (TKAI-538): 1.47 GiB compressed -> 3Gi floor.
+      expect(call.workspaceStorage).toBe("3Gi");
     }
     const rows = await api.providers.db
       .select()

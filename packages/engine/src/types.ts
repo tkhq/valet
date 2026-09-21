@@ -2080,6 +2080,11 @@ export interface DesiredSandboxSpec {
   /** Stable content hash across all steps; used by the diff engine in Task 4+. */
   specHash: string;
   steps: PrepStep[];
+  /** Workspace claim size for the resolved image, as a quantity string (e.g.
+   * "3Gi"). Derived from the selected bake's size so it stays consistent with
+   * `image` (TKAI-538). Undefined leaves the create-opts value in force. A
+   * provider without a sized persistent workspace ignores it. */
+  workspaceStorage?: string;
 }
 
 /**

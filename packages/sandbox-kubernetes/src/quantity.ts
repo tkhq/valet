@@ -51,3 +51,52 @@ export function clampStorageRequest(
   if (requestedBytes > maxBytes) return { storage: max.trim(), clamped: true };
   return { storage: requested.trim(), clamped: false };
 }
+
+/**
+ * Multiplier applied to a bake's COMPRESSED image size to estimate the
+ * uncompressed home-directory seed the workspace claim must hold before
+ * `valet-home-init` finishes (TKAI-538). The seeded home (`/root/.local`
+ * and siblings) is a subset of the image, so twice the compressed size
+ * covers it plus the repo checkout with margin, while staying far below a
+ * blanket over-provision.
+ */
+export const IMAGE_WORKSPACE_FLOOR_FACTOR = 2;
+
+/**
+ * Derives a workspace-storage floor from a bake's recorded compressed image
+ * size. Returns a whole-Gi quantity string, or null when the size is unusable
+ * (absent, zero, or not finite) — the caller then keeps the deploy floor.
+ *
+ * The result is only a floor. `resolveWorkspaceStorageRequest` still clamps it
+ * to the configured max and never shrinks a larger repo-declared size. Rounds
+ * up to whole Gi because EBS provisions in Gi and the growth path
+ * (`workspace-pvc.ts`) also steps in Gi.
+ */
+export function imageAwareWorkspaceFloor(compressedImageBytes: number): string | null {
+  if (!Number.isFinite(compressedImageBytes) || compressedImageBytes <= 0) return null;
+  const gi = 2 ** 30;
+  const requiredGi = Math.ceil((compressedImageBytes * IMAGE_WORKSPACE_FLOOR_FACTOR) / gi);
+  return `${requiredGi}Gi`;
+}
+
+/**
+ * Chooses the larger of a repo-declared workspace size and an image-derived
+ * floor (TKAI-538). A declared size that already fits the image is preserved;
+ * an undeclared or too-small one is lifted to the floor so `valet-home-init`
+ * can seed the baked home. Returns the declared value when the floor is absent
+ * or not larger, and the floor when there is no usable declared value.
+ *
+ * Comparison is by parsed bytes. An unparseable declared value is treated as
+ * absent, so the floor applies rather than a value the provider would reject.
+ */
+export function liftWorkspaceStorageToImageFloor(
+  declared: string | undefined,
+  imageFloor: string | null,
+): string | undefined {
+  if (!imageFloor) return declared;
+  const floorBytes = parseStorageQuantity(imageFloor);
+  if (floorBytes === null) return declared;
+  const declaredBytes = declared ? parseStorageQuantity(declared) : null;
+  if (declaredBytes !== null && declaredBytes >= floorBytes) return declared;
+  return imageFloor;
+}

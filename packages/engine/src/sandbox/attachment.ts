@@ -990,6 +990,13 @@ export class SandboxAttachment {
       if (desired?.image !== undefined && desired.image !== this.createOpts.image) {
         this.createOpts = { ...this.createOpts, image: desired.image };
       }
+      // Workspace claim size travels with the image in one desired snapshot so
+      // the two never diverge (TKAI-538). A fresh claim is created at this size;
+      // an existing claim only grows toward it (a provider with a sized
+      // workspace never shrinks). Persisted so a later recovery keeps it.
+      if (desired?.workspaceStorage !== undefined && desired.workspaceStorage !== this.createOpts.workspaceStorage) {
+        this.createOpts = { ...this.createOpts, workspaceStorage: desired.workspaceStorage };
+      }
       this.persistResources(desired?.resources, desired?.preserveResourceFields);
       const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
         (desired !== undefined && desired.resources === undefined ? (["cpu", "memory"] as const) : undefined);

@@ -35,8 +35,10 @@ const snapWithRepoBake: ResolveSnapshot = {
     bakedSha: "deadbeef",
     recipe: [],
     bakeId: "bake-1",
+    sizeBytes: 3_000_000_000,
   },
   baseBakeRef: "ghcr.io/valet/base-bake:v1",
+  baseBakeSizeBytes: 2_000_000_000,
   repos: [makeBinding()],
   userName: "Alice",
   userEmail: "alice@example.com",
@@ -71,6 +73,30 @@ describe("image resolution", () => {
   it("falls back to stockImage when both bake refs are null", () => {
     const spec = computeSpec(snapWithStockOnly);
     expect(spec.image).toBe("ghcr.io/valet/sandbox:latest");
+  });
+});
+
+// ── Image size (workspace floor input, TKAI-538) ────────────────────────────
+
+describe("imageSizeBytes", () => {
+  it("reports the repo bake size when the repo bake is selected", () => {
+    expect(computeSpec(snapWithRepoBake).imageSizeBytes).toBe(3_000_000_000);
+  });
+
+  it("reports the base bake size when the base image is selected", () => {
+    expect(computeSpec(snapWithBaseBake).imageSizeBytes).toBe(2_000_000_000);
+  });
+
+  it("is null for the stock image, which has no bake row", () => {
+    expect(computeSpec(snapWithStockOnly).imageSizeBytes).toBeNull();
+  });
+
+  it("is null when the selected repo bake has no recorded size", () => {
+    const snap: ResolveSnapshot = {
+      ...snapWithRepoBake,
+      repoBake: { ...snapWithRepoBake.repoBake!, sizeBytes: null },
+    };
+    expect(computeSpec(snap).imageSizeBytes).toBeNull();
   });
 });
 
