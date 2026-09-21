@@ -841,9 +841,9 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it.each([
-    { kind: "designated", params: { text: "Detailed final result", final: true } },
-    { kind: "text-less legacy", params: { text: "Detailed final result" } },
-  ])("lets a $kind final reply own a different terminal wrap-up", async ({ params }) => {
+    { kind: "designated final", params: { text: "Detailed final result", final: true }, expected: ["I am checking"] },
+    { kind: "text-less legacy progress", params: { text: "Progress update" }, expected: ["I am checking", "Done."] },
+  ])("handles a $kind reply before a different terminal wrap-up", async ({ params, expected }) => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const call: SessionEntry = {
@@ -877,7 +877,7 @@ describe("ChannelHost outbound delivery", () => {
     await eventStream.append({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "bare-success-wrap", reason: "end_turn" } }, `bare-success-wrap-${randomUUID()}`);
 
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(expected);
   });
 
   it("defers later text while an earlier text-less origin reply is pending", async () => {
