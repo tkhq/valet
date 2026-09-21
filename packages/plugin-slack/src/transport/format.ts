@@ -74,14 +74,27 @@ export function markdownToSlackMrkdwn(
   options: MarkdownToSlackMrkdwnOptions = {},
 ): string {
   const codeBlocks: string[] = [];
-  let result = text.replace(/\x00/g, "").replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_, code: string) => {
+  // A fence closes only with the same character and at least its opening
+  // length. Shorter fences inside examples remain literal code.
+  const lines = text.replace(/\x00/g, "").split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const opening = /^ {0,3}(`{3,})(?!`)[^`]*$|^ {0,3}(~{3,})[^\n]*$/.exec(lines[index]);
+    if (!opening) continue;
+    const fence = opening[1] ?? opening[2];
+    const closing = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*\\r?$`);
+    let end = index + 1;
+    while (end < lines.length && !closing.test(lines[end])) end += 1;
+    codeBlocks.push(lines.slice(index + 1, end).join("\n").trimEnd());
+    lines.splice(index, Math.min(end + 1, lines.length) - index, `\x00CB${codeBlocks.length - 1}\x00`);
+  }
+  let result = lines.join("\n").replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_, code: string) => {
     codeBlocks.push(code.trimEnd());
     return `\x00CB${codeBlocks.length - 1}\x00`;
   });
 
   const inlineCodes: string[] = [];
-  result = result.replace(/`([^`]+)`/g, (_, code: string) => {
-    inlineCodes.push(code);
+  result = result.replace(/(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)/g, (span: string) => {
+    inlineCodes.push(span);
     return `\x00IC${inlineCodes.length - 1}\x00`;
   });
 
@@ -94,6 +107,18 @@ export function markdownToSlackMrkdwn(
   }
 
   result = escapeMrkdwn(result);
+  // Explicit repository references need no ambient repository or issue type.
+  // Hold generated links so underscores in repository names stay literal.
+  // Existing links and URLs own their labels and fragments.
+  const githubLinks: string[] = [];
+  result = result.replace(
+    /\[[^\]]*\]\([^\n]*?\)|&lt;[^>\n]*>|https?:\/\/[^\s<>]+|(?<![\w./:@\\-])([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?)\/([a-zA-Z0-9_.-]+)#([1-9][0-9]*)(?![\w/#])/g,
+    (match: string, owner: string | undefined, repo: string | undefined, number: string | undefined) => {
+      if (owner === undefined || repo === undefined || number === undefined) return match;
+      githubLinks.push(`<https://github.com/${owner}/${repo}/issues/${number}|${match}>`);
+      return `\x00GH${githubLinks.length - 1}\x00`;
+    },
+  );
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<$2|$1>");
   result = result.replace(/~~(?=\S)(.+?\S)~~/g, "~$1~");
 
@@ -121,7 +146,8 @@ export function markdownToSlackMrkdwn(
     return `*${italicize(boldSpans[Number(index)])}*`;
   });
   result = result.replace(/\x00SN(\d+)\x00/g, (_, index: string) => nativeSpans[Number(index)]);
-  result = result.replace(/\x00IC(\d+)\x00/g, (_, index: string) => `\`${inlineCodes[Number(index)]}\``);
+  result = result.replace(/\x00GH(\d+)\x00/g, (_, index: string) => githubLinks[Number(index)]);
+  result = result.replace(/\x00IC(\d+)\x00/g, (_, index: string) => inlineCodes[Number(index)]);
   result = result.replace(/\x00CB(\d+)\x00/g, (_, index: string) => `\`\`\`${codeBlocks[Number(index)]}\`\`\``);
 
   return result;
