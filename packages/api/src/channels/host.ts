@@ -368,6 +368,8 @@ export class ChannelHost {
   /** Bounded retries for a one-message first reply that fails to send. */
   private firstReplyRetryAttempts = new Map<string, number>();
   private firstReplyRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Requests aborted after the provider may have accepted them. Kept for this host lifetime. */
+  private uncertainDeliveries = new Set<string>();
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
@@ -799,7 +801,7 @@ export class ChannelHost {
       return;
     }
     if (!this.outboundIsActive(generation)) return;
-    if (this.delivered.has(dedupeKey)) {
+    if (this.delivered.has(dedupeKey) || this.uncertainDeliveries.has(dedupeKey)) {
       this.clearFirstReplyRetry(dedupeKey);
       return;
     }
@@ -809,6 +811,7 @@ export class ChannelHost {
       if (!settled && this.firstReplySends.get(dedupeKey) === inFlight) {
         // Abort cannot retract a provider request that may already be accepted.
         // Do not replace this uncertain first reply after local settlement.
+        this.uncertainDeliveries.add(dedupeKey);
         inFlight.controller.abort();
         await inFlight.settled;
         return;
@@ -850,7 +853,7 @@ export class ChannelHost {
     dedupeKey: string,
     generation: number,
   ): void {
-    if (!this.outboundIsActive(generation) || this.firstReplyRetryTimers.has(dedupeKey)) return;
+    if (!this.outboundIsActive(generation) || this.uncertainDeliveries.has(dedupeKey) || this.firstReplyRetryTimers.has(dedupeKey)) return;
     const attempts = this.firstReplyRetryAttempts.get(dedupeKey) ?? 0;
     if (attempts >= MAX_FINAL_DELIVERY_RETRIES) {
       this.firstReplyRetryAttempts.delete(dedupeKey);
@@ -892,7 +895,7 @@ export class ChannelHost {
     dedupeKey: string,
     generation: number,
   ): void {
-    if (!this.outboundIsActive(generation) || this.finalRetryTimers.has(dedupeKey)) return;
+    if (!this.outboundIsActive(generation) || this.uncertainDeliveries.has(dedupeKey) || this.finalRetryTimers.has(dedupeKey)) return;
     const attempts = this.finalRetryAttempts.get(dedupeKey) ?? 0;
     if (attempts >= MAX_FINAL_DELIVERY_RETRIES) {
       this.finalRetryAttempts.delete(dedupeKey);
@@ -1009,7 +1012,7 @@ export class ChannelHost {
       this.clearFinalDeliveryRetry(dedupeKey);
       return;
     }
-    if (this.delivered.has(dedupeKey)) {
+    if (this.delivered.has(dedupeKey) || this.uncertainDeliveries.has(dedupeKey)) {
       this.clearFinalDeliveryRetry(dedupeKey);
       return;
     }
@@ -1019,6 +1022,7 @@ export class ChannelHost {
       if (!settled && this.finalDeliverySends.get(dedupeKey) === inFlight) {
         // Abort cannot retract a provider request that may already be accepted.
         // Do not replace this uncertain final reply after local settlement.
+        this.uncertainDeliveries.add(dedupeKey);
         inFlight.controller.abort();
         await inFlight.settled;
         return;
@@ -1085,6 +1089,7 @@ export class ChannelHost {
   }
 
   private markDelivered(dedupeKey: string): void {
+    this.uncertainDeliveries.delete(dedupeKey);
     this.delivered.add(dedupeKey);
     this.deliveredOrder.push(dedupeKey);
     if (this.deliveredOrder.length > DELIVERED_CAP) {

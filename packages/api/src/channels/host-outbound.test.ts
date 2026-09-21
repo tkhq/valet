@@ -882,6 +882,9 @@ describe("ChannelHost outbound delivery", () => {
       "The work is complete",
     ]);
     expect(fakeTransport.sendAttempts).toBe(1);
+    await eventStream.append(terminalEvent, `final-stalled-redelivery-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS * 2));
+    expect(fakeTransport.sendAttempts).toBe(1);
   });
 
   it("does not duplicate a slow successful final send after restart", async () => {

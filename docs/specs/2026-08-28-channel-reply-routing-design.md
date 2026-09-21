@@ -166,7 +166,10 @@ post a duplicate. This rule applies to first replies and later fallback sends.
 Current work waits briefly for a pre-restart send. If it stalls, the host aborts
 the provider request and waits for its settlement. The host does not send a
 replacement because a provider can accept a post before local cancellation loses
-its response. Slack also aborts a pending `Retry-After` delay. A transport that
+its response. The host keeps an in-memory uncertain-delivery tombstone for that
+key until the host stops or a confirmed delivery resolves it. The tombstone
+survives outbound stop and start, and suppresses later event redelivery and
+retry work. Slack also aborts a pending `Retry-After` delay. A transport that
 cannot cancel keeps the only owner until it settles. The guard never posts a
 one-message answer twice, a successful explicit final, or a manual-delivery
 turn. Decision-gate cards, command results, attention
