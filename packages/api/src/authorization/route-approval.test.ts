@@ -14,11 +14,11 @@ const descriptor = {
   method: "GET", routeTemplate: "/api/sessions/:id", riskLevel: "low",
 };
 
-function initial(action = descriptor) {
+function initial(action = descriptor, requestId = "http-request-1", operationId = "http-delivery-1", requestDigest = "a".repeat(64)) {
   return adaptApiRoute({
     schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1",
-    principal: { type: "user", id: "user-1" }, requestId: "http-request-1",
-    operationId: "http-delivery-1", evaluationTimeMs: 100, descriptor: action,
+    principal: { type: "user", id: "user-1" }, requestId,
+    operationId, evaluationTimeMs: 100, descriptor: action, safeMetadata: { requestDigest },
   });
 }
 
@@ -46,18 +46,21 @@ describe("durable route approval replay", () => {
         approverId: "admin-1", verdict: "approved", appliesIn: "route", scopeKind: "route", scopeId: first.request.subject.invocation.id,
         resolvedAt: 150, expiresAt: 500, resolutionVersion: 1,
       });
-      const replay = await loadApprovedRouteReplay(pg.appDb, first.request, resolutionId, 200, (stored) => service.verifyPersistedDecision(stored));
+      const retry = initial(descriptor, "http-request-2", "http-delivery-2");
+      const replay = await loadApprovedRouteReplay(pg.appDb, retry.request, resolutionId, 200, (stored) => service.verifyPersistedDecision(stored));
       expect(replay?.verdict).toBe("approved");
       const post = adaptApiRoute({
         schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" },
         requestId: "http-request-approved", operationId: replay!.operationId, evaluationTimeMs: 200, descriptor,
         dynamicFacts: { currentPolicy: replay!.facts }, approvalBindingContext: replay!.binding,
-        approvalScopeId: first.request.subject.invocation.id,
+        approvalScopeId: replay!.scopeId, safeMetadata: { requestDigest: "a".repeat(64) },
       });
       expect((await service.authorize(post.request)).decision).toMatchObject({ effect: "allow", reasonCode: "dynamic_grant" });
       expect(canonicalDecisionId("org-1", first.request.idempotencyKey)).toBe(row.decisionId);
       const changed = initial({ ...descriptor, actionId: "api_sessions.get_sessions_other" });
       await expect(loadApprovedRouteReplay(pg.appDb, changed.request, resolutionId, 200)).rejects.toThrow(/does not match/i);
+      const changedSemantics = initial(descriptor, "http-request-3", "http-delivery-3", "b".repeat(64));
+      await expect(loadApprovedRouteReplay(pg.appDb, changedSemantics.request, resolutionId, 200)).rejects.toThrow(/does not match/i);
       await pg.appDb.update(canonicalApprovalResolutions).set({ revokedAt: 201 });
       await expect(loadApprovedRouteReplay(pg.appDb, first.request, resolutionId, 202)).rejects.toThrow(/does not match/i);
       await pg.appDb.update(canonicalApprovalResolutions).set({ revokedAt: null });

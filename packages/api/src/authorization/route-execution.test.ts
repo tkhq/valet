@@ -5,10 +5,10 @@ import { agentSessions, authorizationDecisions, authorizationExecutionAttempts }
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 
-const create = (key: string) => fetch(`${api!.baseUrl}/api/sessions`, {
+const create = (key: string, workspace = "/tmp") => fetch(`${api!.baseUrl}/api/sessions`, {
   method: "POST",
   headers: { "Content-Type": "application/json", "Idempotency-Key": key },
-  body: JSON.stringify({ workspace: "/tmp" }),
+  body: JSON.stringify({ workspace }),
 });
 
 describe("route execution reservation", () => {
@@ -16,13 +16,26 @@ describe("route execution reservation", () => {
     api = await bootTestApi();
     const first = await create("route-mutation-1");
     expect(first.status).toBe(201);
+    const firstBody = await first.json();
     const second = await create("route-mutation-1");
-    expect(second.status).toBe(200);
-    await expect(second.json()).resolves.toEqual({ code: "authorization_completed_replay", originalStatus: 201 });
+    expect(second.status).toBe(201);
+    expect(second.headers.get("x-valet-execution-replay")).toBe("true");
+    await expect(second.json()).resolves.toEqual(firstBody);
     expect(await api.providers.db.select().from(agentSessions)).toHaveLength(1);
     const attempts = await api.providers.db.select().from(authorizationExecutionAttempts);
     expect(attempts).toHaveLength(1);
-    expect(attempts[0]).toMatchObject({ outcome: "completed", targetIdempotencyKey: "route-mutation-1", redactedResult: { status: 201 } });
+    expect(attempts[0]).toMatchObject({ outcome: "completed", targetIdempotencyKey: "route-mutation-1", redactedResult: { status: 201, outputAvailable: true } });
+    expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(2);
+  });
+
+  it("freshly authorizes a replay and rejects changed request semantics", async () => {
+    api = await bootTestApi();
+    expect((await create("route-mutation-semantics", "/tmp/one")).status).toBe(201);
+    const replay = await create("route-mutation-semantics", "/tmp/two");
+    expect(replay.status).toBe(409);
+    await expect(replay.json()).resolves.toMatchObject({ code: "authorization_idempotency_conflict" });
+    expect(await api.providers.db.select().from(agentSessions)).toHaveLength(1);
+    expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(2);
   });
 
   it("returns an indeterminate replay and never reserves reads", async () => {

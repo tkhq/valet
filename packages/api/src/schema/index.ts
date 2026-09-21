@@ -1766,7 +1766,7 @@ export const authorizationDecisions = pgTable(
     proofVerificationError: text("proof_verification_error"),
     identityFactProvenance: jsonb("identity_fact_provenance").$type<FactProvenance[]>().notNull(),
     policyFactProvenance: jsonb("policy_fact_provenance").$type<FactProvenance[]>().notNull(),
-    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string; approvalReplay?: { evaluationTimeMs: number; actorUserId?: string } }>(),
+    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string; approvalReplay?: { evaluationTimeMs: number; actorUserId?: string; route?: { method: string; template: string; actionId: string; requestDigest?: string } } }>(),
     evaluatedAt: bigint("evaluated_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
