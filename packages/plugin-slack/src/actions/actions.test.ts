@@ -1092,6 +1092,34 @@ describe('slack actions', () => {
     expect(result.success).toBe(true);
   });
 
+  it('send_message renders a release report in both the visible block and notification', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '127.891', channel: 'C1' }));
+    const text = '**Release infrastructure**\n\n- **Deployed:** tkhq/gitops#5169\n- **Example:** `tkhq/mono#8158`';
+
+    const result = await action('slack.send_message').execute(
+      { channel: 'C1', text },
+      pluginCtx({
+        credentials: makeCredentials({
+          accessToken: 'xoxb-test-token',
+          metadata: { owner_slack_user_id: 'U999' },
+        }),
+      }),
+    );
+
+    expect(result.success).toBe(true);
+    const post = fetchMock.mock.calls[1]?.[1];
+    expect(post).toBeDefined();
+    if (typeof post?.body !== 'string') throw new Error('Expected a JSON Slack request body.');
+    expect(JSON.parse(post.body)).toMatchObject({
+      text: '*Release infrastructure*\n\n- *Deployed:* <https://github.com/tkhq/gitops/issues/5169|tkhq/gitops#5169>\n- *Example:* `tkhq/mono#8158`',
+      blocks: [
+        { type: 'markdown', text: text.replace('tkhq/gitops#5169', '[tkhq/gitops#5169](https://github.com/tkhq/gitops/issues/5169)') },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: '↳ <@U999>' }] },
+      ],
+    });
+  });
+
   it('send_message does not add attribution block for DM channels', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D1', is_private: false, is_im: true, is_mpim: false } }))

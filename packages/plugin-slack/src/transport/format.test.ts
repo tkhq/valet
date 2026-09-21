@@ -1,5 +1,41 @@
 import { describe, it, expect } from "vitest";
-import { markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
+import { linkGitHubReferencesInMarkdown, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
+
+describe("linkGitHubReferencesInMarkdown", () => {
+  it("preserves headings, emphasis and separate bullet lines", () => {
+    expect(linkGitHubReferencesInMarkdown("## Release report\n\n- **Deployed:** tkhq/gitops#5169\n- *Pending:* tkhq/mono#8158"))
+      .toBe("## Release report\n\n- **Deployed:** [tkhq/gitops#5169](https://github.com/tkhq/gitops/issues/5169)\n- *Pending:* [tkhq/mono#8158](https://github.com/tkhq/mono/issues/8158)");
+  });
+
+  it.each([
+    "```ts\r\ntkhq/mono#12\r\n```\r\n",
+    "~~~md\ntkhq/mono#12\n~~~",
+    "````md\n```\ntkhq/mono#12\n```\n````",
+    "~~~md\ntkhq/mono#12",
+    "``a ` tkhq/mono#12 ` b``",
+    "    tkhq/mono#12",
+    "> ~~~md\n> tkhq/mono#12\n> ~~~",
+    "- ~~~md\n  tkhq/mono#12\n  ~~~",
+  ])("retains original code delimiters and content: %s", (code) => {
+    expect(linkGitHubReferencesInMarkdown(code)).toBe(code);
+  });
+
+  it("preserves explicit links and URLs, and does not guess repository context", () => {
+    const text = "[tkhq/mono#12](https://example.com/custom) <https://example.com|tkhq/mono#12> https://example.com/tkhq/mono#12 gitops #5169 #5267";
+    expect(linkGitHubReferencesInMarkdown(text)).toBe(text);
+  });
+
+  it("escapes underscores in generated labels and is idempotent", () => {
+    const linked = linkGitHubReferencesInMarkdown("tkhq/my__repo__name#12");
+    expect(linked).toBe("[tkhq/my\\_\\_repo\\_\\_name#12](https://github.com/tkhq/my__repo__name/issues/12)");
+    expect(linkGitHubReferencesInMarkdown(linked)).toBe(linked);
+  });
+
+  it("preserves reference-style links and their definitions", () => {
+    const text = "[tkhq/mono#12][release]\n\n[release]: https://example.com/release";
+    expect(linkGitHubReferencesInMarkdown(text)).toBe(text);
+  });
+});
 
 describe("neutralizeSlackMentions", () => {
   it("defuses every broadcast sequence", () => {

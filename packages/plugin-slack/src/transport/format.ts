@@ -1,3 +1,5 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+
 /**
  * Two escapes for two different Slack text formats.
  *
@@ -62,6 +64,39 @@ export function escapeMrkdwn(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 }
 
+const GITHUB_REFERENCE = /\[[^\]]*\]\([^\n]*?\)|(?:&lt;|<)[^>\n]*>|https?:\/\/[^\s<>]+|(?<![\w./:@\\-])([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?)\/([a-zA-Z0-9_.-]+)#([1-9][0-9]*)(?![\w/#])/g;
+
+/** Link only Markdown text nodes, preserving the original source layout. */
+export function linkGitHubReferencesInMarkdown(text: string): string {
+  const tree = fromMarkdown(text);
+  type MarkdownNode = typeof tree | (typeof tree.children)[number];
+  const edits: { start: number; end: number; text: string }[] = [];
+  const visit = (node: MarkdownNode): void => {
+    if (node.type === "link" || node.type === "linkReference"
+      || node.type === "image" || node.type === "imageReference") return;
+    if (node.type === "text") {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start === undefined || end === undefined) return;
+      const source = text.slice(start, end);
+      const linked = source.replace(GITHUB_REFERENCE,
+        (match: string, owner: string | undefined, repo: string | undefined, number: string | undefined) => {
+          if (owner === undefined || repo === undefined || number === undefined) return match;
+          const label = match.replace(/_/g, "\\_");
+          return `[${label}](https://github.com/${owner}/${repo}/issues/${number})`;
+        });
+      if (linked !== source) edits.push({ start, end, text: linked });
+    } else if ("children" in node) {
+      node.children.forEach(visit);
+    }
+  };
+  visit(tree);
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    text = text.slice(0, edit.start) + edit.text + text.slice(edit.end);
+  }
+  return text;
+}
+
 /** Convert CommonMark to Slack mrkdwn.
  *
  * Apply this function exactly once. A second application treats Slack's
@@ -112,7 +147,7 @@ export function markdownToSlackMrkdwn(
   // Existing links and URLs own their labels and fragments.
   const githubLinks: string[] = [];
   result = result.replace(
-    /\[[^\]]*\]\([^\n]*?\)|&lt;[^>\n]*>|https?:\/\/[^\s<>]+|(?<![\w./:@\\-])([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?)\/([a-zA-Z0-9_.-]+)#([1-9][0-9]*)(?![\w/#])/g,
+    GITHUB_REFERENCE,
     (match: string, owner: string | undefined, repo: string | undefined, number: string | undefined) => {
       if (owner === undefined || repo === undefined || number === undefined) return match;
       githubLinks.push(`<https://github.com/${owner}/${repo}/issues/${number}|${match}>`);
