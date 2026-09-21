@@ -27,8 +27,9 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
       return c.json({ error: "Authorization identity is unavailable. Authenticate again.", code: "authorization_identity_missing" }, 401);
     }
     const delivery = deliveryIdentity();
-    const mutationKey = c.req.header("Idempotency-Key");
-    const safeFingerprint = ["GET", "HEAD", "OPTIONS"].includes(c.req.method) ? undefined : await safeRequestFingerprint(c.req.raw, matched.descriptor, matched.pathParameters);
+    const mutation = !["GET", "HEAD", "OPTIONS"].includes(c.req.method);
+    const mutationKey = mutation ? c.req.header("Idempotency-Key") : undefined;
+    const safeFingerprint = mutation ? await safeRequestFingerprint(c.req.raw, matched.descriptor, matched.pathParameters) : undefined;
     if (c.req.header("X-Valet-Approval-Resolution") !== undefined && safeFingerprint === undefined) return c.json({ error: "This route cannot bind the complete request to an approval. Remove unsupported input or ask an administrator to change the policy.", code: "approval_unsupported" }, 422);
     let obligationPlan: RouteResourceObligationPlanV1;
     let executionAttemptId: string | undefined;
@@ -51,7 +52,7 @@ export function routeResourcePolicyMiddleware(registry: () => readonly ApiRouteD
       if (routeRefusal) return c.json(routeRefusal.body, routeRefusal.status);
       if (obligationPlan.readOnly && !["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return c.json({ error: "Policy permits read-only access. Use a read operation or ask an administrator to change access.", code: "authorization_read_only" }, 403);
       if (obligationPlan.resultLimit !== undefined || obligationPlan.fieldMask !== undefined || obligationPlan.redactions.length > 0) return c.json({ error: "This route does not support the required policy obligation. Ask an administrator to change the policy.", code: "authorization_obligation_unsupported" }, 403);
-      if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
+      if (mutation) {
         const executionKey = replay?.executionKey ?? mutationKey;
         const reserved = executionKey === undefined || safeFingerprint === undefined ? undefined : await reserveRouteExecution(c.var.providers.db, canonicalDecisionId(user.orgId, routeRequest.idempotencyKey), { orgId: user.orgId, actorId: user.id, actionId: matched.descriptor.actionId, key: executionKey, digest: safeFingerprint }, evaluationTimeMs);
         if (!reserved) { await next(); return; }

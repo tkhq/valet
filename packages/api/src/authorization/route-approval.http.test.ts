@@ -86,7 +86,7 @@ describe("durable route approval HTTP flow", () => {
     const replay = await redeem("K3");
     expect(replay.status).toBe(200);
     expect(replay.headers.get("x-valet-execution-replay")).toBe("true");
-    expect(await replay.json()).resolves.toEqual({ code: "completed_output_unavailable" });
+    await expect(replay.json()).resolves.toEqual({ code: "completed_output_unavailable" });
     expect(await deleteAttempts()).toHaveLength(1);
   }, 120_000);
 });
