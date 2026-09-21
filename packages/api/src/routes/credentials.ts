@@ -47,11 +47,13 @@ import { invalidateWorkflowSources } from "../services/content-sync/invalidation
 import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { Hono, type Context } from "hono";
 import { insertCredentialIfAbsent, lockTeamCredentialAuthority, replaceCredential } from "../services/credential-insert.js";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
 import { credentialSecret, type CredentialOwner, type StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { requireOrgAdmin } from "./_org-admin.js";
+import { driveApiUrl } from "../services/google-env.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import {
@@ -73,6 +75,7 @@ import type {
   DelegateCredentialRequest,
   DelegateCredentialResponse,
   DeleteCredentialResponse,
+  DriveFolderScopeResponse,
   ListCredentialsResponse,
   PutCredentialRequest,
   PutCredentialResponse,
@@ -426,6 +429,21 @@ credentialsRouter.put("/:service", async (c) => {
         error:
           `metadata.${smuggled} is reserved. To share a personal credential with a team, ` +
           `POST /api/credentials/${service}/delegate as the member who holds it.`,
+      },
+      400,
+    );
+  }
+
+  // `metadata.settings` holds what a person configured on the credential,
+  // such as the Drive folder scope. The store never writes it from a save,
+  // so a PUT carrying one would look accepted and change nothing. Refuse it
+  // and name the route that owns the key.
+  if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "settings" in body.metadata) {
+    return c.json(
+      {
+        error:
+          "metadata.settings is reserved. It holds per-credential settings such as the Drive folder scope, " +
+          `which PUT /api/credentials/${service}/folder-scope writes.`,
       },
       400,
     );
@@ -812,4 +830,308 @@ credentialsRouter.delete("/:service", async (c) => {
 
   const resp: DeleteCredentialResponse = { ok: true };
   return c.json(resp);
+});
+
+// ── Google Drive folder scope ──────────────────────────────────────
+//
+// The folders a person is willing to let Valet see in Drive. The scope is
+// stored on their own Drive credential, because the OAuth grant it narrows
+// is theirs, and it is enforced inside the google-workspace plugin
+// (`actions/folder-scope.ts`). See
+// `docs/specs/2026-09-17-drive-folder-scope-design.md`.
+//
+// The scope is `metadata.settings.driveFolderScope`. `settings` is the one
+// part of credential metadata `CredentialStore.save` never writes and always
+// preserves, so a reconnect, the first Google sign-in, or a token refresh
+// cannot drop it. These handlers write it with a targeted jsonb update: a
+// read-modify-save would round-trip the encrypted secret columns for a
+// change that touches none of them, and would race a refresh in flight.
+
+/** The plugin's credential service id, as `plugin-google-workspace` declares it. */
+const GOOGLE_WORKSPACE_SERVICE = "google_workspace";
+/** Drive ids are URL-safe base64-ish. Anything else is rejected on write. */
+const DRIVE_FOLDER_ID = /^[A-Za-z0-9_-]+$/;
+const MAX_SCOPE_FOLDERS = 50;
+
+function driveScopeGuard(service: string): Response | null {
+  if (service === GOOGLE_WORKSPACE_SERVICE) return null;
+  return new Response(
+    JSON.stringify({
+      error: `Folder scope applies to ${GOOGLE_WORKSPACE_SERVICE} only.`,
+      corrective: `Call this route with the ${GOOGLE_WORKSPACE_SERVICE} service.`,
+    }),
+    { status: 400, headers: { "content-type": "application/json" } },
+  );
+}
+
+function driveCredentialRow(owner: CredentialOwner) {
+  return and(
+    eq(credentials.ownerType, owner.type),
+    eq(credentials.ownerId, owner.id),
+    eq(credentials.service, GOOGLE_WORKSPACE_SERVICE),
+  );
+}
+
+/** The scope stored on one credential row, and whether that row is a share. */
+interface StoredFolderScope {
+  folderIds: string[] | null;
+  /** Set when the row is a delegated reference: the member whose scope applies. */
+  delegatedFrom?: string;
+}
+
+/** Parse the scope out of a credential's metadata. `null` is unrestricted. */
+function folderScopeOf(metadata: Record<string, unknown> | undefined): string[] | null {
+  const settings = metadata?.["settings"];
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) return null;
+  const raw = (settings as Record<string, unknown>)["driveFolderScope"];
+  if (raw === undefined || raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const ids = (raw as Record<string, unknown>)["folderIds"];
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+}
+
+/**
+ * Read the scope that applies to `owner`'s Drive credential. A delegated
+ * team row carries no scope of its own: the member's row does, and the team
+ * borrows it along with the token, so the read follows the reference.
+ */
+async function readFolderScope(db: AppDb, owner: CredentialOwner): Promise<StoredFolderScope | null> {
+  const [row] = await db.select({ metadata: credentials.metadata }).from(credentials).where(driveCredentialRow(owner));
+  if (!row) return null;
+  const metadata = fromJsonbColumn<Record<string, unknown>>(row.metadata);
+  const delegatedFrom = delegatedFromMeta(metadata);
+  if (delegatedFrom) {
+    const source = await readFolderScope(db, { type: "user", id: delegatedFrom });
+    return { folderIds: source?.folderIds ?? null, delegatedFrom };
+  }
+  return { folderIds: folderScopeOf(metadata) };
+}
+
+/**
+ * Write or clear the scope with one targeted update. Only the key under
+ * `settings` changes: the token columns are never read or rewritten, and a
+ * refresh that saves the row mid-flight cannot overwrite this, because
+ * `save()` leaves `settings` alone.
+ */
+async function writeFolderScope(
+  db: AppDb,
+  owner: CredentialOwner,
+  scope: { folderIds: string[] } | null,
+): Promise<boolean> {
+  const metadata =
+    scope === null
+      ? sql`COALESCE(${credentials.metadata}, '{}'::jsonb) #- '{settings,driveFolderScope}'`
+      : sql`jsonb_set(
+          jsonb_set(
+            COALESCE(${credentials.metadata}, '{}'::jsonb),
+            '{settings}',
+            COALESCE(${credentials.metadata} -> 'settings', '{}'::jsonb),
+            true
+          ),
+          '{settings,driveFolderScope}',
+          ${JSON.stringify({ folderIds: scope.folderIds })}::jsonb,
+          true
+        )`;
+  const written = await db
+    .update(credentials)
+    .set({ metadata, updatedAt: Date.now() })
+    .where(driveCredentialRow(owner))
+    .returning({ service: credentials.service });
+  return written.length > 0;
+}
+
+const NOT_CONNECTED = {
+  error:
+    "Google Workspace is not connected. Connect Google Workspace in Settings → Integrations, then set the folders.",
+  corrective: "Connect Google Workspace in Settings → Integrations, then set the folders.",
+} as const;
+
+const SHARED_ROW = {
+  error:
+    "This Google Workspace connection is shared by a member, so its folders are set on their own connection. " +
+    "Ask them to change the folders in Settings → Integrations, or connect Google Workspace for the team.",
+  corrective: "Ask the member to change the folders, or connect Google Workspace for the team.",
+} as const;
+
+/**
+ * Whose Drive credential a folder-scope route acts on. `scope=team` needs
+ * `teamId`: a read admits any member and an org admin, a write needs a team
+ * admin, the same gates the team credential routes use. An org holds no
+ * Drive credential a session would read, so there is nothing to scope.
+ */
+async function folderScopeOwner(
+  c: Context<AppEnv>,
+  access: "read" | "write",
+): Promise<CredentialOwner | Response> {
+  const scope = c.req.query("scope");
+  if (scope === "org") {
+    return c.json(
+      {
+        error:
+          "Folder scope applies to a person's or a team's Google Workspace connection. " +
+          "Pass scope=team with teamId, or omit scope for your own.",
+        corrective: "Pass scope=team with teamId, or omit scope for your own.",
+      },
+      400,
+    );
+  }
+  return resolveCredentialOwner(c, scope === "team" ? "team" : "user", c.req.query("teamId") || undefined, access);
+}
+
+credentialsRouter.get("/:service/folder-scope", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+  const owner = await folderScopeOwner(c, "read");
+  if (owner instanceof Response) return owner;
+  const scope = await readFolderScope(c.var.providers.db, owner);
+  // `folderIds: null` is the unrestricted case, which is not the same as an
+  // empty list. An empty list denies every file. `delegatedFrom` says the
+  // scope belongs to the member who shared the connection.
+  const resp: DriveFolderScopeResponse = {
+    folderIds: scope ? scope.folderIds : null,
+    ...(scope?.delegatedFrom ? { delegatedFrom: scope.delegatedFrom } : {}),
+  };
+  return c.json(resp);
+});
+
+credentialsRouter.put("/:service/folder-scope", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+  const owner = await folderScopeOwner(c, "write");
+  if (owner instanceof Response) return owner;
+
+  let body: { folderIds?: unknown };
+  try {
+    body = (await c.req.json()) as { folderIds?: unknown };
+  } catch {
+    return c.json(
+      { error: 'Body must be JSON. Send {"folderIds": ["<id>"]}.', corrective: 'Send {"folderIds": ["<id>"]}.' },
+      400,
+    );
+  }
+  if (!Array.isArray(body.folderIds)) {
+    return c.json(
+      {
+        error: 'folderIds must be an array. Send {"folderIds": ["<id>"]}.',
+        corrective: 'Send {"folderIds": ["<id>"]}.',
+      },
+      400,
+    );
+  }
+  if (body.folderIds.length > MAX_SCOPE_FOLDERS) {
+    return c.json(
+      {
+        error:
+          `A folder scope holds at most ${MAX_SCOPE_FOLDERS} folders. ` +
+          "Pick fewer folders, or pick a parent folder that contains them.",
+        corrective: "Pick fewer folders, or pick a parent folder that contains them.",
+      },
+      400,
+    );
+  }
+  const folderIds: string[] = [];
+  for (const id of body.folderIds) {
+    if (typeof id !== "string" || !DRIVE_FOLDER_ID.test(id)) {
+      return c.json(
+        {
+          error:
+            `"${String(id)}" is not a Drive folder id. ` +
+            "Copy the id from the folder's URL, after /folders/.",
+          corrective: "Copy the id from the folder's URL, after /folders/.",
+        },
+        400,
+      );
+    }
+    if (id === "root") {
+      // "root" is Drive's alias for the top of My Drive, so a scope holding
+      // it is not a restriction. The unrestricted state is no scope at all.
+      return c.json(
+        {
+          error:
+            'Pick a folder rather than "root". To let Valet use all of Drive, choose ' +
+            "Allow all of Drive, which clears the restriction.",
+          corrective: "Choose Allow all of Drive to clear the restriction.",
+        },
+        400,
+      );
+    }
+    if (!folderIds.includes(id)) folderIds.push(id);
+  }
+
+  const current = await readFolderScope(c.var.providers.db, owner);
+  if (current?.delegatedFrom) return c.json(SHARED_ROW, 400);
+  const wrote = await writeFolderScope(c.var.providers.db, owner, { folderIds });
+  if (!wrote) return c.json(NOT_CONNECTED, 404);
+  return c.json({ folderIds });
+});
+
+credentialsRouter.delete("/:service/folder-scope", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+  const owner = await folderScopeOwner(c, "write");
+  if (owner instanceof Response) return owner;
+  const current = await readFolderScope(c.var.providers.db, owner);
+  if (current?.delegatedFrom) return c.json(SHARED_ROW, 400);
+  const wrote = await writeFolderScope(c.var.providers.db, owner, null);
+  if (!wrote) return c.json(NOT_CONNECTED, 404);
+  // Back to as wide as the OAuth grant itself.
+  return c.json({ folderIds: null });
+});
+
+/**
+ * Browse the caller's Drive folders so the settings UI can offer a picker.
+ *
+ * `parentId` defaults to the Drive root. The listing is folders only: a
+ * scope names folders, and showing files would imply they can be picked.
+ */
+credentialsRouter.get("/:service/drive-folders", async (c) => {
+  const denied = driveScopeGuard(c.req.param("service"));
+  if (denied) return denied;
+  // The picker exists to set a scope, so it takes the write gate.
+  const owner = await folderScopeOwner(c, "write");
+  if (owner instanceof Response) return owner;
+  const { engineCredentials } = c.var.providers;
+  const stored = await engineCredentials.get(owner, GOOGLE_WORKSPACE_SERVICE);
+  if (stored && delegatedFromMeta(stored.metadata)) return c.json(SHARED_ROW, 400);
+  const token = stored ? credentialSecret(stored) : null;
+  if (!token) return c.json(NOT_CONNECTED, 404);
+
+  const parentId = c.req.query("parentId") || "root";
+  if (parentId !== "root" && !DRIVE_FOLDER_ID.test(parentId)) {
+    return c.json(
+      {
+        error: "parentId is not a Drive folder id. Omit it to list the top level.",
+        corrective: "Omit it to list the top level.",
+      },
+      400,
+    );
+  }
+  const qs = new URLSearchParams({
+    q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: "files(id,name)",
+    pageSize: "100",
+    orderBy: "name",
+    supportsAllDrives: "true",
+    includeItemsFromAllDrives: "true",
+  });
+  const res = await fetch(`${driveApiUrl()}/files?${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const corrective =
+      res.status === 401
+        ? "Reconnect Google Workspace in Settings → Integrations."
+        : "Try again in a moment.";
+    return c.json(
+      {
+        error: `Google Drive answered ${res.status} while listing folders. ${corrective}`,
+        corrective,
+      },
+      502,
+    );
+  }
+  const data = (await res.json()) as { files?: Array<{ id?: unknown; name?: unknown }> };
+  const folders = (data.files ?? [])
+    .filter((f): f is { id: string; name: string } => typeof f.id === "string" && typeof f.name === "string")
+    .map((f) => ({ id: f.id, name: f.name }));
+  return c.json({ parentId, folders });
 });

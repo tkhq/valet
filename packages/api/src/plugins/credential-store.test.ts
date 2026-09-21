@@ -83,6 +83,75 @@ describe("PgCredentialStore", () => {
     expect(row.access_token_enc).not.toContain("tok-secret-123");
     expect(row.access_token_enc.startsWith("v1:")).toBe(true);
   });
+
+  // `metadata.settings` holds what a person configured on the credential,
+  // such as a Drive folder scope. Every token writer saves the whole row: the
+  // OAuth callback, the first Google sign-in, the refresh store. So the rule
+  // is that save() never writes settings, and the routes that own them use a
+  // targeted update. Otherwise a reconnect silently widens a narrowed grant.
+  describe("metadata.settings survives save()", () => {
+    const SERVICE = "google_workspace";
+    const scope = (folderIds: string[]) => ({ driveFolderScope: { folderIds } });
+
+    async function setSettings(settings: unknown): Promise<void> {
+      await db.query(
+        `UPDATE credentials
+           SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{settings}', $1::jsonb, true)
+         WHERE owner_type = $2 AND owner_id = $3 AND service = $4`,
+        [JSON.stringify(settings), userOwner.type, userOwner.id, SERVICE],
+      );
+    }
+
+    it("keeps the stored settings when a reconnect writes a fresh metadata object", async () => {
+      const store = await freshStore();
+      await store.save(userOwner, SERVICE, { type: "oauth2", accessToken: "tok-1", metadata: { connectedVia: "oauth" } });
+      await setSettings(scope(["fold-A"]));
+
+      await store.save(userOwner, SERVICE, {
+        type: "oauth2",
+        accessToken: "tok-2",
+        metadata: { connectedVia: "oauth", login: "someone" },
+      });
+
+      const got = await store.get(userOwner, SERVICE);
+      expect(got?.accessToken).toBe("tok-2");
+      expect(got?.metadata).toEqual({ connectedVia: "oauth", login: "someone", settings: scope(["fold-A"]) });
+    });
+
+    it("keeps the stored settings when a save carries no metadata at all", async () => {
+      // The first Google sign-in seeds the row with token fields only.
+      const store = await freshStore();
+      await store.save(userOwner, SERVICE, { type: "oauth2", accessToken: "tok-1", metadata: { connectedVia: "oauth" } });
+      await setSettings(scope(["fold-A"]));
+
+      await store.save(userOwner, SERVICE, { type: "oauth2", accessToken: "tok-2" });
+
+      expect((await store.get(userOwner, SERVICE))?.metadata).toEqual({ settings: scope(["fold-A"]) });
+    });
+
+    it("ignores settings carried by a save, on a new row and on a stale one", async () => {
+      const store = await freshStore();
+      await store.save(userOwner, SERVICE, {
+        type: "oauth2",
+        accessToken: "tok-1",
+        metadata: { connectedVia: "oauth", settings: scope(["smuggled"]) },
+      });
+      expect((await store.get(userOwner, SERVICE))?.metadata).toEqual({ connectedVia: "oauth" });
+
+      // A refresh that read the row before the scope changed writes back
+      // what it read. The stored settings win.
+      await setSettings(scope(["fold-B"]));
+      await store.save(userOwner, SERVICE, {
+        type: "oauth2",
+        accessToken: "tok-3",
+        metadata: { connectedVia: "oauth", settings: scope(["stale"]) },
+      });
+      expect((await store.get(userOwner, SERVICE))?.metadata).toEqual({
+        connectedVia: "oauth",
+        settings: scope(["fold-B"]),
+      });
+    });
+  });
 });
 
 describe("secret-crypto", () => {

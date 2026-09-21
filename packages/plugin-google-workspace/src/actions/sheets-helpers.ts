@@ -5,7 +5,7 @@
  * All API helpers use raw fetch() with Bearer token instead of googleapis client.
  */
 
-const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
+import { SHEETS_API } from './google-api.js';
 
 // ─── Low-Level Fetch ───────────────────────────────────────────────────────
 

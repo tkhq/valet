@@ -5,7 +5,7 @@ description: How to use Google Drive tools effectively — file discovery, folde
 
 # Google Drive
 
-You have full access to Google Drive through the Google Workspace integration. Drive is the file system layer — use it to find, organize, create, and download files. For editing the content of Google Docs or Sheets, use the `docs.*` or `sheets.*` tools instead.
+You have access to Google Drive through the Google Workspace integration, as far as the person's OAuth grant and their folder scope allow (see "Folder scope" below). Drive is the file system layer — use it to find, organize, create, and download files. For editing the content of Google Docs or Sheets, use the `docs.*` or `sheets.*` tools instead.
 
 ## Available Tools
 
@@ -165,6 +165,12 @@ Drive is the file system layer. For editing the **content** of Google Workspace 
 | Google Forms | `application/vnd.google-apps.form` | `form` |
 | Folder | `application/vnd.google-apps.folder` | `folder` |
 | PDF | `application/pdf` | `pdf` |
+
+## Folder scope
+
+The person (or the team admin, for a team connection) may have limited Valet to chosen Drive folders. Under a scope you reach each allowed folder and everything inside it, and nothing else. Listings and searches are filtered to the scope, so a page can come back shorter than `maxResults` with a `nextPageToken` still set: keep following the token rather than concluding there is nothing left. A read, write, copy or move of a file outside the scope answers "File not found or access denied", and so does a copy or move whose destination folder is outside it. A create with no folder named goes into the one allowed folder; with several allowed folders, name the destination.
+
+**If you get "File not found or access denied"** and the message mentions allowed folders, do not retry with other tools. Tell the user the file sits outside the folders Valet is allowed to use, and that they can change the allowed folders in Settings → Integrations → Google Workspace (Folders).
 
 ## Drive Labels Guard
 

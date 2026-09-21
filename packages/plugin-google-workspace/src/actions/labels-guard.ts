@@ -1,4 +1,5 @@
 import { normalizeDocumentId } from './docs-helpers.js';
+import { DRIVE_API } from './google-api.js';
 
 // The legacy `@valet/sdk/integrations` contract (ActionSource/ActionContext/
 // ActionResult) was deleted in the v2 plugin conversion. This guard only
@@ -192,7 +193,7 @@ export async function checkFileLabel(
 
   try {
     const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${qs}`,
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}?${qs}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -243,7 +244,7 @@ export async function applyLabel(
 ): Promise<boolean> {
   try {
     const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/modifyLabels`,
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}/modifyLabels`,
       {
         method: 'POST',
         headers: {
@@ -267,7 +268,7 @@ export async function applyLabel(
 export async function deleteFile(fileId: string, token: string): Promise<void> {
   try {
     await fetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`,
       {
         method: 'DELETE',
         headers: {

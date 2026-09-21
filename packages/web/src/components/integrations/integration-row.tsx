@@ -38,6 +38,7 @@ import { errorText } from "~/lib/error-text";
 import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
+import { DriveFolderScope } from "./drive-folder-scope";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
 import { GithubOrgAppLine } from "./github-org-app-line";
@@ -127,7 +128,16 @@ function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
 
 // ── Tiles ────────────────────────────────────────────────────────────────
 
-export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
+export function IntegrationRow({
+  plugin,
+  autoOpenFolders = false,
+}: {
+  plugin: PluginSummary;
+  /** Open the Drive folder picker on mount. The page passes this once,
+   * right after a Google Workspace connect, so the choice is offered while
+   * the grant is fresh in mind. Ignored on every other service. */
+  autoOpenFolders?: boolean;
+}) {
   const meta = reachMeta(plugin);
   const single = plugin.services.length === 1 ? plugin.services[0] : undefined;
 
@@ -139,6 +149,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
           title={pluginDisplayName(plugin)}
           slug={single.iconSlug ?? plugin.name}
           description={plugin.description}
+          autoOpenFolders={autoOpenFolders}
           meta={meta}
           orgNote={orgNoteFor(single)}
         />
@@ -199,10 +210,12 @@ function ServiceBlock({
   description,
   meta,
   orgNote,
+  autoOpenFolders = false,
 }: {
   service: PluginServiceSummary;
   title: string;
   slug: string;
+  autoOpenFolders?: boolean;
   description?: string;
   meta?: string | null;
   /** A second connection the organisation owns, stated beside this one
@@ -269,16 +282,26 @@ function ServiceBlock({
   const shareControl =
     service.connected && !orgProvided ? <ShareWithTeam service={service.service} title={title} /> : null;
 
+  // Drive is the one credential whose reach a person can narrow after
+  // connecting, so the control sits on its tile rather than in a generic
+  // per-integration settings screen that does not exist yet.
+  const folderScopeControl =
+    service.connected && service.service === "google_workspace" ? (
+      <DriveFolderScope service={service.service} title={title} defaultOpen={autoOpenFolders} />
+    ) : null;
+
   const controls = !service.connected ? (
     unconfigured || orgProvided ? null : connectControl
   ) : repair && !unconfigured && !orgProvided ? (
     <span className="flex flex-wrap items-center gap-3">
+      {folderScopeControl}
       {shareControl}
       {disconnectControl}
       {connectControl}
     </span>
   ) : (
     <span className="flex flex-wrap items-center gap-3">
+      {folderScopeControl}
       {shareControl}
       {disconnectControl}
     </span>

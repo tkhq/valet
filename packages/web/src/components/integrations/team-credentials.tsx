@@ -5,6 +5,7 @@ import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
+import { DriveFolderScope } from "./drive-folder-scope";
 
 /**
  * The verb for a removal control. One route serves both rows
@@ -108,6 +109,20 @@ export function TeamCredentials({
                     The source credential is gone or the member left. Re-share it, or store a
                     direct team credential.
                   </p>
+                )}
+                {row.service === "google_workspace" && !row.referenceBroken && (
+                  // A shared connection carries its sharer's Drive folder scope,
+                  // so the team sees it and cannot change it here. The team's own
+                  // connection takes the same picker a person gets, for admins.
+                  <div className="pt-1">
+                    <DriveFolderScope
+                      service={row.service}
+                      title={displayName(row.service)}
+                      teamId={team.id}
+                      readOnly={!canMutate || !!row.delegatedFrom}
+                      sharerName={row.delegatedFrom ? nameFor(row.delegatedFrom) : undefined}
+                    />
+                  </div>
                 )}
               </div>
               <div className={cards ? "mt-auto flex items-center justify-end gap-2 pt-4" : "flex shrink-0 items-center gap-2 whitespace-nowrap"}>

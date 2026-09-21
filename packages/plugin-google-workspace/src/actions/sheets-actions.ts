@@ -7,6 +7,7 @@
  */
 
 import { Type } from 'typebox';
+import { DRIVE_API } from './google-api.js';
 import type { Static, TSchema } from 'typebox';
 import type {
   PluginAction,
@@ -362,7 +363,7 @@ const listSpreadsheets = action(
         supportsAllDrives: 'true',
         includeItemsFromAllDrives: 'true',
       });
-      const res = await fetch(`https://www.googleapis.com/drive/v3/files?${qs}`, {
+      const res = await fetch(`${DRIVE_API}/files?${qs}`, {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',

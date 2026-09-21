@@ -28,6 +28,9 @@ vi.mock("~/api/integrations", () => ({
   useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
   useDelegateCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+  useDriveFolderScope: () => ({ data: { folderIds: null }, isLoading: false, error: null }),
+  useDriveFolders: () => ({ data: { parentId: "root", folders: [] }, isLoading: false, error: null }),
+  useSetDriveFolderScope: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, error: null }),
 }));
 
 vi.mock("~/api/repos", () => ({
@@ -67,6 +70,15 @@ const PLUGIN: PluginSummary = {
   description: "Issues and projects.",
   actionCount: 4,
   services: [SERVICE],
+};
+
+const DRIVE: PluginSummary = {
+  name: "google-workspace",
+  version: "1.0.0",
+  displayName: "Google Workspace",
+  description: "Drive, Docs and Sheets.",
+  actionCount: 70,
+  services: [{ ...SERVICE, service: "google_workspace" }],
 };
 
 function nativeConfirm() {
@@ -179,5 +191,22 @@ describe("IntegrationRow disconnect", () => {
     const control = screen.getByRole("button", { name: "Disconnect Linear" });
     expect(control.hasAttribute("disabled")).toBe(true);
     expect(control.textContent).toContain("Disconnecting…");
+  });
+});
+
+describe("IntegrationRow — Drive folders after a connect", () => {
+  it("opens the folder picker on its own right after a Google Workspace connect", () => {
+    // The page passes this once, from the `?connected=` result, so the
+    // choice is offered while the grant is fresh in mind.
+    render(<IntegrationRow plugin={DRIVE} autoOpenFolders />);
+
+    expect(screen.getByText("All of your Drive")).toBeTruthy();
+  });
+
+  it("leaves the picker closed otherwise", () => {
+    render(<IntegrationRow plugin={DRIVE} />);
+
+    expect(screen.queryByText("All of your Drive")).toBeNull();
+    expect(screen.getByRole("button", { name: /Choose which Drive folders/ })).toBeTruthy();
   });
 });

@@ -77,6 +77,23 @@ function rawToCredentialRow(raw: Record<string, unknown>): CredentialRow {
   };
 }
 
+/**
+ * `metadata.settings` is what a person configured on a credential, such as
+ * the Drive folder scope. Every token writer saves the whole row: the OAuth
+ * callback, the first Google sign-in, the refresh store. If any of them
+ * carried `metadata` through unchanged, a reconnect would silently widen a
+ * narrowed grant. So `save()` never writes `settings`: on insert the key is
+ * dropped from what was passed, and on conflict the stored value is kept.
+ * The routes that own a setting write it with a targeted jsonb update.
+ */
+function withoutSettings(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (metadata === undefined) return undefined;
+  const { settings: _owned, ...rest } = metadata;
+  return rest;
+}
+
 export class PgCredentialStore implements CredentialStore {
   constructor(
     private readonly db: PgQueryable,
@@ -124,7 +141,12 @@ export class PgCredentialStore implements CredentialStore {
          api_key_enc = EXCLUDED.api_key_enc,
          expires_at = EXCLUDED.expires_at,
          scopes = EXCLUDED.scopes,
-         metadata = EXCLUDED.metadata,
+         metadata = CASE
+           WHEN credentials.metadata ? 'settings'
+             THEN (COALESCE(EXCLUDED.metadata, '{}'::jsonb) - 'settings')
+                  || jsonb_build_object('settings', credentials.metadata -> 'settings')
+           ELSE EXCLUDED.metadata - 'settings'
+         END,
          updated_at = EXCLUDED.updated_at
        RETURNING owner_type, owner_id, service)
        ${CREDENTIAL_INVALIDATION_SQL}`,
@@ -138,7 +160,7 @@ export class PgCredentialStore implements CredentialStore {
         this.encrypt(credential.apiKey),
         credential.expiresAt ?? null,
         jsonbToParam(credential.scopes),
-        jsonbToParam(credential.metadata),
+        jsonbToParam(withoutSettings(credential.metadata)),
         now,
         now,
       ],

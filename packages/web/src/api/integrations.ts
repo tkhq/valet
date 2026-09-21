@@ -11,6 +11,8 @@ import {
 } from "@tanstack/react-query";
 import type {
   DeleteCredentialResponse,
+  DriveFolderScopeResponse,
+  DriveFoldersResponse,
   DelegateCredentialRequest,
   DelegateCredentialResponse,
   ListCredentialsResponse,
@@ -33,6 +35,12 @@ export const qkIntegrations = {
    * "team" pins one team; `teamId` is part of the key. */
   credentials: (scope: CredentialScope = "user", teamId?: string) =>
     ["credentials", scope, teamId ?? ""] as const,
+  /** The Drive folder scope on the caller's connection, or on a team's. */
+  driveFolderScope: (service: string, teamId?: string) =>
+    ["credentials", service, "folder-scope", teamId ?? ""] as const,
+  /** One level of the Drive folder tree, keyed by connection and parent. */
+  driveFolders: (service: string, parentId: string, teamId?: string) =>
+    ["credentials", service, "drive-folders", teamId ?? "", parentId] as const,
 };
 
 export function usePlugins(teamId?: string, opts?: Partial<UseQueryOptions<ListPluginsResponse>>) {
@@ -119,5 +127,51 @@ export function useRevokeDelegation() {
   return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string }>({
     mutationFn: ({ service, teamId }) => api.revokeDelegation(service, teamId),
     onSuccess: () => invalidateCredentialCaches(qc),
+  });
+}
+
+
+// ── Google Drive folder scope ──────────────────────────────────────
+
+/** `teamId` reads a team's own connection; without it, the caller's. */
+export function useDriveFolderScope(
+  service: string,
+  opts?: Partial<UseQueryOptions<DriveFolderScopeResponse>> & { teamId?: string },
+) {
+  const { teamId, ...queryOpts } = opts ?? {};
+  return useQuery<DriveFolderScopeResponse>({
+    queryKey: qkIntegrations.driveFolderScope(service, teamId),
+    queryFn: () => api.getDriveFolderScope(service, teamId),
+    ...queryOpts,
+  });
+}
+
+export function useDriveFolders(
+  service: string,
+  parentId: string,
+  opts?: Partial<UseQueryOptions<DriveFoldersResponse>> & { teamId?: string },
+) {
+  const { teamId, ...queryOpts } = opts ?? {};
+  return useQuery<DriveFoldersResponse>({
+    queryKey: qkIntegrations.driveFolders(service, parentId, teamId),
+    queryFn: () => api.listDriveFolders(service, parentId === "root" ? undefined : parentId, teamId),
+    ...queryOpts,
+  });
+}
+
+/**
+ * Save or clear the scope. `folderIds: null` clears it, which is not the
+ * same as saving an empty list: an empty list allows nothing.
+ */
+export function useSetDriveFolderScope(service: string, teamId?: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (folderIds: string[] | null) =>
+      folderIds === null
+        ? api.clearDriveFolderScope(service, teamId)
+        : api.putDriveFolderScope(service, folderIds, teamId),
+    onSuccess: (data) => {
+      qc.setQueryData(qkIntegrations.driveFolderScope(service, teamId), data);
+    },
   });
 }

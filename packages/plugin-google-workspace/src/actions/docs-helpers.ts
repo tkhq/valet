@@ -9,8 +9,7 @@ import type { DocsRequest } from './docs-markdown.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const DOCS_API = 'https://docs.googleapis.com/v1';
-const DRIVE_API = 'https://www.googleapis.com/drive/v3';
+import { DOCS_API, DRIVE_API } from './google-api.js';
 const MAX_BATCH_UPDATE_REQUESTS = 50;
 
 const DELETE_TYPES = new Set(['deleteContentRange']);

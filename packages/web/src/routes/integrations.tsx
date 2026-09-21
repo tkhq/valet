@@ -196,7 +196,15 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Services" description="Most need a key to connect.">
                   <div className="grid gap-3 pt-4 sm:grid-cols-2">
                     {services.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} />
+                      <IntegrationRow
+                key={plugin.name}
+                plugin={plugin}
+                autoOpenFolders={
+                  connectResult?.kind === "connected" &&
+                  connectResult.value === "google_workspace" &&
+                  plugin.services.some((s) => s.service === "google_workspace")
+                }
+              />
                     ))}
                   </div>
                 </Section>

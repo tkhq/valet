@@ -59,6 +59,26 @@ describe("TeamCredentialStore", () => {
     expect(seen).toEqual(["team_1:u1"]);
   });
 
+  it("carries the delegator's Drive folder scope to the team", async () => {
+    const inner = makeStore({
+      "team:team_1:google_workspace": { type: "oauth2", metadata: { delegatedFrom: "u1" } },
+      "user:u1:google_workspace": {
+        type: "oauth2",
+        accessToken: "user-tok",
+        metadata: { settings: { driveFolderScope: { folderIds: ["fold-A"] } } },
+      },
+    });
+    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+
+    // The folder scope lives in the owner's credential metadata and the
+    // plugin reads it off whatever credential it is handed. Resolving a
+    // share to the token alone would hand the team the owner's WHOLE Drive.
+    await expect(store.get(team, "google_workspace")).resolves.toMatchObject({
+      accessToken: "user-tok",
+      metadata: { settings: { driveFolderScope: { folderIds: ["fold-A"] } } },
+    });
+  });
+
   it("follows a reference to a user row that is itself a 1Password reference", async () => {
     // An org-scoped 1Password reference holds no secret of its own; the
     // caller dereferences it on the team's scopes. The row must come back

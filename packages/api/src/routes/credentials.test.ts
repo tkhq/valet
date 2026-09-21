@@ -901,6 +901,25 @@ describe("GET /api/credentials — onepasswordRef summary", () => {
   });
 });
 
+describe("PUT /api/credentials/:service — metadata.settings is owned by the settings routes", () => {
+  it("400s rather than silently dropping a settings object", async () => {
+    api = await bootTestApi();
+    // The store never writes metadata.settings from a save, so a PUT that
+    // carries one would look accepted and change nothing. Say so instead.
+    const put = await fetch(`${api.baseUrl}/api/credentials/google_workspace`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "oauth2",
+        accessToken: "ya29.tok",
+        metadata: { settings: { driveFolderScope: { folderIds: ["fold-A"] } } },
+      }),
+    });
+    expect(put.status).toBe(400);
+    expect(((await put.json()) as { error: string }).error).toContain("metadata.settings is reserved");
+  });
+});
+
 describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard", () => {
   it("plain PUT with metadata.onepassword (no body.onepassword) 400s, no row saved", async () => {
     api = await bootTestApi();

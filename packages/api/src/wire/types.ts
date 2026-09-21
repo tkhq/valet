@@ -3181,6 +3181,31 @@ export interface DeleteCredentialResponse {
   ok: true;
 }
 
+/**
+ * The folders a person lets Valet see in Google Drive.
+ *
+ * `null` means no scope is set, which leaves Drive access as wide as the
+ * OAuth grant. An empty array is a scope that allows nothing, so the two
+ * are not interchangeable: clearing the restriction is DELETE, not `[]`.
+ */
+export interface DriveFolderScopeResponse {
+  folderIds: string[] | null;
+  /** Team scope only. Set when the team's connection is one a member shared:
+   * the scope is theirs, read from their own credential, and the team page
+   * shows it rather than offering a control. */
+  delegatedFrom?: string;
+}
+
+export interface DriveFolderScopeRequest {
+  folderIds: string[];
+}
+
+/** One level of the Drive folder tree, for the scope picker. */
+export interface DriveFoldersResponse {
+  parentId: string;
+  folders: Array<{ id: string; name: string }>;
+}
+
 export interface DelegateCredentialRequest {
   teamId: string;
 }

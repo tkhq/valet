@@ -168,6 +168,83 @@ describe('drive actions', () => {
     });
   });
 
+  it('search_files never sends the ancestors query term, which Drive v3 rejects', async () => {
+    // Drive v2 accepted "'<id>' in ancestors". v3 removed it and answers 400,
+    // so a folder-scoped search failed outright.
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [] }));
+
+    await action('drive.search_files').execute({ query: 'budget', folderId: 'fold-1' }, pluginCtx());
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    // URLSearchParams writes spaces as "+", so normalize before matching.
+    const query = decodeURIComponent(String(url).replace(/\+/g, ' '));
+    expect(query).not.toContain('in ancestors');
+  });
+
+  it('search_files treats folderId "root" as the canonical My Drive root', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      const target = String(url);
+      if (target.includes('/files/root?')) return jsonResponse(200, { id: '0ROOT' });
+      if (target.includes('fields=parents')) {
+        const id = decodeURIComponent(target.split('/files/')[1].split('?')[0]);
+        const tree: Record<string, string[] | undefined> = { top: ['0ROOT'], shared: ['0SHARED'] };
+        const parents = tree[id];
+        if (parents === undefined) return jsonResponse(404, { error: { code: 404 } });
+        return jsonResponse(200, { parents });
+      }
+      return jsonResponse(200, {
+        files: [
+          { id: 'top', name: 'A', mimeType: 'text/plain' },
+          { id: 'shared', name: 'B', mimeType: 'text/plain' },
+        ],
+      });
+    });
+
+    const result = await action('drive.search_files').execute(
+      { query: 'budget', folderId: 'root' },
+      pluginCtx(),
+    );
+
+    const files = (result.data as { files: Array<{ id: string }> }).files;
+    expect(files.map((f) => f.id)).toEqual(['top']);
+  });
+
+  it('search_files scopes to a folder subtree, not just its direct children', async () => {
+    // One page of results, then the parent lookups that decide containment.
+    fetchMock.mockImplementation(async (url: string) => {
+      const target = String(url);
+      if (target.includes('fields=parents')) {
+        const id = decodeURIComponent(target.split('/files/')[1].split('?')[0]);
+        const tree: Record<string, string[] | undefined> = {
+          direct: ['fold-1'],
+          nested: ['sub-1'],
+          'sub-1': ['fold-1'],
+          elsewhere: ['other'],
+          other: [],
+        };
+        const parents = tree[id];
+        if (parents === undefined) return jsonResponse(404, { error: { code: 404 } });
+        return jsonResponse(200, { parents });
+      }
+      return jsonResponse(200, {
+        files: [
+          { id: 'direct', name: 'A', mimeType: 'text/plain' },
+          { id: 'nested', name: 'B', mimeType: 'text/plain' },
+          { id: 'elsewhere', name: 'C', mimeType: 'text/plain' },
+        ],
+      });
+    });
+
+    const result = await action('drive.search_files').execute(
+      { query: 'budget', folderId: 'fold-1' },
+      pluginCtx(),
+    );
+
+    const files = (result.data as { files: Array<{ id: string }>; total: number }).files;
+    expect(files.map((f) => f.id)).toEqual(['direct', 'nested']);
+    expect((result.data as { total: number }).total).toBe(2);
+  });
+
   it('list_documents filters to Google Docs mimeType', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {

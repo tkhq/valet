@@ -48,6 +48,8 @@ import type {
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowScheduleRequest,
   DeleteCredentialResponse,
+  DriveFolderScopeResponse,
+  DriveFoldersResponse,
   DeleteGrantRequest,
   DeleteGrantResponse,
   DeleteOrgPolicyResponse,
@@ -524,6 +526,18 @@ export interface WorkflowRunFilter extends WorkflowRunPage {
   outcome?: WorkflowRunOutcome[];
   parentRunId?: string;
   since?: number;
+}
+
+/** `?scope=team&teamId=…` for a team's Drive connection, plus the picker's parent folder. */
+function driveScopeQuery(teamId?: string, parentId?: string): string {
+  const qs = new URLSearchParams();
+  if (teamId) {
+    qs.set("scope", "team");
+    qs.set("teamId", teamId);
+  }
+  if (parentId) qs.set("parentId", parentId);
+  const encoded = qs.toString();
+  return encoded ? `?${encoded}` : "";
 }
 
 export const api = {
@@ -1284,6 +1298,30 @@ export const api = {
       `/credentials/${encodeURIComponent(service)}${tail}`,
     );
   },
+  // Google Drive folder scope. `folderIds: null` means unrestricted, which
+  // is not the same as [] — an empty list denies every file. `teamId`
+  // addresses the team's own connection instead of the caller's.
+  getDriveFolderScope: (service: string, teamId?: string) =>
+    request<DriveFolderScopeResponse>(
+      "GET",
+      `/credentials/${encodeURIComponent(service)}/folder-scope${driveScopeQuery(teamId)}`,
+    ),
+  putDriveFolderScope: (service: string, folderIds: string[], teamId?: string) =>
+    request<DriveFolderScopeResponse>(
+      "PUT",
+      `/credentials/${encodeURIComponent(service)}/folder-scope${driveScopeQuery(teamId)}`,
+      { folderIds },
+    ),
+  clearDriveFolderScope: (service: string, teamId?: string) =>
+    request<DriveFolderScopeResponse>(
+      "DELETE",
+      `/credentials/${encodeURIComponent(service)}/folder-scope${driveScopeQuery(teamId)}`,
+    ),
+  listDriveFolders: (service: string, parentId?: string, teamId?: string) =>
+    request<DriveFoldersResponse>(
+      "GET",
+      `/credentials/${encodeURIComponent(service)}/drive-folders${driveScopeQuery(teamId, parentId)}`,
+    ),
   delegateCredential: (service: string, body: DelegateCredentialRequest) =>
     request<DelegateCredentialResponse>(
       "POST",
