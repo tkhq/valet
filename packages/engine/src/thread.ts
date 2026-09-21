@@ -817,9 +817,9 @@ export class Thread {
    * their kicks, so a repairable constituent settles before it can be
    * claimed.
    */
-  async repairOverheardDigests(): Promise<void> {
+  async repairOverheardDigests(snapshot?: readonly QueueItem[]): Promise<void> {
     const store = this.session.providers.store;
-    const items = await store.listUnsettledSubmissions(this.session.id);
+    const items = snapshot ?? await store.listUnsettledSubmissions(this.session.id);
     const mine = items.filter((i) => i.threadId === this.id);
     for (const digest of mine) {
       if (digest.status !== "queued" || digest.supersededByItemId !== undefined) continue;
@@ -988,9 +988,9 @@ export class Thread {
    * (e.g. the timer never got armed this process, or restart — reconciliation
    * proper is Task 5, this is just the safety net the sweep owns).
    */
-  async checkCollectDeadline(): Promise<void> {
+  async checkCollectDeadline(snapshot?: readonly QueueItem[]): Promise<void> {
     const store = this.session.providers.store;
-    const items = await store.listUnsettledSubmissions(this.session.id);
+    const items = snapshot ?? await store.listUnsettledSubmissions(this.session.id);
     const collecting = items.filter((i) => i.threadId === this.id && i.status === "collecting");
     if (collecting.length === 0) return;
     const now = Date.now();
@@ -1586,10 +1586,10 @@ export class Thread {
    * already-past gate, which self-expires immediately and terminalizes.
    * Complements the low-latency in-memory `setTimeout` in `GateManager.register`.
    */
-  async sweepExpiredGates(): Promise<void> {
+  async sweepExpiredGates(snapshot?: readonly DecisionGate[]): Promise<void> {
     const store = this.session.providers.store;
     const now = Date.now();
-    const gates = await store.listDecisionGates(this.session.id, this.id);
+    const gates = snapshot ?? await store.listDecisionGates(this.session.id, this.id);
     // Lazily fetched once per sweep pass, shared by every lapsed gate.
     let suspended: SuspendedTurnState | null | undefined;
     for (const gate of gates) {
@@ -5613,13 +5613,15 @@ export class Thread {
       let done = false;
       let unsubscribe: (() => void) | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let poll: ReturnType<typeof setInterval> | undefined;
+      let poll: ReturnType<typeof setTimeout> | undefined;
+      let checking = false;
+      let recheck = false;
       let onAbort: (() => void) | undefined;
 
       const cleanup = () => {
         unsubscribe?.();
         if (timer !== undefined) clearTimeout(timer);
-        if (poll !== undefined) clearInterval(poll);
+        if (poll !== undefined) clearTimeout(poll);
         if (onAbort && opts.signal) opts.signal.removeEventListener("abort", onAbort);
       };
       const finish = (err?: Error) => {
@@ -5630,9 +5632,28 @@ export class Thread {
         else resolve();
       };
       const checkStore = () => {
-        void store.getQueueItem(this.session.id, itemId).then((current) => {
-          if (current?.status === "settled") finish();
-        });
+        if (done) return;
+        if (checking) {
+          // An event during a read must get a fresh check after that read.
+          recheck = true;
+          return;
+        }
+        if (poll !== undefined) clearTimeout(poll);
+        checking = true;
+        void store.getQueueItem(this.session.id, itemId)
+          .then((current) => {
+            if (current?.status === "settled") finish();
+          })
+          // A transient read failure does not settle or abandon the item.
+          // Retry through the bounded fallback, without an unhandled rejection.
+          .catch(() => { recheck = false; })
+          .finally(() => {
+            checking = false;
+            if (done) return;
+            poll = setTimeout(checkStore, recheck ? 0 : 1_000);
+            recheck = false;
+            poll.unref?.();
+          });
       };
 
       unsubscribe = this.session.providers.stream.subscribe(
@@ -5651,8 +5672,8 @@ export class Thread {
       // collect-window constituents settle via settleUnclaimed with no
       // event), so a poll is the only way to guarantee this promise
       // eventually resolves against store truth.
-      poll = setInterval(checkStore, 50);
-      poll.unref?.();
+      // checkStore schedules the next fallback after its read completes.
+      // Slow reads cannot build an unbounded queue of pending database work.
 
       const timeoutMs = opts.timeoutMs;
       if (timeoutMs !== undefined) {

@@ -221,10 +221,9 @@ export class InMemorySessionStore implements SessionStore {
     return [...result];
   }
 
-  async listDecisionGates(sessionId: string, threadId?: string): Promise<DecisionGate[]> {
+  async listDecisionGates(sessionId: string, threadId?: string, status?: DecisionGate["status"]): Promise<DecisionGate[]> {
     const all = [...this.row(sessionId).gates.values()];
-    if (threadId) return all.filter((g) => g.threadId === threadId);
-    return all;
+    return all.filter((g) => (!threadId || g.threadId === threadId) && (!status || g.status === status));
   }
 
   async getDecisionGate(sessionId: string, gateId: string): Promise<DecisionGate | null> {
@@ -513,9 +512,11 @@ export class InMemorySessionStore implements SessionStore {
     return false;
   }
 
-  async listAllUnsettledSubmissions(): Promise<(QueueItem & { sessionId: string })[]> {
+  async listAllUnsettledSubmissions(sessionIds?: readonly string[]): Promise<(QueueItem & { sessionId: string })[]> {
     const out: (QueueItem & { sessionId: string })[] = [];
+    const selected = sessionIds === undefined ? undefined : new Set(sessionIds);
     for (const [sessionId, r] of this.rows) {
+      if (selected && !selected.has(sessionId)) continue;
       for (const item of r.queueItems.values()) {
         if (item.status !== "settled") out.push({ ...item, sessionId });
       }
