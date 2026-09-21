@@ -9,6 +9,7 @@ import type {
   InboundChannelMedia,
   OutboundChannelAttachment,
   OutboundChannelMessage,
+  OutboundSendOptions,
   RawChannelUpdate,
   SendRef,
   TransportContext,
@@ -179,9 +180,9 @@ export class TelegramTransport implements ChannelTransport {
     return { ...base, kind: "message", text, media };
   }
 
-  async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
+  async send(conversationKey: string, message: OutboundChannelMessage, opts?: OutboundSendOptions): Promise<SendRef> {
     const chatId = chatIdFromConversationKey(conversationKey);
-    const res = await this.api.sendMessage({ chatId, html: markdownToTelegramHtml(message.markdown) });
+    const res = await this.api.sendMessage({ chatId, html: markdownToTelegramHtml(message.markdown), signal: opts?.signal });
     return { conversationKey, messageId: String(res.messageId) };
   }
 

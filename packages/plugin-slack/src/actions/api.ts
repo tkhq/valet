@@ -6,6 +6,7 @@ export async function slackFetch(
   token: string,
   body?: Record<string, unknown>,
   baseUrl: string = SLACK_API,
+  signal?: AbortSignal,
 ): Promise<Response> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(`${baseUrl}/${method}`, {
@@ -15,6 +16,7 @@ export async function slackFetch(
         'Content-Type': 'application/json; charset=utf-8',
       },
       body: body ? JSON.stringify(body) : '{}',
+      signal,
     });
 
     if (res.status === 429) {

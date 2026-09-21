@@ -201,6 +201,7 @@ export {
   type FetchedChannelMedia,
   type OutboundChannelMessage,
   type OutboundChannelAttachment,
+  type OutboundSendOptions,
   type SendRef,
   type GatePromptRef,
   type ChannelGatePrompt,

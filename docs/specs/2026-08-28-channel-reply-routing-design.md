@@ -146,7 +146,8 @@ tool context, so explicit origin actions work for both paths.
 
 **Final delivery guard.** The host finds the terminal assistant result for an
 addressed submission. If the submission has no successful `reply_to_origin`,
-the host posts that result once. A pending origin action defers the guard. A
+the host posts that result once. A failed automatic acknowledgement does not
+prevent the final-delivery guard. A pending origin action defers the guard. A
 successful origin action in a preceding tool-use entry owns delivery when it
 sets `final: true`; its text can differ from the terminal wrap-up. A legacy
 reply owns delivery only when its text matches the terminal wrap-up. An
@@ -160,8 +161,9 @@ Stopping outbound delivery invalidates queued retries and ordinary outbound
 work. An in-flight failed send cannot schedule a retry. An in-flight successful
 send records final delivery after restart, so current-generation work does not
 post a duplicate. Current work waits briefly for a pre-restart send. If it
-stalls, current work takes over. A late old send cannot record delivery after
-takeover. The guard never posts a one-message answer
+stalls, the host aborts the provider request and waits for its settlement
+before another send can start. A transport that cannot cancel keeps the only
+owner until it settles. The guard never posts a one-message answer
 twice, a successful explicit final, or a manual-delivery
 turn. Decision-gate cards, command results, attention
 messages, link-flow messages, and other explicit host control messages keep

@@ -351,6 +351,11 @@ export class ChannelStreamError extends Error {
   }
 }
 
+export interface OutboundSendOptions {
+  /** Cancels a provider request that has not completed. */
+  signal?: AbortSignal;
+}
+
 export interface ChannelTransport {
   readonly channelType: string;
   /**
@@ -365,7 +370,7 @@ export interface ChannelTransport {
   poll?(signal: AbortSignal): AsyncIterable<RawChannelUpdate>;
   /** Normalize one raw update. `null` = not something we handle. */
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
-  send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
+  send(conversationKey: string, message: OutboundChannelMessage, opts?: OutboundSendOptions): Promise<SendRef>;
   sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef>;
   sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef>;
   updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void>;

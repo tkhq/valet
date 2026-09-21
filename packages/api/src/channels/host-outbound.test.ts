@@ -56,6 +56,7 @@ class FakeTransport implements ChannelTransport {
   sendAttempts = 0;
   sendBlock: Promise<void> | undefined;
   sendBlocks = new Map<number, Promise<void>>();
+  ignoreSendAbort = false;
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   deliveries: Array<{ type: "message"; markdown: string } | { type: "gate"; gateId: string }> = [];
   media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
@@ -70,13 +71,21 @@ class FakeTransport implements ChannelTransport {
   parseUpdate(): null {
     return null;
   }
-  async send(conversationKey: string, message: OutboundChannelMessage) {
+  async send(conversationKey: string, message: OutboundChannelMessage, opts?: { signal?: AbortSignal }) {
     this.sendAttempts += 1;
     const attempt = this.sendAttempts;
     if (this.sendDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
-    if (this.sendBlock) await this.sendBlock;
-    const sendBlock = this.sendBlocks.get(attempt);
-    if (sendBlock) await sendBlock;
+    const sendBlock = this.sendBlocks.get(attempt) ?? this.sendBlock;
+    if (sendBlock) {
+      if (this.ignoreSendAbort) await sendBlock;
+      else {
+        await Promise.race([
+          sendBlock,
+          new Promise<void>((_resolve, reject) => opts?.signal?.addEventListener("abort", () => reject(new Error("send aborted")), { once: true })),
+        ]);
+      }
+    }
+    if (opts?.signal?.aborted && !this.ignoreSendAbort) throw new Error("send aborted");
     if (this.sendFailures > 0) {
       this.sendFailures -= 1;
       throw new Error("send failed");
@@ -516,6 +525,28 @@ describe("ChannelHost outbound delivery", () => {
     ]);
   });
 
+  it("delivers the terminal fallback when the automatic acknowledgement fails", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-ack-failure";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } },
+      }),
+      { type: "message", id: "ack-failure-ack", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId },
+      { type: "message", id: "ack-failure-final", sessionId: session.id, threadId, parentId: null, createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn" },
+    ]);
+    fakeTransport.sendFailures = 1;
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "ack-failure-ack", reason: "end_turn" } },
+      `ack-failure-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["The work is complete"]));
+  });
+
   it("retries final fallback after a transport failure without another event", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
@@ -695,6 +726,48 @@ describe("ChannelHost outbound delivery", () => {
       "The work is complete",
     ]), { timeout: FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS * 3 });
     expect(fakeTransport.sendAttempts).toBe(2);
+  });
+
+  it("does not duplicate a slow successful final send after restart", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-final-slow-success";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
+      { type: "message", id: "final-slow-ack", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-slow-ack", reason: "end_turn" } },
+      `final-slow-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: "final-slow-result", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+    }]);
+    const terminalEvent = {
+      sessionId: session.id, threadId, queueItemId, timestamp: Date.now(),
+      event: { type: "message_end" as const, threadId, messageId: "final-slow-result", reason: "end_turn" as const },
+    };
+
+    let releaseSend: (() => void) | undefined;
+    fakeTransport.sendAttempts = 0;
+    fakeTransport.ignoreSendAbort = true;
+    fakeTransport.sendBlocks.set(1, new Promise<void>((resolve) => { releaseSend = resolve; }));
+    await eventStream.append(terminalEvent, `final-slow-old-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sendAttempts).toBe(1));
+    host.stopOutbound();
+    host.startOutbound();
+    await eventStream.append(terminalEvent, `final-slow-current-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS * 2));
+    expect(fakeTransport.sendAttempts).toBe(1);
+
+    releaseSend?.();
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am checking",
+      "The work is complete",
+    ]));
+    expect(fakeTransport.sendAttempts).toBe(1);
   });
 
   it("stops retrying final fallback after the retry limit", async () => {

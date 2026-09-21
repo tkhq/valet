@@ -359,7 +359,7 @@ export class ChannelHost {
   /** Invalidates queued retry work when outbound delivery stops or restarts. */
   private outboundGeneration = 0;
   /** Final fallback sends in progress, including sends that began before a restart. */
-  private finalDeliverySends = new Map<string, { owner: symbol; settled: Promise<void> }>();
+  private finalDeliverySends = new Map<string, { owner: symbol; settled: Promise<void>; controller: AbortController }>();
   /** Bounded retries for final fallback sends that fail at the transport. */
   private finalRetryAttempts = new Map<string, number>();
   private finalRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -696,11 +696,19 @@ export class ChannelHost {
           queueItemId: event.queueItemId,
           reason: e.reason,
         };
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        try {
+          await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        } catch (err) {
+          console.error("[channels] first reply delivery failed", err);
+        }
         await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger, generation);
       } else if (e.type === "tool_end" && event.queueItemId !== undefined) {
         const trigger = { queueItemId: event.queueItemId };
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        try {
+          await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        } catch (err) {
+          console.error("[channels] first reply delivery failed", err);
+        }
         await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger, generation);
       } else if (e.type === "decision_gate") {
         await this.deliverGatePrompt(event.sessionId, e.gate);
@@ -904,7 +912,11 @@ export class ChannelHost {
     if (inFlight) {
       const settled = await this.waitForFinalDeliverySend(inFlight);
       if (!settled && this.finalDeliverySends.get(dedupeKey) === inFlight) {
-        this.finalDeliverySends.delete(dedupeKey);
+        // Do not overlap non-idempotent provider requests. Abort the old
+        // request, then retain its ownership until it settles. A transport
+        // that cannot cancel still gets to report its successful send first.
+        inFlight.controller.abort();
+        await inFlight.settled;
       }
       if (!this.outboundIsActive(generation)) return;
       await this.deliverFinalAssistantReply(sessionId, threadId, trigger, generation);
@@ -917,20 +929,22 @@ export class ChannelHost {
     }
     const sender = await this.assistantSenderIdentity(sessionId);
     if (!this.outboundIsActive(generation)) return;
+    const controller = new AbortController();
     const send = Promise.resolve().then(() => transport.send(target.conversationKey, {
       markdown: final.content,
       ...(sender !== undefined ? { sender } : {}),
-    }));
-    const inFlightSend = { owner: Symbol(dedupeKey), settled: send.then(() => undefined, () => undefined) };
+    }, { signal: controller.signal }));
+    const inFlightSend = { owner: Symbol(dedupeKey), settled: send.then(() => undefined, () => undefined), controller };
     this.finalDeliverySends.set(dedupeKey, inFlightSend);
     try {
       await send;
     } catch (err) {
       if (this.finalDeliverySends.get(dedupeKey) === inFlightSend) this.finalDeliverySends.delete(dedupeKey);
-      this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
+      if (!controller.signal.aborted) {
+        this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
+      }
       throw err;
     }
-    // A timed-out successor took ownership. Its delivery result is authoritative.
     if (this.finalDeliverySends.get(dedupeKey) !== inFlightSend) return;
     this.markDelivered(dedupeKey);
     this.clearFinalDeliveryRetry(dedupeKey);
