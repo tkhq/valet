@@ -1180,6 +1180,15 @@ describe("gate prompt identity (TKAI-387)", () => {
 });
 
 describe("discrete sends", () => {
+  it("renders short tables as blocks and keeps raw mentions inert", async () => {
+    const transport = makeTransport();
+    const markdown = '| PR | Status |\n| --- | --- |\n| [PR](https://github.com/tkhq/mono/pull/8240) | <!channel> |';
+    await transport.send(KEY, { markdown });
+    const body = lastCall("chat.postMessage");
+    expect(body.blocks).toEqual([{ type: 'section', text: { type: 'mrkdwn', text: '*PR*: <https://github.com/tkhq/mono/pull/8240|PR>\n*Status*: &lt;!channel>\n' } }]);
+    expect(fake.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+  });
+
   it("replies in the turn's thread", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000300");

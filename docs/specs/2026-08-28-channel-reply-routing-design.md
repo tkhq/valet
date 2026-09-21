@@ -376,3 +376,28 @@ characters and 256 ASCII punctuation, tab, or line-break characters. Messages
 without a `#` bypass parsing. Over-budget messages retain their original Markdown,
 including explicit links. This prevents nested link syntax from blocking the API
 event loop for seconds. The limit applies before CommonMark parsing starts.
+
+### Short Slack tables (2026-09-21)
+
+Bot message actions, DM actions, message edits, and discrete transport replies
+use Markdown blocks when text contains a pipe-table delimiter row, even below
+4,000 characters. This preserves table rows, empty cells, and Markdown links.
+Short prose keeps the existing mrkdwn path. Explicit caller blocks take priority.
+Transport-generated blocks neutralize Slack mention and broadcast tokens.
+
+The existing 12,000-character Markdown limit and section fallback still apply.
+This change does not repair tables whose source has no row breaks. Streaming
+replies already use Slack's Markdown input and do not change.
+
+Tables accept compact delimiter cells with one or two dashes. Messages containing
+Slack-native spans use `mrkdwn` section blocks. Their tables become labeled rows;
+this keeps native link labels, user mentions, channel references, and user-group
+mentions on Slack's documented rendering path. Action text preserves intentional
+native spans. Transport text keeps them inert. Both paths use the existing
+formatter's control-token policy, including suppression of `<!group>`.
+
+The row conversion preserves empty cells and skips fenced and indented code.
+Row expansion stops at the caller's text budget before formatting. Section splits
+keep complete native spans together. Truncated output includes a visible notice.
+This is a deliberate compatibility fallback, not a claim that Markdown blocks
+support native spans.

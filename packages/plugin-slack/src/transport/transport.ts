@@ -42,6 +42,7 @@ import {
 } from "@valet/engine";
 import {
   buildContentBlocks,
+  needsContentBlocks,
   SLACK_HEADER_LIMIT,
   SLACK_MAX_BLOCKS,
   SLACK_SECTION_FIELD_LIMIT,
@@ -841,7 +842,7 @@ export class SlackTransport implements ChannelTransport {
     const formatted = markdownToSlackMrkdwn(message.markdown);
     let text = formatted;
     let blocks: Record<string, unknown>[] | undefined;
-    if (message.markdown.length > SLACK_TEXT_LIMIT) {
+    if (needsContentBlocks(message.markdown)) {
       // One API call with blocks — never several messages (chat.postMessage is
       // limited to 1/sec/channel; see message-chunking.ts).
       blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);

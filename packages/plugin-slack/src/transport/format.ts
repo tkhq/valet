@@ -32,6 +32,13 @@ export interface MarkdownToSlackMrkdwnOptions {
   preserveSlackNativeSpans?: boolean;
 }
 
+/** Native spans need mrkdwn blocks; Markdown blocks do not document them. */
+export function containsSlackSpans(text: string): boolean {
+  // Detect prefixes without backtracking over an unterminated span. A false
+  // positive only selects the existing mrkdwn formatter.
+  return /<(?:[@#!]|https?:\/\/)/.test(text);
+}
+
 /**
  * Make Slack mention and broadcast sequences inert for the `markdown_text`
  * path, leaving all other text — including every other angle bracket —
