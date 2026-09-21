@@ -822,7 +822,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       db,
       credentials: engineCredentials,
       key: deriveSecretKey(opts.encryptionKey),
-    }),
+    }, { credentialAuthorization: { db, authorization: canonicalAuthorizationService } }),
     orgWebhookLive: () => Boolean(publicUrlFromEnv(process.env)),
   });
 

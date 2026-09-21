@@ -4,7 +4,8 @@
  * subbed in via `GITHUB_API_URL` for tests that need the `github` `RepoHost`
  * to actually call out.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -24,6 +25,7 @@ let fixture: GithubFixture | undefined;
 const prevGithubApiUrl = process.env.GITHUB_API_URL;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await api?.cleanup();
   api = undefined;
   await fixture?.close();
@@ -106,6 +108,34 @@ function rawRepo(overrides: Record<string, unknown>): Record<string, unknown> {
 }
 
 describe("GET /api/repos", () => {
+  it.each(["deny", "require_approval"] as const)("keeps native credential reads at spy zero for %s", async (effect) => {
+    api = await bootTestApi();
+    const get = vi.spyOn(api.providers.engineCredentials, "get");
+    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize").mockImplementation(async (request): Promise<PolicyDecisionEnvelope> => ({
+      schemaVersion: 1,
+      requestId: request.requestId,
+      requestSubjectDigest: "a".repeat(64),
+      inputDigest: "b".repeat(64),
+      policyDigest: "c".repeat(64),
+      sourceBundleDigest: "d".repeat(64),
+      evaluator: { kind: "local_valet", engineDigest: "e".repeat(64) },
+      decision: {
+        effect,
+        reasonCode: "test",
+        matchedRuleIds: ["test.rule"],
+        obligations: [],
+        redactions: [],
+        ...(effect === "require_approval"
+          ? { approvalRequirement: { tier: "owner", approverType: "user" as const, replay: "once" as const } }
+          : {}),
+      },
+      evaluatedAtMs: 1,
+    }));
+    const response = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });
+    expect(response.status).toBe(effect === "deny" ? 403 : 409);
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("soft-empties when nothing is configured (no App, no personal connection)", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });

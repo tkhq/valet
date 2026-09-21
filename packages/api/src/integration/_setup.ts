@@ -570,7 +570,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const contentSync = new ContentSyncService({
     db,
     reader: new GitHubSkillRepoReader({ apiUrl: opts.githubApiUrl }),
-    readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),
+    readerFor: skillRepoReaderFactory(githubTokenDeps, {
+      apiUrl: opts.githubApiUrl,
+      credentialAuthorization: { db, authorization: canonicalAuthorizationService },
+    }),
   });
 
   const providers: Providers = {
