@@ -188,6 +188,15 @@ function replyText(
   return typeof text === "string" ? text : undefined;
 }
 
+function isFinalReply(
+  part: NonNullable<Extract<SessionEntry, { type: "message" }>["parts"]>[number],
+): boolean {
+  return part.type === "tool_call" &&
+    isRecord(part.args) &&
+    isRecord(part.args.params) &&
+    part.args.params.final === true;
+}
+
 /** Classify explicit origin delivery across every assistant entry in a submission. */
 function originReplyState(entries: SessionEntry[], queueItemId: string): OriginReplyState {
   const calls = entries.flatMap((entry) => {
@@ -235,8 +244,9 @@ function terminalAssistantResult(entries: SessionEntry[], queueItemId: string): 
 }
 
 /** Find the explicit reply that delivered this terminal result. A tool-use
- * entry precedes the terminal entry in the engine transcript, so the action's
- * text must match the final text before it can suppress the fallback. */
+ * entry precedes the terminal entry in the engine transcript. A `final: true`
+ * action owns delivery even when the terminal wrap-up uses different text.
+ * Matching text remains a compatibility path for older actions. */
 function finalOriginReplyState(
   entries: SessionEntry[],
   queueItemId: string,
@@ -253,7 +263,7 @@ function finalOriginReplyState(
         isRecord(part.args) &&
         typeof part.args.tool_id === "string" &&
         part.args.tool_id.endsWith(".reply_to_origin") &&
-        (index === finalIndex || replyText(part)?.trim() === final.content.trim()),
+        (index === finalIndex || isFinalReply(part) || replyText(part)?.trim() === final.content.trim()),
     );
     if (calls.length > 0) return originReplyState([{ ...entry, parts: calls }], queueItemId);
   }

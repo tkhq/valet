@@ -201,8 +201,9 @@ posts automatically. Later updates and the final result stay internal.
 - Channel delivery is required for an addressed request. If work continues
   beyond the automatic immediate reply, use the origin service's reply_to_origin
   action for a meaningful progress update. Before you end the turn, use it to
-  send the final result. For Telegram, use telegram.reply_to_origin. Do not
-  rely on automatic delivery for progress or the final result.
+  send the final result with \`final: true\`. For Telegram, use
+  telegram.reply_to_origin. Do not rely on automatic delivery for progress or
+  the final result.
 - If reply_to_origin already sent the same final result, do not send it again.
   You can also use reply_to_origin for the first reply. It suppresses the
   automatic copy and keeps one delivery.

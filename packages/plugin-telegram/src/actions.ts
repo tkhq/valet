@@ -13,13 +13,14 @@ function chatIdFromOrigin(ctx: PluginActionContext): string | null {
 
 const replyParameters = Type.Object({
   text: Type.String({ minLength: 1, description: "The reply text in Markdown." }),
+  final: Type.Optional(Type.Boolean({ description: "Set true only when this reply delivers the final result for the addressed request." })),
 });
 
 const replyToOrigin: PluginAction<typeof replyParameters> = {
   id: "telegram.reply_to_origin",
   name: "Reply to Origin",
   description:
-    "Reply in the Telegram chat this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply.",
+    "Reply in the Telegram chat this turn came from. Use it for later updates and final results. Set final=true for the final result. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply.",
   riskLevel: "medium",
   parameters: replyParameters,
   execute: async (args, ctx) => {

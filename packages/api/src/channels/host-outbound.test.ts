@@ -551,7 +551,7 @@ describe("ChannelHost outbound delivery", () => {
       stopReason: "end_turn",
       parts: [{
         type: "tool_call", callId: "tc-failed-final", toolName: "call_tool", status: "running",
-        args: { tool_id: "fake.reply_to_origin", params: { text: "The work is complete" } },
+        args: { tool_id: "fake.reply_to_origin", params: { text: "The work is complete", final: true } },
       }],
     };
     await engineStore.appendEntries(session.id, threadId, [
@@ -657,7 +657,7 @@ describe("ChannelHost outbound delivery", () => {
         parts: [{
           type: "tool_call", callId: `tc-final-${finalState}`, toolName: "call_tool",
           status: finalState === "pending" ? "running" : "completed",
-          args: { tool_id: "fake.reply_to_origin", params: { text: "The work is complete" } },
+          args: { tool_id: "fake.reply_to_origin", params: { text: "The work is complete", final: true } },
           ...(finalState === "failed" ? { result: { details: { ok: false }, text: "failed" } } : {}),
         }],
       }),
@@ -840,13 +840,13 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(expected);
   });
 
-  it("lets a successful text-less origin reply own later wrap-up text", async () => {
+  it("lets a designated final reply own a different terminal wrap-up", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const call: SessionEntry = {
       type: "message", id: "bare-success", sessionId: session.id, threadId, parentId: null,
       createdAt: Date.now(), role: "assistant", content: "", queueItemId: "qi-bare-success",
-      parts: [{ type: "tool_call", callId: "tc-bare-success", toolName: "call_tool", status: "running", args: { tool_id: "slack.reply_to_origin", params: { text: "internal wrap-up" } } }],
+      parts: [{ type: "tool_call", callId: "tc-bare-success", toolName: "call_tool", status: "running", args: { tool_id: "slack.reply_to_origin", params: { text: "Detailed final result", final: true } } }],
     };
     await engineStore.appendEntries(session.id, threadId, [
       userEntry({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
@@ -869,7 +869,7 @@ describe("ChannelHost outbound delivery", () => {
     await eventStream.append({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", timestamp: Date.now(), event: { type: "tool_end", threadId, tool: "call_tool", callId: part.callId, result: "sent", isError: false } }, `bare-success-tool-${randomUUID()}`);
     await engineStore.appendEntries(session.id, threadId, [{
       type: "message", id: "bare-success-wrap", sessionId: session.id, threadId, parentId: null,
-      createdAt: Date.now(), role: "assistant", content: "internal wrap-up", queueItemId: "qi-bare-success", stopReason: "end_turn",
+      createdAt: Date.now(), role: "assistant", content: "Done.", queueItemId: "qi-bare-success", stopReason: "end_turn",
     }]);
     await eventStream.append({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "bare-success-wrap", reason: "end_turn" } }, `bare-success-wrap-${randomUUID()}`);
 

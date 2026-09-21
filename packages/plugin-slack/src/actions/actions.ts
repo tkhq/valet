@@ -1100,11 +1100,12 @@ async function resolveSlackOrigin(
 
 const replyToOrigin = action(Type.Object({
     text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
+    final: Type.Optional(Type.Boolean({ description: 'Set true only when this reply delivers the final result for the addressed request.' })),
   }))({
   id: 'slack.reply_to_origin',
   name: 'Reply to Origin',
   description:
-    'Reply in the Slack thread this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
+    'Reply in the Slack thread this turn came from. Use it for later updates and final results. Set final=true for the final result. On an addressed turn, the first assistant text posts automatically unless this action sends the first reply. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const o = await resolveSlackOrigin(ctx);
