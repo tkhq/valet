@@ -242,6 +242,17 @@ describe("team API keys", () => {
     const byOrgAdmin = await createTeamKey(baseUrl, orgAdminCookie, teamId);
     expect(byOrgAdmin.status).toBe(201);
     expect(((await byOrgAdmin.json()) as CreateTeamApiKeyResponse).createdBy).toBe(orgAdminId);
+
+    // Stale team membership cannot bypass removal from the organization.
+    const [memberOrg] = await db.select({ orgId: orgMembers.orgId }).from(orgMembers)
+      .where(eq(orgMembers.userId, memberId)).limit(1);
+    expect(memberOrg).toBeDefined();
+    if (!memberOrg) throw new Error("Expected the member to belong to an organization.");
+    await db.delete(orgMembers).where(and(eq(orgMembers.orgId, memberOrg.orgId), eq(orgMembers.userId, memberId)));
+    expect(await isTeamMember(db, teamId, memberId)).toBe(true);
+    const staleMember = await createTeamKey(baseUrl, memberCookie, teamId);
+    expect(staleMember.status).toBe(404);
+    expect(await db.select().from(apikey).where(and(eq(apikey.teamId, teamId), eq(apikey.name, "proxy-key")))).toHaveLength(1);
   });
 
   it("the key still works after the creating member leaves the team", async () => {

@@ -23,7 +23,7 @@ TKAI-205 does not cover this table. Its `credentials` rows are integration token
 
 1. **Keep the better-auth table.** Do not add `team_api_keys`. Put `{ teamId, createdBy }` in `apikey.metadata`, and the same team id in a Valet-owned nullable `apikey.team_id` column with an index. The auth ladder reads the metadata (it is what `verifyApiKey` returns); the team list and revoke read the column. One UPDATE writes both, and create re-reads both before it returns the secret. The list projects the summary columns only; the hash never leaves the table. `referenceId` stays the creating member so the vendor plugin keeps a user row. The personal list filter recomputes `total` and refuses an unknown response shape instead of passing it through.
 
-2. **The key survives the creating member leaving.** Any current team member or organization admin can revoke it. A membership check on the creator at request time would kill CI when that person leaves, which is the failure this ticket exists to close. Record `createdBy` in metadata for audit.
+2. **The key survives the creating member leaving.** Any current organization member who is also a team member, or an organization admin, can revoke it. A membership check on the creator at request time would kill CI when that person leaves, which is the failure this ticket exists to close. Record `createdBy` in metadata for audit.
 
 3. **Auth ladder promotes the principal.** After `verifyApiKey`, if metadata has `teamId`, require that the team still exists in the same org and set the request principal to `{ type: "team", id: teamId }`. Keep the creating user on the context for audit only. Routes that already accept a team owner (`POST /api/sessions`, workflow start) use that principal.
 
@@ -57,7 +57,7 @@ If review prefers "key dies when the creating member leaves," invert decision 2 
 
 ## Implementation
 
-1. On create, require team membership for the workspace `teamId`; an organization admin can create for a team they did not join. Stamp `{ teamId, createdBy }` in metadata and `team_id` in one SQL statement after `createApiKey`; re-read both before returning the secret. The final authorization check, stamp, and read share the team ownership lock with deletion.
+1. On create, require live organization membership and team membership for the workspace `teamId`; an organization admin can create for a team they did not join. Stamp `{ teamId, createdBy }` in metadata and `team_id` in one SQL statement after `createApiKey`; re-read both before returning the secret. The final authorization check, stamp, and read share the team ownership lock with deletion.
 2. List filters on the indexed `team_id` column and projects the summary columns. Personal list omits team keys on the server and recomputes `total`.
 3. Extend the auth ladder to promote a team-metadata key to a team principal. Reject the key if the team is gone or belongs to another org.
 4. Session and workflow create paths use `resolveCreateOwner`. A team principal skips membership but still requires the team row under the ownership lock.
@@ -93,7 +93,7 @@ A `vlt_` key created in a team workspace starts a team-owned session. A personal
 
 Deleting a team removes its API key rows in the same transaction. Keys belonging to other teams and personal keys remain. Authentication already refuses keys whose team is missing; this change removes the stored rows as well.
 
-Concurrent key creation uses the same `lockTeamForOwnership(tx, teamId)` lock as team deletion (#624). Better-auth mints outside the transaction. After minting, the route takes the lock and rechecks the team in the caller's org and the caller's team membership or organization-admin role. The route writes and verifies both team pins through `tx` before releasing the lock. It never calls the outer database handle inside that transaction.
+Concurrent key creation uses the same `lockTeamForOwnership(tx, teamId)` lock as team deletion (#624). Better-auth mints outside the transaction. After minting, the route takes the lock and rechecks the team in the caller's org and the caller's live organization membership plus team membership, or organization-admin role. The route writes and verifies both team pins through `tx` before releasing the lock. It never calls the outer database handle inside that transaction.
 
 If deletion or lost authorization wins, creation returns 404 without the secret. A failed pin returns 500 without the secret. After the transaction settles, the route deletes the minted row on either failure, including transaction errors. If creation wins, team deletion removes the pinned row through its existing cleanup.
 
@@ -111,8 +111,8 @@ Team key controls discard drafts and revealed secrets after access errors or los
 
 ### Member API key management
 
-A team API key is a shared credential for scripts that call the Valet API. Every team member can create, list, and revoke keys for that team. An organization admin retains the same access when they are not a team member. A user outside the team receives a 404.
+A team API key is a shared credential for scripts that call the Valet API. Every team member with a live organization membership can create, list, and revoke keys for that team. An organization admin retains the same access when they are not a team member. A user outside the team receives a 404.
 
 The workspace switcher selects the owner. A key created in the personal workspace creates user-owned sessions. A key created in the team workspace creates team-owned sessions. The API must preserve this split even when the same non-admin member creates both keys.
 
-The create route rechecks membership after it mints a key and before it pins the key to the team. The route holds the caller's membership and organization rows while it makes this check. If removal or deletion wins, the route deletes the minted key and returns no secret.
+The create route rechecks organization and team membership after it mints a key and before it pins the key to the team. The route holds the caller's membership and organization rows while it makes this check. If removal or deletion wins, the route deletes the minted key and returns no secret.

@@ -16,7 +16,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { apikey, orgMembers, teamMembers } from "../schema/index.js";
 import { getTeamInOrg, isTeamMember, lockTeamForOwnership } from "../services/teams.js";
-import { isOrgAdmin } from "../services/org.js";
+import { isOrgAdmin, isOrgMember } from "../services/org.js";
 import { parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
 import type { CreateTeamApiKeyResponse, ListTeamApiKeysResponse, TeamApiKeySummary } from "../wire/types.js";
 
@@ -39,7 +39,7 @@ async function teamKeyAccess(
   userId: string,
 ): Promise<TeamKeyAccess> {
   const team = await getTeamInOrg(db, orgId, teamId);
-  if (!team) return "hidden";
+  if (!team || !(await isOrgMember(db, orgId, userId))) return "hidden";
   if (await isOrgAdmin(db, orgId, userId)) return "allowed";
   return (await isTeamMember(db, teamId, userId)) ? "allowed" : "hidden";
 }
