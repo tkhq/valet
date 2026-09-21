@@ -1,0 +1,173 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Type } from "typebox";
+import { googleWorkspacePlugin } from "@valet/plugin-google-workspace/actions";
+import { InMemorySessionStore, InMemoryCredentialStore, VirtualSandbox, type PluginAction, type PluginActionContext, type ValetPlugin } from "@valet/engine";
+import type { WorkflowRun } from "@valet/workflow";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import { workflowDefinitions } from "../schema/index.js";
+import { assemblePlugins, pluginSessionExtras } from "../plugins/assemble.js";
+import { buildActionInvoker } from "../plugins/action-invoker.js";
+import { GoogleWorkspaceLinkScope, linkedDriveFileId, bindLinkedDriveThread } from "./google-workspace-link-scope.js";
+
+const owner = { type: "team", id: "legal" } satisfies PluginActionContext["owner"];
+const slackMessage = (text: string, overrides: Record<string, unknown> = {}) => ({
+  type: "event_callback", event: { type: "app_mention", user: "U123", channel: "C123", ts: "100.001", text, ...overrides },
+});
+
+function context(overrides: Partial<PluginActionContext> = {}): PluginActionContext {
+  return {
+    userId: "user1", orgId: "org1", owner, sessionId: "assistant1", threadId: "thread1", sessionPurpose: "orchestrator",
+    actionId: "docs.read_document", service: "google_workspace",
+    credentials: { get: async () => ({ accessToken: "token" }), request: async () => { throw new Error("unused"); } },
+    sandbox: new VirtualSandbox("test"),
+    signal: new AbortController().signal, requestDecision: async () => ({ actionId: "approve", resolvedBy: "user1", resolvedAt: 0 }),
+    threadRead: async () => [], listThreads: async () => [], setModel: async ({ model }) => ({ fromModel: model, toModel: model }),
+    ...overrides,
+  };
+}
+
+function fixturePlugin(execute: PluginAction["execute"] = vi.fn(async (_args: unknown, _ctx: PluginActionContext) => ({ success: true, data: "read" })), service = "google_workspace"): ValetPlugin {
+  return { name: "google-workspace", version: "1", actions: [{ service, credentialService: "google_workspace", actions: [
+    "docs.read_document", "docs.add_comment", "drive.download_file", "drive.list_files", "drive.copy_file", "docs.new_action", "constructor", "sheets.read_spreadsheet",
+  ].map((id) => ({ id, name: id, description: id, riskLevel: "low", parameters: Type.Object({
+    documentId: Type.Optional(Type.String()), fileId: Type.Optional(Type.String()),
+  }), execute })) }] };
+}
+
+function action(scope: GoogleWorkspaceLinkScope, id = "docs.read_document", plugin = fixturePlugin()) {
+  const found = scope.wrapPlugins([plugin])[0]?.actions?.[0]?.actions?.find((candidate) => candidate.id === id);
+  if (!found) throw new Error("fixture action missing");
+  return found;
+}
+
+describe("linked Drive scope", () => {
+  afterEach(() => vi.restoreAllMocks());
+  let scope: GoogleWorkspaceLinkScope;
+  let engineStore: InMemorySessionStore;
+  let db: Awaited<ReturnType<typeof freshTestPgDb>>["appDb"];
+  let run: WorkflowRun | null;
+  const buildScope = () => new GoogleWorkspaceLinkScope({ db, engineStore, getRun: async () => run });
+
+  beforeEach(async () => {
+    db = (await freshTestPgDb()).appDb;
+    run = null;
+    engineStore = new InMemorySessionStore();
+    await engineStore.saveSession({ id: "assistant1", userId: "user1", orgId: "org1", owner, workspace: "/tmp", purpose: "orchestrator", status: "running", createdAt: 0, updatedAt: 0 });
+    for (const [id, key] of [["thread1", "slack:C123:100.001"], ["thread2", "slack:C123:200.001"]]) {
+      await engineStore.saveThread("assistant1", { id, sessionId: "assistant1", key, status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+      await bindLinkedDriveThread(db, { orgId: "org1", owner, sessionId: "assistant1", threadId: id, threadKey: key });
+    }
+    scope = buildScope();
+  });
+
+  it("allows only human-linked files, keeps follow-ups durable, and normalizes the checked target", async () => {
+    const execute = vi.fn(async (_args: unknown, _ctx: PluginActionContext) => ({ success: true }));
+    const read = action(scope, "docs.read_document", fixturePlugin(execute));
+    expect((await read.execute({ documentId: "fileA" }, context())).success).toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+    await scope.recordSlackMessage("org1", slackMessage("<https://docs.google.com/document/d/fileA/edit|contract>"));
+    expect((await read.execute({ documentId: "https://docs.google.com/document/d/fileA/edit" }, context())).success).toBe(true);
+    expect(execute.mock.calls[0]?.[0]).toEqual({ documentId: "fileA" });
+    expect((await read.execute({ documentId: "fileB", linkedFileIds: ["fileB"] }, context())).success).toBe(false);
+    await scope.recordSlackMessage("org1", slackMessage("https://drive.google.com/file/d/fileB/view", { thread_ts: "100.001", ts: "101.002" }));
+    scope = buildScope(); // Rebuild the service; grants live in Postgres.
+    expect((await action(scope).execute({ documentId: "fileB" }, context())).success).toBe(true);
+    expect((await action(scope, "docs.add_comment").execute({ documentId: "fileA" }, context())).success).toBe(true);
+  });
+
+  it("isolates threads, channels, teams, organizations, and child sessions", async () => {
+    await scope.recordSlackMessage("org1", slackMessage("https://docs.google.com/document/d/fileA/edit"));
+    const read = action(scope);
+    expect((await read.execute({ documentId: "fileA" }, context({ threadId: "thread2" }))).success).toBe(false);
+    expect((await read.execute({ documentId: "fileA" }, context({ owner: undefined }))).success).toBe(false);
+    const session = await engineStore.getSession("assistant1");
+    if (!session) throw new Error("fixture session missing");
+    for (const changed of [{ ...session, orgId: "org2" }, { ...session, owner: { type: "team", id: "other" } satisfies PluginActionContext["owner"] }, { ...session, purpose: "child" as const }]) {
+      await engineStore.saveSession(changed);
+      expect((await read.execute({ documentId: "fileA" }, context())).success).toBe(false);
+    }
+  });
+
+  it.each([
+    { bot_id: "B123" }, { bot_profile: {} }, { subtype: "message_changed" }, { user: undefined },
+    { channel: "C999" }, { type: "reaction_added" }, { text: "bot says see fileA", attachments: [{ text: "https://docs.google.com/document/d/fileA/edit" }] },
+  ])("does not authorize non-human or out-of-channel content: %j", async (overrides) => {
+    await scope.recordSlackMessage("org1", slackMessage("https://docs.google.com/document/d/fileA/edit", overrides));
+    expect((await action(scope).execute({ documentId: "fileA" }, context())).success).toBe(false);
+  });
+
+  it("denies caller-created Slack-looking threads without a routed binding", async () => {
+    await scope.recordSlackMessage("org1", slackMessage("https://docs.google.com/document/d/fileA/edit"));
+    await engineStore.saveThread("assistant1", { id: "forged", sessionId: "assistant1", key: "slack:C123:100.001", status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ threadId: "forged" }))).success).toBe(false);
+  });
+
+  it("does not accept another organization's ingress", async () => {
+    await scope.recordSlackMessage("org2", slackMessage("https://docs.google.com/document/d/fileA/edit"));
+    expect((await action(scope).execute({ documentId: "fileA" }, context())).success).toBe(false);
+  });
+
+  it.each(["drive.list_files", "drive.copy_file", "docs.new_action", "constructor", "sheets.read_spreadsheet"])("denies unsupported action %s even with a linked target", async (id) => {
+    await scope.recordSlackMessage("org1", slackMessage("https://drive.google.com/file/d/fileA/view"));
+    expect((await action(scope, id).execute({ fileId: "fileA", documentId: "fileA", [String(Object)]: "fileA" }, context())).success).toBe(false);
+  });
+
+  it("leaves personal integrations unchanged and denies credential aliases", async () => {
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ owner: { type: "user", id: "user1" } }))).success).toBe(true);
+    await scope.recordSlackMessage("org1", slackMessage("https://drive.google.com/file/d/fileA/view"));
+    expect((await action(scope, "docs.read_document", fixturePlugin(undefined, "alias")).execute({ documentId: "fileA" }, context())).success).toBe(false);
+  });
+
+  it("fails closed when scope storage or thread lookup fails", async () => {
+    vi.spyOn(engineStore, "getSession").mockRejectedValueOnce(new Error("offline"));
+    const result = await action(scope).execute({ documentId: "fileA" }, context());
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("unavailable");
+  });
+
+  it("uses validated workflow origins for session nodes and real headless invocation", async () => {
+    await scope.recordSlackMessage("org1", slackMessage("https://docs.google.com/document/d/fileA/edit"));
+    await db.insert(workflowDefinitions).values({ id: "def1", orgId: "org1", ownerType: "team", ownerId: "legal", name: "review", definition: {}, createdAt: 0, updatedAt: 0 });
+    run = { runId: "run1", status: "running", waitingOn: [], updatedAt: 0, params: { workflowId: "def1", definitionVersionId: "v1", origin: { assistantSessionId: "assistant1", threadId: "thread1" } }, definition: {}, definitionVersionId: "v1", attempt: 1, wakeRequested: false, createdAt: 0, owner: { ownerType: "team", ownerId: "legal" } };
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ sessionId: "wf:run1:review", sessionPurpose: "workflow" }))).success).toBe(true);
+    const assembled = assemblePlugins([scope.wrapPlugins([fixturePlugin()])]);
+    const invoke = buildActionInvoker({ db, credentials: new InMemoryCredentialStore(), ...assembled });
+    const result = await invoke({ invocationId: "workflow:run1:review", service: "google_workspace", action: "docs.read_document", params: { documentId: "fileA" } }, { userId: "user1", orgId: "org1", owner });
+    expect(result).toMatchObject({ ok: true });
+    run.params.origin = { assistantSessionId: "assistant1", threadId: "thread2" };
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ sessionId: "wf:run1:review", sessionPurpose: "workflow" }))).success).toBe(false);
+    run.params.origin = undefined;
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ sessionId: "wf:run1:review", sessionPurpose: "workflow" }))).success).toBe(false);
+  });
+
+  it("guards the real Google actions and never follows embedded links or shortcuts", async () => {
+    const real: ValetPlugin = { name: "google-workspace", version: "1", actions: [googleWorkspacePlugin] };
+    await scope.recordSlackMessage("org1", slackMessage("https://docs.google.com/document/d/fileA/edit"));
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
+      documentId: "fileA", title: "Contract", body: { content: [{ paragraph: { elements: [{ textRun: { content: "https://docs.google.com/document/d/fileB/edit" } }] } }] },
+    }));
+    expect((await action(scope, "docs.read_document", real).execute({ documentId: "fileA" }, context())).success).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0]?.[0])).toContain("/documents/fileA?");
+    expect((await action(scope, "docs.read_document", real).execute({ documentId: "fileB" }, context())).success).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    fetch.mockReset().mockResolvedValue(Response.json({ id: "fileA", name: "shortcut", mimeType: "application/vnd.google-apps.shortcut", shortcutDetails: { targetId: "fileB" } }));
+    expect((await action(scope, "drive.download_file", real).execute({ fileId: "fileA" }, context())).success).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0]?.[0])).toContain("/files/fileA?");
+  });
+
+  it("keeps the restriction in the interactive catalog", async () => {
+    const { tools } = pluginSessionExtras(scope.wrapPlugins([fixturePlugin()]));
+    const call = tools.find((tool) => tool.name === "call_tool");
+    if (!call) throw new Error("catalog missing call_tool");
+    const result = await call.execute({ tool_id: "docs.read_document", summary: "Read linked contract", params: { documentId: "fileA" } }, context());
+    expect(JSON.stringify(result)).toContain("outside this thread");
+  });
+});
+
+describe("linked Drive parsing", () => {
+  it.each(["https://drive.google.com/file/d/abc_123/view", "https://drive.google.com/open?id=abc_123", "https://docs.google.com/document/d/abc_123/edit"])("accepts direct link %s", (url) => expect(linkedDriveFileId(url)).toBe("abc_123"));
+  it.each(["abc_123", "https://drive.google.com/drive/folders/abc_123", "http://docs.google.com/document/d/abc_123", "https://docs.google.com.evil.test/document/d/abc_123", "https://docs.google.com@evil.test/document/d/abc_123", "https://drive.google.com/open?id=abc&id=def", "https://docs.google.com/document/d/%2Fother", "https://docs.google.com/document/d/../../other"])("rejects %s", (url) => expect(linkedDriveFileId(url)).toBeNull());
+
+});

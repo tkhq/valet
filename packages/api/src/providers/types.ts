@@ -35,6 +35,7 @@ import type { AutoTitleHost } from "../sessions/auto-title-host.js";
  * exact subset they need.
  */
 export interface Providers {
+  linkedDriveScope?: import("../services/google-workspace-link-scope.js").GoogleWorkspaceLinkScope;
   db: AppDb;
   blobs: BlobStore;
   encryptionKey: string;
