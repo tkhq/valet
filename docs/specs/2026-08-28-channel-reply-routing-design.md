@@ -148,11 +148,12 @@ tool context, so explicit origin actions work for both paths.
 addressed submission. If the submission has no successful `reply_to_origin`,
 the host posts that result once. A pending origin action defers the guard. A
 successful origin action in a preceding tool-use entry owns delivery when it
-sets `final: true`; its text can differ from the terminal wrap-up. Text matching
-remains a compatibility path for older actions. A successful progress reply
-does not suppress a missing or failed final reply. An action with
-`details.ok=false` falls back to the terminal result when its tool ends. The
-guard never posts a one-message answer twice, a successful explicit final, or a manual-delivery
+sets `final: true`; its text can differ from the terminal wrap-up. A legacy,
+text-less tool-use entry directly before the terminal wrap-up also owns delivery.
+A progress entry has progress text, so it does not suppress a missing, failed,
+or pending final reply. An action with `details.ok=false` falls back to the
+terminal result when its tool ends. The guard never posts a one-message answer
+twice, a successful explicit final, or a manual-delivery
 turn. Decision-gate cards, command results, attention
 messages, link-flow messages, and other explicit host control messages keep
 their existing delivery behavior.

@@ -180,14 +180,6 @@ function isGatePromptRef(value: unknown): value is GatePromptRef {
 
 type OriginReplyState = "none" | "pending" | "succeeded" | "failed";
 
-function replyText(
-  part: NonNullable<Extract<SessionEntry, { type: "message" }>["parts"]>[number],
-): string | undefined {
-  if (part.type !== "tool_call" || !isRecord(part.args) || !isRecord(part.args.params)) return undefined;
-  const text = part.args.params.text;
-  return typeof text === "string" ? text : undefined;
-}
-
 function isFinalReply(
   part: NonNullable<Extract<SessionEntry, { type: "message" }>["parts"]>[number],
 ): boolean {
@@ -246,7 +238,9 @@ function terminalAssistantResult(entries: SessionEntry[], queueItemId: string): 
 /** Find the explicit reply that delivered this terminal result. A tool-use
  * entry precedes the terminal entry in the engine transcript. A `final: true`
  * action owns delivery even when the terminal wrap-up uses different text.
- * Matching text remains a compatibility path for older actions. */
+ * Legacy text-less tool-use entries immediately before the terminal wrap-up
+ * also own delivery. A progress entry contains progress text, so it cannot
+ * suppress fallback for a missing, failed, or pending final reply. */
 function finalOriginReplyState(
   entries: SessionEntry[],
   queueItemId: string,
@@ -263,7 +257,9 @@ function finalOriginReplyState(
         isRecord(part.args) &&
         typeof part.args.tool_id === "string" &&
         part.args.tool_id.endsWith(".reply_to_origin") &&
-        (index === finalIndex || isFinalReply(part) || replyText(part)?.trim() === final.content.trim()),
+        (index === finalIndex ||
+          isFinalReply(part) ||
+          (entry.content === "" && index === finalIndex - 1)),
     );
     if (calls.length > 0) return originReplyState([{ ...entry, parts: calls }], queueItemId);
   }

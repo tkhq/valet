@@ -840,13 +840,16 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(expected);
   });
 
-  it("lets a designated final reply own a different terminal wrap-up", async () => {
+  it.each([
+    { kind: "designated", params: { text: "Detailed final result", final: true } },
+    { kind: "text-less legacy", params: { text: "Detailed final result" } },
+  ])("lets a $kind final reply own a different terminal wrap-up", async ({ params }) => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const call: SessionEntry = {
       type: "message", id: "bare-success", sessionId: session.id, threadId, parentId: null,
       createdAt: Date.now(), role: "assistant", content: "", queueItemId: "qi-bare-success",
-      parts: [{ type: "tool_call", callId: "tc-bare-success", toolName: "call_tool", status: "running", args: { tool_id: "slack.reply_to_origin", params: { text: "Detailed final result", final: true } } }],
+      parts: [{ type: "tool_call", callId: "tc-bare-success", toolName: "call_tool", status: "running", args: { tool_id: "slack.reply_to_origin", params } }],
     };
     await engineStore.appendEntries(session.id, threadId, [
       userEntry({ sessionId: session.id, threadId, queueItemId: "qi-bare-success", signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
