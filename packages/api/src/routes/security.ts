@@ -68,7 +68,7 @@ import {
   serializePlan,
 } from "@valet/plugin-security";
 import type { PlanCell } from "@valet/plugin-security";
-import { seedSecurityReview } from "../services/security-seed.js";
+import { resolveSecurityApiToken, seedSecurityReview } from "../services/security-seed.js";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -99,7 +99,7 @@ import { canAdministerSession, canViewSession } from "../services/session-access
 import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { resolveApiTokenOrNull, resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
+import { resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
 import {
   buildChildStatusReader,
   ChildLimitError,
@@ -780,7 +780,7 @@ securityRouter.post("/security/preview", async (c) => {
     includeReport = body.includeReport;
   }
 
-  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const { db, engineCredentials, encryptionKey, canonicalAuthorizationService } = c.var.providers;
   const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
   const seeded = await seedSecurityReview({
     owner: parsed.owner,
@@ -791,6 +791,12 @@ securityRouter.post("/security/preview", async (c) => {
     ...(includeReport !== undefined ? { includeReport } : {}),
     tokenDeps,
     orgId: user.orgId,
+    credentialAuthorization: {
+      db,
+      authorization: canonicalAuthorizationService,
+      actorUserId: user.id,
+      principal: c.var.principal,
+    },
   });
 
   const personaKeys = seeded.personas ? Object.keys(seeded.personas) : [];
@@ -1147,7 +1153,7 @@ securityRouter.get("/:id/security/start-preview", async (c) => {
     return serviceError(c, err);
   }
 
-  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const { db, engineCredentials, encryptionKey, canonicalAuthorizationService } = c.var.providers;
   const bindingRows = await db
     .select()
     .from(sessionRepos)
@@ -1175,7 +1181,12 @@ securityRouter.get("/:id/security/start-preview", async (c) => {
     }
     const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
     try {
-      const token = await resolveApiTokenOrNull(tokenDeps, row.orgId, owner, repo);
+      const token = await resolveSecurityApiToken(tokenDeps, {
+        db,
+        authorization: canonicalAuthorizationService,
+        actorUserId: row.userId,
+        principal: sessionOwner(row),
+      }, { orgId: row.orgId, owner, repo, actionId: "security.resolve_start_ref" });
       resolvedSha = await resolveRefSha(tokenDeps, token, owner, repo, ref);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1489,7 +1500,7 @@ async function resolveRescanDiff(
 ): Promise<{ baseRef: string | null; changedFiles: string[] | null }> {
   if (!engagement.parentEngagementId) return { baseRef: null, changedFiles: null };
 
-  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const { db, engineCredentials, encryptionKey, canonicalAuthorizationService } = c.var.providers;
   const security = createSecurityEngagementService({ db });
   const parent = await security.getEngagement(engagement.parentEngagementId);
   const baseRef = parent?.engagement.repoRef ?? "";
@@ -1504,10 +1515,16 @@ async function resolveRescanDiff(
 
   // The owning session's org scopes the GitHub token, mirroring start-preview.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, engagement.sessionId)).limit(1);
-  const orgId = rows[0]?.orgId ?? "";
+  const session = rows[0];
+  if (!session) return { baseRef, changedFiles: null };
   const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
   try {
-    const token = await resolveApiTokenOrNull(tokenDeps, orgId, owner, repo);
+    const token = await resolveSecurityApiToken(tokenDeps, {
+      db,
+      authorization: canonicalAuthorizationService,
+      actorUserId: session.userId,
+      principal: sessionOwner(session),
+    }, { orgId: session.orgId, owner, repo, actionId: "security.resolve_rescan_diff" });
     const changedFiles = await resolveChangedFiles(tokenDeps, token, owner, repo, baseRef, headSha);
     return { baseRef, changedFiles };
   } catch (err) {
