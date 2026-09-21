@@ -547,6 +547,37 @@ describe("ChannelHost outbound delivery", () => {
     await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["The work is complete"]));
   });
 
+  it("retries a failed one-message addressed answer without duplicate delivery", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-one-message-retry";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } },
+      }),
+      {
+        type: "message", id: "one-message-result", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+      },
+    ]);
+    fakeTransport.sendFailures = 1;
+    const event = {
+      sessionId: session.id, threadId, queueItemId, timestamp: Date.now(),
+      event: { type: "message_end" as const, threadId, messageId: "one-message-result", reason: "end_turn" as const },
+    };
+    await eventStream.append(event, `one-message-failure-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "The work is complete",
+    ]), { timeout: FINAL_DELIVERY_RETRY_DELAY_MS * 3 });
+
+    await eventStream.append(event, `one-message-redelivery-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["The work is complete"]);
+  });
+
   it("retries final fallback after a transport failure without another event", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;

@@ -1,5 +1,20 @@
 export const SLACK_API = 'https://slack.com/api';
 
+function waitForRetryAfter(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Request was aborted"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("Request was aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** Authenticated POST against the Slack Web API. Automatically retries on 429 rate limits. */
 export async function slackFetch(
   method: string,
@@ -21,7 +36,7 @@ export async function slackFetch(
 
     if (res.status === 429) {
       const retryAfter = Number(res.headers.get('Retry-After') || '2');
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      await waitForRetryAfter(retryAfter * 1000, signal);
       continue;
     }
 
@@ -58,7 +73,7 @@ export async function slackGet(
 
     if (res.status === 429) {
       const retryAfter = Number(res.headers.get('Retry-After') || '2');
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
       continue;
     }
 

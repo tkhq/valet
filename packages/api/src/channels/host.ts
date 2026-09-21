@@ -363,6 +363,9 @@ export class ChannelHost {
   /** Bounded retries for final fallback sends that fail at the transport. */
   private finalRetryAttempts = new Map<string, number>();
   private finalRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Bounded retries for a one-message first reply that fails to send. */
+  private firstReplyRetryAttempts = new Map<string, number>();
+  private firstReplyRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
@@ -683,6 +686,9 @@ export class ChannelHost {
     for (const timer of this.finalRetryTimers.values()) clearTimeout(timer);
     this.finalRetryTimers.clear();
     this.finalRetryAttempts.clear();
+    for (const timer of this.firstReplyRetryTimers.values()) clearTimeout(timer);
+    this.firstReplyRetryTimers.clear();
+    this.firstReplyRetryAttempts.clear();
   }
 
   /** Rule 5: every callback body try/caught — errors logged, never thrown into the stream. */
@@ -776,8 +782,10 @@ export class ChannelHost {
 
     const target = this.channelThreadFor(origin.threadKey);
     if (!target || !this.outboundIsActive(generation)) return;
-    if (this.delivered.has(dedupeKey)) return;
-    this.markDelivered(dedupeKey);
+    if (this.delivered.has(dedupeKey)) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.assistantSenderIdentity(sessionId);
@@ -785,6 +793,45 @@ export class ChannelHost {
       markdown: first.content,
       ...(sender !== undefined ? { sender } : {}),
     });
+    this.markDelivered(dedupeKey);
+    this.clearFirstReplyRetry(dedupeKey);
+  }
+
+  private scheduleFirstReplyRetry(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+    dedupeKey: string,
+    generation: number,
+  ): void {
+    if (!this.outboundIsActive(generation) || this.firstReplyRetryTimers.has(dedupeKey)) return;
+    const attempts = this.firstReplyRetryAttempts.get(dedupeKey) ?? 0;
+    if (attempts >= MAX_FINAL_DELIVERY_RETRIES) {
+      this.firstReplyRetryAttempts.delete(dedupeKey);
+      console.error(`[channels] first reply failed after ${attempts} retries (session=${sessionId} queue=${queueItemId})`);
+      return;
+    }
+    this.firstReplyRetryAttempts.set(dedupeKey, attempts + 1);
+    const timer = setTimeout(() => {
+      this.firstReplyRetryTimers.delete(dedupeKey);
+      if (!this.outboundIsActive(generation)) return;
+      this.enqueueOutbound(sessionId, threadId, async () => {
+        if (!this.outboundIsActive(generation)) return;
+        try {
+          await this.deliverFirstAssistantReply(sessionId, threadId, { queueItemId }, generation);
+        } catch (err) {
+          console.error("[channels] outbound delivery failed", err);
+        }
+      });
+    }, FINAL_DELIVERY_RETRY_DELAY_MS * 2 ** attempts);
+    this.firstReplyRetryTimers.set(dedupeKey, timer);
+  }
+
+  private clearFirstReplyRetry(dedupeKey: string): void {
+    const timer = this.firstReplyRetryTimers.get(dedupeKey);
+    if (timer) clearTimeout(timer);
+    this.firstReplyRetryTimers.delete(dedupeKey);
+    this.firstReplyRetryAttempts.delete(dedupeKey);
   }
 
   private outboundIsActive(generation: number): boolean {
@@ -887,13 +934,22 @@ export class ChannelHost {
         Boolean(entry.content),
     );
     const final = terminalAssistantResult(entries, queueItemId);
-    // A one-message answer is the automatic first reply, not a second post.
-    if (!first || first.type !== "message" || !final || first.id === final.id) {
+    if (!first || first.type !== "message" || !final) {
       this.clearFinalDeliveryRetry(dedupeKey);
       return;
     }
 
     const explicit = finalOriginReplyState(entries, queueItemId, final);
+    // A one-message answer is the automatic first reply, not a second post.
+    // If that post failed, its own bounded retry remains responsible for it.
+    if (first.id === final.id) {
+      const firstDedupeKey = `${sessionId}:first-reply:${queueItemId}`;
+      this.clearFinalDeliveryRetry(dedupeKey);
+      if (explicit !== "pending" && explicit !== "succeeded" && !this.delivered.has(firstDedupeKey)) {
+        this.scheduleFirstReplyRetry(sessionId, threadId, queueItemId, firstDedupeKey, generation);
+      }
+      return;
+    }
     if (explicit === "pending" || explicit === "succeeded") {
       this.clearFinalDeliveryRetry(dedupeKey);
       return;
