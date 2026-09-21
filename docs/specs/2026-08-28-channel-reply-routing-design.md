@@ -293,6 +293,24 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   `reply_to_origin`. The child result itself does not post directly.
   `child_send` and restart recovery retain the stored origin, even when a
   follow-up comes from another parent thread.
+  The web admission path clears the stored channel origin before human input
+  enters a child. The watcher also clears it when it follows human steering. Parent-directed steering
+  retains the origin, including recovery after an interrupted `child_send`.
+- **Automatic child completion replies have durable delivery intents.** The
+  watcher stores an intent before it submits `child.settled`. It stores the
+  parent submission ID before it marks the watch settled. Restart recovery
+  resolves missing receipts by the immutable, namespaced dispatch ID, even if
+  later work changed the child watch. `SessionStore.getQueueItemByDispatchId`
+  scopes this lookup to the parent session in both store implementations.
+  The channel host polls up to 20 due intents per pass. A conditional lease
+  prevents concurrent workers from claiming the same intent during that lease.
+  Failed sends retry with backoff, capped at five minutes. A successful send
+  completes the intent. An explicit reply or an aborted parent turn suppresses
+  automatic delivery. The live event handler does not also send child replies.
+  Failed attempts retain an error and attempt count for diagnosis.
+  Delivery is at least once: a crash after provider acceptance but before the
+  completion write can duplicate a reply. No provider-independent atomic send
+  and database commit exists. This queue does not replay older untracked replies.
 - **Telegram has an explicit text reply action.** `telegram.reply_to_origin`
   sends text to the origin DM through the organization bot credential.
 - **Slack text uses the CommonMark converter.** The channel transport,

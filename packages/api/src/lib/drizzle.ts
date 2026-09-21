@@ -219,6 +219,18 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "child completion reply deliveries", probe: { kind: "table", table: "child_reply_deliveries" }, sql: `CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
+  "id" text PRIMARY KEY NOT NULL,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "queue_item_id" text,
+  "next_attempt_at" bigint NOT NULL,
+  "completed_at" bigint,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  "last_error" text
+);` },
+  { describe: "child completion reply due index", probe: { kind: "index", index: "child_reply_deliveries_due" }, sql: `CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");` },
   {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },

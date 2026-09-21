@@ -84,6 +84,17 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(loaded).toEqual(item);
     });
 
+    it("recovers a receipt by dispatch ID before and after settlement, scoped to the session", async () => {
+      const item = makeItem({ dispatchId: "recover-receipt" });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      expect(await store.getQueueItemByDispatchId(SESSION_ID, "recover-receipt")).toEqual(item);
+      expect(await store.getQueueItemByDispatchId(SESSION_ID, "missing")).toBeNull();
+      await store.saveSession(newSession({ id: "other-session", orgId: "other-org" }));
+      expect(await store.getQueueItemByDispatchId("other-session", "recover-receipt")).toBeNull();
+      await store.settleUnclaimed(SESSION_ID, THREAD_ID, item.id, { outcome: "completed" });
+      expect(await store.getQueueItemByDispatchId(SESSION_ID, "recover-receipt")).toMatchObject({ id: item.id, status: "settled" });
+    });
+
     it("same dispatchId + same content returns the original item, admitted=false", async () => {
       const item = makeItem({ dispatchId: "dispatch-1", content: "same text" });
       const first = await store.admitSubmission(SESSION_ID, THREAD_ID, item);

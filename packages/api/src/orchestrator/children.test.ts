@@ -39,7 +39,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { childReplyDeliveries, agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -1148,6 +1148,14 @@ describe("ChildWatcher", () => {
       originJson: JSON.stringify(origin),
     });
 
+    await db.insert(agentSessions).values({
+      id: "child-o", userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active",
+      ownerType: "user", ownerId: "local-user", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    expect((await resolveChildSettlement(deps, "child-o", "parent-o"))?.settled).toBe(true);
+    const [beforeDelivery] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-o"));
+    expect(beforeDelivery?.settled).toBe(false);
+
     // rearm() reads the row back — the restart path must not lose the origin.
     await watcher.rearm();
 
@@ -1171,6 +1179,20 @@ describe("ChildWatcher", () => {
       throw new Error("Expected a child settlement signal");
     }
     expect(content.origin).toEqual(origin);
+    const deliveries = await db.select().from(childReplyDeliveries);
+    expect(deliveries).toHaveLength(reply === "manual" ? 0 : 1);
+    if (reply !== "manual") {
+      expect(deliveries[0]?.queueItemId).toBe(settledSignals[0]?.id);
+      // Simulate death after admission, before saving its receipt and settling the watch.
+      await db.update(childReplyDeliveries).set({ queueItemId: null });
+      await db.update(childWatches).set({ settled: false }).where(eq(childWatches.childSessionId, "child-o"));
+      await new ChildWatcher(deps).rearm();
+      await waitFor(async () => {
+        const [row] = await db.select().from(childReplyDeliveries);
+        return row?.queueItemId === settledSignals[0]?.id;
+      });
+      expect(await engineStore.listUnsettledSubmissions("parent-o")).toHaveLength(1);
+    }
   });
 
   it("leaves an un-diagnosable (retryable) failure UNSETTLED after exhausting in-process retries, relying on rearm() as the backstop", async () => {
@@ -2343,7 +2365,7 @@ describe("buildChildSender", () => {
     expect(content.origin).toEqual(origin);
   });
 
-  it("self-heals a steer whose sender died before the re-point: the watch follows the successor", async () => {
+  it.each([true, false])("follows a successor across rearm with human takeover %s", async (humanTakeover) => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -2355,6 +2377,8 @@ describe("buildChildSender", () => {
       settled: false,
       queueItemId: "qi-heal-orig",
     });
+    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }) })
+      .where(eq(childWatches.childSessionId, "child-heal"));
     watcher.arm({
       childSessionId: "child-heal",
       queueItemId: "qi-heal-orig",
@@ -2369,7 +2393,7 @@ describe("buildChildSender", () => {
     const child = engineHost.liveSession("child-heal");
     expect(child).not.toBeNull();
     const receipt = await child!.prompt("changed my mind — do it differently", {
-      author: { id: "local-user" },
+      ...(humanTakeover ? { author: { id: "local-user" } } : {}),
       queueMode: "steer",
     });
 
@@ -2380,6 +2404,8 @@ describe("buildChildSender", () => {
       return r[0]?.queueItemId === receipt.queueItemId;
     });
     expect(settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-heal"))).toHaveLength(0);
+
+    await new ChildWatcher(deps).rearm();
 
     // The successor settles: exactly one signal, for the successor.
     await engineStore.settleUnclaimed("child-heal", childThread.id, receipt.queueItemId, { outcome: "completed" });
@@ -2393,6 +2419,10 @@ describe("buildChildSender", () => {
     expect(signals[0]?.dispatchId).toBe(`child-heal:settled:child-heal:${receipt.queueItemId}`);
     const content = signals[0]?.content as SignalContent;
     expect(content.attributes?.outcome).toBe("completed");
+    expect(content.origin).toEqual(humanTakeover ? undefined : { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" });
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-heal"));
+    expect(watch?.originJson === null).toBe(humanTakeover);
+    expect(await db.select().from(childReplyDeliveries)).toHaveLength(humanTakeover ? 0 : 1);
   });
 
   it("re-opening a settled child pays the child cap: the 11th active child is rejected", async () => {

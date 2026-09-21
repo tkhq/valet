@@ -28,7 +28,7 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import { childWatches, childReplyDeliveries, agentSessions, assistants, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -586,16 +586,98 @@ describe("ChannelHost outbound delivery", () => {
         createdAt: Date.now(), role: "assistant", content: "internal child result", queueItemId: "qi-child-settled", stopReason: "end_turn",
       },
     ]);
+    await testDb.appDb.insert(childReplyDeliveries).values({
+      id: "reply-test", orgId: ORG_ID, sessionId: session.id, threadId,
+      queueItemId: "qi-child-settled", nextAttemptAt: 0,
+    });
     await eventStream.append(
       { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "child-settled-response", reason: "end_turn" } },
       `child-settled-${randomUUID()}`,
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await host.retryChildReplies();
     expect(fakeTransport.sent).toHaveLength(reply === "auto" ? 1 : 0);
     if (reply === "auto") {
       expect(fakeTransport.sent[0]?.message.markdown).toBe("internal child result");
     }
+  });
+
+  it.each([true, false])("retries a failed child reply without another engine event, restart=%s", async (restart) => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId: "qi-retry", signal: {
+        signalType: "child.settled", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99" },
+      } }),
+      { type: "message", id: "reply-retry", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "Finished the requested work", queueItemId: "qi-retry", stopReason: "end_turn" },
+    ]);
+    await testDb.appDb.insert(childReplyDeliveries).values({
+      id: "retry-test", orgId: ORG_ID, sessionId: session.id, threadId, queueItemId: "qi-retry", nextAttemptAt: 0,
+    });
+    const send = vi.spyOn(fakeTransport, "send").mockRejectedValueOnce(new Error("temporary Slack failure"));
+    await host.retryChildReplies();
+    const [failed] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "retry-test"));
+    expect(failed?.completedAt).toBeNull();
+    expect(failed?.attempts).toBe(1);
+    expect(failed?.lastError).toContain("temporary Slack failure");
+    expect(fakeTransport.sent).toHaveLength(0);
+    if (restart) host.stopOutbound();
+    const recovered = restart ? new ChannelHost({
+      db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "recovered", version: "0", transports: [{ channelType: "fake", create: () => fakeTransport }] }],
+      resolveOrgId: async () => ORG_ID,
+    }) : host;
+    await testDb.appDb.update(childReplyDeliveries).set({ nextAttemptAt: 0 }).where(eq(childReplyDeliveries.id, "retry-test"));
+    try {
+      await recovered.start();
+      await recovered.retryChildReplies();
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(fakeTransport.sent[0]?.message.markdown).toBe("Finished the requested work");
+      const [delivered] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "retry-test"));
+      expect(delivered?.completedAt).not.toBeNull();
+      await recovered.retryChildReplies();
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      await recovered.stop();
+    }
+  });
+
+  it("recovers a child reply written while outbound delivery was stopped", async () => {
+    host.stopOutbound();
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.admitSubmission(session.id, threadId, {
+      id: "qi-offline", threadId, dispatchId: "offline-test", content: "child result", status: "queued",
+      attemptCount: 0, maxAttempts: 10, timeoutAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await engineStore.settleUnclaimed(session.id, threadId, "qi-offline", { outcome: "completed" });
+    // The watcher has moved to later child work. Receipt recovery cannot depend on that row.
+    await testDb.appDb.insert(childWatches).values({
+      childSessionId: "child-moved", parentSessionId: session.id, parentThreadId: threadId,
+      queueItemId: "new-child-work", orgId: ORG_ID, actorUserId: USER_ID, settled: true, createdAt: Date.now(),
+    });
+    await testDb.appDb.insert(childReplyDeliveries).values({
+      id: "offline-test", orgId: ORG_ID, sessionId: session.id, threadId, queueItemId: null, nextAttemptAt: 0,
+    });
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId: "qi-offline", signal: {
+        signalType: "child.settled", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99" },
+      } }),
+      { type: "message", id: "reply-offline", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "Completed while offline", queueItemId: "qi-offline", stopReason: "end_turn" },
+    ]);
+    await eventStream.append({ sessionId: session.id, threadId, timestamp: Date.now(), event: {
+      type: "message_end", threadId, messageId: "reply-offline", reason: "end_turn",
+    } }, "offline-message");
+    host.startOutbound();
+    await host.retryChildReplies();
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.message.markdown).toBe("Completed while offline");
+    host.stopOutbound();
+    host.startOutbound();
+    await host.retryChildReplies();
+    expect(fakeTransport.sent).toHaveLength(1);
   });
 
   it("a web-UI submission's gate card stays off the channel (TKAI-323)", async () => {
