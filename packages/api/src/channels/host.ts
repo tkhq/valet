@@ -354,6 +354,8 @@ export class ChannelHost {
    * card its tool call raised, and fire-and-forget handlers would let the
    * two race. An entry is removed once its chain drains. */
   private outboundChains = new Map<string, Promise<void>>();
+  /** Invalidates queued retry work when outbound delivery stops or restarts. */
+  private outboundGeneration = 0;
   /** Bounded retries for final fallback sends that fail at the transport. */
   private finalRetryAttempts = new Map<string, number>();
   private finalRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -627,6 +629,7 @@ export class ChannelHost {
    */
   startOutbound(): void {
     if (this.outboundUnsub) return;
+    this.outboundGeneration += 1;
     this.outboundUnsub = this.deps.eventStream.subscribe(
       {
         eventTypes: [
@@ -669,6 +672,7 @@ export class ChannelHost {
   }
 
   stopOutbound(): void {
+    this.outboundGeneration += 1;
     this.outboundUnsub?.();
     this.outboundUnsub = null;
     this.outboundChains.clear();
@@ -768,8 +772,18 @@ export class ChannelHost {
     });
   }
 
-  private scheduleFinalDeliveryRetry(sessionId: string, threadId: string, queueItemId: string, dedupeKey: string): void {
-    if (this.finalRetryTimers.has(dedupeKey)) return;
+  private outboundIsActive(generation: number): boolean {
+    return this.outboundUnsub !== null && this.outboundGeneration === generation;
+  }
+
+  private scheduleFinalDeliveryRetry(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+    dedupeKey: string,
+    generation: number,
+  ): void {
+    if (!this.outboundIsActive(generation) || this.finalRetryTimers.has(dedupeKey)) return;
     const attempts = this.finalRetryAttempts.get(dedupeKey) ?? 0;
     if (attempts >= MAX_FINAL_DELIVERY_RETRIES) {
       this.finalRetryAttempts.delete(dedupeKey);
@@ -779,9 +793,11 @@ export class ChannelHost {
     this.finalRetryAttempts.set(dedupeKey, attempts + 1);
     const timer = setTimeout(() => {
       this.finalRetryTimers.delete(dedupeKey);
+      if (!this.outboundIsActive(generation)) return;
       this.enqueueOutbound(sessionId, threadId, async () => {
+        if (!this.outboundIsActive(generation)) return;
         try {
-          await this.deliverFinalAssistantReply(sessionId, threadId, { queueItemId });
+          await this.deliverFinalAssistantReply(sessionId, threadId, { queueItemId }, generation);
         } catch (err) {
           console.error("[channels] outbound delivery failed", err);
         }
@@ -812,8 +828,9 @@ export class ChannelHost {
       queueItemId?: string;
       reason?: "end_turn" | "tool_use" | "error" | "abort";
     },
+    generation = this.outboundGeneration,
   ): Promise<void> {
-    if (trigger.reason === "error" || trigger.reason === "abort") return;
+    if (!this.outboundIsActive(generation) || trigger.reason === "error" || trigger.reason === "abort") return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
@@ -860,15 +877,17 @@ export class ChannelHost {
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.assistantSenderIdentity(sessionId);
+    if (!this.outboundIsActive(generation)) return;
     try {
       await transport.send(target.conversationKey, {
         markdown: final.content,
         ...(sender !== undefined ? { sender } : {}),
       });
     } catch (err) {
-      this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey);
+      this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
       throw err;
     }
+    if (!this.outboundIsActive(generation)) return;
     this.markDelivered(dedupeKey);
     this.clearFinalDeliveryRetry(dedupeKey);
   }

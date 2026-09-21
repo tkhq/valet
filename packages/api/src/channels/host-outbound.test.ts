@@ -52,6 +52,8 @@ class FakeTransport implements ChannelTransport {
   sendDelayMs = 0;
   /** Number of the next sends that fail before any message is recorded. */
   sendFailures = 0;
+  sendAttempts = 0;
+  sendBlock: Promise<void> | undefined;
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   deliveries: Array<{ type: "message"; markdown: string } | { type: "gate"; gateId: string }> = [];
   media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
@@ -67,7 +69,9 @@ class FakeTransport implements ChannelTransport {
     return null;
   }
   async send(conversationKey: string, message: OutboundChannelMessage) {
+    this.sendAttempts += 1;
     if (this.sendDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
+    if (this.sendBlock) await this.sendBlock;
     if (this.sendFailures > 0) {
       this.sendFailures -= 1;
       throw new Error("send failed");
@@ -553,6 +557,49 @@ describe("ChannelHost outbound delivery", () => {
       "I am checking",
       "The work is complete",
     ]);
+  });
+
+  it("does not schedule a retry when outbound stops during a failed send", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-final-retry-stop";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId,
+        signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } },
+      }),
+      {
+        type: "message", id: "final-stop-ack", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId,
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-stop-ack", reason: "end_turn" } },
+      `final-stop-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: "final-stop-result", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+    }]);
+
+    let releaseSend: (() => void) | undefined;
+    fakeTransport.sendAttempts = 0;
+    fakeTransport.sendFailures = 1;
+    fakeTransport.sendBlock = new Promise<void>((resolve) => { releaseSend = resolve; });
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-stop-result", reason: "end_turn" } },
+      `final-stop-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sendAttempts).toBe(1));
+    host.stopOutbound();
+    releaseSend?.();
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS * 3));
+
+    expect(fakeTransport.sendAttempts).toBe(1);
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
   });
 
   it("stops retrying final fallback after the retry limit", async () => {

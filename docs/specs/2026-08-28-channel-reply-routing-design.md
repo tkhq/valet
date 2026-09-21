@@ -154,8 +154,10 @@ unmarked, text-less reply can be progress, so it does not suppress a missing,
 failed, or pending final reply. An action with `details.ok=false` falls back to
 the terminal result when its tool ends. The guard records fallback delivery only
 after the transport accepts the post. A failed fallback retries twice with an
-increasing short delay. The host logs and clears retry state after the retry limit. The
-guard never posts a one-message answer twice, a successful explicit final, or a manual-delivery
+increasing short delay. The host logs and clears retry state after the retry limit.
+Stopping outbound delivery invalidates queued retries and prevents an in-flight
+failed send from scheduling one. The guard never posts a one-message answer
+twice, a successful explicit final, or a manual-delivery
 turn. Decision-gate cards, command results, attention
 messages, link-flow messages, and other explicit host control messages keep
 their existing delivery behavior.
