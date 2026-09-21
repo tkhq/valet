@@ -575,8 +575,8 @@ export class PgSessionStore implements SessionStore {
       await tx.query(
         `INSERT INTO engine_suspended_turns (
            session_id, thread_id, queue_item_id, gate_id, model, leaf_entry_id,
-           tool_call_id, tool_name, tool_args, resume_key, ordinal, attempt, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           tool_call_id, tool_name, tool_args, prepared_args_digest, prepared_tool_id, resume_key, ordinal, attempt, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          ON CONFLICT (session_id, thread_id) DO UPDATE SET
            queue_item_id = EXCLUDED.queue_item_id,
            gate_id = EXCLUDED.gate_id,
@@ -585,6 +585,8 @@ export class PgSessionStore implements SessionStore {
            tool_call_id = EXCLUDED.tool_call_id,
            tool_name = EXCLUDED.tool_name,
            tool_args = EXCLUDED.tool_args,
+           prepared_args_digest = EXCLUDED.prepared_args_digest,
+           prepared_tool_id = EXCLUDED.prepared_tool_id,
            resume_key = EXCLUDED.resume_key,
            ordinal = EXCLUDED.ordinal,
            attempt = EXCLUDED.attempt`,
@@ -598,6 +600,8 @@ export class PgSessionStore implements SessionStore {
           s.toolCallId,
           s.toolName,
           JSON.stringify(s.toolArgs),
+          s.preparedArgsDigest ?? null,
+          s.preparedToolId ?? null,
           s.resumeKey,
           s.ordinal,
           s.attempt,
@@ -774,6 +778,8 @@ export class PgSessionStore implements SessionStore {
       toolCallId: row.toolCallId,
       toolName: row.toolName,
       toolArgs: parseJson(row.toolArgs) ?? {},
+      preparedArgsDigest: row.preparedArgsDigest ?? undefined,
+      preparedToolId: row.preparedToolId ?? undefined,
       resumeKey: row.resumeKey,
       ordinal: row.ordinal,
       attempt: row.attempt,

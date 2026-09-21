@@ -33,6 +33,7 @@ import { resolveInstance } from "../resolve.js";
 import { streamSession } from "../stream.js";
 import type { CliContext } from "../types.js";
 import { outcomeToExit, renderToolEnd, renderToolStart, type StreamFn } from "./send.js";
+import { actionApproves, approvalPreviewLines, approvalReviewIncomplete } from "./approval-review.js";
 import type {
   DecisionGate,
   ResolveDecisionRequest,
@@ -52,6 +53,7 @@ const PROMPT = "you › ";
 export function renderGatePrompt(gate: DecisionGate): string {
   const lines = [`decision required: ${gate.title} [${gate.type}]`];
   if (gate.body) lines.push(gate.body);
+  lines.push(...approvalPreviewLines(gate));
   if (gate.type === "question") {
     lines.push("(type your answer)");
   } else {
@@ -93,13 +95,20 @@ export function parseGateSelection(gate: DecisionGate, raw: string | null): Gate
   if (/^\d+$/.test(input)) {
     const n = Number.parseInt(input, 10);
     if (n >= 1 && n <= gate.actions.length) {
-      return { kind: "resolve", resolution: { actionId: gate.actions[n - 1].id } };
+      const action = gate.actions[n - 1];
+      if (gate.approval && approvalReviewIncomplete(gate) && actionApproves(action)) {
+        return { kind: "invalid", message: "parameter review is incomplete; reject this request and ask the agent to retry" };
+      }
+      return { kind: "resolve", resolution: { actionId: action.id } };
     }
     return { kind: "invalid", message: `no option ${n} (choose 1-${gate.actions.length})` };
   }
 
   // Otherwise match a literal action id.
   const byId = gate.actions.find((a) => a.id === input);
+  if (byId && gate.approval && approvalReviewIncomplete(gate) && actionApproves(byId)) {
+    return { kind: "invalid", message: "parameter review is incomplete; reject this request and ask the agent to retry" };
+  }
   if (byId) return { kind: "resolve", resolution: { actionId: byId.id } };
   return { kind: "invalid", message: `no such option: ${input}` };
 }

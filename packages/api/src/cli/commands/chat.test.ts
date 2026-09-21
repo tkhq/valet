@@ -276,6 +276,17 @@ describe("renderGatePrompt", () => {
     expect(out).toContain("(enter a number or an action id)");
   });
 
+  it("shows typed tool parameters and blocks approval when identity is missing", () => {
+    const complete = approvalGate({ approval: { toolId: "payments.send", argsPreview: "{\"amount\":10}" } });
+    expect(renderGatePrompt(complete)).toContain("parameters: {\"amount\":10}");
+    const unsafe = approvalGate({
+      approval: { argsPreview: "{\"amount\":10}", reviewIncomplete: true },
+      actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }],
+    });
+    expect(parseGateSelection(unsafe, "approve").kind).toBe("invalid");
+    expect(parseGateSelection(unsafe, "deny")).toEqual({ kind: "resolve", resolution: { actionId: "deny" } });
+  });
+
   it("prompts for free text on a question gate", () => {
     const out = renderGatePrompt(approvalGate({ type: "question", actions: [] }));
     expect(out).toContain("[question]");

@@ -65,6 +65,10 @@ export async function applyEngineMigrations(db: PgDb, pgDataDir?: string): Promi
     });
   }
 
+  // 0000 is edited in place before 1.0. Existing databases have it marked
+  // applied, so additive engine columns need this idempotent repair path.
+  await db.query("ALTER TABLE engine_suspended_turns ADD COLUMN IF NOT EXISTS prepared_args_digest text");
+  await db.query("ALTER TABLE engine_suspended_turns ADD COLUMN IF NOT EXISTS prepared_tool_id text");
   await assertSchemaVersion(db, pgDataDir);
 }
 

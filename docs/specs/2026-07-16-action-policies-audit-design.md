@@ -159,17 +159,25 @@ Three independent adversarial reviewers (engine contract, policy security, integ
 8. **`PluginActionContext.actionId` still mirrors raw `PluginAction.id`** (possibly bare) while the policy/audit actionId is the fqid — intentional (the context field is documented as mirroring the plugin's own id); plugins must not treat it as the policy id.
 9. **After a restart replay, continuation-phase tool calls run with no `runningItem`,** so their audit rows carry no `queueItemId`. Gate ordinals in that state are scoped to the same empty key and stay monotonic per resumeKey, so audit ids remain unique and replay dedup still holds — the cost is turn attribution on those rows, not correctness.
 
-### resumeKey size bound (2026-08-17)
+### Opaque restart-safe invocation identity (2026-09-13)
 
-The original resumeKey format was `${fqid}:${stableJson(args)}` with no length bound. The key is embedded in two indexed values: the deterministic gate id (the `engine_decision_gates` text primary key, plus the `engine_decision_gates_resume` index) and the `action_invocations` audit primary key. Postgres btree index rows cap at ~2704 bytes, so any gated tool call with args over ~2.6KB failed to persist its gate: `index row size ... exceeds btree version 4 maximum 2704`. In practice this capped `skills.create_skill` bodies at ~2.7KB.
+Each session-path invocation receives a cryptographically random UUID-based resume key. The key is independent of serialized parameters: parameter values are never embedded, hashed, or otherwise used to derive a durable gate or audit identity. This keeps indexed keys bounded and prevents durable identifiers from disclosing or correlating reviewed values.
 
-Fix (`plugin-catalog.ts`): when the args JSON exceeds 256 characters, the key's args portion becomes `fnv1a64:<utf8-byte-length>:<64-bit FNV-1a hex over the UTF-8 bytes>` instead of the raw JSON. Properties preserved:
+When a gate suspends a turn, the engine persists that opaque resume key in `SuspendedTurnState`. Restart replay seeds the tool context with the persisted key, so the reconstructed invocation reuses the same gate and audit identity. A genuine later invocation, even with identical tool parameters, receives a new key.
 
-- Deterministic per (tool_id, args) — restart replay re-derives the identical key, so gate short-circuit and audit dedup are unchanged.
-- Small keys are byte-identical to the old format (the seam tests pin the literal).
-- Pure JS hash — the engine imports no node builtins.
+The checkpoint also stores a SHA-256 commitment to the complete prepared arguments. The digest does not expose parameter values. On replay, the engine re-prepares the call and rejects it if the digest differs. This prevents changed schemas or defaults from executing values that the approver did not review.
 
-The hash is 64-bit, not cryptographic. A collision only matters when two different large-args calls to the same tool collide within one (session, queue item) scope; with the length prefix the probability is negligible. The gate `body` still carries the full args JSON for display — `body` is an unindexed text column.
+Parameter validation runs before policy evaluation. If validation fails, the audit outcome is `error`, while `resolvedMode` and policy provenance are null because no policy decision occurred. Policy resolver hooks receive deep-cloned parameter snapshots. The approval preview and plugin execution retain independent prepared snapshots, so resolver or post-resolution hooks cannot mutate reviewed or executed values, including nested values.
+
+## Approval review and composer input (2026-09-13)
+
+The live decision-gate wire carries a typed `approval` projection for a tool request. It includes the tool id, service, risk level, summary, and a bounded parameter preview. All approval-summary and preview caps count UTF-8 bytes and stop on code-point boundaries, so CJK text and emoji are not split. The raw engine context remains private. `call_tool` summaries are capped at the source before they enter the gate, plugin context, or audit record. The web approval card shows the summary and risk facts first. It puts the parameter preview in a collapsed, independently scrolling review area. Long URLs, code, and other unbroken values wrap. A malformed parameter context leaves the authoritative gate body visible; question and credential bodies are also forwarded unchanged. The API does not silently truncate a gate body.
+
+The engine applies schema defaults and validation before it creates an approval gate. The gate preview and action execution use the same prepared argument object. The gate stores only a bounded preview. It never stores raw argument JSON in the body or context. This prevents a multi-megabyte request from blocking persistence, WebSocket delivery, or client rendering.
+
+A truncated or missing approval preview, or a missing or malformed tool identity, is explicitly an incomplete review, not an authorization surface. Channel projections also become incomplete whenever their tighter field limits omit or truncate any parameter data; approving callbacks are removed from the prompt and rejected server-side. CLI chat, send, and explicit gate resolution show the typed tool and parameter preview, and refuse approving selections when that review is absent or incomplete. Every action carries an authoritative `approves` flag. The web card disables only actions with `approves: true`; it does not infer authorization from labels or styles. The resolve route and channel callback reject approval actions for incomplete review. This prevents direct POST, old clients, and channel buttons from bypassing the restriction. Rejection actions remain available, and the card tells the approver to reject and ask the agent to retry with a smaller request. This prevents a large early field from concealing material later fields such as a recipient or amount. The action controls stay below the bounded review area, so an approver can reach Reject on a phone or desktop without first scrolling through a payload. Question-card footers are independently bounded too, keeping their textarea and submit action reachable under a short visual viewport or mobile keyboard. Native buttons, a labelled region, and a keyboard-focusable payload preserve keyboard and screen-reader review.
+
+The composer uses the same 767-pixel breakpoint as the mobile layout. On that layout, Return inserts a line break. On wider layouts, Enter sends and Shift+Enter inserts a line break. This avoids user-agent checks and keeps hardware keyboards aligned with the visible layout.
 
 ## Team policies (2026-09-11)
 
@@ -223,3 +231,7 @@ Policy edits apply on the next action; no session restart is required.
 
 If a team policy read fails, chat and workflow actions remain blocked until
 a successful check. A prior approval cannot bypass an unread team deny.
+
+### Approval replay identity
+
+The engine stores the canonical qualified action id with the prepared-argument digest. Replay compares both values. An alias or plugin ordering change cannot authorize a different action. Readers treat a scalar, array, null, or malformed tool approval context as incomplete. They do not approve it.

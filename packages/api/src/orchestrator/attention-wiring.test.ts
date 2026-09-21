@@ -255,10 +255,11 @@ describe("wireAttentionRouter", () => {
     if (event.event.type === "decision_gate") {
       event.event.gate.body = 'do it\n\ntool_id=fake.do_thing\nargs={"a":1}';
       event.event.gate.context = {
+        kind: "tool_approval",
         riskLevel: "high",
         service: "fake",
         tool_id: "fake.do_thing",
-        args: { a: 1 },
+        argsPreview: JSON.stringify({ a: 1 }),
         summary: "do it",
       };
     }
@@ -269,7 +270,7 @@ describe("wireAttentionRouter", () => {
     expect(delivered[0]?.gate?.fields).toEqual([
       { label: "Tool", value: "`fake.do_thing`" },
       { label: "Risk", value: "high" },
-      { label: "a", value: "1" },
+      { label: "Parameters", value: "`{\"a\":1}`" },
     ]);
     // The stored notification row gets the digested body too.
     const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));

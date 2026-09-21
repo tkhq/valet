@@ -1341,6 +1341,8 @@ export interface DecisionAction {
   id: string;
   label: string;
   style?: "primary" | "danger";
+  /** True when this action authorizes the gated operation. */
+  approves?: boolean;
 }
 
 /**
@@ -1360,6 +1362,19 @@ export interface DecisionGateProvenance {
   matchedOverrideId?: string;
 }
 
+/** Typed, reviewable facts for a tool approval. Raw gate context stays private. */
+export interface DecisionGateApprovalDetails {
+  /** Missing means the tool identity is malformed and approval is unsafe. */
+  toolId?: string;
+  riskLevel?: string;
+  service?: string;
+  /** A bounded JSON preview. The complete body remains the gate record. */
+  argsPreview?: string;
+  /** True when the full arguments cannot be reviewed in this card. */
+  reviewIncomplete?: true;
+  summary?: string;
+}
+
 export interface DecisionGate {
   id: string;
   sessionId: string;
@@ -1373,6 +1388,8 @@ export interface DecisionGate {
   createdAt: number;
   updatedAt: number;
   provenance?: DecisionGateProvenance;
+  /** Present for approval gates created from a plugin tool request. */
+  approval?: DecisionGateApprovalDetails;
 }
 
 export interface DecisionResolution {

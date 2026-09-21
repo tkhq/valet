@@ -17,6 +17,9 @@ import {
   dispatchCommand,
   NotFoundError,
   parseReasoningLevel,
+  resolutionApproves,
+  isLegacyToolApprovalBody,
+  toolApprovalGateContext,
   ValidationError,
 } from "@valet/engine";
 import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
@@ -1086,6 +1089,11 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   const pending = await engineSession.pendingDecisionGates();
   const gate = pending.find((g) => g.id === gateId);
   if (!gate) return c.json({ error: "gate not pending" }, 404);
+  const approval = gate.type === "approval" ? toolApprovalGateContext(gate.context) : null;
+  const bodyOnlyToolApproval = gate.type === "approval" && isLegacyToolApprovalBody(gate.body);
+  if ((approval && (approval.argsPreview === undefined || approval.reviewIncomplete) || (!approval && bodyOnlyToolApproval)) && resolutionApproves(gate, { actionId: body.actionId, resolvedBy: "", resolvedAt: 0 })) {
+    return c.json({ error: "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request." }, 409);
+  }
 
   await engineSession.resolveDecision(gateId, {
     actionId: body.actionId,

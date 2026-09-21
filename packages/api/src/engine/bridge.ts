@@ -1,3 +1,4 @@
+import { isLegacyToolApprovalBody, toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -20,13 +21,13 @@ import type {
 /**
  * Project an engine DecisionGate to its wire shape. Drops engine-only fields
  * (origin/refs, and `context` as a whole — surfacing the raw bag would
- * commit us to a contract before we know what we want). The ONE typed
- * extraction is `context.provenance` (policy gates, action-policies spec
- * decision 4): the wire carries a validated `DecisionGateProvenance` so gate
- * surfaces can render WHY the gate opened.
+ * commit us to a contract before we know what we want). Typed extraction keeps
+ * the review facts stable: provenance explains why the gate opened and tool
+ * details give the approver the requested action and a bounded parameter preview.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
+  const approval = g.type === "approval" ? gateApprovalDetails(g.context, g.body) : undefined;
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -40,10 +41,29 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     ...(provenance ? { provenance } : {}),
+    ...(approval ? { approval } : {}),
   };
 }
 
 const WIRE_APPROVAL_MODES: ReadonlySet<string> = new Set(["allow", "require_approval", "deny"]);
+/**
+ * Project only a valid tool approval. A malformed `args` value must leave the
+ * authoritative gate body visible instead of claiming that its arguments are
+ * empty. The JSON preview is capped before it reaches React, so a large tool
+ * call cannot make the approval card serialize the same payload again.
+ */
+function gateApprovalDetails(context: Record<string, unknown> | undefined, body?: string): WireDecisionGate["approval"] | undefined {
+  const approval = toolApprovalGateContext(context);
+  if (!approval) return isLegacyToolApprovalBody(body) ? { reviewIncomplete: true } : undefined;
+  return {
+    ...(approval.toolId !== undefined ? { toolId: approval.toolId } : {}),
+    riskLevel: approval.riskLevel,
+    service: approval.service,
+    summary: approval.summary,
+    ...(approval.argsPreview !== undefined ? { argsPreview: approval.argsPreview.slice(0, 16_000) } : {}),
+    ...(approval.toolId === undefined || approval.argsPreview === undefined || approval.argsPreview.length > 16_000 || approval.reviewIncomplete ? { reviewIncomplete: true } : {}),
+  };
+}
 
 /** Narrow the engine gate's untyped `context.provenance` into the wire's
  * `DecisionGateProvenance`. Fail-soft: any shape surprise → undefined (the

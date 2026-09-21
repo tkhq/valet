@@ -10,6 +10,7 @@ import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import type { CliContext } from "../types.js";
+import { actionApproves, approvalPreviewLines, approvalReviewIncomplete } from "./approval-review.js";
 import type {
   DecisionGate,
   EnsureOrchestratorResponse,
@@ -77,9 +78,29 @@ async function gatesResolve(client: GatesClient, flags: ParsedFlags): Promise<nu
   if (value !== undefined) body.value = value;
 
   const id = await targetSession(client, flags);
+  const gate = (await client.listDecisions(id)).gates.find((candidate) => candidate.id === gateId);
+  if (!gate) {
+    printErr("valet gates resolve: gate not found");
+    return ExitCode.Usage;
+  }
+  if (!flags.json) {
+    for (const line of approvalPreviewLines(gate)) printLine(line);
+  }
+  const action = gate.actions.find((candidate) => candidate.id === actionId);
+  if (action && approvalReviewIncomplete(gate) && actionApproves(action)) {
+    printErr("valet gates resolve: parameter review is incomplete; reject this request and ask the agent to retry");
+    return ExitCode.Usage;
+  }
   await client.resolveDecision(id, gateId, body);
 
-  if (flags.json) printJson({ ok: true, gateId });
+  if (flags.json) {
+    printJson({
+      ok: true,
+      gateId,
+      approval: gate.approval,
+      reviewIncomplete: approvalReviewIncomplete(gate),
+    });
+  }
   else printLine(`resolved gate ${gateId}`);
   return ExitCode.OK;
 }

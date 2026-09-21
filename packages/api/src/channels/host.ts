@@ -16,6 +16,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
+  resolutionApproves,
   SANDBOX_READY_TIMEOUT_MS,
   type ActionPlugin,
   type ChannelTransport,
@@ -60,7 +61,7 @@ import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
-import { digestGate } from "./gate-digest.js";
+import { digestGate, safeChannelActions } from "./gate-digest.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
@@ -820,7 +821,7 @@ export class ChannelHost {
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,
-      { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: gate.actions },
+      { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: safeChannelActions(gate, digest.reviewIncomplete === true) },
       sessionId,
     );
   }
@@ -1383,6 +1384,11 @@ export class ChannelHost {
         gateCallback.callbackId,
         "This approval was already resolved. Open the session in Valet to see the outcome.",
       );
+      return;
+    }
+    const channelReviewIncomplete = digestGate(gate).reviewIncomplete === true;
+    if (channelReviewIncomplete && resolutionApproves(gate, { actionId: gateCallback.actionId, resolvedBy: "", resolvedAt: 0 })) {
+      await transport?.answerCallback?.(gateCallback.callbackId, "The complete parameters are unavailable. Reject this request and ask the agent to retry with a smaller request.");
       return;
     }
     try {

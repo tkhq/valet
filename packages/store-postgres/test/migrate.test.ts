@@ -67,6 +67,23 @@ describe("applyEngineMigrations", () => {
     expect(result.rows).toHaveLength(1);
   });
 
+  it("repairs an existing tracked schema missing prepared approval columns", async () => {
+    const existing = new PGlite();
+    const existingDb = pgDbFromPglite(existing);
+    try {
+      await applyEngineMigrations(existingDb);
+      await existingDb.query("ALTER TABLE engine_suspended_turns DROP COLUMN prepared_args_digest");
+      await existingDb.query("ALTER TABLE engine_suspended_turns DROP COLUMN prepared_tool_id");
+      await applyEngineMigrations(existingDb);
+      const columns = await existingDb.query(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'engine_suspended_turns' AND column_name IN ('prepared_args_digest', 'prepared_tool_id')",
+      );
+      expect(columns.rows.map((row) => row.column_name).sort()).toEqual(["prepared_args_digest", "prepared_tool_id"]);
+    } finally {
+      await existingDb.close();
+    }
+  });
+
   it("is idempotent on re-run", async () => {
     await expect(applyEngineMigrations(db)).resolves.toBeUndefined();
     const result = await db.query(

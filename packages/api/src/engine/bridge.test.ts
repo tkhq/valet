@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BusEvent, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
-import { busEventToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
+import { truncateApprovalText } from "@valet/engine";
+import { busEventToWire, engineGateToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
 
 function ev(event: BusEvent["event"], threadId = "t1"): BusEvent {
   return { sessionId: "s1", threadId, userId: "u1", event, timestamp: 100 };
@@ -73,6 +74,67 @@ describe("engineToWireParts", () => {
 
   it("returns [] for missing parts", () => {
     expect(engineToWireParts(undefined)).toEqual([]);
+  });
+});
+
+describe("engineGateToWire", () => {
+  it("truncates approval text at UTF-8 and code-point boundaries", () => {
+    expect(truncateApprovalText("猫😀a", 8)).toEqual({ text: "猫😀a", truncated: false });
+    expect(truncateApprovalText("猫😀", 10)).toEqual({ text: "猫😀", truncated: false });
+  });
+
+  it("projects typed tool approval details without exposing raw context", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: {
+        kind: "tool_approval", tool_id: "github.create_issue", service: "github", riskLevel: "high",
+        summary: "Create an issue in the public repository.", argsPreview: "{\"title\":\"Fix the bug\"}", private: "omit",
+      },
+    });
+    expect(wire.approval).toEqual({
+      toolId: "github.create_issue", service: "github", riskLevel: "high",
+      summary: "Create an issue in the public repository.", argsPreview: "{\"title\":\"Fix the bug\"}",
+    });
+    expect(Object.keys(wire)).not.toContain("context");
+  });
+
+  it("projects malformed tool identity as an incomplete unsafe review", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: { kind: "tool_approval", argsPreview: "{\"amount\":10}" },
+    });
+    expect(wire.approval).toEqual({ argsPreview: "{\"amount\":10}", reviewIncomplete: true });
+  });
+
+  it("keeps the body when tool context has malformed arguments", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve issue?", body: "tool_id=github.create_issue\nargs=[bad]", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: { tool_id: "github.create_issue", args: ["bad"] },
+    });
+    expect(wire.approval?.reviewIncomplete).toBe(true);
+    expect(wire.body).toBe("tool_id=github.create_issue\nargs=[bad]");
+  });
+
+  it.each(["question", "credential_request"] as const)("preserves a long %s body", (type) => {
+    const body = "猫😀".repeat(20_000);
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type, title: "Review", body, actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+    });
+    expect(wire.body).toBe(body);
+  });
+
+  it("caps the live parameter preview and marks it truncated", () => {
+    const wire = engineGateToWire({
+      id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "r", ordinal: 0,
+      type: "approval", title: "Approve issue?", actions: [], status: "pending", createdAt: 1, updatedAt: 1,
+      context: { kind: "tool_approval", tool_id: "github.create_issue", argsPreview: JSON.stringify({ body: "x".repeat(16_000) }) },
+    });
+    expect(new TextEncoder().encode(wire.approval?.argsPreview).length).toBeLessThanOrEqual(16_000);
+    expect(wire.approval?.reviewIncomplete).toBe(true);
   });
 });
 

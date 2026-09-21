@@ -38,9 +38,9 @@ function gate(overrides: Partial<DecisionGate> = {}): DecisionGate {
     type: "approval",
     title: "Send email to external address?",
     actions: [
-      { id: "approve_session", label: "Approve for session" },
-      { id: "approve_once", label: "Approve once" },
-      { id: "always_allow", label: "Always allow" },
+      { id: "approve_session", label: "Approve for session", approves: true },
+      { id: "approve_once", label: "Approve once", approves: true },
+      { id: "always_allow", label: "Always allow", approves: true },
       { id: "deny", label: "Deny", style: "danger" },
     ],
     status: "pending",
@@ -70,6 +70,153 @@ describe("DecisionGateCard — action rendering", () => {
     expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Always allow" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+});
+
+describe("DecisionGateCard — reviewable tool requests", () => {
+  it("bounds long parameters and keeps decisions outside the payload", () => {
+    const longUrl = `https://example.test/${"path".repeat(300)}`;
+    renderCard(gate({
+      approval: {
+        toolId: "github.create_issue",
+        service: "github",
+        riskLevel: "high",
+        summary: "Create an issue in the external repository.",
+        argsPreview: JSON.stringify({ callbackUrl: longUrl, source: "x".repeat(2000) }),
+        reviewIncomplete: true,
+      },
+    }));
+
+    expect(screen.getByText("Create an issue in the external repository.")).toBeTruthy();
+    expect(screen.getByText("github.create_issue")).toBeTruthy();
+    expect(screen.getByText("high")).toBeTruthy();
+    const details = screen.getByTestId("approval-details");
+    expect(details.querySelector("pre")?.className).toContain("max-h-52");
+    expect(details.querySelector("pre")?.className).toContain("break-all");
+    expect(screen.getByText(/complete parameters are not available/i)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+
+  it("explains incomplete reviews and describes the disabled approval action", () => {
+    renderCard(gate({
+      approval: { argsPreview: "{\"amount\":10}", reviewIncomplete: true },
+      actions: [
+        { id: "approve", label: "Approve", style: "primary", approves: true },
+        { id: "deny", label: "Reject", style: "danger", approves: false },
+      ],
+    }));
+
+    expect(screen.getByText("Approval is unavailable because the complete parameters could not be reviewed.")).toBeTruthy();
+    expect(screen.getByText(/tool identity is unavailable/i)).toBeTruthy();
+    const approve = screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    expect(approve.parentElement?.getAttribute("tabindex")).toBe("0");
+    expect(approve.parentElement?.getAttribute("aria-describedby")).toBe("approval-review-unavailable");
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("blocks legacy built-in approve but keeps a legacy rejection action enabled", () => {
+    renderCard(gate({
+      approval: { toolId: "payments.send", argsPreview: "", reviewIncomplete: true },
+      actions: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
+    }));
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows the authoritative body for incomplete typed metadata", () => {
+    renderCard(gate({
+      body: "tool_id=payments.send\nargs=[legacy]",
+      approval: { toolId: "payments.send", argsPreview: "", reviewIncomplete: true },
+    }));
+    expect(screen.getByText(/tool_id=payments\.send/).textContent).toContain("args=[legacy]");
+  });
+
+  it("blocks approval when a legacy preview is blank", () => {
+    renderCard(gate({
+      approval: { toolId: "payments.send", argsPreview: "" },
+      actions: [
+        { id: "approve", label: "Approve", approves: true },
+        { id: "deny", label: "Reject" },
+      ],
+    }));
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("blocks approval when a preview can hide material later fields", () => {
+    renderCard(gate({
+      approval: {
+        toolId: "payments.send",
+        argsPreview: `{"note":"${"x".repeat(16_000)}","recipient":"outside@example.test","amount":1000}`,
+        reviewIncomplete: true,
+      },
+      actions: [
+        { id: "approve", label: "Approve", style: "primary", approves: true },
+        { id: "deny", label: "Reject", style: "danger", approves: false },
+      ],
+    }));
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/reject this request and ask the agent to retry/i)).toBeTruthy();
+  });
+
+  it("uses the authoritative approves flag instead of action labels or styles", () => {
+    renderCard(gate({
+      approval: { toolId: "tool", argsPreview: "{}", reviewIncomplete: true },
+      actions: [
+        { id: "dangerous_grant", label: "Reject", style: "danger", approves: true },
+        { id: "safe_stop", label: "Approve", style: "primary", approves: false },
+      ],
+    }));
+    expect((screen.getByRole("button", { name: "Reject" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("caps an oversized preview from an older server before it mounts", () => {
+    renderCard(gate({ approval: { toolId: "github.create_issue", argsPreview: "x".repeat(20_000) } }));
+    expect(new TextEncoder().encode(screen.getByLabelText("Approval request parameters").textContent).length).toBeLessThanOrEqual(16_000);
+    expect(screen.getByText(/complete parameters are not available/i)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows the authoritative body when typed approval details are unavailable", () => {
+    renderCard(gate({ body: "tool_id=github.create_issue\nargs=[malformed]" }));
+    expect(screen.getByText(/tool_id=github\.create_issue/).textContent).toContain("args=[malformed]");
+    expect(screen.queryByTestId("approval-details")).toBeNull();
+  });
+});
+
+describe("DecisionGateCard — bounded card layout", () => {
+  it("bounds the card, title, and action footer on a small viewport", () => {
+    renderCard(gate({
+      title: "x".repeat(500),
+      actions: [{ id: "approve", label: `Approve ${"x".repeat(500)}` }],
+    }));
+    expect(screen.getByLabelText("Cancel and dismiss approval").closest("section")?.className).toContain("max-h-[calc(100dvh-1.5rem)]");
+    expect(screen.getByRole("heading").className).toContain("max-h-12");
+    expect(screen.getByRole("button", { name: /Approve/ }).querySelector("span")?.className).toContain("break-all");
+    expect(screen.getByRole("button", { name: /Approve/ }).parentElement?.className).toContain("max-h-[35dvh]");
+  });
+
+  it("bounds the question footer when the visual viewport is short", () => {
+    renderCard(gate({ type: "question" }));
+    const answer = screen.getByPlaceholderText("Your answer…");
+    expect(answer.parentElement?.className).toContain("max-h-[35dvh]");
+    expect(answer.parentElement?.className).toContain("overflow-y-auto");
+    expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
+  });
+});
+
+describe("DecisionGateCard — dismissal labels", () => {
+  it.each([
+    ["approval", "Cancel and dismiss approval"],
+    ["question", "Cancel and dismiss question"],
+    ["credential_request", "Cancel and dismiss credential request"],
+  ] as const)("uses a specific close label for %s", (type, label) => {
+    renderCard(gate({ type }));
+    expect(screen.getByLabelText(label)).toBeTruthy();
   });
 });
 
