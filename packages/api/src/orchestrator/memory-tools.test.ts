@@ -19,7 +19,7 @@ import type {
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eq } from "drizzle-orm";
-import { teamMembers } from "../schema/index.js";
+import { agentSessions, teamMembers } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -65,6 +65,13 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 }
 
 let api: TestApi;
+
+async function seedInternalSession(): Promise<void> {
+  await api.providers.db.insert(agentSessions).values({
+    id: "s1", userId: "local-user", orgId: "local-org", workspace: "fixture",
+    ownerType: "user", ownerId: "local-user", createdAt: 1, updatedAt: 1,
+  });
+}
 
 afterEach(async () => {
   await api?.cleanup();
@@ -332,6 +339,7 @@ describe("mem_* tools: real HTTP round trip", () => {
 
   it("mem_share round-trips: share returns a URL + audience line, revoke confirms", async () => {
     api = await bootTestApi();
+    await seedInternalSession();
     const ctx = makeCtx({
       userId: "local-user",
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
@@ -356,6 +364,7 @@ describe("mem_* tools: real HTTP round trip", () => {
 
   it("artifact_publish round-trips: publish returns URL + version + audience, republish bumps, revoke confirms", async () => {
     api = await bootTestApi();
+    await seedInternalSession();
     const ctx = makeCtx({
       userId: "local-user",
       config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },

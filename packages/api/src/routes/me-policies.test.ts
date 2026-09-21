@@ -432,7 +432,7 @@ describe("PUT /api/me/policy-overrides — matcher-carrying org policy bounds (C
     });
     expect(res.status).toBe(400);
     expect(await api.providers.db.select().from(authorizationDecisions)).toHaveLength(decisionCount + 2);
-    expect(await api.providers.db.select().from(authorizationExecutionAttempts)).toHaveLength(attemptCount + 1);
+    expect(await api.providers.db.select().from(authorizationExecutionAttempts)).toHaveLength(attemptCount);
   });
 
   it("a matcher-scoped workflow-only org require_approval also blocks the allow override", async () => {

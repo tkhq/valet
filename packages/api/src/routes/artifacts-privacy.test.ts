@@ -60,13 +60,18 @@ describe("team artifact privacy", () => {
   });
 
   it("keeps internal team tool publications team-owned without borrowing actor authority", async () => {
-    const { request } = await setup();
+    const { db, request } = await setup();
     if (!api) throw new Error("Test API is unavailable");
+    await db.insert(agentSessions).values({
+      id: "internal-team-session", userId: "test-admin", orgId: "local-org", workspace: "fixture",
+      ownerType: "team", ownerId: "private-team", createdAt: 1, updatedAt: 1,
+    });
     const response = await fetch(`${api.baseUrl}/api/artifacts/share`, {
       method: "POST",
       headers: {
         "content-type": "application/json", "x-valet-internal": internalToken(),
         "x-valet-owner": "team:private-team", "x-valet-actor": "test-admin",
+        "x-valet-session-id": "internal-team-session",
       },
       body: JSON.stringify({ key: "internal-tool.md", content: "Internal team publication" }),
     });

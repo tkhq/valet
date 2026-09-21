@@ -563,7 +563,7 @@ teamsRouter.delete("/:id", async (c) => {
   const id = c.req.param("id");
 
   const team = await loadTeamInOrg(db, id, user.orgId);
-  if (!team || !(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+  if (!team) return c.json({ error: "team not found" }, 404);
   await authorizeDirectResource(c.var.providers.resourceAuthorizationPort, { organizationId: user.orgId, actorUserId: user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) }, "team", "delete", { id: team.id, ownerType: "org", ownerId: team.orgId, version: team.createdAt });
   let sessionIds: string[];
   try {
