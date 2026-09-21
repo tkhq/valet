@@ -102,6 +102,7 @@
             "pages": [
               "product/admin-setup",
               "product/teams",
+              "product/usage-reporting",
               "product/access",
               "product/billing"
             ]

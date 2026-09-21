@@ -1,9 +1,10 @@
 import * as React from 'react';
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
 import { PageContainer, PageHeader } from '@/components/layout/page-container';
 import { PeriodSelector } from '@/components/dashboard/period-selector';
 import { useAuthStore } from '@/stores/auth';
-import { useUsageStats } from '@/api/usage';
+import { downloadUsageCsv, useUsageStats, type UsageSelection } from '@/api/usage';
+import { defaultUsageSelection, UsageReportControls } from '@/components/usage/report-controls';
 import { UsageHeroMetrics } from '@/components/usage/hero-metrics';
 import { CostChart } from '@/components/usage/cost-chart';
 import { ModelBreakdownTable } from '@/components/usage/model-breakdown-table';
@@ -20,20 +21,13 @@ export const Route = createFileRoute('/settings/usage')({
 
 function UsagePage() {
   const user = useAuthStore((s) => s.user);
-  const navigate = useNavigate();
-  const [period, setPeriod] = React.useState(720); // default 30 days in hours
+  const [period, setPeriod] = React.useState(720); // non-billing analytics keep rolling windows
+  const [usageSelection, setUsageSelection] = React.useState<UsageSelection>(defaultUsageSelection);
   const [tab, setTab] = React.useState<'billing' | 'value' | 'overview' | 'performance' | 'events'>('billing');
 
-  // Redirect non-admins
-  React.useEffect(() => {
-    if (user && user.role !== 'admin') {
-      navigate({ to: '/settings', search: { tab: 'general' } });
-    }
-  }, [user, navigate]);
-
-  if (!user || user.role !== 'admin') {
-    return null;
-  }
+  if (!user) return null;
+  const isAdmin = user.role === 'admin';
+  const reportSelection = isAdmin ? usageSelection : { ...usageSelection, scope: 'personal' as const };
 
   return (
     <PageContainer>
@@ -41,12 +35,12 @@ function UsagePage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <PageHeader
             title="Analytics"
-            description="Usage, performance, and event analytics across your organization"
+            description={isAdmin ? 'Usage, performance, and event analytics across your organization' : 'Your model and sandbox usage'}
           />
-          <PeriodSelector value={period} onChange={setPeriod} includeYear />
+          {isAdmin && tab !== 'billing' && <PeriodSelector value={period} onChange={setPeriod} includeYear />}
         </div>
 
-        <div className="flex gap-1 border-b border-neutral-200 dark:border-neutral-800">
+        {isAdmin && <div className="flex gap-1 border-b border-neutral-200 dark:border-neutral-800">
           {(['billing', 'value', 'overview', 'performance', 'events'] as const).map((t) => (
             <button
               key={t}
@@ -60,9 +54,9 @@ function UsagePage() {
               {t}
             </button>
           ))}
-        </div>
+        </div>}
 
-        {tab === 'billing' && <BillingContent period={period} />}
+        {tab === 'billing' && <BillingContent selection={reportSelection} onSelectionChange={setUsageSelection} isAdmin={isAdmin} />}
         {tab === 'value' && <ValueTab period={period} />}
         {tab === 'overview' && <OverviewTab period={period} />}
         {tab === 'performance' && <PerformanceTab period={period} />}
@@ -72,23 +66,37 @@ function UsagePage() {
   );
 }
 
-function BillingContent({ period }: { period: number }) {
-  const { data, isLoading } = useUsageStats(period);
+function BillingContent({ selection, onSelectionChange, isAdmin }: { selection: UsageSelection; onSelectionChange: (value: UsageSelection) => void; isAdmin: boolean }) {
+  const { data, isLoading, error } = useUsageStats(selection);
+  const [exporting, setExporting] = React.useState(false);
+  const [exportError, setExportError] = React.useState<string | null>(null);
 
-  if (isLoading) {
-    return <UsageSkeleton />;
-  }
-
-  if (!data) {
-    return (
-      <div className="flex h-64 items-center justify-center text-sm text-neutral-400">
-        No usage data available
-      </div>
-    );
-  }
+  const exportCsv = async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await downloadUsageCsv(selection, data?.report.end);
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : 'Usage export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
+      <UsageReportControls value={selection} onChange={onSelectionChange} onExport={exportCsv} exporting={exporting || !data} scopes={isAdmin ? undefined : ['personal']} />
+      {(error || exportError) && (
+        <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          {exportError ?? (error instanceof Error ? error.message : 'Invalid report selection')}
+        </div>
+      )}
+      {isLoading && <UsageSkeleton />}
+      {!isLoading && !data && !error && (
+        <div className="flex h-64 items-center justify-center text-sm text-neutral-400">No usage data available</div>
+      )}
+      {data && <>
+        <p className="text-xs text-neutral-400">{data.report.label} · {data.report.start} to {data.report.end}</p>
       <UsageHeroMetrics
         totalCost={data.hero.totalCost}
         totalInputTokens={data.hero.totalInputTokens}
@@ -104,6 +112,7 @@ function BillingContent({ period }: { period: number }) {
         <ModelBreakdownTable data={data.byModel} />
         <UserBreakdownTable data={data.byUser} byUserModel={data.byUserModel} />
       </div>
+      </>}
     </div>
   );
 }

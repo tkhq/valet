@@ -5,36 +5,39 @@ import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getU
 import { getModelPricing, computeCost } from '../services/model-catalog.js';
 import { computeSandboxCost, DEFAULT_CPU_CORES, DEFAULT_MEMORY_GIB } from '../services/sandbox-pricing.js';
 import { getDb } from '../lib/drizzle.js';
+import { parseUsageScope, resolveUsagePeriod, UsagePeriodError, type ResolvedUsagePeriod, type UsageScope } from '../services/usage-period.js';
+import { usageReportToCsv } from '../services/usage-csv.js';
 
 export const usageRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
-// GET /api/usage/stats?period=24
-usageRouter.get('/stats', async (c) => {
+function resolveRequest(c: any): { period: ResolvedUsagePeriod; scope: UsageScope; userFilter?: string } {
   const user = c.get('user');
-  if (!user || user.role !== 'admin') {
-    return c.json({ error: 'Admin access required', code: 'FORBIDDEN' }, 403);
+  if (!user) throw new UsagePeriodError('Authentication required');
+  const url = new URL(c.req.url);
+  const scope = parseUsageScope(url.searchParams.get('scope') ?? undefined);
+  if (scope !== 'personal' && user.role !== 'admin') {
+    throw new UsagePeriodError('Admin access required for team and org scope');
   }
+  return { period: resolveUsagePeriod(url.searchParams), scope, userFilter: scope === 'personal' ? user.id : undefined };
+}
 
-  const rawPeriod = parseInt(c.req.query('period') || '720', 10);
-  const periodHours = Number.isFinite(rawPeriod) ? Math.min(Math.max(rawPeriod, 1), 8760) : 720;
-  const periodStart = new Date(Date.now() - periodHours * 60 * 60 * 1000).toISOString();
-
+async function buildUsageResponse(c: any, period: ResolvedUsagePeriod, scope: UsageScope, userFilter?: string): Promise<UsageStatsResponse> {
   const db = c.env.DB;
   const appDb = getDb(db);
 
   // Fetch all data + pricing in parallel (including sandbox stats)
   const [heroStats, byDayRaw, byUserRaw, byModelRaw, byUserModelRaw, pricingMap, sandboxHero, sandboxByDay, sandboxByUser, byPurposeModelRaw, byWorkflowRaw] = await Promise.all([
-    getUsageHeroStats(db, periodStart),
-    getUsageByDay(db, periodStart),
-    getUsageByUser(db, periodStart),
-    getUsageByModel(db, periodStart),
-    getUsageByUserModel(db, periodStart),
+    getUsageHeroStats(db, period.start, period.end, userFilter),
+    getUsageByDay(db, period.start, period.end, userFilter),
+    getUsageByUser(db, period.start, period.end, userFilter),
+    getUsageByModel(db, period.start, period.end, userFilter),
+    getUsageByUserModel(db, period.start, period.end, userFilter),
     getModelPricing(appDb, c.env),
-    getSandboxHeroStats(db, periodStart),
-    getSandboxByDay(db, periodStart),
-    getSandboxByUser(db, periodStart),
-    getUsageByPurposeModel(db, periodStart),
-    getUsageByWorkflowModel(db, periodStart),
+    getSandboxHeroStats(db, period.start, period.end, userFilter),
+    getSandboxByDay(db, period.start, period.end, userFilter),
+    getSandboxByUser(db, period.start, period.end, userFilter),
+    getUsageByPurposeModel(db, period.start, period.end, userFilter),
+    getUsageByWorkflowModel(db, period.start, period.end, userFilter),
   ]);
 
   // Compute hero LLM total cost
@@ -202,8 +205,41 @@ usageRouter.get('/stats', async (c) => {
     byUserModel,
     byPurpose,
     byWorkflow,
-    period: periodHours,
+    period: period.selection.kind === 'lookback' ? period.selection.hours : 0,
+    report: {
+      scope,
+      periodType: period.selection.kind,
+      start: period.start,
+      end: period.end,
+      label: period.label,
+      timezone: period.timezone,
+      boundary: 'start-inclusive/end-exclusive' as const,
+    },
   };
 
-  return c.json(response);
-});
+  return response;
+}
+
+async function withUsageReport(c: any, format: 'json' | 'csv') {
+  try {
+    const { period, scope, userFilter } = resolveRequest(c);
+    const response = await buildUsageResponse(c, period, scope, userFilter);
+    if (format === 'csv') {
+      return c.body(usageReportToCsv(response), 200, {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="valet-usage-${scope}-${period.label}.csv"`,
+      });
+    }
+    return c.json(response);
+  } catch (error) {
+    if (error instanceof UsagePeriodError) {
+      const status = error.message === 'Authentication required' ? 401 : error.message.startsWith('Admin access') ? 403 : 400;
+      return c.json({ error: error.message, code: status === 403 ? 'FORBIDDEN' : 'INVALID_PERIOD' }, status);
+    }
+    throw error;
+  }
+}
+
+// GET /api/usage/stats. All report windows are exact [start, end) UTC intervals.
+usageRouter.get('/stats', (c) => withUsageReport(c, 'json'));
+usageRouter.get('/export.csv', (c) => withUsageReport(c, 'csv'));

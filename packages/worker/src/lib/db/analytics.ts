@@ -153,6 +153,16 @@ export async function batchInsertAnalyticsEvents(
   await db.batch(stmts);
 }
 
+// Usage reports use exact [start, end) windows. The optional user filter powers
+// personal scope without changing the aggregation or exposing another user.
+function usageWindowSql(alias: string, periodEnd?: string, userId?: string): string {
+  return `${periodEnd ? `AND ${alias}.created_at < ?` : ''} ${userId ? `AND ${alias}.user_id = ?` : ''}`;
+}
+
+function usageWindowBindings(periodStart: string, periodEnd?: string, userId?: string): string[] {
+  return [periodStart, ...(periodEnd ? [periodEnd] : []), ...(userId ? [userId] : [])];
+}
+
 // ─── Billing / Usage Aggregate Queries ──────────────────────────────────────
 
 export interface UsageHeroStats {
@@ -165,6 +175,8 @@ export interface UsageHeroStats {
 export async function getUsageHeroStats(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageHeroStats> {
   const row = await db
     .prepare(`
@@ -176,8 +188,9 @@ export async function getUsageHeroStats(
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .first<{
       total_input_tokens: number;
       total_output_tokens: number;
@@ -201,6 +214,8 @@ export interface UsageByDayRow extends LlmTokenSums {
 export async function getUsageByDay(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByDayRow[]> {
   const result = await db
     .prepare(`
@@ -210,10 +225,11 @@ export async function getUsageByDay(
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
       GROUP BY date(ae.created_at), ae.model
       ORDER BY date ASC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -235,6 +251,8 @@ export interface UsageByUserRow {
 export async function getUsageByUser(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByUserRow[]> {
   const result = await db
     .prepare(`
@@ -249,11 +267,12 @@ export async function getUsageByUser(
       LEFT JOIN users u ON u.id = ae.user_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
         AND ae.user_id IS NOT NULL
       GROUP BY ae.user_id
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -275,6 +294,8 @@ export interface UsageByUserModelRow extends LlmTokenSums {
 export async function getUsageByUserModel(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByUserModelRow[]> {
   const result = await db
     .prepare(`
@@ -285,11 +306,12 @@ export async function getUsageByUserModel(
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
         AND ae.user_id IS NOT NULL
       GROUP BY ae.user_id, ae.model
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -335,6 +357,8 @@ const AE_ORIGIN_EXPR = `
 export async function getUsageByPurposeModel(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByPurposeModelRow[]> {
   const result = await db
     .prepare(`
@@ -346,10 +370,11 @@ export async function getUsageByPurposeModel(
       LEFT JOIN sessions s ON s.id = ae.session_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
       GROUP BY ${AE_ORIGIN_EXPR}, ae.model
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -384,6 +409,8 @@ export interface UsageByWorkflowModelRow extends LlmTokenSums {
 export async function getUsageByWorkflowModel(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByWorkflowModelRow[]> {
   const result = await db
     .prepare(`
@@ -400,13 +427,14 @@ export async function getUsageByWorkflowModel(
       LEFT JOIN triggers t ON t.id = we.trigger_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
         -- Ephemeral-session usage reports under its own origin, so exclude it
         -- here to keep this drill-down consistent with the by-origin table.
         AND json_extract(ae.properties, '$.usage_kind') IS NULL
       GROUP BY we.workflow_id, w.name, w.slug, t.type, ae.model
       ORDER BY (SUM(${AE_BILLABLE_INPUT_EXPR}) + SUM(${AE_BILLABLE_OUTPUT_EXPR})) DESC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -430,6 +458,7 @@ export async function getUsageByModel(
   // Optional exclusive upper bound so windowed consumers (Value tab deltas)
   // can query [start, end); omitted = "since periodStart" (usage stats).
   periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByModelRow[]> {
   const result = await db
     .prepare(`
@@ -440,10 +469,11 @@ export async function getUsageByModel(
       WHERE event_type = 'llm_call'
         AND created_at >= ?
         ${periodEnd ? 'AND created_at < ?' : ''}
+        ${userId ? 'AND user_id = ?' : ''}
       GROUP BY model
       ORDER BY (SUM(${SQL_BILLABLE_INPUT_EXPR}) + SUM(${SQL_BILLABLE_OUTPUT_EXPR})) DESC
     `)
-    .bind(...(periodEnd ? [periodStart, periodEnd] : [periodStart]))
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -462,14 +492,17 @@ export interface SandboxHeroStats {
 export async function getSandboxHeroStats(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<SandboxHeroStats> {
   const row = await db
     .prepare(`
       SELECT COALESCE(SUM(active_seconds), 0) as total_active_seconds
       FROM sessions
       WHERE created_at >= ?
+        ${usageWindowSql('sessions', periodEnd, userId)}
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .first<{ total_active_seconds: number }>();
 
   return {
@@ -485,6 +518,8 @@ export interface SandboxByDayRow {
 export async function getSandboxByDay(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<SandboxByDayRow[]> {
   const result = await db
     .prepare(`
@@ -493,10 +528,11 @@ export async function getSandboxByDay(
         SUM(active_seconds) as active_seconds
       FROM sessions
       WHERE created_at >= ?
+        ${usageWindowSql('sessions', periodEnd, userId)}
       GROUP BY date(created_at)
       ORDER BY date ASC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -515,6 +551,8 @@ export interface SandboxByUserRow {
 export async function getSandboxByUser(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<SandboxByUserRow[]> {
   const result = await db
     .prepare(`
@@ -526,10 +564,11 @@ export async function getSandboxByUser(
       FROM sessions s
       LEFT JOIN users u ON u.id = s.user_id
       WHERE s.created_at >= ?
+        ${usageWindowSql('s', periodEnd, userId)}
         AND s.user_id IS NOT NULL
       GROUP BY s.user_id
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({

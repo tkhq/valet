@@ -1347,7 +1347,17 @@ export interface UsageStatsResponse {
     cost: number | null;
     callCount: number;
   }>;
+  /** Legacy rolling-window hours; 0 for calendar-month and custom reports. */
   period: number;
+  report: {
+    scope: 'personal' | 'team' | 'org';
+    periodType: 'lookback' | 'month' | 'range';
+    start: string;
+    end: string;
+    label: string;
+    timezone: 'UTC';
+    boundary: 'start-inclusive/end-exclusive';
+  };
 }
 
 // ─── Analytics Performance Types ─────────────────────────────────────────────
