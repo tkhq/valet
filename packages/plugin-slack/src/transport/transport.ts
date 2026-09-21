@@ -837,6 +837,10 @@ export class SlackTransport implements ChannelTransport {
     }
   }
 
+  sendFailureIsCertain(error: unknown): boolean {
+    return error instanceof SlackApiError && error.providerRejected;
+  }
+
   async send(
     conversationKey: string,
     message: OutboundChannelMessage,

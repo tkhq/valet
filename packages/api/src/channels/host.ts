@@ -660,8 +660,26 @@ export class ChannelHost {
     );
   }
 
+  private abortDeliverySends(sessionId: string, queueItemId: string): void {
+    for (const dedupeKey of [
+      `${sessionId}:first-reply:${queueItemId}`,
+      `${sessionId}:final-reply:${queueItemId}`,
+    ]) {
+      const send = this.firstReplySends.get(dedupeKey) ?? this.finalDeliverySends.get(dedupeKey);
+      if (send) {
+        this.uncertainDeliveries.add(dedupeKey);
+        send.controller.abort();
+      }
+      this.clearFirstReplyRetry(dedupeKey);
+      this.clearFinalDeliveryRetry(dedupeKey);
+    }
+  }
+
   private enqueueOutboundEvent(event: DeliveredBusEvent, generation: number): void {
     const e = event.event;
+    if (e.type === "message_end" && e.reason === "abort" && event.queueItemId !== undefined) {
+      this.abortDeliverySends(event.sessionId, event.queueItemId);
+    }
     const threadId = "threadId" in e ? e.threadId : undefined;
     if (threadId === undefined) {
       void this.handleOutboundEvent(event, generation);
@@ -838,6 +856,7 @@ export class ChannelHost {
       await send;
     } catch (err) {
       if (this.firstReplySends.get(dedupeKey) === inFlightSend) this.firstReplySends.delete(dedupeKey);
+      if (this.sendFailureIsUncertain(transport, err)) this.uncertainDeliveries.add(dedupeKey);
       throw err;
     }
     if (this.firstReplySends.get(dedupeKey) !== inFlightSend) return;
@@ -882,6 +901,10 @@ export class ChannelHost {
     if (timer) clearTimeout(timer);
     this.firstReplyRetryTimers.delete(dedupeKey);
     this.firstReplyRetryAttempts.delete(dedupeKey);
+  }
+
+  private sendFailureIsUncertain(transport: ChannelTransport, error: unknown): boolean {
+    return transport.sendFailureIsCertain?.(error) !== true;
   }
 
   private outboundIsActive(generation: number): boolean {
@@ -1049,7 +1072,9 @@ export class ChannelHost {
       await send;
     } catch (err) {
       if (this.finalDeliverySends.get(dedupeKey) === inFlightSend) this.finalDeliverySends.delete(dedupeKey);
-      if (!controller.signal.aborted) {
+      if (this.sendFailureIsUncertain(transport, err)) {
+        this.uncertainDeliveries.add(dedupeKey);
+      } else if (!controller.signal.aborted) {
         this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
       }
       throw err;

@@ -15,7 +15,7 @@ import type {
   TransportContext,
 } from "@valet/engine";
 import { credentialSecret } from "@valet/engine";
-import { TelegramApi } from "./api.js";
+import { TelegramApi, TelegramApiError } from "./api.js";
 import { escapeTelegramHtml, markdownToTelegramHtml } from "./format.js";
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // Bot API getFile limit
@@ -178,6 +178,10 @@ export class TelegramTransport implements ChannelTransport {
     }
     if (text === undefined && media === undefined) return null;
     return { ...base, kind: "message", text, media };
+  }
+
+  sendFailureIsCertain(error: unknown): boolean {
+    return error instanceof TelegramApiError;
   }
 
   async send(conversationKey: string, message: OutboundChannelMessage, opts?: OutboundSendOptions): Promise<SendRef> {

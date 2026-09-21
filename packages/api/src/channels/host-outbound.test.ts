@@ -73,6 +73,9 @@ class FakeTransport implements ChannelTransport {
   parseUpdate(): null {
     return null;
   }
+  sendFailureIsCertain(): boolean {
+    return true;
+  }
   async send(conversationKey: string, message: OutboundChannelMessage, opts?: { signal?: AbortSignal }) {
     this.sendAttempts += 1;
     const attempt = this.sendAttempts;
@@ -788,6 +791,37 @@ describe("ChannelHost outbound delivery", () => {
     releaseSend?.();
     await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_RETRY_DELAY_MS * 3));
 
+    expect(fakeTransport.sendAttempts).toBe(1);
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
+  });
+
+  it("aborts an in-flight final send when the submission aborts", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const queueItemId = "qi-final-abort-inflight";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" } } }),
+      { type: "message", id: "final-abort-ack", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "final-abort-ack", reason: "end_turn" } },
+      `final-abort-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+    await engineStore.appendEntries(session.id, threadId, [{
+      type: "message", id: "final-abort-result", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId, stopReason: "end_turn",
+    }]);
+    fakeTransport.sendAttempts = 0;
+    fakeTransport.sendBlocks.set(1, new Promise<void>(() => {}));
+    const resultEvent = { sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "message_end" as const, threadId, messageId: "final-abort-result", reason: "end_turn" as const } };
+    await eventStream.append(resultEvent, `final-abort-result-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sendAttempts).toBe(1));
+    await eventStream.append(
+      { ...resultEvent, event: { type: "message_end", threadId, messageId: "final-abort-result", reason: "abort" } },
+      `final-abort-${randomUUID()}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
     expect(fakeTransport.sendAttempts).toBe(1);
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
   });

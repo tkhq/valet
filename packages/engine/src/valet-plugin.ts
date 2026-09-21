@@ -371,6 +371,8 @@ export interface ChannelTransport {
   /** Normalize one raw update. `null` = not something we handle. */
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
   send(conversationKey: string, message: OutboundChannelMessage, opts?: OutboundSendOptions): Promise<SendRef>;
+  /** True only when a failed send is known not to have reached the provider. */
+  sendFailureIsCertain?(error: unknown): boolean;
   sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef>;
   sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef>;
   updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void>;
