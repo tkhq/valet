@@ -57,6 +57,8 @@ class FakeTransport implements ChannelTransport {
   sendBlock: Promise<void> | undefined;
   sendBlocks = new Map<number, Promise<void>>();
   ignoreSendAbort = false;
+  /** Simulates a provider that accepts the post before the local response is lost. */
+  acceptBeforeBlock = false;
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   deliveries: Array<{ type: "message"; markdown: string } | { type: "gate"; gateId: string }> = [];
   media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
@@ -76,6 +78,10 @@ class FakeTransport implements ChannelTransport {
     const attempt = this.sendAttempts;
     if (this.sendDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
     const sendBlock = this.sendBlocks.get(attempt) ?? this.sendBlock;
+    if (this.acceptBeforeBlock) {
+      this.sent.push({ conversationKey, message });
+      this.deliveries.push({ type: "message", markdown: message.markdown });
+    }
     if (sendBlock) {
       if (this.ignoreSendAbort) await sendBlock;
       else {
@@ -90,6 +96,7 @@ class FakeTransport implements ChannelTransport {
       this.sendFailures -= 1;
       throw new Error("send failed");
     }
+    if (this.acceptBeforeBlock) return { conversationKey, messageId: String(this.nextMessageId++) };
     this.sent.push({ conversationKey, message });
     this.deliveries.push({ type: "message", markdown: message.markdown });
     return { conversationKey, messageId: String(this.nextMessageId++) };
@@ -839,7 +846,7 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sendAttempts).toBe(1);
   });
 
-  it("takes over a stalled pre-restart final send after its wait limit", async () => {
+  it("does not duplicate a final post accepted before its response is lost", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const queueItemId = "qi-final-stalled-restart";
@@ -858,6 +865,7 @@ describe("ChannelHost outbound delivery", () => {
     }]);
 
     fakeTransport.sendAttempts = 0;
+    fakeTransport.acceptBeforeBlock = true;
     fakeTransport.sendBlocks.set(1, new Promise<void>(() => {}));
     const terminalEvent = {
       sessionId: session.id, threadId, queueItemId, timestamp: Date.now(),
@@ -868,11 +876,12 @@ describe("ChannelHost outbound delivery", () => {
     host.stopOutbound();
     host.startOutbound();
     await eventStream.append(terminalEvent, `final-stalled-current-${randomUUID()}`);
-    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+    await new Promise((resolve) => setTimeout(resolve, FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS * 3));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
       "I am checking",
       "The work is complete",
-    ]), { timeout: FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS * 3 });
-    expect(fakeTransport.sendAttempts).toBe(2);
+    ]);
+    expect(fakeTransport.sendAttempts).toBe(1);
   });
 
   it("does not duplicate a slow successful final send after restart", async () => {

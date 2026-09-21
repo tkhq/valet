@@ -807,8 +807,11 @@ export class ChannelHost {
     if (inFlight) {
       const settled = await this.waitForFinalDeliverySend(inFlight);
       if (!settled && this.firstReplySends.get(dedupeKey) === inFlight) {
+        // Abort cannot retract a provider request that may already be accepted.
+        // Do not replace this uncertain first reply after local settlement.
         inFlight.controller.abort();
         await inFlight.settled;
+        return;
       }
       if (!this.outboundIsActive(generation)) return;
       await this.deliverFirstAssistantReply(sessionId, threadId, trigger, generation);
@@ -1014,11 +1017,11 @@ export class ChannelHost {
     if (inFlight) {
       const settled = await this.waitForFinalDeliverySend(inFlight);
       if (!settled && this.finalDeliverySends.get(dedupeKey) === inFlight) {
-        // Do not overlap non-idempotent provider requests. Abort the old
-        // request, then retain its ownership until it settles. A transport
-        // that cannot cancel still gets to report its successful send first.
+        // Abort cannot retract a provider request that may already be accepted.
+        // Do not replace this uncertain final reply after local settlement.
         inFlight.controller.abort();
         await inFlight.settled;
+        return;
       }
       if (!this.outboundIsActive(generation)) return;
       await this.deliverFinalAssistantReply(sessionId, threadId, trigger, generation);

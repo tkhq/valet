@@ -164,11 +164,11 @@ work. An in-flight failed send cannot schedule a retry. An in-flight successful
 send records final delivery after restart, so current-generation work does not
 post a duplicate. This rule applies to first replies and later fallback sends.
 Current work waits briefly for a pre-restart send. If it stalls, the host aborts
-the provider request and waits for its settlement
-before another send can start. Slack also aborts a pending `Retry-After` delay.
-A transport that cannot cancel keeps the only owner until it settles. The guard
-never posts a one-message answer twice, a successful explicit final, or a
-manual-delivery
+the provider request and waits for its settlement. The host does not send a
+replacement because a provider can accept a post before local cancellation loses
+its response. Slack also aborts a pending `Retry-After` delay. A transport that
+cannot cancel keeps the only owner until it settles. The guard never posts a
+one-message answer twice, a successful explicit final, or a manual-delivery
 turn. Decision-gate cards, command results, attention
 messages, link-flow messages, and other explicit host control messages keep
 their existing delivery behavior.
