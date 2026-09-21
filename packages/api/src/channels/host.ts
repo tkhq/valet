@@ -207,6 +207,25 @@ function originReplyState(entries: SessionEntry[], queueItemId: string): OriginR
   return "failed";
 }
 
+/** The terminal text for a submission. The engine persists `end_turn` only
+ * after the model has completed the turn, so interim acknowledgement text
+ * cannot be selected as a fallback result. */
+function terminalAssistantResult(entries: SessionEntry[], queueItemId: string): Extract<SessionEntry, { type: "message" }> | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (
+      entry?.type === "message" &&
+      entry.role === "assistant" &&
+      entry.queueItemId === queueItemId &&
+      entry.stopReason === "end_turn" &&
+      entry.content
+    ) {
+      return entry;
+    }
+  }
+  return undefined;
+}
+
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
 function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & { getMe(): Promise<{ username?: string }> } {
   return typeof (transport as { getMe?: unknown }).getMe === "function";
@@ -606,15 +625,17 @@ export class ChannelHost {
     try {
       const e = event.event;
       if (e.type === "message_end") {
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
+        const trigger = {
           messageId: e.messageId,
           queueItemId: event.queueItemId,
           reason: e.reason,
-        });
+        };
+        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger);
+        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger);
       } else if (e.type === "tool_end" && event.queueItemId !== undefined) {
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
-          queueItemId: event.queueItemId,
-        });
+        const trigger = { queueItemId: event.queueItemId };
+        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger);
+        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger);
       } else if (e.type === "decision_gate") {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
@@ -686,6 +707,67 @@ export class ChannelHost {
     const sender = await this.assistantSenderIdentity(sessionId);
     await transport.send(target.conversationKey, {
       markdown: first.content,
+      ...(sender !== undefined ? { sender } : {}),
+    });
+  }
+
+  /**
+   * Backstop final delivery for addressed turns. The first-response path
+   * intentionally posts only an acknowledgement. When a later terminal result
+   * has no successful explicit origin reply, this path posts that result once.
+   * A pending explicit reply still owns delivery until its tool result records
+   * `details.ok`; a failed result falls back here on `tool_end`.
+   */
+  private async deliverFinalAssistantReply(
+    sessionId: string,
+    threadId: string,
+    trigger: {
+      messageId?: string;
+      queueItemId?: string;
+      reason?: "end_turn" | "tool_use" | "error" | "abort";
+    },
+  ): Promise<void> {
+    if (trigger.reason === "error" || trigger.reason === "abort") return;
+    const thread = await this.deps.engineStore.getThread(sessionId, threadId);
+    if (!thread) return;
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    const triggerEntry = trigger.messageId === undefined
+      ? undefined
+      : entries.find(
+          (entry) =>
+            entry.id === trigger.messageId && entry.type === "message" && entry.role === "assistant",
+        );
+    const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
+    if (!queueItemId) return;
+    const queueItem = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
+    if (queueItem?.abortRequestedAt !== undefined || queueItem?.outcome?.outcome === "aborted") return;
+
+    const origin = turnOrigin(entries, queueItemId);
+    if (!origin || origin.reply === "manual") return;
+    const first = entries.find(
+      (entry) =>
+        entry.type === "message" &&
+        entry.role === "assistant" &&
+        entry.queueItemId === queueItemId &&
+        Boolean(entry.content),
+    );
+    const final = terminalAssistantResult(entries, queueItemId);
+    // A one-message answer is the automatic first reply, not a second post.
+    if (!first || first.type !== "message" || !final || first.id === final.id) return;
+
+    const explicit = originReplyState([final], queueItemId);
+    if (explicit === "pending" || explicit === "succeeded") return;
+
+    const target = this.channelThreadFor(origin.threadKey);
+    if (!target) return;
+    const dedupeKey = `${sessionId}:final-reply:${queueItemId}`;
+    if (this.delivered.has(dedupeKey)) return;
+    this.markDelivered(dedupeKey);
+    const transport = this.transports.get(target.channelType);
+    if (!transport) return;
+    const sender = await this.assistantSenderIdentity(sessionId);
+    await transport.send(target.conversationKey, {
+      markdown: final.content,
       ...(sender !== undefined ? { sender } : {}),
     });
   }

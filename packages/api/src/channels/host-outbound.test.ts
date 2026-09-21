@@ -458,7 +458,7 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("web-typed result"))).toHaveLength(0);
   });
 
-  it("posts only the first addressed response and keeps the final result internal", async () => {
+  it("delivers a terminal result that has no explicit origin reply", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("events").id;
     await engineStore.appendEntries(session.id, threadId, [
@@ -489,8 +489,11 @@ describe("ChannelHost outbound delivery", () => {
       );
     }
 
-    await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(1));
-    expect(keyedTransport.sent[0]?.message.markdown).toBe("I am on it");
+    await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(2));
+    expect(keyedTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am on it",
+      "The work is complete",
+    ]);
   });
 
   it("keeps an explicit later reply and does not auto-post the final result", async () => {
@@ -537,6 +540,74 @@ describe("ChannelHost outbound delivery", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking", "The check passed"]);
+  });
+
+  it("falls back to the final result after a failed explicit reply and auto-ack", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const final: SessionEntry = {
+      type: "message", id: "failed-final", sessionId: session.id, threadId, parentId: null,
+      createdAt: Date.now() + 1, role: "assistant", content: "The work is complete", queueItemId: "qi-failed-final",
+      stopReason: "end_turn",
+      parts: [{
+        type: "tool_call", callId: "tc-failed-final", toolName: "call_tool", status: "running",
+        args: { tool_id: "fake.reply_to_origin", params: { text: "The work is complete" } },
+      }],
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId: "qi-failed-final",
+        signal: {
+          signalType: "fake.message",
+          tagName: "signal",
+          origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" },
+        },
+      }),
+      {
+        type: "message", id: "failed-final-ack", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "I am checking", queueItemId: "qi-failed-final",
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId: "qi-failed-final", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "failed-final-ack", reason: "end_turn" } },
+      `failed-final-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]));
+
+    await engineStore.appendEntries(session.id, threadId, [final]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, queueItemId: "qi-failed-final", timestamp: Date.now(), event: { type: "message_end", threadId, messageId: final.id, reason: "end_turn" } },
+      `failed-final-message-${randomUUID()}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["I am checking"]);
+
+    const part = final.parts?.[0];
+    if (!part || part.type !== "tool_call") throw new Error("missing final reply call");
+    part.status = "completed";
+    part.result = { details: { ok: false }, text: "failed" };
+    await engineStore.updateEntry(session.id, threadId, final);
+    const toolEnd = {
+      sessionId: session.id,
+      threadId,
+      queueItemId: "qi-failed-final",
+      timestamp: Date.now(),
+      event: { type: "tool_end" as const, threadId, tool: "call_tool", callId: part.callId, result: "failed", isError: false },
+    };
+    await eventStream.append(toolEnd, `failed-final-tool-${randomUUID()}`);
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am checking",
+      "The work is complete",
+    ]));
+
+    await eventStream.append(toolEnd, `failed-final-tool-redelivery-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual([
+      "I am checking",
+      "The work is complete",
+    ]);
   });
 
   it("keeps an unaddressed response silent", async () => {

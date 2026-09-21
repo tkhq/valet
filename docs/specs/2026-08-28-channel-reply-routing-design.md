@@ -144,11 +144,14 @@ Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the
 tool context, so explicit origin actions work for both paths.
 
-**No final fallback.** The failed-action fallback applies only to a deferred
-first response. A reply action on a later message does not enable a host post.
-Decision-gate cards, command results, attention messages, link-flow messages,
-and other explicit host control messages keep their existing delivery
-behavior.
+**Final delivery guard.** The host finds the terminal assistant result for an
+addressed submission. If that result has no successful `reply_to_origin`, the
+host posts it once. A pending origin action defers the guard. A terminal action
+with `details.ok=false` falls back to the terminal result when its tool ends.
+The guard never posts a one-message answer twice, a successful explicit final,
+or a manual-delivery turn. Decision-gate cards, command results, attention
+messages, link-flow messages, and other explicit host control messages keep
+their existing delivery behavior.
 
 **Submission surface (TKAI-323).** A bound thread stays bound for its whole
 life. Gate cards and command results inspect the submission surface. A web
@@ -273,12 +276,12 @@ Expected footprint:
 
 ## Invariants (alert, do not auto-repair)
 
-An addressed turn has at most one automatic assistant-text delivery: its first eligible response. Later and final text requires an explicit channel action. A manual-delivery turn has no automatic delivery. Manual delivery does not decide whether a thread message is overheard.
+An addressed turn has at most one automatic first assistant-text delivery. The host posts a later terminal result only when its explicit origin reply is missing or failed. A manual-delivery turn has no automatic delivery. Manual delivery does not decide whether a thread message is overheard.
 
 ## Testing
 
 - **Engine.** Channel-signal origins reach the tool context.
-- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. A manual-delivery turn has no automatic post.
+- **API.** An addressed turn posts its first assistant text once. The host posts a later terminal result once when no explicit origin reply succeeds. A failed terminal origin reply falls back after `tool_end`. A manual-delivery turn has no automatic post.
   Command results and gate cards retain their existing surface checks.
 - **Slack.** `reply_to_origin` posts text exactly once.
   `reply_file_to_origin` uploads a sandbox file exactly once.
