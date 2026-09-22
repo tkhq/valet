@@ -1,13 +1,13 @@
 /**
  * GET /api/proxy/usage/summary, /api/proxy/requests, /api/proxy/requests/:id
  *
- * Ownership gating: a member sees only their own rows; an org admin sees the
- * whole org. A row outside the caller's org 404s (no 403).
+ * The personal usage surface returns only the current user's rows. This stays
+ * true for organization admins. Rows outside that scope return 404.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProxyRequests, orgMembers, orgs, users } from "../schema/index.js";
-import type { ProxyUsageSummary, ProxyRequestListItem, ProxyRequestDetail, ProxyDayBucket } from "../wire/types.js";
+import type { ProxyUsageSummary, ProxyRequestListItem, ProxyRequestDetail, ProxyRequestListResponse, ProxyDayBucket } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -65,15 +65,15 @@ describe("GET /api/proxy/requests — member scoping", () => {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { requests: ProxyRequestListItem[]; nextCursor?: string };
+    const body = (await res.json()) as ProxyRequestListResponse;
     const ids = body.requests.map((r) => r.id);
     expect(ids).toContain("req-theirs");
     expect(ids).not.toContain("req-mine");
   });
 });
 
-describe("GET /api/proxy/requests — admin scoping", () => {
-  it("returns all rows in the org for an admin", async () => {
+describe("GET /api/proxy/requests — personal scope", () => {
+  it("keeps an admin in their personal scope and ignores a user filter", async () => {
     api = await bootTestApi();
     const now = Date.now();
 
@@ -85,12 +85,40 @@ describe("GET /api/proxy/requests — admin scoping", () => {
     );
 
     // local-user is an org admin in the harness
-    const res = await fetch(`${api.baseUrl}/api/proxy/requests`);
+    const res = await fetch(`${api.baseUrl}/api/proxy/requests?user=test-member`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { requests: ProxyRequestListItem[]; nextCursor?: string };
+    const body = (await res.json()) as ProxyRequestListResponse;
     const ids = body.requests.map((r) => r.id);
     expect(ids).toContain("req-user1");
-    expect(ids).toContain("req-user2");
+    expect(ids).not.toContain("req-user2");
+    expect(body.pageSize).toBe(50);
+    expect(body.hasMore).toBe(false);
+  });
+});
+
+describe("GET /api/proxy/requests — cursor pagination", () => {
+  it("returns a bounded page and metadata for the next page", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(llmProxyRequests).values([
+      makeRow({ id: "req-page-3", createdAt: now - 3_000 }),
+      makeRow({ id: "req-page-2", createdAt: now - 2_000 }),
+      makeRow({ id: "req-page-1", createdAt: now - 1_000 }),
+    ]);
+
+    const first = await fetch(api.baseUrl + "/api/proxy/requests?limit=2");
+    const firstBody = (await first.json()) as ProxyRequestListResponse;
+    expect(firstBody.requests.map((row) => row.id)).toEqual(["req-page-1", "req-page-2"]);
+    expect(firstBody.pageSize).toBe(2);
+    expect(firstBody.hasMore).toBe(true);
+    expect(firstBody.nextCursor).toEqual(expect.any(String));
+
+    const second = await fetch(api.baseUrl + "/api/proxy/requests?limit=2&cursor=" + encodeURIComponent(firstBody.nextCursor!));
+    const secondBody = (await second.json()) as ProxyRequestListResponse;
+    expect(secondBody.requests.map((row) => row.id)).toEqual(["req-page-3"]);
+    expect(secondBody.pageSize).toBe(2);
+    expect(secondBody.hasMore).toBe(false);
+    expect(secondBody.nextCursor).toBeUndefined();
   });
 });
 
@@ -126,7 +154,7 @@ describe("GET /api/proxy/requests/:id — gating", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns the full row including request_body for an admin", async () => {
+  it("404s when an admin tries to read another user's row", async () => {
     api = await bootTestApi();
 
     await api.providers.db.insert(llmProxyRequests).values(
@@ -139,14 +167,8 @@ describe("GET /api/proxy/requests/:id — gating", () => {
       }),
     );
 
-    // local-user is an org admin
     const res = await fetch(`${api.baseUrl}/api/proxy/requests/req-full`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as ProxyRequestDetail;
-    expect(body.id).toBe("req-full");
-    expect(body.requestBody).toBe('{"model":"claude-3-5-sonnet","max_tokens":1024}');
-    expect(body.responseBody).toBe('{"id":"resp-full","type":"message"}');
-    expect(body.parsed).toEqual({ tokens: 150 });
+    expect(res.status).toBe(404);
   });
 
   it("returns a member's own row via the detail endpoint", async () => {
@@ -212,14 +234,13 @@ describe("GET /api/proxy/usage/summary — cost aggregation", () => {
       }),
     );
 
-    // local-user is an org admin — should see all three rows' aggregates
+    // The personal dashboard remains scoped to local-user, even for admins.
     const res = await fetch(`${api.baseUrl}/api/proxy/usage/summary?window=7d`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ProxyUsageSummary;
 
-    // Total cost across the org
-    expect(body.totalCostUsd).toBeCloseTo(0.08, 5);
-    expect(body.totalRequests).toBe(3);
+    expect(body.totalCostUsd).toBeCloseTo(0.03, 5);
+    expect(body.totalRequests).toBe(2);
 
     // By-user breakdown
     const userEntry = body.byUser.find((u) => u.userId === "local-user");
@@ -227,10 +248,7 @@ describe("GET /api/proxy/usage/summary — cost aggregation", () => {
     expect(userEntry!.costUsd).toBeCloseTo(0.03, 5);
     expect(userEntry!.requests).toBe(2);
 
-    const memberEntry = body.byUser.find((u) => u.userId === "test-member");
-    expect(memberEntry).toBeDefined();
-    expect(memberEntry!.costUsd).toBeCloseTo(0.05, 5);
-    expect(memberEntry!.requests).toBe(1);
+    expect(body.byUser.every((u) => u.userId === "local-user")).toBe(true);
 
     // By-model breakdown
     const sonnetEntry = body.byModel.find((m) => m.model === "claude-3-5-sonnet");
@@ -238,15 +256,13 @@ describe("GET /api/proxy/usage/summary — cost aggregation", () => {
     expect(sonnetEntry!.costUsd).toBeCloseTo(0.03, 5);
     expect(sonnetEntry!.requests).toBe(2);
 
-    const opusEntry = body.byModel.find((m) => m.model === "claude-opus-4");
-    expect(opusEntry).toBeDefined();
-    expect(opusEntry!.costUsd).toBeCloseTo(0.05, 5);
+    expect(body.byModel.find((m) => m.model === "claude-opus-4")).toBeUndefined();
 
     // By-harness breakdown
     const harnessEntry = body.byHarness.find((h) => h.harness === "valet-engine");
     expect(harnessEntry).toBeDefined();
-    expect(harnessEntry!.requests).toBe(3);
-    expect(harnessEntry!.costUsd).toBeCloseTo(0.08, 5);
+    expect(harnessEntry!.requests).toBe(2);
+    expect(harnessEntry!.costUsd).toBeCloseTo(0.03, 5);
   });
 
   it("a member sees only their own rows in the summary", async () => {
@@ -417,22 +433,16 @@ describe("GET/PUT /api/proxy/settings — governance (enabled + mode)", () => {
 
 
 describe("team proxy record visibility", () => {
-  it("projects team ownership for org admins without exposing team records to a personal member", async () => {
+  it("excludes team records from every personal usage caller", async () => {
     api = await bootTestApi();
     await api.providers.db.insert(llmProxyRequests).values([
       makeRow({ id: "shared-team-1", userId: null, teamId: "team-1" }),
       makeRow({ id: "shared-team-2", userId: null, teamId: "team-2" }),
     ]);
     const list = await fetch(`${api.baseUrl}/api/proxy/requests`);
-    expect(await list.json()).toMatchObject({ requests: [
-      expect.objectContaining({ userId: null, teamId: expect.any(String) }),
-      expect.objectContaining({ userId: null, teamId: expect.any(String) }),
-    ] });
+    expect(await list.json()).toMatchObject({ requests: [] });
     const summary = await fetch(`${api.baseUrl}/api/proxy/usage/summary`);
-    expect(await summary.json()).toMatchObject({ totalRequests: 2, byUser: expect.arrayContaining([
-      expect.objectContaining({ userId: null, teamId: "team-1", requests: 1 }),
-      expect.objectContaining({ userId: null, teamId: "team-2", requests: 1 }),
-    ]) });
+    expect(await summary.json()).toMatchObject({ totalRequests: 0, byUser: [] });
     const headers = { "x-valet-test-user-id": "test-member" };
     const member = await fetch(`${api.baseUrl}/api/proxy/requests`, { headers });
     expect(await member.json()).toMatchObject({ requests: [] });

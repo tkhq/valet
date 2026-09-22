@@ -237,7 +237,7 @@ import type {
   ListCommandsResponse,
   ProxyUsageSummary,
   ProxyRequestDetail,
-  ProxyRequestListItem,
+  ProxyRequestListResponse,
   ProxySettingsResponse,
   UsageBreakdownResponse,
   UsageSessionsResponse,
@@ -1492,7 +1492,6 @@ export const api = {
   proxyUsageSummary: (window: string = "7d") =>
     request<ProxyUsageSummary>("GET", `/proxy/usage/summary?window=${encodeURIComponent(window)}`),
   proxyRequests: (opts: {
-    user?: string;
     model?: string;
     harness?: string;
     from?: number;
@@ -1501,7 +1500,6 @@ export const api = {
     limit?: number;
   } = {}) => {
     const qs = new URLSearchParams();
-    if (opts.user) qs.set("user", opts.user);
     if (opts.model) qs.set("model", opts.model);
     if (opts.harness) qs.set("harness", opts.harness);
     if (opts.from !== undefined) qs.set("from", String(opts.from));
@@ -1509,7 +1507,7 @@ export const api = {
     if (opts.cursor) qs.set("cursor", opts.cursor);
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<{ requests: ProxyRequestListItem[]; nextCursor?: string }>("GET", `/proxy/requests${tail}`);
+    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`);
   },
   proxyRequestDetail: (id: string) =>
     request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),

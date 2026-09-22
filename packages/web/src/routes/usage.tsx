@@ -25,7 +25,6 @@ import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
-import { SampleView } from "~/components/usage/SampleView";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageUseCase, UsageDrillItem, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
@@ -223,9 +222,10 @@ function UseCaseRow({
 export function UsagePage() {
   const [window, setWindow] = useState<Window>("7d");
   const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<string | undefined>(undefined);
-  const [items, setItems] = useState<Parameters<typeof RequestLog>[0]["items"]>([]);
+  // Keep only cursor history, not every loaded row. Each page remains bounded
+  // by the server's explicit page size.
+  const [pageCursors, setPageCursors] = useState<(string | undefined)[]>([undefined]);
+  const cursor = pageCursors[pageCursors.length - 1];
 
   const orgQ = useOrg();
   const isOrgAdmin =
@@ -249,31 +249,14 @@ export function UsagePage() {
   const breakdownQ = useUsageBreakdown(window, scope, teamId, { enabled: scopeKnown });
   // Proxy traffic is personal; every consumer of these two queries renders
   // only in the personal workspace, so do not fetch outside it.
-  const requestsQ = useProxyRequests({ limit: 50, cursor }, { enabled: personalWorkspace });
+  const requestsQ = useProxyRequests({ limit: 25, cursor }, { enabled: personalWorkspace });
   const settingsQ = useProxySettings({ enabled: personalWorkspace });
 
-  // Accumulate proxy request items across page loads.
-  const [seenCursors] = useState(() => new Set<string | undefined>());
-
-  // A workspace switch hides and reshapes the page; drop the proxy log's
-  // accumulated pages and any open detail so a return to the personal
-  // workspace starts from page one, not a mid-list cursor.
+  // A workspace switch resets the bounded request-log pager. Team records
+  // never appear in this personal surface.
   useEffect(() => {
-    setCursor(undefined);
-    setItems((prev) => (prev.length === 0 ? prev : []));
-    seenCursors.clear();
-    setSelectedId(null);
-  }, [teamId, seenCursors]);
-
-  if (!seenCursors.has(cursor) && requestsQ.data) {
-    seenCursors.add(cursor);
-    const newItems = requestsQ.data.items ?? [];
-    setItems((prev) => {
-      const ids = new Set(prev.map((i) => i.id));
-      const fresh = newItems.filter((i) => !ids.has(i.id));
-      return [...prev, ...fresh];
-    });
-  }
+    setPageCursors([undefined]);
+  }, [teamId]);
 
   const breakdown = breakdownQ.data;
   const USE_CASE_ORDER: UsageUseCase[] = [
@@ -300,9 +283,6 @@ export function UsagePage() {
 
   function handleWindowChange(w: Window) {
     setWindow(w);
-    setCursor(undefined);
-    setItems([]);
-    seenCursors.clear();
   }
 
   return (
@@ -661,22 +641,18 @@ export function UsagePage() {
             <p className="text-sm text-danger-600 mb-2">{String(requestsQ.error)}</p>
           )}
           <RequestLog
-            items={items}
-            selectedId={selectedId}
-            onSelect={(id) => setSelectedId((prev) => (prev === id ? null : id))}
-            nextCursor={requestsQ.data?.nextCursor}
-            onLoadMore={() => {
-              if (requestsQ.data?.nextCursor) {
-                setCursor(requestsQ.data.nextCursor);
-              }
+            items={requestsQ.data?.items ?? []}
+            pageNumber={pageCursors.length}
+            pageSize={requestsQ.data?.pageSize ?? 25}
+            hasPreviousPage={pageCursors.length > 1}
+            hasNextPage={requestsQ.data?.hasMore ?? false}
+            onPreviousPage={() => setPageCursors((pages) => pages.slice(0, -1))}
+            onNextPage={() => {
+              const nextCursor = requestsQ.data?.nextCursor;
+              if (nextCursor) setPageCursors((pages) => [...pages, nextCursor]);
             }}
             isLoading={requestsQ.isLoading}
           />
-          {selectedId && (
-            <div className="mt-4">
-              <SampleView id={selectedId} onClose={() => setSelectedId(null)} />
-            </div>
-          )}
         </div>
         )}
 

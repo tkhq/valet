@@ -2,10 +2,10 @@
  * `/api/proxy/usage/summary`, `/api/proxy/requests`, `/api/proxy/requests/:id`
  *
  * Read surface for the LLM recording gateway. Ownership gating:
- *   - org members see only their own rows.
- *   - org admins see all rows in their org.
- * A row outside the caller's org 404s — never 403. This avoids leaking
- * cross-org existence, matching the `llm-providers` route convention.
+ *   - the personal usage surface sees only rows owned by the current user.
+ *   - team-owned rows are excluded from the personal usage surface.
+ * A row outside the caller's personal scope 404s. This avoids leaking
+ * record existence across personal, team, and organization scopes.
  *
  * Mount this router UNDER the `/api/*` auth ladder (after
  * `buildAuthMiddleware`) so `c.var.user` is always populated.
@@ -123,12 +123,9 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
 
   const windowMs = parseWindowMs(c.req.query("window"));
   const sinceMs = Date.now() - windowMs;
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-
-  // Members see only their own rows; admins see the whole org.
-  const scopeClause = admin
-    ? sql`org_id = ${user.orgId}`
-    : sql`org_id = ${user.orgId} AND user_id = ${user.id}`;
+  // This endpoint backs the personal usage page. It remains personal for
+  // admins too: organization and team records must not leak into this scope.
+  const scopeClause = sql`org_id = ${user.orgId} AND user_id = ${user.id}`;
 
   // drizzle's execute() is typed `unknown` for raw SQL; narrow to the
   // node-postgres/PGlite result shape ({ rows }) by casting the awaited value,
@@ -309,10 +306,7 @@ proxyUsageRouter.get("/requests", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
 
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-
   // Query filters
-  const filterUserId = c.req.query("user");
   const filterModel = c.req.query("model");
   const filterHarness = c.req.query("harness");
   const filterFrom = c.req.query("from");
@@ -323,16 +317,10 @@ proxyUsageRouter.get("/requests", async (c) => {
   // Build WHERE conditions
   const conditions = [];
 
-  // Ownership scope
-  if (admin) {
-    conditions.push(eq(llmProxyRequests.orgId, user.orgId));
-    if (filterUserId) {
-      conditions.push(eq(llmProxyRequests.userId, filterUserId));
-    }
-  } else {
-    conditions.push(eq(llmProxyRequests.orgId, user.orgId));
-    conditions.push(eq(llmProxyRequests.userId, user.id));
-  }
+  // This list is the personal request log. Do not widen it for admins or
+  // honor a supplied user filter: both would expose another owner's records.
+  conditions.push(eq(llmProxyRequests.orgId, user.orgId));
+  conditions.push(eq(llmProxyRequests.userId, user.id));
 
   if (filterModel) {
     conditions.push(eq(llmProxyRequests.model, filterModel));
@@ -408,7 +396,12 @@ proxyUsageRouter.get("/requests", async (c) => {
     ).toString("base64");
   }
 
-  return c.json({ requests: page.map(rowToListItem), nextCursor });
+  return c.json({
+    requests: page.map(rowToListItem),
+    nextCursor,
+    pageSize: limit,
+    hasMore,
+  });
 });
 
 proxyUsageRouter.get("/requests/:id", async (c) => {
@@ -425,12 +418,11 @@ proxyUsageRouter.get("/requests/:id", async (c) => {
   const row = rows[0];
   if (!row) return c.json({ error: "not found" }, 404);
 
-  // A row in another org always 404s — never 403 (existence hiding).
-  if (row.orgId !== user.orgId) return c.json({ error: "not found" }, 404);
-
-  // A non-admin can only read their own rows.
-  const admin = await isOrgAdmin(db, user.orgId, user.id);
-  if (!admin && row.userId !== user.id) return c.json({ error: "not found" }, 404);
+  // Detail is reachable from the personal request log only. A row in another
+  // scope always 404s, including organization-admin callers.
+  if (row.orgId !== user.orgId || row.userId !== user.id) {
+    return c.json({ error: "not found" }, 404);
+  }
 
   return c.json(rowToDetail(row));
 });

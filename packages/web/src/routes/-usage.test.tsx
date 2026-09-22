@@ -13,7 +13,7 @@
  *   - By model section shows model names;
  *   - spend chart renders day bars;
  *   - Download CSV control points at /api/usage/export.csv with correct query;
- *   - proxy request log still renders and opens SampleView on row click;
+ *   - proxy request log has bounded page navigation and never renders raw content;
  *   - Settings → Proxy callout link renders;
  *   - disabled-gateway notice renders.
  */
@@ -24,7 +24,6 @@ import type {
   UsageBreakdownResponse,
   UsageDrillResponse,
   ProxyRequestListItem,
-  ProxyRequestDetail,
 } from "@valet/api/wire";
 
 // --- mock data -----------------------------------------------------------
@@ -266,33 +265,7 @@ const reqItem: ProxyRequestListItem = {
   error: null,
 };
 
-const mockRequests = { items: [reqItem], nextCursor: undefined };
-
-const mockDetail: ProxyRequestDetail = {
-  ...reqItem,
-  requestBody: '{"model":"claude-opus-4-5","messages":[{"role":"user","content":"Hello"}]}',
-  responseBody: '{"id":"msg_1","content":[{"type":"text","text":"Hi there!"}]}',
-  parsed: {
-    schema: "valet.llm-sample/v1",
-    provider: "anthropic",
-    parseVersion: 1,
-    model: "claude-opus-4-5",
-    params: {},
-    system: "You are a helpful assistant.",
-    tools: [],
-    previousResponseId: null,
-    input: [
-      { role: "user", content: [{ type: "text", text: "Hello" }] },
-    ],
-    output: { role: "assistant", content: [{ type: "text", text: "Hi there!" }] },
-    stop_reason: "end_turn",
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 },
-  },
-  parseVersion: 1,
-  parseError: null,
-  providerResponseId: "msg_1",
-  previousResponseId: null,
-};
+const mockRequests = { items: [reqItem], nextCursor: undefined, pageSize: 25, hasMore: false };
 
 // --- mocks ---------------------------------------------------------------
 
@@ -349,12 +322,6 @@ let requestsResult: {
 let lastProxyRequestsOpts: { enabled?: boolean } | undefined;
 let lastProxySettingsOpts: { enabled?: boolean } | undefined;
 
-let detailResult: {
-  data: ProxyRequestDetail | undefined;
-  isLoading: boolean;
-  error: null | Error;
-} = { data: mockDetail, isLoading: false, error: null };
-
 let settingsResult: {
   data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined;
   isLoading: boolean;
@@ -365,7 +332,6 @@ vi.mock("~/api/proxy-usage", () => ({
     lastProxyRequestsOpts = opts;
     return requestsResult;
   },
-  useProxyRequestDetail: () => detailResult,
   useProxySettings: (opts?: { enabled?: boolean }) => {
     lastProxySettingsOpts = opts;
     return settingsResult;
@@ -432,7 +398,6 @@ beforeEach(() => {
     proxy: { data: mockProxyItems, isLoading: false, error: null },
   };
   requestsResult = { data: mockRequests, isLoading: false, error: null };
-  detailResult = { data: mockDetail, isLoading: false, error: null };
   settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
   orgResult = {
     data: { features: { organizations: false }, callerRole: "member" },
@@ -797,36 +762,14 @@ describe("UsagePage — CSV export", () => {
   });
 });
 
-describe("UsagePage — request log drill-down", () => {
-  it("clicking a request row opens the SampleView", async () => {
+describe("UsagePage — request log pagination", () => {
+  it("shows bounded navigation without raw request content", () => {
     render(<UsagePage />);
-    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
-    expect(rowEl).toBeTruthy();
-    fireEvent.click(rowEl);
-    await waitFor(() => {
-      expect(screen.getByText("Request detail")).toBeTruthy();
-    });
-  });
-
-  it("SampleView shows structured content from parsed detail", async () => {
-    render(<UsagePage />);
-    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
-    fireEvent.click(rowEl);
-    await waitFor(() => {
-      expect(screen.getByText("Hello")).toBeTruthy();
-      expect(screen.getByText("Hi there!")).toBeTruthy();
-    });
-  });
-
-  it("closing the SampleView removes it", async () => {
-    render(<UsagePage />);
-    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
-    fireEvent.click(rowEl);
-    await waitFor(() => {
-      expect(screen.getByText("Request detail")).toBeTruthy();
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Close detail" }));
+    expect(screen.getByText("Page 1 · 25 requests per page")).toBeTruthy();
+    expect(screen.queryByText("Hello")).toBeNull();
     expect(screen.queryByText("Request detail")).toBeNull();
+    expect((screen.getByRole("button", { name: "Previous" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 

@@ -5181,6 +5181,16 @@ export interface ProxyRequestListItem {
   error: string | null;
 }
 
+/** `GET /api/proxy/requests` — one bounded cursor page of metadata. */
+export interface ProxyRequestListResponse {
+  requests: ProxyRequestListItem[];
+  /** Cursor for the next older page. Omitted on the final page. */
+  nextCursor?: string;
+  /** The server-applied page size, after validation and capping. */
+  pageSize: number;
+  hasMore: boolean;
+}
+
 /**
  * `GET /api/proxy/requests/:id` — full row including request and response
  * bodies and the parsed representation.

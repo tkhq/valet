@@ -240,11 +240,11 @@ WHERE p."org_id" IS NOT NULL;
 
 ### 7. API surface
 
-New router `/api/proxy`, mounted under the normal `/api` auth ladder (cookie/session identity). Members see their own rows; org-admins see the whole org.
+New router `/api/proxy`, mounted under the normal `/api` auth ladder (cookie/session identity). The personal usage surface always returns only the caller's personal rows, including for organization admins. Team rows are excluded.
 
 - `GET /api/proxy/usage/summary?window=...` — time-series buckets plus breakdowns by user, model, and harness. Reads `llm_proxy_requests` with a raw aggregate, same pattern as `routes/usage.ts`.
-- `GET /api/proxy/requests?user=&model=&harness=&from=&to=&cursor=` — filtered, paginated list (metadata columns, no bodies).
-- `GET /api/proxy/requests/:id` — one row with full request and response bodies for drill-down. Ownership-gated: a member reads only their own row; an admin reads any row in the org; a row in another org 404s.
+- `GET /api/proxy/requests?model=&harness=&from=&to=&cursor=&limit=` — filtered, paginated list (metadata columns, no bodies).
+- `GET /api/proxy/requests/:id` — one row with full request and response bodies for internal analysis. It is personal-scope gated: a row not owned by the caller returns 404.
 - `POST /api/proxy/keys` / `GET /api/proxy/keys` / `DELETE /api/proxy/keys/:id` — issue, list, and revoke `vlt_` proxy keys, wrapping the existing `apiKey` plugin. Reused by the onboarding panel.
 
 ### 8. Dashboard (web)
@@ -252,9 +252,9 @@ New router `/api/proxy`, mounted under the normal `/api` auth ladder (cookie/ses
 New route in `packages/web/src/routes/` (proposed `usage.tsx`, or a tab under settings), TanStack Query against the endpoints above:
 
 - **Time-series** — spend (USD) and tokens over the selected window, stacked by model.
-- **Breakdown tables** — by user (admin view), by model, and by harness; each row shows requests, tokens, and cost.
-- **Request log** — a paginated table with filters (user, model, harness, date range); each row links to drill-down.
-- **Drill-down** — renders the normalized `Sample` (`parsed`) with the existing session message-rendering components: system, tools, input turns, and the assistant output as readable message blocks. Falls back to raw request/response JSON when `parsed` is null (parse failed or pending reprocess). The raw bodies stay available behind a "view raw" toggle.
+- **Breakdown tables** — by model and by harness. Each row shows requests, tokens, and cost.
+- **Request log** — a cursor-paginated metadata table. It has an explicit page size and Previous/Next navigation. It does not show owner identifiers, prompts, responses, or raw request bodies.
+- **Content safety** — prompt and response bodies remain stored for the internal analysis pipeline. The usage page does not fetch or render them.
 
 ### 9. Onboarding panel
 
@@ -308,7 +308,7 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 - **Recorder integration** — a fake upstream serving a canned SSE stream; drive `proxyCompletion` and assert one `llm_proxy_requests` row with the recorded **request body** (finding 1), correct usage, cost, latency, `provider_response_id`, full response body, and a non-null `parsed` sample; assert the client received the identical stream bytes.
 - **Sample parser** — `parseSample` fixtures for both wires: a plain text turn, a tool-use/function-call turn, an image input, and a streamed response reassembled to the same `Sample` as its non-streamed twin. Assert `system`, `tools`, `input`, and `output` blocks are populated; assert an unknown block type is preserved as `{type:"unknown"}` not dropped; assert a Codex request with `previous_response_id` yields a partial `input` plus the recorded pointer.
 - **cost_entries union** — insert a proxy row; assert `/api/usage/summary` includes its cost.
-- **API authorization** — a member cannot read another member's drill-down; an admin can; a cross-org row 404s.
+- **API authorization** — a caller cannot read another user's or a team record, including when the caller is an organization admin. A cross-org row returns 404.
 
 **Success-criteria validation (manual):** point local Claude Code (`ANTHROPIC_BASE_URL` + `vlt_` key) and Codex (`config.toml` provider) at the dev stack. Run a prompt in each. Confirm each produces streamed output identical to going direct, a `llm_proxy_requests` row lands with correct usage, and the dashboard reflects the spend under the acting user. Then run `make e2e` for a clean scorecard.
 
@@ -323,7 +323,7 @@ The gateway puts valet in the inference hot path for every engineer's local Clau
 7. `/proxy` router mount for both kinds; wire into `app.ts`.
 8. Per-key spend metric + alert through the OTEL meter (decision 8).
 9. `/api/proxy/*` endpoints, with authorization tests.
-10. Web dashboard (Sample drill-down) + onboarding panel.
+10. Web dashboard (bounded metadata log) + onboarding panel.
 11. Manual success-criteria run + `make e2e`.
 
 ## Out of scope
@@ -346,7 +346,7 @@ The gateway accepts a verified team key only when its metadata matches the store
 
 Organization governance applies to team traffic. A disabled gateway forwards nothing. Centralized mode uses the organization's provider credential. Pass-through mode requires an approved provider credential alongside the shared team key. The team page never reads personal provider credentials.
 
-Proxy records store `team_id` and a null `user_id` for team traffic. Personal records retain `user_id` and a null `team_id`. Metrics label the team instead of the creating admin. The `cost_entries` view projects team ownership, including after key revocation. Team usage drill-down groups proxy rows by harness and filters by both organization and team. Existing detailed proxy log access remains limited to organization admins for team records. Personal members cannot read those records through their user identity.
+Proxy records store `team_id` and a null `user_id` for team traffic. Personal records retain `user_id` and a null `team_id`. Metrics label the team instead of the creating admin. The `cost_entries` view projects team ownership, including after key revocation. Team usage drill-down groups proxy rows by harness and filters by both organization and team. The personal proxy endpoints exclude team records for every caller.
 
 The in-place schema repair adds `team_id`, permits a null `user_id`, and updates the cost view. One SQL block updates attribution and creates the team index atomically. The index is the repair completion marker. Fresh migrations contain the same schema and view.
 

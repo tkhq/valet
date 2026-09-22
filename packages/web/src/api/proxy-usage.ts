@@ -23,7 +23,6 @@ export const qkProxy = {
 };
 
 export interface ProxyRequestFilters {
-  user?: string;
   model?: string;
   harness?: string;
   from?: number;
@@ -32,9 +31,11 @@ export interface ProxyRequestFilters {
   limit?: number;
 }
 
-export interface ProxyRequestListResponse {
+export interface ProxyRequestPage {
   items: ProxyRequestListItem[];
   nextCursor?: string;
+  pageSize: number;
+  hasMore: boolean;
 }
 
 export function useProxyUsageSummary(
@@ -51,15 +52,15 @@ export function useProxyUsageSummary(
 
 export function useProxyRequests(
   filters: ProxyRequestFilters = {},
-  opts?: Partial<UseQueryOptions<ProxyRequestListResponse>>,
+  opts?: Partial<UseQueryOptions<ProxyRequestPage>>,
 ) {
-  return useQuery<ProxyRequestListResponse>({
+  return useQuery<ProxyRequestPage>({
     queryKey: qkProxy.requests(filters),
     queryFn: async () => {
       const raw = await api.proxyRequests(filters);
       // The backend returns `{ requests, nextCursor }` but the hook exposes
       // `{ items, nextCursor }` so callers don't need to know the key name.
-      return { items: raw.requests, nextCursor: raw.nextCursor };
+      return { items: raw.requests, nextCursor: raw.nextCursor, pageSize: raw.pageSize, hasMore: raw.hasMore };
     },
     staleTime: 30_000,
     ...opts,
