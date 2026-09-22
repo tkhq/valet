@@ -270,16 +270,29 @@ FOR EACH ROW EXECUTE FUNCTION reject_delegation_envelope_update();
 CREATE TABLE "credential_delegations" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL,
   "parent_session_id" text NOT NULL, "parent_thread_id" text NOT NULL, "parent_queue_item_id" text NOT NULL,
-  "child_session_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "child_session_id" text NOT NULL, "child_watch_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
   "repo_host" text NOT NULL, "repo_owner" text NOT NULL, "repo_name" text NOT NULL,
   "credential_kind" text NOT NULL, "credential_id" text NOT NULL, "credential_version" bigint NOT NULL,
-  "operations" jsonb NOT NULL, "expires_at" bigint NOT NULL, "revoked_at" bigint,
-  "decision_id" text NOT NULL UNIQUE, "created_at" bigint NOT NULL
+  "operations" jsonb NOT NULL, "issued_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "revoked_at" bigint,
+  "decision_id" text NOT NULL UNIQUE, "decision_evidence" jsonb NOT NULL, "created_at" bigint NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "credential_delegations_child_repo" ON "credential_delegations" ("child_session_id","repo_host","repo_owner","repo_name");
 --> statement-breakpoint
 CREATE INDEX "credential_delegations_parent" ON "credential_delegations" ("org_id","parent_session_id");
+--> statement-breakpoint
+CREATE FUNCTION restrict_credential_delegation_update() RETURNS trigger AS $$
+BEGIN
+  IF (to_jsonb(NEW) - 'revoked_at') IS DISTINCT FROM (to_jsonb(OLD) - 'revoked_at')
+     OR OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL THEN
+    RAISE EXCEPTION 'credential_delegations metadata is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER credential_delegations_revoke_only BEFORE UPDATE ON credential_delegations
+FOR EACH ROW EXECUTE FUNCTION restrict_credential_delegation_update();
 --> statement-breakpoint
 CREATE TABLE "session_threads" (
 	"id" text PRIMARY KEY NOT NULL,

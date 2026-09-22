@@ -63,7 +63,7 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
   if (!Array.isArray(value.subjects) || !dense(value.subjects) || value.subjects.length === 0 || value.subjects.some((subject) => !descriptor.subjectKinds.includes(subject))) issues.push(issue("invalid_subject", `${path}.subjects`, "Select only subject kinds allowed by this context."));
   if (!descriptor.effects.includes(value.effect as never)) issues.push(issue("invalid_effect", `${path}.effect`, "Select an effect allowed by this context."));
   const selectedTarget = descriptor.targets.find((target) => record(value.target) && value.target["action.id"] === target.actionId);
-  const fixedApproval = value.context === "api.route" || value.context === "resource.access";
+  const fixedApproval = descriptor.targets.length > 0;
   if (value.effect === "require_approval" && (!descriptor.humanApproval || (fixedApproval ? !record(value.approval) || value.approval.tier !== "human" || value.approval.replay !== "once" || selectedTarget?.approvalSupported === false : descriptor.publishable ? value.approval !== undefined : !record(value.approval) || typeof value.approval.tier !== "string" || !["once", "session", "workflow"].includes(String(value.approval.replay))))) issues.push(issue("unsupported_approval", `${path}.approval`, "Choose an approval-capable target and use the supported approval settings."));
   if (value.effect !== "require_approval" && value.approval !== undefined) issues.push(issue("unexpected_approval", `${path}.approval`, "Remove approval settings or require approval."));
   if (descriptor.appliesIn ? !["any", "session", "workflow"].includes(String(value.appliesIn)) : value.appliesIn !== undefined) issues.push(issue("invalid_applies_in", `${path}.appliesIn`, "Use appliesIn only for action and workflow contexts."));
@@ -74,9 +74,10 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     `${path}.target`,
     issues,
     false,
+    selectedTarget !== undefined,
   );
   const nestedIds = new Set<string>();
-  if (!Array.isArray(value.matcherGroups) || (value.matcherGroups.length === 0 && !(["tool.builtin", "api.route", "resource.access"] as string[]).includes(String(value.context)))) issues.push(issue("empty_conditions", `${path}.matcherGroups`, "Add at least one condition group."));
+  if (!Array.isArray(value.matcherGroups) || (value.matcherGroups.length === 0 && descriptor.targets.length === 0 && value.context !== "tool.builtin")) issues.push(issue("empty_conditions", `${path}.matcherGroups`, "Add at least one condition group."));
   else
     value.matcherGroups.forEach((group, groupIndex) => {
       if (!record(group) || !validId(group.id) || nestedIds.has(String(group.id)) || !["all", "any", "not"].includes(String(group.mode)) || !Array.isArray(group.matchers) || !dense(group.matchers) || group.matchers.length === 0 || (group.mode === "not" && group.matchers.length !== 1)) {
@@ -129,7 +130,7 @@ function validateMatcher(value: unknown, fields: readonly PolicyFieldDescriptor[
   if (fieldPath.startsWith("parameters.")) for (const code of currentPolicyMatcherIssuesV1({ path: fieldPath.slice(11), op: String(value.operator), ...(value.value === undefined ? {} : { value: value.value }) })) issues.push(issue(code, path, "Use a matcher supported by the current source builder."));
 }
 
-function validateFields(value: unknown, fields: readonly PolicyFieldDescriptor[], path: string, issues: DraftValidationIssue[], allowSensitive: boolean): void {
+function validateFields(value: unknown, fields: readonly PolicyFieldDescriptor[], path: string, issues: DraftValidationIssue[], allowSensitive: boolean, serverRegistered = false): void {
   if (!record(value)) {
     issues.push(issue("invalid_target", path, "Use a target object."));
     return;
@@ -137,7 +138,7 @@ function validateFields(value: unknown, fields: readonly PolicyFieldDescriptor[]
   for (const [key, item] of Object.entries(value)) {
     const field = fields.find((candidate) => candidate.path === key);
     if (!field) issues.push(issue("unknown_field", `${path}.${String(key)}`, "Select a target field from this context schema."));
-    else { const size = currentPolicyValueComplexityV1(item); if (!typedValue(field.type, item, "eq") || (typeof item === "string" && item.length === 0) || (!allowSensitive && field.sensitivity !== "public") || !size || size.bytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes || containsSensitiveTextV1(item as JsonValue)) issues.push(issue("invalid_target", `${path}.${key}`, "Remove sensitive or long values and use the declared target type.")); }
+    else { const size = currentPolicyValueComplexityV1(item); if (!typedValue(field.type, item, "eq") || (typeof item === "string" && item.length === 0) || (!allowSensitive && field.sensitivity !== "public") || !size || size.bytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes || (!serverRegistered && containsSensitiveTextV1(item as JsonValue))) issues.push(issue("invalid_target", `${path}.${key}`, "Remove sensitive or long values and use the declared target type.")); }
   }
 }
 

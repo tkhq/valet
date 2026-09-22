@@ -36,19 +36,22 @@ const descriptor = (kind: AuthorizationKind, label: string, fields: readonly Pol
   };
 };
 
-const delegatedContext = (kind: AuthorizationKind, obligations: PolicyContextDescriptor["obligations"], publishable = true): Partial<Pick<PolicyContextDescriptor, "publishable" | "humanApproval" | "obligations" | "targets">> => ({
-  publishable,
-  humanApproval: false,
-  obligations,
-  targets: DELEGATED_EXECUTION_REGISTRY_V1.filter((entry) => entry.kind === kind).map((entry) => ({
-    actionId: entry.actionId,
-    service: entry.service,
-    operation: entry.actionId.slice(entry.actionId.indexOf(".") + 1),
-    riskLevel: entry.riskLevel,
-    approvalSupported: entry.approvalSupported,
-    label: entry.actionId,
-  })),
-});
+const delegatedContext = (kind: AuthorizationKind, obligations: PolicyContextDescriptor["obligations"], publishable = true): Partial<Pick<PolicyContextDescriptor, "publishable" | "humanApproval" | "obligations" | "targets">> => {
+  const entries = DELEGATED_EXECUTION_REGISTRY_V1.filter((entry) => entry.kind === kind);
+  return {
+    publishable,
+    humanApproval: entries.some((entry) => entry.approvalSupported),
+    obligations,
+    targets: entries.map((entry) => ({
+      actionId: entry.actionId,
+      service: entry.service,
+      operation: entry.actionId.slice(entry.actionId.indexOf(".") + 1),
+      riskLevel: entry.riskLevel,
+      approvalSupported: entry.approvalSupported,
+      label: entry.actionId,
+    })),
+  };
+};
 
 export const POLICY_CONTEXTS = {
   "tool.action": descriptor("tool.action", "Tool and action", [field("action.service", "string", "target"), field("action.id", "string", "target"), field("action.riskLevel", "string", "target"), field("parameters.*", "string", "attribute")], {

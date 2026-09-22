@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AuthorizationRequest, DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -8,6 +9,7 @@ import {
   assertRepositoryCredentialDelegation,
   authorizeRepositoryCredentialDelegation,
   CredentialDelegationInvalidError,
+  revokeChildCredentialDelegations,
 } from "./credential-delegation.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -70,6 +72,18 @@ async function seedChildState(now: number): Promise<void> {
     envelope,
     decisionId: "test-delegation-envelope",
     createdAt: now,
+  });
+  await api!.providers.db.insert(agentSessions).values({
+    id: "parent-credential-delegation",
+    userId: "local-user",
+    orgId: "local-org",
+    workspace: "/tmp/parent-credential-delegation",
+    status: "active",
+    ownerType: "user",
+    ownerId: "local-user",
+    createdAt: now,
+    updatedAt: now,
+    lastActivityAt: now,
   });
   await api!.providers.db.insert(agentSessions).values({
     id: CHILD_ID,
@@ -157,8 +171,14 @@ describe("repository credential delegation", () => {
     })).rejects.toBeInstanceOf(CredentialDelegationInvalidError);
 
     const [grant] = await api.providers.db.select().from(credentialDelegations);
-    expect(grant?.expiresAt).toBe(now + DAY_MS);
+    expect(grant).toMatchObject({ childWatchId: CHILD_ID, issuedAt: now, expiresAt: now + DAY_MS,
+      decisionEvidence: { effect: "allow", reasonCode: "test.allow" } });
     expect(JSON.stringify(grant)).not.toContain("secret-canary-not-persisted");
+    await expect(api.providers.db.update(credentialDelegations).set({ ownerId: "tampered" }).where(eq(credentialDelegations.id, grant!.id))).rejects.toThrow();
+    await revokeChildCredentialDelegations(api.providers.db, CHILD_ID, now + 1);
+    await revokeChildCredentialDelegations(api.providers.db, CHILD_ID, now + 2);
+    const [revoked] = await api.providers.db.select().from(credentialDelegations);
+    expect(revoked).toMatchObject({ ownerId: "local-user", revokedAt: now + 1 });
   });
 
   it("rejects a different repository", async () => {

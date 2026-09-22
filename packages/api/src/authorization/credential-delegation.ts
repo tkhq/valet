@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { PolicyDecision, Principal } from "@valet/engine";
 import { adaptCredentialDelegate, buildDelegatedExecutionObligationPlan, decisionDigestOf, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
@@ -101,10 +101,15 @@ export async function authorizeRepositoryCredentialDelegation(input: {
   if (reserved.kind !== "execute") throw new Error(reserved.error);
   const id = randomUUID();
   await input.db.insert(credentialDelegations).values({ id, orgId: input.orgId, parentSessionId: input.parentSessionId,
-    parentThreadId: input.parentThreadId, parentQueueItemId: input.parentQueueItemId, childSessionId: input.childSessionId,
+    parentThreadId: input.parentThreadId, parentQueueItemId: input.parentQueueItemId, childSessionId: input.childSessionId, childWatchId: input.childSessionId,
     ownerType: input.owner.type, ownerId: input.owner.id, repoHost: repo.host, repoOwner: repo.owner, repoName: repo.repo,
     credentialKind: provenance.kind, credentialId: provenance.id, credentialVersion: provenance.version, operations: [...OPERATIONS],
-    expiresAt: now + DAY_MS, decisionId, createdAt: now });
+    issuedAt: now, expiresAt: now + DAY_MS, decisionId, decisionEvidence: { requestId: authorization.requestId,
+      requestSubjectDigest: authorization.requestSubjectDigest, inputDigest: authorization.inputDigest,
+      policyDigest: authorization.policyDigest, sourceBundleDigest: authorization.sourceBundleDigest,
+      evaluatorKind: authorization.evaluator.kind, engineDigest: authorization.evaluator.engineDigest,
+      decisionDigest: decisionDigestOf(authorization.decision), effect: authorization.decision.effect,
+      reasonCode: authorization.decision.reasonCode }, createdAt: now });
   await completeCanonicalExecution(input.db, decision, digest, reserved.attemptId, { outcome: "completed", result: { id } }, (value) => value, parseGrant, () => now);
 }
 
@@ -117,7 +122,7 @@ export async function assertRepositoryCredentialDelegation(input: {
     input.db.select().from(credentialDelegations).where(and(eq(credentialDelegations.childSessionId, input.childSessionId), eq(credentialDelegations.repoHost, repo.host), eq(credentialDelegations.repoOwner, repo.owner), eq(credentialDelegations.repoName, repo.repo), isNull(credentialDelegations.revokedAt))).limit(1),
     input.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, input.childSessionId)).limit(1),
     input.db.select().from(childWatches).where(and(eq(childWatches.childSessionId, input.childSessionId), eq(childWatches.settled, false))).limit(1),
-    input.db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId }).from(agentSessions).where(eq(agentSessions.id, input.childSessionId)).limit(1),
+    input.db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, input.childSessionId)).limit(1),
     input.db.select().from(orgMembers).where(and(eq(orgMembers.orgId, input.orgId), eq(orgMembers.userId, input.actorUserId))).limit(1),
     input.owner.type === "team" ? input.db.select().from(teamMembers).where(and(eq(teamMembers.teamId, input.owner.id), eq(teamMembers.userId, input.actorUserId))).limit(1) : Promise.resolve([]),
   ]);
@@ -129,6 +134,10 @@ export async function assertRepositoryCredentialDelegation(input: {
     || row.orgId !== input.orgId
     || row.ownerType !== input.owner.type
     || row.ownerId !== input.owner.id
+    || row.childWatchId !== childWatch.childSessionId
+    || row.issuedAt === null
+    || row.expiresAt - row.issuedAt !== DAY_MS
+    || row.decisionEvidence === null
     || edge.orgId !== row.orgId
     || edge.parentSessionId !== row.parentSessionId
     || edge.envelope.parentThreadId !== row.parentThreadId
@@ -142,16 +151,24 @@ export async function assertRepositoryCredentialDelegation(input: {
     || childWatch.orgId !== row.orgId
     || session[0].ownerType !== input.owner.type
     || session[0].ownerId !== input.owner.id
+    || session[0].status === "deleted"
     || !row.operations.includes(input.operation)
     || (input.owner.type === "team" && !teamMembership[0])) {
     throw new CredentialDelegationInvalidError();
   }
+  const [parent, bound] = await Promise.all([
+    input.db.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, row.parentSessionId)).limit(1),
+    input.db.select({ sessionId: sessionRepos.sessionId }).from(sessionRepos).where(and(eq(sessionRepos.sessionId, input.childSessionId), eq(sessionRepos.host, repo.host), sql`lower(${sessionRepos.fullName}) = ${`${repo.owner}/${repo.repo}`}`)).limit(1),
+  ]);
+  if (!parent[0] || parent[0].status === "deleted" || !bound[0]) throw new CredentialDelegationInvalidError();
   const provenance = await provenanceFor(input.db, input.orgId, input.owner, repo.owner, input.binding.auth);
   if (!provenance || provenance.kind !== row.credentialKind || provenance.id !== row.credentialId || provenance.version !== row.credentialVersion) throw new CredentialDelegationInvalidError();
-  const bound = await input.db.select({ sessionId: sessionRepos.sessionId }).from(sessionRepos).where(and(eq(sessionRepos.sessionId, input.childSessionId), eq(sessionRepos.host, repo.host), sql`lower(${sessionRepos.fullName}) = ${`${repo.owner}/${repo.repo}`}`)).limit(1);
-  if (!bound[0]) throw new CredentialDelegationInvalidError();
 }
 
 export async function revokeChildCredentialDelegations(db: AppDb, childSessionId: string, now = Date.now()): Promise<void> {
   await db.update(credentialDelegations).set({ revokedAt: now }).where(and(eq(credentialDelegations.childSessionId, childSessionId), isNull(credentialDelegations.revokedAt)));
+}
+
+export async function revokeSessionCredentialDelegations(db: AppDb, sessionId: string, now = Date.now()): Promise<void> {
+  await db.update(credentialDelegations).set({ revokedAt: now }).where(and(or(eq(credentialDelegations.parentSessionId, sessionId), eq(credentialDelegations.childSessionId, sessionId)), isNull(credentialDelegations.revokedAt)));
 }

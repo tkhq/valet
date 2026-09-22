@@ -110,6 +110,24 @@ describe("browser draft to current source contract", () => {
     expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
   });
 
+  it.each([
+    ["delegation.create", "delegation.create"],
+    ["agent.signal", "agent.cancel"],
+    ["sandbox.capability", "sandbox.provision"],
+    ["credential.use", "credential.repository"],
+    ["credential.delegate", "credential.delegate"],
+  ] as const)("projects non-egress %s policies", (context, actionId) => {
+    const rule = { ...draft.rules[0], context, target: { "action.id": actionId }, matcherGroups: [], appliesIn: undefined };
+    const snapshot = projectDraftToCurrentSnapshot(normalizePolicyDraft({ ...draft, rules: [rule] }), "org-1");
+    expect(snapshot.organizationPolicies[0]).toMatchObject({ authorizationKind: context, actionId });
+    expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
+  });
+
+  it("keeps egress authoring unsupported", () => {
+    const rule = { ...draft.rules[0], context: "egress.connect" as const, target: { "action.id": "egress.connect" }, matcherGroups: [], appliesIn: undefined };
+    expect(() => projectDraftToCurrentSnapshot(normalizePolicyDraft({ ...draft, rules: [rule] }), "org-1")).toThrow(/does not support/);
+  });
+
   it("projects a bare approval mode without custom approval fields", () => {
     const changed: PolicyDraftV1 = { ...draft, rules: [{ ...draft.rules[0], effect: "require_approval", approval: undefined }] }, snapshot = projectDraftToCurrentSnapshot(normalizePolicyDraft(changed), "org-1");
     expect(snapshot.organizationPolicies[0].mode).toBe("require_approval"); expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();

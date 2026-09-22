@@ -32,6 +32,7 @@ import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import { authorizeDirectResource, newResourceDelivery } from "../authorization/resource-authorization.js";
 import { authorizeCredentialUseOperation, CredentialUseDeniedError } from "../authorization/credential-use-provider.js";
+import { revokeSessionCredentialDelegations } from "../authorization/credential-delegation.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import {
@@ -1556,10 +1557,12 @@ sessionsRouter.delete("/:id", async (c) => {
   // in the same transaction as the soft-delete (TKAI-296): a live row kept
   // the assistant in every teammate's rail, pointing at a dead session.
   await db.transaction(async (tx) => {
+    const now = Date.now();
     await tx
       .update(agentSessions)
-      .set({ status: "deleted", updatedAt: Date.now() })
+      .set({ status: "deleted", updatedAt: now })
       .where(eq(agentSessions.id, id));
+    await revokeSessionCredentialDelegations(tx, id, now);
     if (assistant) await retireAssistant(tx, assistant.id);
   });
 
