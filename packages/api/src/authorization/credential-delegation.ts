@@ -109,7 +109,13 @@ export async function authorizeRepositoryCredentialDelegation(input: {
   const decisionId = canonicalDecisionId(input.orgId, adapted.request.idempotencyKey);
   const digest = createHash("sha256").update(adapted.canonicalBytes).digest("hex");
   const decision = executionDecision(authorization, decisionId, digest);
-  const reserved = await reserveCanonicalExecution(input.db, decision, digest, parseGrant, () => now);
+  const reserved = await reserveCanonicalExecution(input.db, decision, digest, parseGrant, () => now, async (tx) => {
+    const rows = await tx.select().from(credentialDelegations).where(eq(credentialDelegations.decisionId, decisionId));
+    if (rows.length === 0) return { kind: "absent" };
+    const row = rows[0];
+    if (rows.length === 1 && row.orgId === input.orgId && row.parentSessionId === input.parentSessionId && row.parentThreadId === input.parentThreadId && row.parentOperationId === input.parentOperationId && row.childSessionId === input.childSessionId && row.childWatchId === input.childSessionId && row.ownerType === input.owner.type && row.ownerId === input.owner.id && row.repoHost === repo.host && row.repoOwner === repo.owner && row.repoName === repo.repo) return { kind: "completed", result: { id: row.id } };
+    return { kind: "ambiguous", error: "credential_delegation_recovery_ambiguous: inspect the grant and execution attempt before retrying." };
+  });
   if (reserved.kind === "completed") return;
   if (reserved.kind !== "execute") throw new Error(reserved.error);
   const id = randomUUID();

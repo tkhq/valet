@@ -26,10 +26,11 @@ import type {
   ToolContext,
 } from "@valet/engine";
 import securityPlugin from "@valet/plugin-security/plugin";
+import type { DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { loadSessionMeta } from "./session-meta.js";
-import { agentSessions, childWatches, securityCells, securityFiles } from "../schema/index.js";
+import { agentSessions, childWatches, delegationEnvelopes, securityCells, securityFiles } from "../schema/index.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
 import type { CreateSessionResponse, GetSessionSecurityResponse } from "../wire/types.js";
 import {
@@ -108,6 +109,11 @@ async function engagementOf(a: TestApi, sessionId: string): Promise<GetSessionSe
   const res = await fetch(`${a.baseUrl}/api/sessions/${sessionId}/security`);
   expect(res.status).toBe(200);
   return (await res.json()) as GetSessionSecurityResponse;
+}
+
+async function seedEdge(parentSessionId: string, childSessionId: string): Promise<void> {
+  const envelope: DelegationEnvelopeV1 = { schemaVersion: 1, organizationId: "local-org", parentSessionId, parentThreadId: "t-runner", childSessionId, actorUserId: "local-user", owner: { type: "user", id: "local-user" }, depth: 1, parentRootCapable: true, constraints: {}, capabilities: ["agent.signal"], policyDigest: "test-policy", sourceBundleDigest: "test-source", evaluatorKind: "local_valet", engineDigest: "test-engine" };
+  await api.providers.db.insert(delegationEnvelopes).values({ childSessionId, orgId: "local-org", parentSessionId, envelope, decisionId: `test-decision:${childSessionId}`, createdAt: Date.now() });
 }
 
 describe("buildSecurityRunnerTools", () => {
@@ -392,17 +398,11 @@ describe("sec_cell_complete", () => {
     const engagementId = found!.engagement.id;
     await service.startEngagement(engagementId, { resolvedSha: SHA });
 
-    // Claim cell 1 with a fake spawn — no engine child needed to rule on
-    // the exit condition.
     const { cell } = await service.dispatchCell(engagementId, {
       spawn: async () => ({ childSessionId: "child-viol" }),
     });
 
     const now = Date.now();
-    // A real spawn creates the child's session row; the mock spawn above does
-    // not, so insert it — `resolveChildSettlement` (the shared settle check the
-    // /complete route now uses) verifies the child session exists and is not
-    // deleted before trusting the watch flag.
     await db.insert(agentSessions).values({
       id: "child-viol",
       userId: "local-user",
@@ -427,6 +427,7 @@ describe("sec_cell_complete", () => {
       settled: true,
       createdAt: now,
     });
+    await seedEdge(created.id, "child-viol");
     await db.insert(securityFiles).values({
       id: `file_${randomUUID()}`,
       engagementId,
@@ -521,9 +522,6 @@ describe("sec_wait", () => {
     const { cell } = await service.dispatchCell(found!.engagement.id, {
       spawn: async () => ({ childSessionId: "child-settled" }),
     });
-    // A real spawn creates the child's session row; the mock does not, so
-    // insert it — the status route verifies the child session exists before
-    // trusting the settled flag (else it reports CHILD GONE).
     await db.insert(agentSessions).values({
       id: "child-settled",
       userId: "local-user",
@@ -538,8 +536,6 @@ describe("sec_wait", () => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
-    // A settled watch → sec_wait must not park; it returns the snapshot so the
-    // runner rules on the cell immediately.
     await db.insert(childWatches).values({
       childSessionId: "child-settled",
       queueItemId: `qi-${cell.id}`,
@@ -551,9 +547,9 @@ describe("sec_wait", () => {
       createdAt: Date.now(),
     });
 
+    await seedEdge(created.id, "child-settled");
     const started = Date.now();
     const result = await secWaitTool.execute({ timeout_seconds: 30 }, toolCtx(api, created.id));
-    // Returned promptly (no 30s park) with a settled snapshot, no wait note.
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(result.text).toContain("running cell child child-settled: settled=true");
     expect(result.text).not.toContain("sec_wait: still running");

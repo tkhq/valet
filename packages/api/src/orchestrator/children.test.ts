@@ -40,7 +40,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, credentialDelegations, delegationEnvelopes, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, authorizationExecutionAttempts, bakes, childWatches, credentialDelegations, delegationEnvelopes, eventDropLog, imageSources, sandboxTokens, securityCells, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import type { AuthorizationRequest, DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
@@ -237,16 +237,11 @@ describe("buildChildSpawner", () => {
     });
     const parentThread = parent.thread("web:default");
     const owner = { type: "team" as const, id: "team-x" };
+    const childSessionId = "child_security_recovery", parentOperationId = "security-dispatch:engagement:cell:1";
+    await api.providers.db.insert(securityCells).values({ id: "cell", engagementId: "engagement", ordinal: 1, persona: "reviewer", goal: "review", dir: "01-review", status: "running", attempts: 1, childSessionId, createdAt: Date.now() });
+    const context = { parentSessionId: "parent-spawn", parentThreadId: parentThread.id, parentOperationId, actorUserId: "local-user", owner };
 
-    const result = await spawner(
-      { prompt: "do the thing", title: "The Thing" },
-      {
-        parentSessionId: "parent-spawn",
-        parentThreadId: parentThread.id,
-        actorUserId: "local-user",
-        owner,
-      },
-    );
+    const result = await spawner({ prompt: "do the thing", title: "The Thing", sessionId: childSessionId }, context);
     expect(result.childSessionId).toMatch(/^child_/);
     expect(result.queueItemId).toBeTruthy();
 
@@ -285,6 +280,15 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null });
+    const replay = await buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context);
+    expect(replay).toEqual(result);
+    await api.providers.db.update(securityCells).set({ attempts: 2 });
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null });
+    await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
+    await api.providers.db.update(securityCells).set({ attempts: 1 });
+    await api.providers.db.delete(childWatches).where(eq(childWatches.childSessionId, result.childSessionId));
+    await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
   });
 
   it("rejects a child attempting nested delegation before side effects", async () => {

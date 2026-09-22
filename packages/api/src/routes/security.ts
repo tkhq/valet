@@ -1111,7 +1111,7 @@ securityRouter.get("/:id/security/status", async (c) => {
   let runningChild: GetSecurityStatusResponse["runningChild"] = null;
   const running = result.cells.find((cell) => cell.status === "running");
   if (running?.childSessionId) {
-    const statusReader = buildChildStatusReader({ db, engineHost, engineStore, prebuildService });
+    const statusReader = buildChildStatusReader({ db, engineHost, engineStore, prebuildService, canonicalAuthorizationService: c.var.providers.canonicalAuthorizationService });
     const status = await statusReader(
       { childSessionId: running.childSessionId },
       { parentSessionId: sessionId },
@@ -1701,7 +1701,7 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
   let settled = false;
   if (cell.childSessionId) {
     const resolved = await resolveChildSettlement(
-      { db, engineHost, engineStore, prebuildService },
+      { db, engineHost, engineStore, prebuildService, canonicalAuthorizationService: c.var.providers.canonicalAuthorizationService },
       cell.childSessionId,
       sessionId,
     );

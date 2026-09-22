@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AuthorizationRequest, DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, childWatches, credentialDelegations, delegationEnvelopes, sessionRepos } from "../schema/index.js";
+import { agentSessions, authorizationExecutionAttempts, childWatches, credentialDelegations, delegationEnvelopes, sessionRepos } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 import {
   assertRepositoryCredentialDelegation,
@@ -189,6 +189,17 @@ describe("repository credential delegation", () => {
     const grants = await api.providers.db.select().from(credentialDelegations);
     expect(grants).toHaveLength(2);
     expect(grants.filter((row) => row.revokedAt === null)).toHaveLength(1);
+    const active = grants.find((row) => row.revokedAt === null)!;
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
+    await expect(createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation")).resolves.toBeUndefined();
+    await api.providers.db.delete(credentialDelegations).where(eq(credentialDelegations.id, active.id));
+    await api.providers.db.insert(credentialDelegations).values({ ...active, childWatchId: "mismatched" });
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
+    await expect(createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation")).rejects.toThrow("credential_delegation_recovery_ambiguous");
+    await api.providers.db.delete(credentialDelegations).where(eq(credentialDelegations.id, active.id));
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
+    await createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation");
+    expect((await api.providers.db.select().from(authorizationExecutionAttempts)).map((row) => row.outcome)).toContain("completed");
   });
 
   it("revokes only grants bound to an aborted operation", async () => {

@@ -8,12 +8,26 @@ type Attempt = typeof authorizationExecutionAttempts.$inferSelect;
 export type DurableReplay<T> = { kind: "execute"; attemptId: string } | { kind: "completed"; result: T } | { kind: "failed"; error: string; result?: T } | { kind: "indeterminate"; error: string };
 export type DurableSettlement<T> = { outcome: "completed"; result: T } | { outcome: "failed"; error: string; result?: T };
 
-export async function reserveCanonicalExecution<T>(db: AppDb, decision: PolicyDecision, executionInputDigest: string, parse: (value: unknown) => T, now: () => number): Promise<DurableReplay<T>> {
+export type StartedRecovery<T> = { kind: "completed"; result: T } | { kind: "absent" } | { kind: "ambiguous"; error: string };
+
+export async function reserveCanonicalExecution<T>(db: AppDb, decision: PolicyDecision, executionInputDigest: string, parse: (value: unknown) => T, now: () => number, recover?: (tx: AppDb) => Promise<StartedRecovery<T>>): Promise<DurableReplay<T>> {
   const identity = await canonicalExecutionIdentity(db, decision, executionInputDigest);
   const attemptId = `attempt:${identity.decisionId.slice("decision:".length)}`;
   const inserted = await db.insert(authorizationExecutionAttempts).values({ attemptId, decisionId: identity.decisionId, outcome: "started", targetIdempotencyKey: identity.idempotencyKey, externalOperationIds: [], startedAt: now(), createdAt: now() }).onConflictDoNothing().returning({ attemptId: authorizationExecutionAttempts.attemptId });
   if (inserted[0]) return { kind: "execute", attemptId };
-  return replay(await loadAttempt(db, attemptId), identity, parse);
+  if (!recover) return replay(await loadAttempt(db, attemptId), identity, parse);
+  return db.transaction(async (tx) => {
+    const locked = await tx.update(authorizationExecutionAttempts).set({ startedAt: now() }).where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.outcome, "started"))).returning({ attemptId: authorizationExecutionAttempts.attemptId });
+    if (!locked[0]) return replay(await loadAttempt(tx, attemptId), identity, parse);
+    const recovered = await recover(tx);
+    if (recovered.kind === "completed") {
+      await tx.update(authorizationExecutionAttempts).set({ outcome: "completed", redactedResult: recovered.result, finishedAt: now() }).where(eq(authorizationExecutionAttempts.attemptId, attemptId));
+      return recovered;
+    }
+    if (recovered.kind === "ambiguous") return { kind: "indeterminate", error: recovered.error };
+    await tx.update(authorizationExecutionAttempts).set({ redactedResult: null, redactedError: null, finishedAt: null, startedAt: now() }).where(eq(authorizationExecutionAttempts.attemptId, attemptId));
+    return { kind: "execute", attemptId };
+  });
 }
 
 export async function completeCanonicalExecution<T>(db: AppDb, decision: PolicyDecision, executionInputDigest: string, attemptId: string, settlement: DurableSettlement<T>, normalize: (value: DurableSettlement<T>) => DurableSettlement<T>, parse: (value: unknown) => T, now: () => number): Promise<DurableSettlement<T>> {
