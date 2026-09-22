@@ -51,6 +51,7 @@ export class RecordingSandboxProvider implements SandboxProvider {
       warmPool: false,
       hibernation: false,
       customImage: true,
+      dockerSupport: true,
     };
   }
 
