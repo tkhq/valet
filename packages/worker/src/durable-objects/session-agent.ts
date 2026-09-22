@@ -5174,7 +5174,7 @@ export class SessionAgentDO {
       const sessionId = this.sessionState.sessionId;
       if (sessionId) {
         try {
-          await addActiveSeconds(this.appDb, sessionId, seconds);
+          await addActiveSeconds(this.env.DB, sessionId, seconds);
         } catch (err) {
           console.error('[SessionAgentDO] Failed to flush active seconds:', err);
         }

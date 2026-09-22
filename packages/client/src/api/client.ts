@@ -1,5 +1,4 @@
 import { useAuthStore } from '@/stores/auth';
-import { router } from '@/app';
 
 // In production, use the worker URL. In development, proxy through Vite.
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -39,10 +38,10 @@ interface RequestOptions extends Omit<RequestInit, 'body' | 'headers'> {
   headers?: Record<string, string>;
 }
 
-export async function apiClient<T>(
+export async function apiResponse(
   endpoint: string,
   options: RequestOptions = {}
-): Promise<T> {
+): Promise<Response> {
   const { body, headers: customHeaders, ...rest } = options;
 
   const token = useAuthStore.getState().token;
@@ -72,6 +71,7 @@ export async function apiClient<T>(
 
     if (response.status === 401) {
       useAuthStore.getState().clearAuth();
+      const { router } = await import('@/app');
       router.navigate({ to: '/login' });
     }
 
@@ -83,14 +83,22 @@ export async function apiClient<T>(
     );
   }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
+  return response;
+}
 
+export async function apiClient<T>(
+  endpoint: string,
+  options: RequestOptions = {}
+): Promise<T> {
+  const response = await apiResponse(endpoint, options);
+  if (response.status === 204) return undefined as T;
   return response.json();
 }
 
 export const api = {
+  raw: (endpoint: string, options?: RequestOptions) =>
+    apiResponse(endpoint, options),
+
   get: <T>(endpoint: string, options?: RequestOptions) =>
     apiClient<T>(endpoint, { ...options, method: 'GET' }),
 
