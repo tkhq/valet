@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
 import { requestSubjectDigest } from "@valet/engine/authorization";
-import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgressAuthorizationRouter, parseAuthorizationRequestV1, type AuthorizationRequestV1 } from "./managed-egress-authorization.js";
+import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgressAuthorizationRouter, parseAuthorizationRequestV1, type AuthorizationRequestV1, type ManagedEgressBindingActivation } from "./managed-egress-authorization.js";
 
 const identity = { orgId: "org-1", sessionId: "session-1", workloadId: "workload-1", proxyId: "proxy-1", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION };
 const token = "t".repeat(48);
-const activation = {
+const activation: ManagedEgressBindingActivation = {
   effective: {
     requested: true as const, configured: true as const, ready: true as const, effective: true as const,
     identity, proxyArtifact: "hematite@sha256:test",
@@ -159,6 +159,38 @@ describe("managed egress callback", () => {
     registry.register({ ...identity, orgId: "org-2", proxyId: "proxy-3" }, "v".repeat(48), undefined, 20);
     expect(() => registry.register({ ...identity, orgId: "org-3", proxyId: "proxy-4" }, "w".repeat(48), undefined, 20)).toThrow(/registry capacity/);
     expect(registry.bindingCount).toBe(2);
+  });
+
+  it("prevents cross-sandbox reuse and never evaluates an unforced binding", async () => {
+    const authorize = vi.fn();
+    registry = new ManagedEgressBindingRegistry({ authorization: { authorize } });
+    registry.register(identity, token);
+    registry.register({ ...identity, sessionId: "session-2", workloadId: "workload-2", proxyId: "proxy-2" }, "u".repeat(48));
+    expect(await registry.authorize(token, { ...request, subject: { session_id: "session-2", workload_id: "workload-2" } })).toBeNull();
+    expect((await registry.authorize(token, request))?.reason_code).toBe("unsupported_prerequisite");
+    expect(authorize).not.toHaveBeenCalled();
+    expect(() => registry.register({ ...identity, proxyId: "proxy-3" }, "v".repeat(48), undefined, Date.now(), { ...activation, effective: { ...activation.effective, identity: { ...identity, proxyId: "other-proxy" } } })).toThrow(/observed effective boundary/);
+  });
+
+  it.each([
+    ["allow", "allow", "policy_allow"],
+    ["deny", "deny", "policy_denied"],
+    ["failure", "failure", "authorization_failure"],
+  ] as const)("evaluates and audits %s once across concurrent callback replay", async (_name, outcome, reason) => {
+    const authorize = vi.fn(async (canonicalRequest: Parameters<import("../authorization/canonical-authorization-service.js").CanonicalAuthorizationService["authorize"]>[0]) => {
+      if (outcome === "failure") throw new Error("audit boundary failed");
+      return {
+        schemaVersion: 1 as const, requestId: canonicalRequest.requestId, requestSubjectDigest: requestSubjectDigest(canonicalRequest),
+        inputDigest: "a".repeat(64), policyDigest: "b".repeat(64), sourceBundleDigest: "c".repeat(64), evaluator: { kind: "local_valet" as const, engineDigest: "d".repeat(64) },
+        decision: { effect: outcome, reasonCode: "organization_policy", matchedRuleIds: ["egress-rule"], obligations: [], redactions: [] },
+        decisionDigest: "e".repeat(64), obligationDigest: "f".repeat(64), evaluatedAtMs: 100,
+      };
+    });
+    registry = new ManagedEgressBindingRegistry({ authorization: { authorize }, now: () => 100 });
+    registry.register(identity, token, undefined, 90, activation);
+    const responses = await Promise.all(Array.from({ length: 16 }, () => registry.authorize(token, request)));
+    expect(responses.every((response) => response?.reason_code === reason)).toBe(true);
+    expect(authorize).toHaveBeenCalledTimes(1);
   });
 
   it("keeps rotate, expiry, registration, and replay deterministic", async () => {

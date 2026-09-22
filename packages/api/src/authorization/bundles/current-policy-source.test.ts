@@ -373,6 +373,7 @@ describe("current policy source builder", () => {
     expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ id: "one" }), orgRule({ id: "two" })] }))).toThrow(/ambiguous/);
     expect(() => buildCurrentPolicySource(snapshot({ teamIds: [], teamPolicies: [teamRule()] }))).toThrow(/ownership/);
     expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ paramMatchers: [{ path: "to", op: "regex", value: "(?=x)" }] })] }))).toThrow(/losslessly/);
+    expect(() => buildCurrentPolicySource(snapshot({ organizationPolicies: [orgRule({ paramMatchers: [{ path: "destination.host", op: "suffix", value: "example.com" }] })] }))).toThrow(/authored-only/);
     expect(() => buildCurrentPolicyDynamicFacts({ organizationId: ORG, grants: [{
       schemaVersion: 1, id: "bad", organizationId: "other", policyKey: "gmail.send_email", service: "gmail",
       actionId: "gmail.send_email", riskLevel: "high", appliesIn: "session", sessionId: "session-1",
