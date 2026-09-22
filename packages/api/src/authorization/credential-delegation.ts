@@ -98,7 +98,7 @@ export async function authorizeRepositoryCredentialDelegation(input: {
   if (!provenance) throw new CredentialDelegationDeniedError("credential_delegation_denied");
   const operationId = opaqueId(`${input.parentSessionId}:${input.parentThreadId}:${input.parentOperationId}:${input.childSessionId}:${repo.host}:${repo.owner}/${repo.repo}`);
   const adapted = adaptCredentialDelegate({ schemaVersion: 1, organizationId: input.orgId, actorUserId: input.actorUserId, principal: input.owner,
-    requestId: `credential-delegation:${operationId}`, operationId,
+    requestId: `credential-delegation:${operationId}`, operationId, parentSessionId: input.parentSessionId,
     evaluationTimeMs: now, service: "github", credentialClass: "repository_transport", owner: input.owner,
     delegatorSessionId: input.parentSessionId, delegateeSessionId: input.childSessionId, operations: OPERATIONS,
     resource: { type: "repository", id: `${repo.host}:${repo.owner}/${repo.repo}` }, expiresAtMs: now + DAY_MS, transitive: false });

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AuthorizationRequest, PolicyDecisionV1 } from "@valet/engine/authorization";
+import { adaptCredentialDelegate, type AuthorizationRequest, type PolicyDecisionV1 } from "@valet/engine/authorization";
 import { SourceBundleHost } from "./host.js";
 import { InMemorySourceBundleStorage } from "./in-memory-storage.js";
 import { LocalValetEvaluator } from "../evaluators/local-valet.js";
@@ -118,6 +118,48 @@ describe("current policy source builder", () => {
     });
     const unsupported = await evaluate(snapshot(), request({ kind: "api.route" }));
     expect(unsupported.decision).toMatchObject({ effect: "allow", reasonCode: "bundle_default", matchedRuleIds: ["standard.authenticated_access"] });
+  });
+
+  it("allows only one-level repository transport delegation by default", async () => {
+    const delegated = adaptCredentialDelegate({
+      schemaVersion: 1,
+      organizationId: ORG,
+      actorUserId: "user-1",
+      principal: { type: "user", id: "user-1" },
+      requestId: "credential-delegate-1",
+      operationId: "credential-delegate-operation-1",
+      evaluationTimeMs: NOW,
+      parentSessionId: "parent-1",
+      service: "github",
+      credentialClass: "repository_transport",
+      owner: { type: "user", id: "user-1" },
+      delegatorSessionId: "parent-1",
+      delegateeSessionId: "child-1",
+      operations: ["repository.clone", "repository.fetch", "repository.push"],
+      resource: { type: "repository", id: "github:acme/widgets" },
+      expiresAtMs: NOW + 86_400_000,
+      transitive: false,
+    }).request;
+    expect((await evaluate(snapshot(), delegated)).decision).toMatchObject({
+      effect: "allow",
+      matchedRuleIds: ["standard.credential.delegate.repository"],
+    });
+
+    for (const [name, parameters] of [
+      ["service", { ...delegated.action.parameters, service: "onepassword" }],
+      ["api", { ...delegated.action.parameters, credentialClass: "api_key" }],
+      ["onepassword", { ...delegated.action.parameters, credentialClass: "onepassword_item" }],
+      ["llm", { ...delegated.action.parameters, credentialClass: "llm_provider" }],
+      ["owner", { ...delegated.action.parameters, owner: { type: "team", id: "team-1" } }],
+      ["operation", { ...delegated.action.parameters, operations: ["repository.clone", "api.call"] }],
+      ["resource", { ...delegated.action.parameters, resource: { type: "repository", id: "gitlab:acme/widgets" } }],
+      ["transitive", { ...delegated.action.parameters, transitive: true }],
+    ] as const) {
+      const denied = await evaluate(snapshot(), { ...delegated, requestId: `denied-${name}`, action: { ...delegated.action, parameters } });
+      expect(denied.decision.effect).toBe("deny");
+    }
+    const orgDenied = await evaluate(snapshot({ organizationPolicies: [orgRule({ authorizationKind: "credential.delegate", actionId: "credential.delegate", mode: "deny" })] }), delegated);
+    expect(orgDenied.decision).toMatchObject({ effect: "deny", reasonCode: "organization_policy" });
   });
 
   it("keeps route and resource policy kinds independent", async () => {

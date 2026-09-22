@@ -497,7 +497,9 @@ describe("buildChildSpawner", () => {
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
     githubFixture = startGithubFixture();
     api = await bootTestApi({ githubApiUrl: githubFixture.url });
-    mockDelegationDecision(api, () => "allow");
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "api_key", accessToken: "user-test-token",
+    });
     await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github", {
       type: "api_key", accessToken: "org-test-token",
     });
