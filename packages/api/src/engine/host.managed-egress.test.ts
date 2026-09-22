@@ -49,6 +49,21 @@ describe("managed egress restart options", () => {
     expect(newRegistry.authorize(newRestore.managedEgress.proxyToken, authorizationRequest)?.decision).toBe("deny");
   });
 
+  it("rotates by revoking the old binding before registering fresh delivered material", () => {
+    const registry = new ManagedEgressBindingRegistry();
+    const oldOptions = managedEgressRestoreOptions(persisted, { sessionId: identity.sessionId, orgId: identity.orgId }, registry);
+    if (!oldOptions?.managedEgress || !oldOptions.managedEgressLifecycle) throw new Error("expected old options");
+    oldOptions.managedEgressLifecycle.registerCallbackBinding();
+
+    const freshOptions = managedEgressRestoreOptions(persisted, { sessionId: identity.sessionId, orgId: identity.orgId }, registry);
+    if (!freshOptions?.managedEgress || !freshOptions.managedEgressLifecycle) throw new Error("expected fresh options");
+    oldOptions.managedEgressLifecycle.revokeCallbackBinding();
+    expect(registry.authorize(oldOptions.managedEgress.proxyToken, authorizationRequest)).toBeNull();
+    expect(registry.authorize(freshOptions.managedEgress.proxyToken, authorizationRequest)).toBeNull();
+    freshOptions.managedEgressLifecycle.registerCallbackBinding();
+    expect(registry.authorize(freshOptions.managedEgress.proxyToken, authorizationRequest)?.decision).toBe("deny");
+  });
+
   it("fails closed without registry or with mismatched durable identity", () => {
     expect(() => managedEgressRestoreOptions(persisted, { sessionId: identity.sessionId, orgId: identity.orgId }, undefined)).toThrow(ManagedEgressPrerequisiteError);
     expect(() => managedEgressRestoreOptions(persisted, { sessionId: "other", orgId: identity.orgId }, new ManagedEgressBindingRegistry())).toThrow(ManagedEgressPrerequisiteError);

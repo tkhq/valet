@@ -1021,7 +1021,7 @@ export class SandboxAttachment {
       });
       if (this.createOpts.managedEgress) {
         const observed = (await provider.status(sandbox.id)).managedEgress;
-        if (!observed || observed.identity.proxyId !== this.createOpts.managedEgress.identity.proxyId) {
+        if (!observed || JSON.stringify(observed.identity) !== JSON.stringify(this.createOpts.managedEgress.identity)) {
           this.createOpts.managedEgressLifecycle?.revokeCallbackBinding();
           await provider.destroy(sandbox.id).catch(() => {});
           throw new ManagedEgressPrerequisiteError(

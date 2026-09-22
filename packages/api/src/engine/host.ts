@@ -869,15 +869,18 @@ export class EngineHost {
    */
   private trackHibernationWake(sessionId: string, session: Session): void {
     let wasSuspended = false;
+    const persistReadyState = () => {
+      void session.toData()
+        .then((data) => this.opts.engineStore.saveSession(data))
+        .catch((err) => console.error(`EngineHost: managed sandbox state save failed for session ${sessionId}:`, err));
+    };
     session.attachment.onStatus((status) => {
       if (status.state === "suspended") {
         wasSuspended = true;
         return;
       }
       if (status.state === "ready") {
-        void session.toData()
-          .then((data) => this.opts.engineStore.saveSession(data))
-          .catch((err) => console.error(`EngineHost: managed sandbox state save failed for session ${sessionId}:`, err));
+        persistReadyState();
         if (wasSuspended) {
           wasSuspended = false;
           if (this.opts.onWake) {
@@ -913,6 +916,7 @@ export class EngineHost {
         );
       }
     });
+    if (session.attachment.state === "ready") persistReadyState();
   }
 
   /**
