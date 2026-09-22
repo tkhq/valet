@@ -39,6 +39,24 @@ type Window = (typeof WINDOWS)[number];
 const TODAY_UTC = new Date().toISOString().slice(0, 10);
 const CURRENT_MONTH_UTC = TODAY_UTC.slice(0, 7);
 
+function usageErrorText(error: unknown): string {
+  if (typeof error === "object" && error !== null && "payload" in error) {
+    const payload = error.payload;
+    if (typeof payload === "object" && payload !== null && "error" in payload) {
+      const detail = payload.error;
+      if (
+        typeof detail === "object" &&
+        detail !== null &&
+        "message" in detail &&
+        typeof detail.message === "string"
+      ) {
+        return detail.message;
+      }
+    }
+  }
+  return String(error);
+}
+
 function fmt(n: number) {
   return n.toLocaleString();
 }
@@ -293,7 +311,22 @@ export function UsagePage() {
       : `${period.start} to ${period.end}`;
 
   function handleWindowChange(w: Window) {
+    setMonth("");
+    setCustomStart("");
+    setCustomEnd("");
     setPeriod({ kind: "lookback", window: w });
+  }
+
+  function handleMonthChange(next: string) {
+    setMonth(next);
+    setCustomStart("");
+    setCustomEnd("");
+    setPeriod(next ? { kind: "month", month: next } : { kind: "lookback", window: "7d" });
+  }
+
+  function applyCustomPeriod() {
+    setMonth("");
+    setPeriod({ kind: "custom", start: customStart, end: customEnd });
   }
 
   return (
@@ -350,12 +383,13 @@ export function UsagePage() {
               aria-label="Calendar month"
               max={CURRENT_MONTH_UTC}
               value={month}
-              onChange={(event) => {
-                const next = event.target.value;
-                setMonth(next);
-                if (next) setPeriod({ kind: "month", month: next });
-              }}
-              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+              onChange={(event) => handleMonthChange(event.target.value)}
+              aria-current={period.kind === "month" ? "date" : undefined}
+              className={`min-h-11 rounded border bg-paper px-2 sm:min-h-0 ${
+                period.kind === "month"
+                  ? "border-moss bg-moss-wash font-medium text-moss"
+                  : "border-line text-ink"
+              }`}
             />
           </label>
           <label className="text-sm text-muted">
@@ -385,8 +419,13 @@ export function UsagePage() {
           <button
             type="button"
             disabled={!customStart || !customEnd || customStart > customEnd}
-            onClick={() => setPeriod({ kind: "custom", start: customStart, end: customEnd })}
-            className="min-h-11 rounded border border-line px-3 py-2 text-sm text-muted hover:border-ink hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1"
+            onClick={applyCustomPeriod}
+            aria-pressed={period.kind === "custom"}
+            className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
+              period.kind === "custom"
+                ? "border-moss bg-moss-wash font-medium text-moss"
+                : "border-line text-muted hover:border-ink hover:text-ink"
+            }`}
           >
             Apply dates
           </button>
@@ -435,7 +474,7 @@ export function UsagePage() {
         {!scopeKnown || breakdownQ.isLoading ? (
           <p className="text-sm text-muted">Loading…</p>
         ) : breakdownQ.error ? (
-          <p className="text-sm text-danger-600">{String(breakdownQ.error)}</p>
+          <p className="text-sm text-danger-600">{usageErrorText(breakdownQ.error)}</p>
         ) : breakdown ? (
           <>
             {/* Total stat cards — cost + token types + cache-hit-rate + unpriced */}

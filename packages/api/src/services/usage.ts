@@ -321,7 +321,7 @@ export async function getUsageBreakdown(
     ? {
         days: period.activityDays ?? Math.max(1, Math.ceil((period.endMs - period.startMs) / DAY_MS)),
         sinceMs: period.activityStartMs ?? period.startMs,
-        untilMs: period.endMs - (period.kind === "lookback" ? 1 : 0),
+        untilMs: period.endMs,
         timezone: "UTC" as const,
       }
     : undefined;
@@ -489,10 +489,11 @@ export async function getUsageSessions(
 const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced";
 
 function csvEscape(v: unknown): string {
-  const s = v === null || v === undefined ? "" : String(v);
-  // Quote on comma, quote, newline OR carriage return — a lone \r in a title
-  // would otherwise break a CSV row boundary.
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const value = v === null || v === undefined ? "" : String(v);
+  const formulaPrefix = /^[-=+@\t\r]/.test(value);
+  const safe = formulaPrefix ? `'${value}` : value;
+  // Formula-like values stay quoted after the neutralizing apostrophe.
+  return formulaPrefix || /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 /** One CSV row per billable turn for the window/scope, capped at 100k rows.

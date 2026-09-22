@@ -57,10 +57,12 @@ function utcMonth(value: string): { startMs: number; endMs: number } | undefined
   if (!/^\d{4}-\d{2}$/.test(value)) return undefined;
   const [year, month] = value.split("-").map(Number);
   if (year === undefined || month === undefined || month < 1 || month > 12) return undefined;
-  return {
-    startMs: Date.UTC(year, month - 1, 1),
-    endMs: Date.UTC(year, month, 1),
-  };
+  const startMs = Date.UTC(year, month - 1, 1);
+  const start = new Date(startMs);
+  if (start.getUTCFullYear() !== year || start.getUTCMonth() !== month - 1 || start.getUTCDate() !== 1) {
+    return undefined;
+  }
+  return { startMs, endMs: Date.UTC(year, month, 1) };
 }
 
 function dateLabel(time: number): string {

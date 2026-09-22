@@ -3666,7 +3666,7 @@ export interface UsageBreakdownResponse {
     /** Team admins only. Distinct session-days divided by dailyAgentWindow.days. */
     avgDailyActiveAgents?: number;
   })[];
-  /** Calendar window for agent activity; spend continues to use the rolling window. */
+  /** Calendar window for agent activity. `sinceMs` is inclusive and `untilMs` is exclusive. */
   dailyAgentWindow?: { days: number; sinceMs: number; untilMs: number; timezone: "UTC" };
   byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
 }

@@ -19,6 +19,12 @@ describe("resolveUsagePeriod", () => {
     });
   });
 
+  it("rolls December into the next UTC year", () => {
+    const december = period({ month: "2023-12" });
+    expect(december.startMs).toBe(Date.UTC(2023, 11, 1));
+    expect(december.endMs).toBe(Date.UTC(2024, 0, 1));
+  });
+
   it("includes leap day and keeps the end exclusive", () => {
     const leap = period({ start: "2024-02-28", end: "2024-02-29" });
     expect(leap.startMs).toBe(Date.UTC(2024, 1, 28));
@@ -36,6 +42,7 @@ describe("resolveUsagePeriod", () => {
     [{ start: "2022-01-01", end: "2024-01-01" }, "range_too_large"],
     [{ start: "2024-02-30", end: "2024-03-01" }, "invalid_date"],
     [{ month: "2024-13" }, "invalid_date"],
+    [{ month: "0099-01" }, "invalid_date"],
     [{ month: "2024-04" }, "future_range"],
     [{ start: "2024-03-01" }, "invalid_period"],
     [{ window: "7d", month: "2024-02" }, "invalid_period"],

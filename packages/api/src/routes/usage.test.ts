@@ -356,7 +356,12 @@ describe("GET /api/usage/export.csv", () => {
     api = await bootTestApi();
     const now = Date.now();
     await api.providers.db.insert(agentSessions).values({ id: "s-csv", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now, title: "CSV" });
-    await seedEngineEntry(api, "e-csv", "s-csv", now);
+    const formulaModels = ["=1+1", "+SUM(A1)", "-2+3", "@cmd", "\tformula", "\rformula"];
+    for (const [index, model] of formulaModels.entries()) {
+      const entryId = `e-csv-${index}`;
+      await seedEngineEntry(api, entryId, "s-csv", now + index);
+      await api.providers.db.execute(sql`UPDATE engine_entries SET model = ${model} WHERE id = ${entryId}`);
+    }
 
     const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d`);
     expect(res.status).toBe(200);
@@ -367,6 +372,7 @@ describe("GET /api/usage/export.csv", () => {
     expect(header).toContain("timestamp,use_case,model");
     expect(header).toContain("cost_usd,priced");
     expect(rows.some((r) => r.includes("session"))).toBe(true);
+    for (const model of formulaModels) expect(text).toContain(`,"'${model}",`);
   });
 });
 
@@ -528,7 +534,7 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     await seedActivity(api);
     const scope = { scope: "team", orgId: "local-org", teamId: "activity-team", byMember: true } as const;
     const week = await getUsageBreakdown(api.providers.db, { scope, windowMs: 7 * DAY, now });
-    expect(week.dailyAgentWindow).toEqual({ days: 7, sinceMs: today - 6 * DAY, untilMs: now, timezone: "UTC" });
+    expect(week.dailyAgentWindow).toEqual({ days: 7, sinceMs: today - 6 * DAY, untilMs: now + 1, timezone: "UTC" });
     const members = new Map(week.byUser?.map((r) => [r.userId, r]));
     // Assistant on three days plus the child today; not turns or range uniques.
     expect(members.get("test-member")?.avgDailyActiveAgents).toBeCloseTo(4 / 7);

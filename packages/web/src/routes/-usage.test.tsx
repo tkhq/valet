@@ -953,4 +953,43 @@ describe("UsagePage custom period controls", () => {
     expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
     expect(csvLink.textContent).toContain("2024-02-01 to 2024-02-29");
   });
+
+  it("shows the server range error message", () => {
+    breakdownResult = {
+      data: undefined,
+      isLoading: false,
+      error: Object.assign(new Error("GET /usage/breakdown → 400"), {
+        payload: { error: { code: "reversed_range", message: "Choose an end date on or after the start date." } },
+      }),
+    };
+    render(<UsagePage />);
+    expect(screen.getByText("Choose an end date on or after the start date.")).toBeTruthy();
+    expect(screen.queryByText(/GET \/usage\/breakdown/)).toBeNull();
+  });
+
+  it("clears inactive controls and marks the active period", () => {
+    render(<UsagePage />);
+    const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
+    const start = screen.getByLabelText("Custom start date") as HTMLInputElement;
+    const end = screen.getByLabelText("Custom end date") as HTMLInputElement;
+    const apply = screen.getByRole("button", { name: "Apply dates" });
+
+    fireEvent.change(month, { target: { value: "2024-02" } });
+    expect(month.getAttribute("aria-current")).toBe("date");
+    fireEvent.click(screen.getByRole("button", { name: "24h" }));
+    expect(month.value).toBe("");
+    expect(month.getAttribute("aria-current")).toBeNull();
+
+    fireEvent.change(start, { target: { value: "2024-02-01" } });
+    fireEvent.change(end, { target: { value: "2024-02-29" } });
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.change(month, { target: { value: "2024-01" } });
+    expect(start.value).toBe("");
+    expect(end.value).toBe("");
+    expect(apply.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.change(month, { target: { value: "" } });
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "lookback", window: "7d" });
+  });
 });
