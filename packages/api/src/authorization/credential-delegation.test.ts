@@ -223,7 +223,7 @@ describe("repository credential delegation", () => {
     allowCredentialDelegation(api);
     const now = Date.now();
     await createGrant(now);
-    await expect(createGrant(now)).resolves.toBeUndefined();
+    await expect(createGrant(now + 1)).resolves.toBeUndefined();
     await expect(createGrant(now, { type: "user", id: "local-user" }, "other-attempt"))
       .rejects.toBeInstanceOf(CredentialDelegationInvalidError);
     expect(await api.providers.db.select().from(credentialDelegations)).toHaveLength(1);

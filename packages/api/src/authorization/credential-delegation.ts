@@ -94,15 +94,15 @@ export async function authorizeRepositoryCredentialDelegation(input: {
     || existing.parentOperationId !== input.parentOperationId)) {
     throw new CredentialDelegationInvalidError();
   }
-  const provenance = await provenanceFor(input.db, input.orgId, input.owner, repo.owner, input.binding.auth);
+  const provenance = await provenanceFor(input.db, input.orgId, input.owner, repo.owner, input.binding.auth), grantNow = existing?.issuedAt ?? now;
   if (!provenance) throw new CredentialDelegationDeniedError("credential_delegation_denied");
   const generation = prior.filter((row) => row.revokedAt !== null).length;
   const operationId = opaqueId(`${input.parentSessionId}:${input.parentThreadId}:${input.parentOperationId}:${input.childSessionId}:${repo.host}:${repo.owner}/${repo.repo}:${generation}`);
   const adapted = adaptCredentialDelegate({ schemaVersion: 1, organizationId: input.orgId, actorUserId: input.actorUserId, principal: input.owner,
     requestId: `credential-delegation:${operationId}`, operationId, parentSessionId: input.parentSessionId,
-    evaluationTimeMs: now, service: "github", credentialClass: "repository_transport", owner: input.owner,
+    evaluationTimeMs: grantNow, service: "github", credentialClass: "repository_transport", owner: input.owner,
     delegatorSessionId: input.parentSessionId, delegateeSessionId: input.childSessionId, operations: OPERATIONS,
-    resource: { type: "repository", id: `${repo.host}:${repo.owner}/${repo.repo}` }, expiresAtMs: now + DAY_MS, transitive: false });
+    resource: { type: "repository", id: `${repo.host}:${repo.owner}/${repo.repo}` }, expiresAtMs: grantNow + DAY_MS, transitive: false });
   const authorization = await input.authorization.authorize(adapted.request);
   buildDelegatedExecutionObligationPlan(authorization.decision);
   if (authorization.decision.effect !== "allow") throw new CredentialDelegationDeniedError(authorization.decision.effect === "deny" ? "credential_delegation_denied" : "credential_delegation_approval_required");
@@ -113,7 +113,7 @@ export async function authorizeRepositoryCredentialDelegation(input: {
     const rows = await tx.select().from(credentialDelegations).where(eq(credentialDelegations.decisionId, decisionId));
     if (rows.length === 0) return { kind: "absent" };
     const row = rows[0];
-    if (rows.length === 1 && row.orgId === input.orgId && row.parentSessionId === input.parentSessionId && row.parentThreadId === input.parentThreadId && row.parentOperationId === input.parentOperationId && row.childSessionId === input.childSessionId && row.childWatchId === input.childSessionId && row.ownerType === input.owner.type && row.ownerId === input.owner.id && row.repoHost === repo.host && row.repoOwner === repo.owner && row.repoName === repo.repo && row.credentialKind === provenance.kind && row.credentialId === provenance.id && row.credentialVersion === provenance.version && canonicalAuthorizationJson(row.operations) === canonicalAuthorizationJson(OPERATIONS) && row.issuedAt === now && row.expiresAt === now + DAY_MS && row.revokedAt === null && row.createdAt === now && canonicalAuthorizationJson(row.decisionEvidence) === canonicalAuthorizationJson({ requestId: authorization.requestId, requestSubjectDigest: authorization.requestSubjectDigest, inputDigest: authorization.inputDigest, policyDigest: authorization.policyDigest, sourceBundleDigest: authorization.sourceBundleDigest, evaluatorKind: authorization.evaluator.kind, engineDigest: authorization.evaluator.engineDigest, decisionDigest: decisionDigestOf(authorization.decision), effect: authorization.decision.effect, reasonCode: authorization.decision.reasonCode })) return { kind: "completed", result: { id: row.id } };
+    if (rows.length === 1 && row.orgId === input.orgId && row.parentSessionId === input.parentSessionId && row.parentThreadId === input.parentThreadId && row.parentOperationId === input.parentOperationId && row.childSessionId === input.childSessionId && row.childWatchId === input.childSessionId && row.ownerType === input.owner.type && row.ownerId === input.owner.id && row.repoHost === repo.host && row.repoOwner === repo.owner && row.repoName === repo.repo && row.credentialKind === provenance.kind && row.credentialId === provenance.id && row.credentialVersion === provenance.version && canonicalAuthorizationJson(row.operations) === canonicalAuthorizationJson(OPERATIONS) && row.issuedAt === grantNow && row.expiresAt === grantNow + DAY_MS && row.revokedAt === null && row.createdAt === grantNow && canonicalAuthorizationJson(row.decisionEvidence) === canonicalAuthorizationJson({ requestId: authorization.requestId, requestSubjectDigest: authorization.requestSubjectDigest, inputDigest: authorization.inputDigest, policyDigest: authorization.policyDigest, sourceBundleDigest: authorization.sourceBundleDigest, evaluatorKind: authorization.evaluator.kind, engineDigest: authorization.evaluator.engineDigest, decisionDigest: decisionDigestOf(authorization.decision), effect: authorization.decision.effect, reasonCode: authorization.decision.reasonCode })) return { kind: "completed", result: { id: row.id } };
     return { kind: "ambiguous", error: "credential_delegation_recovery_ambiguous: inspect the grant and execution attempt before retrying." };
   });
   if (reserved.kind === "completed") return;
@@ -123,12 +123,12 @@ export async function authorizeRepositoryCredentialDelegation(input: {
     parentThreadId: input.parentThreadId, parentOperationId: input.parentOperationId, childSessionId: input.childSessionId, childWatchId: input.childSessionId,
     ownerType: input.owner.type, ownerId: input.owner.id, repoHost: repo.host, repoOwner: repo.owner, repoName: repo.repo,
     credentialKind: provenance.kind, credentialId: provenance.id, credentialVersion: provenance.version, operations: [...OPERATIONS],
-    issuedAt: now, expiresAt: now + DAY_MS, decisionId, decisionEvidence: { requestId: authorization.requestId,
+    issuedAt: grantNow, expiresAt: grantNow + DAY_MS, decisionId, decisionEvidence: { requestId: authorization.requestId,
       requestSubjectDigest: authorization.requestSubjectDigest, inputDigest: authorization.inputDigest,
       policyDigest: authorization.policyDigest, sourceBundleDigest: authorization.sourceBundleDigest,
       evaluatorKind: authorization.evaluator.kind, engineDigest: authorization.evaluator.engineDigest,
       decisionDigest: decisionDigestOf(authorization.decision), effect: authorization.decision.effect,
-      reasonCode: authorization.decision.reasonCode }, createdAt: now });
+      reasonCode: authorization.decision.reasonCode }, createdAt: grantNow });
   await completeCanonicalExecution(input.db, decision, digest, reserved.attemptId, { outcome: "completed", result: { id } }, (value) => value, parseGrant, () => now);
 }
 
