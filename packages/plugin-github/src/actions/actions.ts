@@ -2264,18 +2264,30 @@ const readRepoFile = action(Type.Object({
       if (needsRaw) {
         // Pin the raw request to the metadata blob. Without the SHA, a branch
         // can change between the Contents metadata request and the raw read.
-        const rawRef = typeof data.sha === "string" ? data.sha : args.ref;
-        const rawResponse = await octokit.request(
-          "GET /repos/{owner}/{repo}/contents/{path}",
-          {
-            owner: args.owner,
-            repo: args.repo,
-            path: args.path,
-            ref: rawRef,
-            mediaType: { format: "raw" },
-            request: { parseSuccessResponseBody: false },
-          },
-        );
+        const blobSha = typeof data.sha === "string" ? data.sha : undefined;
+        const rawRef = blobSha ?? args.ref;
+        const rawResponse = blobSha
+          ? await octokit.request(
+              "GET /repos/{owner}/{repo}/git/blobs/{file_sha}",
+              {
+                owner: args.owner,
+                repo: args.repo,
+                file_sha: blobSha,
+                mediaType: { format: "raw" },
+                request: { parseSuccessResponseBody: false },
+              },
+            )
+          : await octokit.request(
+              "GET /repos/{owner}/{repo}/contents/{path}",
+              {
+                owner: args.owner,
+                repo: args.repo,
+                path: args.path,
+                ref: rawRef,
+                mediaType: { format: "raw" },
+                request: { parseSuccessResponseBody: false },
+              },
+            );
         if (!(rawResponse.data instanceof ReadableStream)) {
           return { success: false, error: `Could not download ${name}. Try again.` };
         }
@@ -2285,15 +2297,15 @@ const readRepoFile = action(Type.Object({
         const rawMime = normalizeDocumentMime(headers.get("content-type") ?? undefined);
         const namedOrInlinePdf = name.toLowerCase().endsWith(".pdf") || inlinePdf;
         const generic = rawMime === "" || rawMime === "application/octet-stream";
-        const expectsPdf = namedOrInlinePdf || rawMime === "application/pdf" || generic;
+        const expectsPdf = namedOrInlinePdf || rawMime === "application/pdf" || generic || (data.encoding === "none" && !isTextDocumentMime(rawMime));
 
         if (expectsPdf) {
-          const downloaded = await readPdfCandidateResponse(response, MAX_PDF_DOCUMENT_BYTES);
+          const downloaded = await readPdfCandidateResponse(response, MAX_PDF_DOCUMENT_BYTES, ctx.signal);
           if (downloaded.kind === "oversize") {
             return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
           }
           if (downloaded.kind !== "pdf") {
-            if (generic && !namedOrInlinePdf) {
+            if (!namedOrInlinePdf && rawMime !== "application/pdf") {
               return { success: false, error: `Cannot read binary file ${name}. Only text files and PDFs are supported.` };
             }
             return { success: false, error: `Cannot read ${name} as a PDF. The downloaded file does not have a PDF signature.` };
@@ -2302,6 +2314,7 @@ const readRepoFile = action(Type.Object({
             data: downloaded.data,
             name,
             extractDocument: ctx.extractDocument,
+            signal: ctx.signal,
           });
           if (!read.ok) return { success: false, error: read.error };
           return {
@@ -2317,7 +2330,7 @@ const readRepoFile = action(Type.Object({
         }
 
         if (isTextDocumentMime(rawMime)) {
-          const downloaded = await readResponseText(response, 1_048_576);
+          const downloaded = await readResponseText(response, 1_048_576, ctx.signal);
           if (!downloaded.ok) {
             return { success: false, error: `File is ${downloaded.size} bytes, exceeds max 1048576 bytes.` };
           }

@@ -93,17 +93,16 @@ describe("document text helpers", () => {
   });
 
   it("stops a generic non-PDF after its prefix", async () => {
-    let reads = 0;
+    let cancelled = false;
     const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        reads += 1;
-        if (reads === 1) controller.enqueue(new Uint8Array([0x50, 0x4b, 3, 4, 0]));
-        else controller.enqueue(new Uint8Array(1024 * 1024));
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x50, 0x4b, 3, 4, 0]));
       },
+      cancel() { cancelled = true; },
     });
 
     await expect(readPdfCandidateResponse(new Response(body), 3)).resolves.toEqual({ kind: "not-pdf" });
-    expect(reads).toBe(1);
+    expect(cancelled).toBe(true);
   });
 
   it("bounds a generic PDF after its prefix", async () => {
@@ -120,6 +119,20 @@ describe("document text helpers", () => {
 
     await expect(readPdfCandidateResponse(new Response(body), 5)).resolves.toEqual({ kind: "oversize", size: 9 });
     expect(cancelled).toBe(true);
+  });
+
+  it("stops a stalled response when the action signal aborts", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() { cancelled = true; },
+    });
+    const controller = new AbortController();
+    const result = readResponseBytes(new Response(body), 3, controller.signal);
+    controller.abort(new Error("action timed out"));
+
+    await expect(result).rejects.toThrow("action timed out");
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
   });
 
   it("extracts a downloaded PDF", async () => {

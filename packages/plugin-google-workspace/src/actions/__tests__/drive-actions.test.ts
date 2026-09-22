@@ -451,11 +451,18 @@ describe('drive actions', () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { id: 'f1', name: 'image.png', mimeType: 'image/png', size: '100' }),
     );
-    fetchMock.mockResolvedValueOnce(new Response('image', { status: 200, headers: { 'Content-Type': 'image/png' } }));
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1])); },
+      cancel() { cancelled = true; return Promise.reject(new Error('reset')); },
+    });
+    fetchMock.mockResolvedValueOnce(new Response(body, { status: 200, headers: { 'Content-Type': 'image/png' } }));
 
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
     expect(result).toEqual({
       success: false,
       error: 'Cannot download binary file (image/png). Only text, PDF, and Google Workspace files are supported.',

@@ -1,6 +1,7 @@
 import { Type } from 'typebox';
 import type { Static, TSchema } from 'typebox';
 import {
+  discardResponseBody,
   extractDownloadedPdf,
   isPdfDocument,
   isTextDocumentMime,
@@ -931,7 +932,7 @@ const downloadFile = action(
         fields: 'id,name,mimeType,size',
         supportsAllDrives: 'true',
       });
-      const metaRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${metaQs}`, token);
+      const metaRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${metaQs}`, token, { signal: ctx.signal });
       if (!metaRes.ok) return driveError(metaRes);
       const meta = (await metaRes.json()) as DriveFile;
       const metadataMime = normalizeDocumentMime(meta.mimeType);
@@ -951,9 +952,10 @@ const downloadFile = action(
         const exportRes = await driveFetch(
           `/files/${encodeURIComponent(fileId)}/export?${exportQs}`,
           token,
+          { signal: ctx.signal },
         );
         if (!exportRes.ok) return driveError(exportRes);
-        const downloaded = await readResponseText(exportRes, maxBytes);
+        const downloaded = await readResponseText(exportRes, maxBytes, ctx.signal);
         if (!downloaded.ok) {
           return {
             success: false,
@@ -967,7 +969,7 @@ const downloadFile = action(
       }
 
       const dlQs = new URLSearchParams({ alt: 'media', supportsAllDrives: 'true' });
-      const dlRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${dlQs}`, token);
+      const dlRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${dlQs}`, token, { signal: ctx.signal });
       if (!dlRes.ok) return driveError(dlRes);
 
       const mediaMime = normalizeDocumentMime(dlRes.headers.get('content-type') ?? undefined);
@@ -980,7 +982,7 @@ const downloadFile = action(
       if (pdf || generic) {
         let data: Uint8Array | undefined;
         if (generic) {
-          const candidate = await readPdfCandidateResponse(dlRes, maxBytes);
+          const candidate = await readPdfCandidateResponse(dlRes, maxBytes, ctx.signal);
           if (candidate.kind === 'oversize') {
             return {
               success: false,
@@ -989,7 +991,7 @@ const downloadFile = action(
           }
           if (candidate.kind === 'pdf') data = candidate.data;
         } else {
-          const downloaded = await readResponseBytes(dlRes, maxBytes);
+          const downloaded = await readResponseBytes(dlRes, maxBytes, ctx.signal);
           if (!downloaded.ok) {
             return {
               success: false,
@@ -1005,6 +1007,7 @@ const downloadFile = action(
           data,
           name: meta.name,
           extractDocument: ctx.extractDocument,
+          signal: ctx.signal,
         });
         if (!read.ok) return { success: false, error: read.error };
         return {
@@ -1013,9 +1016,12 @@ const downloadFile = action(
         };
       }
 
-      if (!isTextDocumentMime(mediaMime)) return { success: false, error: binaryError };
+      if (!isTextDocumentMime(mediaMime)) {
+        discardResponseBody(dlRes);
+        return { success: false, error: binaryError };
+      }
 
-      const downloaded = await readResponseText(dlRes, maxBytes);
+      const downloaded = await readResponseText(dlRes, maxBytes, ctx.signal);
       if (!downloaded.ok) {
         return {
           success: false,

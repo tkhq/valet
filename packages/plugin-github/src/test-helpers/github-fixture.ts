@@ -71,6 +71,8 @@ export interface GithubFixtureHandlers {
    * status to exercise a failure, which is what a caller reading a file out
    * of another repository meets most often. */
   readFile?: (owner: string, repo: string, path: string, accept: string | undefined) => GithubFixtureResponse;
+  /** GET /repos/:owner/:repo/git/blobs/:file_sha */
+  readBlob?: (owner: string, repo: string, sha: string, accept: string | undefined) => GithubFixtureResponse;
   /** `GET /search/issues` — receives the parsed query, because the order
    * and the page size are the part of a search a caller depends on and
    * cannot see in the response. */
@@ -141,6 +143,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   listReviewComments: () => ({ body: [] }),
   listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
   readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "base64", path, size: 0, content: "" } }),
+  readBlob: () => ({ body: new Uint8Array() }),
   searchIssues: () => ({ body: { total_count: 0, items: [] } }),
   listUserRepos: () => ({ body: [{ full_name: "fixture-user/repo" }] }),
   listInstallationRepos: () => ({
@@ -283,6 +286,16 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     const ref = c.req.param("ref");
     record(c, { owner, repo, ref });
     const { status, body } = handlers.listCheckRuns(owner, repo, ref);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/git/blobs/:file_sha", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const sha = c.req.param("file_sha");
+    record(c, { owner, repo, file_sha: sha });
+    const { status, body, headers } = handlers.readBlob(owner, repo, sha, c.req.header("accept"));
+    if (headers) return new Response(body as BodyInit, { status: status ?? 200, headers });
     return c.json(body as object, status ?? 200);
   });
 

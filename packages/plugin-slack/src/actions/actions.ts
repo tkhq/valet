@@ -691,6 +691,7 @@ const fetchFile = action(Type.Object({
 
     const res = await fetch(p.url, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: ctx.signal,
     });
     if (!res.ok) {
       return { success: false, error: `Failed to fetch file: ${res.status} ${res.statusText}` };
@@ -726,7 +727,7 @@ const fetchFile = action(Type.Object({
 
     // Text files — return content directly. The type list lives in the engine.
     if (isTextDocumentMime(contentType)) {
-      const downloaded = await readResponseText(res, MAX_TEXT_SIZE);
+      const downloaded = await readResponseText(res, MAX_TEXT_SIZE, ctx.signal);
       if (!downloaded.ok) {
         return { success: false, error: `File too large for text extraction (${Math.round(downloaded.size / 1024)}KB). Max 1MB.` };
       }
@@ -737,20 +738,20 @@ const fetchFile = action(Type.Object({
       const filename = parsedUrl.pathname.split('/').pop() || 'document.pdf';
       let data: Uint8Array | undefined;
       if (contentType === 'application/pdf') {
-        const downloaded = await readResponseBytes(res, MAX_PDF_FETCH);
+        const downloaded = await readResponseBytes(res, MAX_PDF_FETCH, ctx.signal);
         if (!downloaded.ok) {
           return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
         }
         data = downloaded.data;
       } else {
-        const candidate = await readPdfCandidateResponse(res, MAX_PDF_FETCH);
+        const candidate = await readPdfCandidateResponse(res, MAX_PDF_FETCH, ctx.signal);
         if (candidate.kind === 'oversize') {
           return { success: false, error: `PDF too large (${Math.round(candidate.size / 1024 / 1024)}MB). Max 25MB.` };
         }
         if (candidate.kind === 'pdf') data = candidate.data;
       }
       if (data && isPdfDocument({ mimeType: contentType, data })) {
-        const read = await extractDownloadedPdf({ data, name: filename, extractDocument: ctx.extractDocument });
+        const read = await extractDownloadedPdf({ data, name: filename, extractDocument: ctx.extractDocument, signal: ctx.signal });
         if (!read.ok) return { success: false, error: read.error };
         return { success: true, data: { content: read.content, mimetype: 'application/pdf', filename } };
       }

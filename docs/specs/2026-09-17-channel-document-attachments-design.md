@@ -121,7 +121,8 @@ not grow a private PDF extractor branch.
 
 `readResponseBytes` reads a response stream only up to its byte cap. It
 checks each chunk when Content-Length is absent, invalid, or stale. It starts
-cancellation without waiting when a source does not settle cancellation.
+cancellation without waiting when a source does not settle cancellation. The
+action signal cancels a stalled response read and stops waiting for extraction.
 `readResponseText` decodes the same bounded bytes as UTF-8. A PDF always
 requires the `%PDF-` signature before extraction. Generic streams are
 inspected through the `%PDF-` prefix before they are buffered. A non-PDF
@@ -139,9 +140,9 @@ Callers:
   generic stream is extracted only when its bytes start with `%PDF-`. Text
   stays at 1 MB.
 - `github.read_repo_file`. It requests raw Contents API media for a PDF or a
-  Contents response without inline bytes. It pins that request to the metadata
-  SHA when available. The raw stream must have the PDF signature and stay
-  within the 25 MB cap before extraction.
+  Contents response without inline bytes. When metadata has a blob SHA, it uses
+  the Git Blobs endpoint for raw bytes. The raw stream must have the PDF
+  signature and stay within the 25 MB cap before extraction.
 
 A new downloader calls the same function. Adding a format other than PDF
 is still one branch, and that branch is `extractDocumentText`.

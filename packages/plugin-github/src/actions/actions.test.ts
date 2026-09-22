@@ -633,10 +633,11 @@ describe("github.read_repo_file", () => {
     const bytes = new Uint8Array(1_048_577);
     bytes.set(Buffer.from("%PDF-1.4"));
     useFixture({
-      readFile: (_owner, _repo, path, accept) =>
-        accept?.includes(".raw")
-          ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
-          : { body: { type: "file", encoding: "none", path, sha: "metadata-sha", size: bytes.length, content: "" } },
+      readFile: (_owner, _repo, path) => ({
+        status: 200,
+        body: { type: "file", encoding: "none", path, sha: "metadata-sha", size: bytes.length, content: "" },
+      }),
+      readBlob: (_owner, _repo, sha) => ({ body: bytes, headers: { "Content-Type": "application/pdf", "X-Blob-Sha": sha } }),
     });
 
     const result = await findAction("github.read_repo_file").execute(
@@ -647,15 +648,14 @@ describe("github.read_repo_file", () => {
     expect(result).toMatchObject({ success: true, data: { content: "# Large PDF" } });
     expect(fixture?.calls).toHaveLength(2);
     expect(fixture?.calls[1].acceptHeader).toContain(".raw");
-    expect(fixture?.calls[1].query.ref).toBe("metadata-sha");
+    expect(fixture?.calls[1].path).toBe("/repos/acme/handbook/git/blobs/metadata-sha");
   });
 
   it("reads an extensionless inline PDF through the extractor", async () => {
     const bytes = Buffer.from("%PDF-1.4 fixture");
     useFixture({
-      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
-        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
-        : { body: { type: "file", encoding: "base64", path, sha: "pdf-sha", size: bytes.length, content: bytes.toString("base64") } },
+      readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "base64", path, sha: "pdf-sha", size: bytes.length, content: bytes.toString("base64") } }),
+      readBlob: () => ({ body: bytes, headers: { "Content-Type": "application/pdf" } }),
     });
 
     const result = await findAction("github.read_repo_file").execute(
@@ -687,9 +687,8 @@ describe("github.read_repo_file", () => {
   it("does not return empty content for an unclassified large file", async () => {
     const bytes = Buffer.from("PK\x03\x04");
     useFixture({
-      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
-        ? { body: bytes, headers: { "Content-Type": "application/octet-stream" } }
-        : { body: { type: "file", encoding: "none", path, sha: "binary-sha", size: 2_000_000, content: "" } },
+      readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "none", path, sha: "binary-sha", size: 2_000_000, content: "" } }),
+      readBlob: () => ({ body: bytes, headers: { "Content-Type": "application/octet-stream" } }),
     });
 
     const result = await read("legal/archive");

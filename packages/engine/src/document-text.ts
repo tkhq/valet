@@ -66,11 +66,64 @@ function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
   void reader.cancel().catch(() => {});
 }
 
+function abortError(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The action was aborted.", "AbortError");
+}
+
+async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (!signal) return reader.read();
+  if (signal.aborted) {
+    cancelReader(reader);
+    throw abortError(signal);
+  }
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      cancelReader(reader);
+      reject(abortError(signal));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void reader.read().then(
+      (result) => {
+        signal.removeEventListener("abort", abort);
+        resolve(result);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Cancel a response without waiting for a source that does not settle. */
+export function discardResponseBody(response: Response): void {
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  try {
+    cancelReader(reader);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function withSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw abortError(signal);
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(abortError(signal));
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(
+      (value) => { signal.removeEventListener("abort", abort); resolve(value); },
+      (error) => { signal.removeEventListener("abort", abort); reject(error); },
+    );
+  });
+}
+
 /**
  * Read a response body without accumulating more than `maxBytes`. A declared
  * size avoids a read. An unknown or false size is checked for every chunk.
  */
-export async function readResponseBytes(response: Response, maxBytes: number): Promise<BoundedResponseBytes> {
+export async function readResponseBytes(response: Response, maxBytes: number, signal?: AbortSignal): Promise<BoundedResponseBytes> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     const reader = response.body?.getReader();
@@ -90,7 +143,7 @@ export async function readResponseBytes(response: Response, maxBytes: number): P
   let size = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readChunk(reader, signal);
       if (done) break;
       if (!value) continue;
       size += value.byteLength;
@@ -118,7 +171,7 @@ export async function readResponseBytes(response: Response, maxBytes: number): P
  * cancelled after their first five bytes. PDF candidates keep the same chunks
  * while they continue through the byte cap.
  */
-export async function readPdfCandidateResponse(response: Response, maxBytes: number): Promise<PdfCandidateResponse> {
+export async function readPdfCandidateResponse(response: Response, maxBytes: number, signal?: AbortSignal): Promise<PdfCandidateResponse> {
   if (!response.body) return { kind: "not-pdf" };
 
   const declared = Number(response.headers.get("content-length"));
@@ -129,7 +182,7 @@ export async function readPdfCandidateResponse(response: Response, maxBytes: num
   let size = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readChunk(reader, signal);
       if (done) break;
       if (!value) continue;
 
@@ -177,8 +230,8 @@ export async function readPdfCandidateResponse(response: Response, maxBytes: num
 }
 
 /** Decode a bounded UTF-8 response. The cap applies to bytes, not characters. */
-export async function readResponseText(response: Response, maxBytes: number): Promise<BoundedResponseText> {
-  const result = await readResponseBytes(response, maxBytes);
+export async function readResponseText(response: Response, maxBytes: number, signal?: AbortSignal): Promise<BoundedResponseText> {
+  const result = await readResponseBytes(response, maxBytes, signal);
   return result.ok ? { ok: true, text: new TextDecoder().decode(result.data) } : result;
 }
 
@@ -192,6 +245,7 @@ export async function extractDownloadedPdf(input: {
   data: Uint8Array;
   name?: string;
   extractDocument?: DocumentExtractor;
+  signal?: AbortSignal;
 }): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
   const name = input.name && input.name.length > 0 ? input.name : "document.pdf";
   if (!input.extractDocument) {
@@ -202,7 +256,10 @@ export async function extractDownloadedPdf(input: {
     };
   }
   try {
-    const extracted = await input.extractDocument({ data: input.data, mimeType: "application/pdf", name });
+    const extracted = await withSignal(
+      input.extractDocument({ data: input.data, mimeType: "application/pdf", name }),
+      input.signal,
+    );
     if (!extracted) {
       return {
         ok: false,

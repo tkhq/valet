@@ -292,6 +292,7 @@ export {
   isTextDocumentMime,
   isPdfDocument,
   readResponseBytes,
+  discardResponseBody,
   readPdfCandidateResponse,
   readResponseText,
   extractDownloadedPdf,
