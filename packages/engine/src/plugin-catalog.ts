@@ -728,6 +728,16 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
  * Throws propagate to the caller — list_tools turns them into a warning,
  * call_tool turns them into an error-text tool result.
  */
+function catalogCredentials(ctx: ToolContext, plugin: ActionPlugin): CredentialProvider {
+  const service = plugin.credentialService ?? plugin.service;
+  const provider = scopedCredentialProvider(ctx, service);
+  return ctx.credentialProviderForAction ? ctx.credentialProviderForAction(provider, {
+    organizationId: ctx.orgId, actorUserId: ctx.userId, principal: ctx.owner ?? { type: "user", id: ctx.userId }, owner: ctx.owner ?? { type: "user", id: ctx.userId },
+    service, credentialClass: plugin.credentialClass ?? "stored", actionId: `${plugin.service}.catalog`, operation: "resolve", sessionId: ctx.sessionId,
+    ...(ctx.sessionPurpose === "child" ? { childSessionId: ctx.sessionId } : {}), invocationId: `${ctx.actionInvocationId ?? ctx.threadId}:catalog:${plugin.service}`,
+  }) : provider;
+}
+
 async function resolveDynamic(
   catalog: Catalog,
   plugin: ActionPlugin,
@@ -741,9 +751,8 @@ async function resolveDynamic(
   // resolveActions is guaranteed present on every entry of dynamicPlugins.
   const resolveActions = plugin.resolveActions;
   if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
-  const credentialService = plugin.credentialService ?? plugin.service;
   const actions = await resolveActions({
-    credentials: scopedCredentialProvider(ctx, credentialService),
+    credentials: catalogCredentials(ctx, plugin),
   });
   const built = buildEntries(plugin.service, plugin, actions);
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
@@ -863,7 +872,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         let cred: Awaited<ReturnType<typeof ctx.credentials.get>>;
         let probeReason: string | undefined;
         try {
-          cred = await ctx.credentials.get(credService);
+          cred = await catalogCredentials(ctx, plugin).get(credService);
         } catch (err) {
           // A resolver may throw instead of returning null (e.g. a
           // GitHubAuthError when the org has no installation). Treat that

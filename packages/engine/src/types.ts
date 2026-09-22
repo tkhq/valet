@@ -812,7 +812,7 @@ export interface CredentialActionBinding {
   service: string;
   credentialClass: string;
   actionId: string;
-  operation: "plugin";
+  operation: "plugin" | "resolve";
   sessionId: string;
   childSessionId?: string;
   invocationId: string;
