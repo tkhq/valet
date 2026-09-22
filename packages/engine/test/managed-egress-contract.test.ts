@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MANAGED_EGRESS_CONTRACT_VERSION, ManagedEgressPrerequisiteError, SandboxAttachment, parseManagedEgressPersistedState, validateManagedEgressRequest, type SandboxProvider } from "../src/index.js";
+import { MANAGED_EGRESS_CONTRACT_VERSION, ManagedEgressPrerequisiteError, SandboxAttachment, VirtualSandbox, parseManagedEgressPersistedState, validateManagedEgressRequest, type ManagedEgressEffectiveState, type SandboxProvider } from "../src/index.js";
 
 const request = { requested: true as const, proxyToken: "t".repeat(48), identity: { orgId: "o", sessionId: "s", workloadId: "w", proxyId: "p", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION } };
 function provider(ready: boolean): SandboxProvider {
@@ -30,6 +30,61 @@ describe("managed egress provider contract", () => {
     expect(parseManagedEgressPersistedState(persisted)).toEqual(persisted);
     expect(() => parseManagedEgressPersistedState({ ...persisted, proxyToken: request.proxyToken })).toThrow(ManagedEgressPrerequisiteError);
     expect(() => parseManagedEgressPersistedState({ requested: { ...persisted.requested, privateKey: "secret" } })).toThrow(ManagedEgressPrerequisiteError);
+  });
+
+  it("becomes ready only after the provider registers and re-observes the boundary", async () => {
+    let registered = false;
+    const effective: ManagedEgressEffectiveState = {
+      requested: true, configured: true, ready: true, effective: true,
+      identity: request.identity,
+      proxyArtifact: `registry.example/hematite@sha256:${"a".repeat(64)}`,
+      topology: {
+        proxyResources: ["proxy-1"], policyResources: ["policy-1"],
+        workloadSelector: { "valet.dev/session": "s" }, callbackBindingId: "binding-1",
+      },
+    };
+    const managedProvider: SandboxProvider = {
+      ...provider(true),
+      create: async (opts) => {
+        expect(registered).toBe(false);
+        opts.managedEgressLifecycle?.registerCallbackBinding();
+        return new VirtualSandbox("managed-sandbox");
+      },
+      status: async (id) => ({ id, state: "ready", ...(registered ? { managedEgress: effective } : {}) }),
+    };
+    const attachment = new SandboxAttachment(managedProvider, {
+      managedEgress: request,
+      managedEgressLifecycle: {
+        registerCallbackBinding: () => { registered = true; },
+        revokeCallbackBinding: () => { registered = false; },
+      },
+    });
+    await attachment.ensureReady({ timeoutMs: 1_000 });
+    expect(attachment.managedEgressEffectiveState()).toEqual(effective);
+    await attachment.destroy();
+    expect(registered).toBe(false);
+  });
+
+  it("fails typed-unavailable and revokes when the provider cannot observe the boundary", async () => {
+    let registered = false;
+    const missingProvider: SandboxProvider = {
+      ...provider(true),
+      create: async (opts) => {
+        opts.managedEgressLifecycle?.registerCallbackBinding();
+        return new VirtualSandbox("missing-boundary");
+      },
+      status: async (id) => ({ id, state: "ready" }),
+    };
+    const attachment = new SandboxAttachment(missingProvider, {
+      managedEgress: request,
+      managedEgressLifecycle: {
+        registerCallbackBinding: () => { registered = true; },
+        revokeCallbackBinding: () => { registered = false; },
+      },
+    });
+    await expect(attachment.ensureReady({ timeoutMs: 1_000 })).rejects.toBeInstanceOf(ManagedEgressPrerequisiteError);
+    expect(registered).toBe(false);
+    expect(attachment.state).toBe("error");
   });
 
   it("rejects before attachment side effects unless capability is fully ready", () => {

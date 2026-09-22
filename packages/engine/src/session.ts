@@ -1446,7 +1446,7 @@ export class Session {
 
   async toData(): Promise<SessionData> {
     const request = this.attachment.managedEgressRequest();
-    const persistedEffective = this.managedEgressState?.effective;
+    const persistedEffective = this.attachment.managedEgressEffectiveState() ?? this.managedEgressState?.effective;
     const sameManagedIdentity =
       request && persistedEffective && JSON.stringify(request.identity) === JSON.stringify(persistedEffective.identity);
     const managedEgress = request

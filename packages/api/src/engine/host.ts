@@ -875,6 +875,9 @@ export class EngineHost {
         return;
       }
       if (status.state === "ready") {
+        void session.toData()
+          .then((data) => this.opts.engineStore.saveSession(data))
+          .catch((err) => console.error(`EngineHost: managed sandbox state save failed for session ${sessionId}:`, err));
         if (wasSuspended) {
           wasSuspended = false;
           if (this.opts.onWake) {
