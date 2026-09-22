@@ -9,13 +9,14 @@ const OPS: Record<FieldType, readonly ComparisonOperator[]> = {
   string_set: ["in", "not_in", "exists", "not_exists"],
   timestamp: ["eq", "neq", "gt", "gte", "lt", "lte", "exists", "not_exists"],
 };
-const field = (path: string, type: FieldType, location: PolicyFieldDescriptor["location"] = "attribute", sensitivity: Sensitivity = "public", operators = OPS[type]): PolicyFieldDescriptor => ({
+const field = (path: string, type: FieldType, location: PolicyFieldDescriptor["location"] = "attribute", sensitivity: Sensitivity = "public", operators = OPS[type], operatorDescriptions?: PolicyFieldDescriptor["operatorDescriptions"]): PolicyFieldDescriptor => ({
   path,
   label: path.split(".").at(-1) ?? path,
   location,
   type,
   sensitivity,
   operators,
+  ...(operatorDescriptions ? { operatorDescriptions } : {}),
 });
 const common = [field("subject.principalId", "string", "fact"), field("subject.ownerId", "string", "fact", "sensitive")];
 const descriptor = (kind: AuthorizationKind, label: string, fields: readonly PolicyFieldDescriptor[], options: Partial<Pick<PolicyContextDescriptor, "publishable" | "humanApproval" | "appliesIn" | "obligations" | "targets">> = {}): PolicyContextDescriptor => {
@@ -70,7 +71,7 @@ export const POLICY_CONTEXTS = {
   "sandbox.capability": descriptor("sandbox.capability", "Sandbox capability", [field("action.id", "string", "target"), field("parameters.requested.profile", "string"), field("parameters.requested.docker", "boolean"), field("parameters.requested.browser", "boolean"), field("parameters.requested.nestedKubernetes", "boolean"), field("parameters.requested.tunnels", "boolean")], delegatedContext("sandbox.capability", ["sandbox_capabilities"])),
   "credential.use": descriptor("credential.use", "Credential use", [field("action.id", "string", "target"), field("parameters.service", "string"), field("parameters.credentialClass", "string"), field("parameters.owner.id", "string", "fact", "sensitive"), field("parameters.operation", "string")], delegatedContext("credential.use", ["credential_owner"])),
   "credential.delegate": descriptor("credential.delegate", "Credential delegation", [field("action.id", "string", "target"), field("parameters.service", "string"), field("parameters.credentialClass", "string"), field("parameters.delegateeSessionId", "string", "fact", "sensitive"), field("parameters.expiresAtMs", "timestamp")], delegatedContext("credential.delegate", ["credential_owner"])),
-  "egress.connect": descriptor("egress.connect", "Egress", [field("action.id", "string", "target"), field("parameters.destination.scheme", "string"), field("parameters.destination.host", "string", "attribute", "public", ["eq", "suffix", "in", "not_in"]), field("parameters.destination.port", "number"), field("parameters.destination.protocol", "string"), field("parameters.destination.destinationClass", "string")], delegatedContext("egress.connect", ["egress_hosts"])),
+  "egress.connect": descriptor("egress.connect", "Egress", [field("action.id", "string", "target"), field("parameters.destination.scheme", "string"), field("parameters.destination.host", "string", "attribute", "public", ["eq", "suffix", "in", "not_in"], { not_in: "Excludes exact host matches only. It does not exclude DNS suffixes." }), field("parameters.destination.port", "number"), field("parameters.destination.protocol", "string"), field("parameters.destination.destinationClass", "string")], delegatedContext("egress.connect", ["egress_hosts"])),
 
 } as const satisfies Record<AuthorizationKind, PolicyContextDescriptor>;
 

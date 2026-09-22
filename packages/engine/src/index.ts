@@ -140,6 +140,8 @@ export {
 export {
   HEMATITE_COMPATIBLE_CONFIG_CONTRACT,
   HEMATITE_COMPATIBLE_SOURCE_COMMIT,
+  HEMATITE_REQUEST_ID_PATTERN,
+  isHematiteRequestId,
   renderHematiteManagedEgressConfig,
   type HematiteManagedEgressConfig,
   type HematiteMaterialPaths,

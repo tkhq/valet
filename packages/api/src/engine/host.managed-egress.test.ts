@@ -26,7 +26,7 @@ const expected = {
 };
 const persisted: NonNullable<SessionData["managedEgress"]> = { requested: { identity } };
 const authorizationRequest: AuthorizationRequestV1 = {
-  version: "1", request_id: "request-1", service: "egress", action: "connect",
+  version: "1", request_id: "000000000000000018db1a2b3c4d5e6f-0000000000000001", service: "egress", action: "connect",
   subject: { session_id: identity.sessionId, workload_id: identity.workloadId },
   destination: { scheme: "https", protocol: "tcp", host: "example.com", port: 443 },
 };

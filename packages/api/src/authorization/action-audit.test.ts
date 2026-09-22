@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adaptInteractiveAction, canonicalAuthorizationJson, inputDigestOf, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { adaptEgressConnect, adaptInteractiveAction, canonicalAuthorizationJson, inputDigestOf, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { buildDecisionAuditPlan, buildExecutionAuditPlan } from "./action-audit.js";
 
 const H = "a".repeat(64);
@@ -17,6 +17,18 @@ describe("canonical authorization audit builders", () => {
     expect(plan.row).toMatchObject({ decisionId: "decision-1", requestId: "request-1", effect: "allow", matchedRuleIds: ["a", "z"], inputDigest: f.envelope.inputDigest });
     expect(plan.evidence.decisionDigest).toHaveLength(64); expect(plan.evidence.obligationDigest).toHaveLength(64);
     expect(canonicalAuthorizationJson(plan)).not.toContain("SECRET-CANARY"); expect(Object.isFrozen(plan)).toBe(true);
+  });
+
+  it("accepts only pinned Hematite request IDs for egress audit rows", () => {
+    const validId = "000000000000000018db1a2b3c4d5e6f-0000000000000001";
+    const adapted = adaptEgressConnect({ schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" }, requestId: validId, operationId: "egress:1", evaluationTimeMs: 10, sessionId: "session-1", operation: "connect", destination: { scheme: "https", protocol: "tcp", host: "example.com", port: 443, destinationClass: "external" } });
+    const build = (requestId: string) => {
+      const request = { ...adapted.request, requestId };
+      const envelope: PolicyDecisionEnvelope = { schemaVersion: 1, requestId, requestSubjectDigest: adapted.requestSubjectDigest, inputDigest: inputDigestOf(request), policyDigest: H, sourceBundleDigest: H, evaluator: { kind: "local_valet", engineDigest: H }, decision: { effect: "deny", reasonCode: "default_deny", matchedRuleIds: [], obligations: [], redactions: [] }, evaluatedAtMs: 10 };
+      return buildDecisionAuditPlan({ decisionId: "decision-1", request, envelope, profileDigest: H, interpreterDigest: H, contractDigest: H, identityFactProvenance: [], policyFactProvenance: [], createdAtMs: 11 });
+    };
+    expect(() => build("000000000000000018db1a2b3c4d5e6f-0000000000000001")).not.toThrow();
+    for (const requestId of ["request.id", "-request", "request!"]) expect(() => build(requestId), requestId).toThrow();
   });
 
   it("rejects request identity and input digest mismatches", () => {

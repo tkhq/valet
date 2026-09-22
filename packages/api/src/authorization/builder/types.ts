@@ -12,6 +12,7 @@ export interface PolicyFieldDescriptor {
   readonly type: FieldType;
   readonly sensitivity: Sensitivity;
   readonly operators: readonly ComparisonOperator[];
+  readonly operatorDescriptions?: Readonly<Partial<Record<ComparisonOperator, string>>>;
 }
 export interface PolicyTargetOptionV1 {
   readonly actionId: string;

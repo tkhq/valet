@@ -5,6 +5,7 @@ import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgr
 
 const identity = { orgId: "org-1", sessionId: "session-1", workloadId: "workload-1", proxyId: "proxy-1", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION };
 const token = "t".repeat(48);
+const hematiteRequestId = (counter: number) => `000000000000000018db1a2b3c4d5e6f-${counter.toString(16).padStart(16, "0")}`;
 const activation: ManagedEgressBindingActivation = {
   effective: {
     requested: true as const, configured: true as const, ready: true as const, effective: true as const,
@@ -14,7 +15,7 @@ const activation: ManagedEgressBindingActivation = {
   policyIdentity: { actorUserId: "server-user", principal: { type: "user" as const, id: "server-user" } },
 };
 const request: AuthorizationRequestV1 = {
-  version: "1", request_id: "request-1", service: "egress", action: "connect",
+  version: "1", request_id: "000000000000000018db1a2b3c4d5e6f-0000000000000001", service: "egress", action: "connect",
   subject: { session_id: "session-1", workload_id: "workload-1" },
   destination: { scheme: "https", protocol: "tcp", host: "example.com", port: 443 },
 };
@@ -49,6 +50,9 @@ describe("managed egress callback", () => {
     }
     expect(parseAuthorizationRequestV1({ ...request, destination: { ...request.destination, host: "h".repeat(253) } })).not.toBeNull();
     expect(parseAuthorizationRequestV1({ ...request, destination: { ...request.destination, host: "h".repeat(254) } })).toBeNull();
+    for (const request_id of ["request.id", "-request", "request!", "123-1"]) {
+      expect(parseAuthorizationRequestV1({ ...request, request_id }), request_id).toBeNull();
+    }
   });
 
   it("authenticates the proxy token, binds identity, denies unsupported, and disables caches", async () => {
@@ -58,7 +62,7 @@ describe("managed egress callback", () => {
     expect(response.headers.get("cache-control")).toContain("no-store");
     expect(response.headers.get("pragma")).toBe("no-cache");
     expect(response.headers.get("expires")).toBe("0");
-    expect(await response.json()).toMatchObject({ version: "1", request_id: "request-1", decision: "deny", reason_code: "unsupported_prerequisite" });
+    expect(await response.json()).toMatchObject({ version: "1", request_id: "000000000000000018db1a2b3c4d5e6f-0000000000000001", decision: "deny", reason_code: "unsupported_prerequisite" });
     expect((await post(request, "x".repeat(48))).status).toBe(401);
     expect((await post({ ...request, subject: { ...request.subject, session_id: "caller-choice" } })).status).toBe(401);
   });
@@ -191,6 +195,24 @@ describe("managed egress callback", () => {
     const responses = await Promise.all(Array.from({ length: 16 }, () => registry.authorize(token, request)));
     expect(responses.every((response) => response?.reason_code === reason)).toBe(true);
     expect(authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it("throttles a per-binding connect loop before evaluator invocation", async () => {
+    const authorize = vi.fn(async () => { throw new Error("not reached"); });
+    registry = new ManagedEgressBindingRegistry({ authorization: { authorize }, now: () => 100, maxEvaluationsPerWindow: 2, evaluationWindowMs: 1_000 });
+    registry.register(identity, token, undefined, 90, activation);
+    const first = await registry.authorize(token, { ...request, request_id: hematiteRequestId(1) });
+    const second = await registry.authorize(token, { ...request, request_id: hematiteRequestId(2) });
+    const thirdRequest = { ...request, request_id: hematiteRequestId(3) };
+    const third = await registry.authorize(token, thirdRequest);
+    const replay = await registry.authorize(token, thirdRequest);
+    expect(first?.reason_code).toBe("authorization_failure");
+    expect(second?.reason_code).toBe("authorization_failure");
+    expect(third).toMatchObject({ decision: "deny", reason_code: "rate_limited" });
+    expect(replay).toEqual(third);
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect((await post(thirdRequest)).status).toBe(429);
+    expect(authorize).toHaveBeenCalledTimes(2);
   });
 
   it("keeps rotate, expiry, registration, and replay deterministic", async () => {

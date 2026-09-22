@@ -1,5 +1,6 @@
 import { authorizationIdentity, canonicalAuthorizationJson } from "./identity.js";
 import { trustedJsonClone } from "./trusted-json.js";
+import { isHematiteRequestId } from "../sandbox/hematite.js";
 import type { AuthorizationKind, AuthorizationPrincipal, AuthorizationRequest, JsonObject, PolicyDecisionV1, RedactionDirective } from "./types.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/;
@@ -183,6 +184,7 @@ export function adaptCredentialDelegate(input: CredentialDelegateAdapterInputV1)
 
 export function adaptEgressConnect(input: EgressConnectAdapterInputV1): DelegatedExecutionAdapterOutputV1 {
   common(input); validId(input.sessionId);
+  if (!isHematiteRequestId(input.requestId)) fail("invalid_identity");
   return output(input, "egress.connect", `egress.${input.operation}`, "egress", "high", {
     destination: normalizeEgressDestination(input.destination),
   });
@@ -192,7 +194,7 @@ export function normalizeEgressDestination(value: EgressConnectAdapterInputV1["d
   const compatibleProtocol = value.protocol === value.scheme || value.protocol === "tcp" && ["http", "https", "connect"].includes(value.scheme);
   if (!["http", "https", "ws", "wss", "tcp", "connect"].includes(value.scheme) || !compatibleProtocol || !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) fail("invalid_destination");
   const host = value.host.toLowerCase().replace(/\.$/, "");
-  if (!HOST.test(host) || host.includes("..") || host.startsWith("xn--") || host.split(".").some((label) => label.startsWith("xn--")) || /^[0-9.]+$/.test(host) || host.includes(":") || host === "localhost") fail("invalid_destination");
+  if (!HOST.test(host) || host.includes("..") || host.startsWith("xn--") || host.split(".").some((label) => label.startsWith("xn--")) || /^[0-9.]+$/.test(host) || /^0x[0-9a-f]+$/i.test(host) || host.includes(":") || host === "localhost") fail("invalid_destination");
   validId(value.destinationClass); if (value.service !== undefined) validId(value.service); if (value.action !== undefined && !ACTION.test(value.action)) fail("invalid_destination");
   return { scheme: value.scheme, protocol: value.protocol, host, port: value.port, destinationClass: value.destinationClass, ...(value.service === undefined ? {} : { service: value.service }), ...(value.action === undefined ? {} : { action: value.action }) };
 }

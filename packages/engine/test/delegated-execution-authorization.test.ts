@@ -14,6 +14,8 @@ import {
   type DelegationEnvelopeV1,
 } from "../src/authorization/index.js";
 
+const HEMATITE_REQUEST_ID = "000000000000000018db1a2b3c4d5e6f-0000000000000001";
+
 const common = {
   schemaVersion: 1 as const,
   organizationId: "org_1",
@@ -94,12 +96,20 @@ describe("delegated execution adapters", () => {
 
   it("normalizes safe DNS hosts and rejects ambiguous destinations", () => {
     expect(normalizeEgressDestination({ scheme: "https", protocol: "https", host: "API.Example.COM.", port: 443, destinationClass: "service" }).host).toBe("api.example.com");
-    for (const host of ["127.0.0.1", "localhost", "xn--e1afmkfd.xn--p1ai", "a..example.com", "[::1]"]) {
-      expect(() => adaptEgressConnect({ ...common, sessionId: "session_1", operation: "connect", destination: { scheme: "https", protocol: "https", host, port: 443, destinationClass: "external" } })).toThrow(/invalid_destination/);
+    for (const host of ["127.0.0.1", "2130706433", "017700000001", "0x7f000001", "localhost", "xn--e1afmkfd.xn--p1ai", "a..example.com", "[::1]"]) {
+      expect(() => adaptEgressConnect({ ...common, requestId: HEMATITE_REQUEST_ID, sessionId: "session_1", operation: "connect", destination: { scheme: "https", protocol: "https", host, port: 443, destinationClass: "external" } })).toThrow(/invalid_destination/);
     }
-    expect(adaptEgressConnect({ ...common, sessionId: "session_1", operation: "connect", destination: { scheme: "https", protocol: "https", host: "api.example.com", port: 443, destinationClass: "external" } }).request.action.parameters).toEqual({
+    expect(adaptEgressConnect({ ...common, requestId: HEMATITE_REQUEST_ID, sessionId: "session_1", operation: "connect", destination: { scheme: "https", protocol: "https", host: "api.example.com", port: 443, destinationClass: "external" } }).request.action.parameters).toEqual({
       destination: { scheme: "https", protocol: "https", host: "api.example.com", port: 443, destinationClass: "external" },
     });
+  });
+
+  it("accepts only request IDs minted by the pinned Hematite source", () => {
+    const input = { ...common, sessionId: "session_1", operation: "connect" as const, destination: { scheme: "https" as const, protocol: "https" as const, host: "api.example.com", port: 443, destinationClass: "external" } };
+    expect(() => adaptEgressConnect({ ...input, requestId: HEMATITE_REQUEST_ID })).not.toThrow();
+    for (const requestId of ["request.id", "-request", "request!", "123-1"]) {
+      expect(() => adaptEgressConnect({ ...input, requestId }), requestId).toThrow(/invalid_identity/);
+    }
   });
 
   it("fails closed on nested or malformed delegation", () => {

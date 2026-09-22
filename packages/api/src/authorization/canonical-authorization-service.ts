@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { ApprovalMode, RiskLevel } from "@valet/engine";
 import { adaptInteractiveAction, adaptWorkflowAction, assertEnvelope, buildActionObligationPlan, buildDelegatedExecutionObligationPlan, buildRouteResourceObligationPlan, canonicalAuthorizationJson, decisionDigestOf, DELEGATED_EXECUTION_KINDS, obligationDigestOf, requestSubjectDigest, type AuthorizationRequest, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { actionProjection } from "./action-projections.js";
@@ -12,6 +12,31 @@ import type { CanonicalOverrideBoundPolicyReference, CanonicalPolicyBundleManage
 
 export function canonicalDecisionId(orgId: string, idempotencyKey: string): string {
   return `decision:${createHash("sha256").update(`${orgId}\0${idempotencyKey}`).digest("hex")}`;
+}
+
+export const MAX_RETAINED_EGRESS_DECISIONS_PER_ORG = 10_000;
+
+export async function pruneEgressDecisions(
+  db: AppDb | AppTx,
+  orgId: string,
+  preserveDecisionId: string,
+  maxRows = MAX_RETAINED_EGRESS_DECISIONS_PER_ORG,
+): Promise<void> {
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1) throw new TypeError("Set the egress decision retention limit to a positive integer.");
+  await db.execute(sql`
+    WITH ranked AS (
+      SELECT decision_id,
+             row_number() OVER (ORDER BY created_at DESC, decision_id DESC) AS retention_rank
+      FROM authorization_decisions
+      WHERE org_id = ${orgId}
+        AND idempotency_key LIKE 'resource:egress:%'
+        AND decision_id <> ${preserveDecisionId}
+    )
+    DELETE FROM authorization_decisions
+    WHERE decision_id IN (
+      SELECT decision_id FROM ranked WHERE retention_rank >= ${maxRows}
+    )
+  `);
 }
 
 const OVERRIDE_BOUND_RISKS: readonly RiskLevel[] = ["low", "medium", "high", "critical"];
@@ -125,7 +150,16 @@ export class CanonicalAuthorizationService implements AuthorizationService {
       policyFactProvenance: [{ source: "host_asserted" }],
       createdAtMs: this.now(),
     });
-    await this.db.insert(authorizationDecisions).values(JSON.parse(canonicalAuthorizationJson(plan.row)) as AuthorizationDecisionRow).onConflictDoNothing();
+    const row = JSON.parse(canonicalAuthorizationJson(plan.row)) as AuthorizationDecisionRow;
+    if (request.kind === "egress.connect") {
+      await this.db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT id FROM orgs WHERE id = ${request.subject.orgId} FOR UPDATE`);
+        await tx.insert(authorizationDecisions).values(row).onConflictDoNothing();
+        await pruneEgressDecisions(tx, request.subject.orgId, plan.row.decisionId);
+      });
+    } else {
+      await this.db.insert(authorizationDecisions).values(row).onConflictDoNothing();
+    }
     const stored = await this.find(request.subject.orgId, request.idempotencyKey);
     if (!stored) throw new Error("Canonical authorization decision reservation failed.");
     return this.replay(stored, subjectDigest);

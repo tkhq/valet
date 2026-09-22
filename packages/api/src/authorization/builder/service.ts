@@ -421,7 +421,9 @@ export class PolicyAuthoringService {
     if (!draft || typeof draft !== "object" || "normalizedIdentity" in draft || !("rules" in draft) || !Array.isArray(draft.rules))
       invalid("Remove client-computed identity and digest fields before you retry.");
     for (const rule of draft.rules) {
-      if (!rule || typeof rule !== "object" || !("owner" in rule) || !rule.owner || typeof rule.owner !== "object") continue;
+      if (!rule || typeof rule !== "object") continue;
+      if (scope.teamId && "context" in rule && rule.context === "egress.connect") throw new PolicyAuthoringError("forbidden", "Create and publish egress rules in the organization policy scope.", 403);
+      if (!("owner" in rule) || !rule.owner || typeof rule.owner !== "object") continue;
       const owner = rule.owner as { kind?: unknown; id?: unknown };
       if (scope.teamId ? owner.kind !== "team" || owner.id !== scope.teamId : owner.kind !== "org" || owner.id !== scope.organizationId)
         invalid("Set every rule owner to the policy draft scope before you retry.");

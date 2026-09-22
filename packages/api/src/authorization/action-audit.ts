@@ -1,3 +1,4 @@
+import { isHematiteRequestId } from "@valet/engine";
 import {
   assertEnvelope,
   decisionDigestOf,
@@ -46,6 +47,7 @@ export function buildDecisionAuditPlan(input: {
   if ((supplied.evaluator?.kind !== "local_valet" && supplied.evaluator?.kind !== "tvc_attested") || (supplied.evaluator.kind === "tvc_attested") !== (supplied.proof !== undefined)) fail("invalid_proof");
   try { envelope = assertEnvelope(request, supplied); } catch { fail("digest_mismatch"); }
   validId(input.decisionId); validId(request.subject.orgId); validId(request.requestId); validId(request.idempotencyKey); timestamp(input.createdAtMs); timestamp(envelope.evaluatedAtMs);
+  if (request.kind === "egress.connect" && !isHematiteRequestId(request.requestId)) fail("invalid_identity");
   for (const value of [input.profileDigest, input.interpreterDigest, input.contractDigest, envelope.inputDigest, envelope.policyDigest, envelope.sourceBundleDigest, envelope.evaluator.engineDigest]) digest(value);
   if (new Set(envelope.decision.matchedRuleIds).size !== envelope.decision.matchedRuleIds.length) fail("invalid_identity");
   const decisionDigest = decisionDigestOf(envelope.decision), obligationDigest = obligationDigestOf(envelope.decision);

@@ -176,6 +176,17 @@ describe("policy draft validation", () => {
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, obligations: [{ type: "redact" }] }] }).map((issue) => issue.code)).toContain("unsupported_obligation");
   });
 
+  it("enforces organization egress authority and canonical host semantics", () => {
+    const value = draft(), base = value.rules[0];
+    const egress = { ...base, context: "egress.connect" as const, target: { "action.id": "egress.connect" }, appliesIn: undefined, effect: "allow" as const, matcherGroups: [{ id: "g", mode: "all" as const, matchers: [{ id: "m", field: "parameters.destination.host", operator: "suffix" as const, value: "example.com" }] }] };
+    expect(validatePolicyDraft({ ...value, rules: [egress] })).toEqual([]);
+    expect(POLICY_CONTEXTS["egress.connect"].fields.find((field) => field.path === "parameters.destination.host")?.operatorDescriptions?.not_in).toContain("exact host matches only");
+    expect(validatePolicyDraft({ ...value, rules: [{ ...egress, authority: "team" as const, owner: { kind: "team" as const, id: "team-1" } }] }).map((issue) => issue.code)).toContain("organization_authority_required");
+    for (const host of ["com", "123456", "017700000001", "0x7f000001"]) {
+      expect(validatePolicyDraft({ ...value, rules: [{ ...egress, matcherGroups: [{ id: "g", mode: "all", matchers: [{ id: "m", field: "parameters.destination.host", operator: "suffix", value: host }] }] }] }).map((issue) => issue.code), host).toContain("invalid_value");
+    }
+  });
+
   it("rejects resource approvals before publication", () => {
     const value = draft(), option = POLICY_CONTEXTS["resource.access"].targets[0];
     const rule = { ...value.rules[0], context: "resource.access" as const, target: { "action.id": option.actionId }, matcherGroups: [], appliesIn: undefined, effect: "require_approval" as const, approval: { tier: "human", replay: "once" as const } };

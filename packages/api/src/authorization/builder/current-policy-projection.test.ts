@@ -142,7 +142,7 @@ describe("browser draft to current source contract", () => {
     const identity = await host.publish(built.bundle);
     await host.activate("org-1", undefined, identity.sourceBundleDigest);
     const evaluator = await LocalValetEvaluator.create(host, runtime);
-    const egress = (hostName: string) => adaptEgressConnect({ schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" }, requestId: `egress-${hostName.replaceAll(".", "-")}`, operationId: `op-${hostName.replaceAll(".", "-")}`, evaluationTimeMs: 100, sessionId: "session-1", operation: "connect", destination: { scheme: "https", protocol: "tcp", host: hostName, port: 443, destinationClass: "external" } }).request;
+    const egress = (hostName: string) => adaptEgressConnect({ schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" }, requestId: "000000000000000018db1a2b3c4d5e6f-0000000000000001", operationId: `op-${hostName.replaceAll(".", "-")}`, evaluationTimeMs: 100, sessionId: "session-1", operation: "connect", destination: { scheme: "https", protocol: "tcp", host: hostName, port: 443, destinationClass: "external" } }).request;
     expect((await evaluator.evaluate(egress("api.example.com"))).decision.effect).toBe("allow");
     expect((await evaluator.evaluate(egress("example.com"))).decision.effect).toBe("allow");
     expect((await evaluator.evaluate(egress("evil-example.com"))).decision.effect).toBe("deny");

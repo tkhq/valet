@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
-import { validateManagedEgressRequest, type ManagedEgressEffectiveState, type ManagedEgressIdentity } from "@valet/engine";
+import { isHematiteRequestId, validateManagedEgressRequest, type ManagedEgressEffectiveState, type ManagedEgressIdentity } from "@valet/engine";
 import { adaptEgressConnect, canonicalAuthorizationJson, type AuthorizationPrincipal } from "@valet/engine/authorization";
 import { canonicalDecisionId, type CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 
@@ -11,6 +11,8 @@ const MAX_TOKEN_BYTES = 4096;
 const REPLAY_TTL_MS = 60_000;
 const MAX_REPLAY_ENTRIES = 1024;
 const DEFAULT_BODY_READ_TIMEOUT_MS = 2_000;
+const DEFAULT_EVALUATION_WINDOW_MS = 1_000;
+const DEFAULT_MAX_EVALUATIONS_PER_WINDOW = 120;
 
 const SAFE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate, private",
@@ -36,6 +38,8 @@ interface Binding {
   activation?: ManagedEgressBindingActivation;
   seen: Map<string, { at: number; requestDigest: string; response: AuthorizationResponse }>;
   pending: Map<string, { requestDigest: string; response: Promise<AuthorizationResponse> }>;
+  evaluationWindowStartedAt: number;
+  evaluationCount: number;
 }
 
 export interface AuthorizationRequestV1 {
@@ -52,13 +56,15 @@ interface AuthorizationResponse {
   request_id: string;
   decision: "allow" | "deny";
   decision_id: string;
-  reason_code: "policy_allow" | "policy_denied" | "unsupported_prerequisite" | "authorization_failure";
+  reason_code: "policy_allow" | "policy_denied" | "unsupported_prerequisite" | "authorization_failure" | "rate_limited";
 }
 
 export interface ManagedEgressBindingRegistryOptions {
   maxBindings?: number;
   maxBindingsPerOrg?: number;
   authorization?: Pick<CanonicalAuthorizationService, "authorize">;
+  evaluationWindowMs?: number;
+  maxEvaluationsPerWindow?: number;
   now?: () => number;
 }
 
@@ -136,7 +142,7 @@ async function readBoundedBody(request: Request, expectedLength: number | null, 
 
 export function parseAuthorizationRequestV1(value: unknown): AuthorizationRequestV1 | null {
   if (!record(value) || !exactKeys(value, ["version", "request_id", "service", "action", "subject", "destination"])) return null;
-  if (value.version !== "1" || value.service !== "egress" || value.action !== "connect" || !safe(value.request_id)) return null;
+  if (value.version !== "1" || value.service !== "egress" || value.action !== "connect" || !isHematiteRequestId(value.request_id)) return null;
   if (!record(value.subject) || !exactKeys(value.subject, ["session_id", "workload_id"])) return null;
   if (!safe(value.subject.session_id) || !safe(value.subject.workload_id)) return null;
   if (!record(value.destination) || !exactKeys(value.destination, ["scheme", "protocol", "host", "port"])) return null;
@@ -169,12 +175,17 @@ export class ManagedEgressBindingRegistry {
   private readonly maxBindings: number;
   private readonly maxBindingsPerOrg: number;
   private readonly authorization?: Pick<CanonicalAuthorizationService, "authorize">;
+  private readonly evaluationWindowMs: number;
+  private readonly maxEvaluationsPerWindow: number;
   private readonly now: () => number;
 
   constructor(options: ManagedEgressBindingRegistryOptions = {}) {
     this.maxBindings = options.maxBindings ?? 4_096;
     this.maxBindingsPerOrg = options.maxBindingsPerOrg ?? 512;
     this.authorization = options.authorization;
+    this.evaluationWindowMs = options.evaluationWindowMs ?? DEFAULT_EVALUATION_WINDOW_MS;
+    this.maxEvaluationsPerWindow = options.maxEvaluationsPerWindow ?? DEFAULT_MAX_EVALUATIONS_PER_WINDOW;
+    if (!Number.isSafeInteger(this.evaluationWindowMs) || this.evaluationWindowMs < 1 || !Number.isSafeInteger(this.maxEvaluationsPerWindow) || this.maxEvaluationsPerWindow < 1) throw new TypeError("Set positive managed egress rate limits.");
     this.now = options.now ?? Date.now;
   }
 
@@ -220,6 +231,8 @@ export class ManagedEgressBindingRegistry {
       ...(activation ? { activation } : {}),
       seen: new Map(),
       pending: new Map(),
+      evaluationWindowStartedAt: now,
+      evaluationCount: 0,
     });
   }
 
@@ -233,6 +246,8 @@ export class ManagedEgressBindingRegistry {
     binding.tokenHash = candidate;
     binding.seen.clear();
     binding.pending.clear();
+    binding.evaluationWindowStartedAt = now;
+    binding.evaluationCount = 0;
   }
 
   revoke(proxyId: string): void {
@@ -251,6 +266,26 @@ export class ManagedEgressBindingRegistry {
     if (replay) return replay.requestDigest === requestDigest ? replay.response : null;
     const pending = binding.pending.get(request.request_id);
     if (pending) return pending.requestDigest === requestDigest ? pending.response : null;
+    if (now - binding.evaluationWindowStartedAt >= this.evaluationWindowMs) {
+      binding.evaluationWindowStartedAt = now;
+      binding.evaluationCount = 0;
+    }
+    if (binding.evaluationCount >= this.maxEvaluationsPerWindow) {
+      const throttled: AuthorizationResponse = {
+        version: "1",
+        request_id: request.request_id,
+        decision: "deny",
+        decision_id: `throttled-${createHash("sha256").update(`${binding.identity.proxyId}\0${request.request_id}`).digest("hex").slice(0, 28)}`,
+        reason_code: "rate_limited",
+      };
+      if (binding.seen.size >= MAX_REPLAY_ENTRIES) {
+        const oldest = binding.seen.keys().next().value;
+        if (oldest !== undefined) binding.seen.delete(oldest);
+      }
+      binding.seen.set(request.request_id, { at: now, requestDigest, response: throttled });
+      return throttled;
+    }
+    binding.evaluationCount++;
     const response = this.evaluate(binding, request, now).then((result) => {
       if (binding.seen.size >= MAX_REPLAY_ENTRIES) {
         const oldest = binding.seen.keys().next().value;
@@ -334,7 +369,7 @@ export function managedEgressAuthorizationRouter(registry: ManagedEgressBindingR
     if (!request) return c.json({ error: "invalid_request" }, 400, SAFE_HEADERS);
     const response = await registry.authorize(bearer, request);
     if (!response) return c.json({ error: "unauthorized" }, 401, SAFE_HEADERS);
-    return c.json(response, 200, SAFE_HEADERS);
+    return c.json(response, response.reason_code === "rate_limited" ? 429 : 200, SAFE_HEADERS);
   });
   return router;
 }

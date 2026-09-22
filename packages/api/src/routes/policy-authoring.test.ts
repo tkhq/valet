@@ -571,6 +571,26 @@ describe("canonical policy authoring routes", () => {
     await rejectsWithoutChange(() => failing.restore("author", scope, created.documentId, 1, mutation("audit-restore-fail", 1, submitted.stateVersion)));
   });
 
+  it("prevents two team administrators from authoring an egress allow", async () => {
+    const app = await setup();
+    await app.providers.db.insert(teams).values({ id: "team-egress", orgId: "local-org", name: "Egress", createdAt: 1 });
+    await app.providers.db.insert(teamMembers).values([
+      { teamId: "team-egress", userId: "local-user", role: "admin" },
+      { teamId: "team-egress", userId: "test-member", role: "admin" },
+    ]);
+    const egressDraft = {
+      ...draft,
+      rules: [{ ...draft.rules[0], context: "egress.connect" as const, authority: "team" as const, owner: { kind: "team" as const, id: "team-egress" }, subjects: ["team" as const], target: { "action.id": "egress.connect" }, matcherGroups: [{ id: "g", mode: "all" as const, matchers: [{ id: "m", field: "parameters.destination.host", operator: "eq" as const, value: "example.com" }] }], effect: "allow" as const, appliesIn: undefined }],
+    };
+    const before = await app.providers.db.select().from(policyActiveBundles);
+    for (const actorHeaders of [headers, reviewer]) {
+      const response = await post("/teams/team-egress/policy-drafts", { ...mutation(`egress-${actorHeaders === headers ? "one" : "two"}`, 0, 0), draft: egressDraft }, actorHeaders);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: "Create and publish egress rules in the organization policy scope.", code: "forbidden" });
+    }
+    expect(await app.providers.db.select().from(policyActiveBundles)).toEqual(before);
+  });
+
   it("isolates idempotency and replays across exact team scopes", async () => {
     const app = await setup();
     await app.providers.db.insert(teams).values([

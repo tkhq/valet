@@ -62,6 +62,7 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     issues.push(issue("invalid_authority", `${path}.authority`, "Match the owner kind to the selected authority scope."));
   if (!Array.isArray(value.subjects) || !dense(value.subjects) || value.subjects.length === 0 || value.subjects.some((subject) => !descriptor.subjectKinds.includes(subject))) issues.push(issue("invalid_subject", `${path}.subjects`, "Select only subject kinds allowed by this context."));
   if (!descriptor.effects.includes(value.effect as never)) issues.push(issue("invalid_effect", `${path}.effect`, "Select an effect allowed by this context."));
+  if (value.context === "egress.connect" && (authority !== "organization" || !record(owner) || owner.kind !== "org")) issues.push(issue("organization_authority_required", `${path}.authority`, "Use organization authority for egress rules."));
   const selectedTarget = descriptor.targets.find((target) => record(value.target) && value.target["action.id"] === target.actionId);
   const fixedApproval = descriptor.targets.length > 0;
   if (value.effect === "require_approval" && (!descriptor.humanApproval || (fixedApproval ? !record(value.approval) || value.approval.tier !== "human" || value.approval.replay !== "once" || selectedTarget?.approvalSupported === false : descriptor.publishable ? value.approval !== undefined : !record(value.approval) || typeof value.approval.tier !== "string" || !["once", "session", "workflow"].includes(String(value.approval.replay))))) issues.push(issue("unsupported_approval", `${path}.approval`, descriptor.humanApproval ? "Choose an approval-capable target and use the supported approval settings." : `Human approval is not yet supported for ${value.context}; choose allow or deny.`));
@@ -127,7 +128,7 @@ function validateMatcher(value: unknown, fields: readonly PolicyFieldDescriptor[
   if (!typed) issues.push(issue("invalid_value", `${path}.value`, "Enter a value that matches the field type and operator."));
   if (fieldPath === "parameters.destination.host" && value.value !== undefined) {
     const hosts = Array.isArray(value.value) ? value.value : [value.value];
-    if (hosts.some((host) => typeof host !== "string" || !canonicalPolicyHost(host))) issues.push(issue("invalid_value", `${path}.value`, "Use a lowercase canonical DNS host without a trailing dot."));
+    if (hosts.some((host) => typeof host !== "string" || !canonicalPolicyHost(host) || (value.operator === "suffix" && !host.includes(".")))) issues.push(issue("invalid_value", `${path}.value`, "Use a lowercase canonical DNS host. Suffix hosts must have at least two labels."));
   }
   if (descriptor.sensitivity !== "public" && value.value !== undefined) issues.push(issue("sensitive_literal", `${path}.value`, "Remove the sensitive literal. Use a server-held reference instead."));
   if (value.value !== undefined && currentPolicyValueComplexityV1(value.value) && containsSensitiveTextV1(value.value as JsonValue)) issues.push(issue("unsafe_value", `${path}.value`, "Remove secret-like text from the value."));
@@ -204,7 +205,7 @@ const unknownKeys = (value: Record<string, unknown>, allowed: readonly string[],
   Reflect.ownKeys(value)
     .filter((key): key is string => typeof key !== "string" || !allowed.includes(key))
     .forEach((key) => issues.push(issue("unknown_field", `${path}.${key}`, "Remove the unknown field.")));
-const canonicalPolicyHost = (value: string): boolean => /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value) && !value.includes("..") && !value.split(".").some((label) => label.startsWith("xn--")) && !/^[0-9.]+$/.test(value) && value !== "localhost";
+const canonicalPolicyHost = (value: string): boolean => /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value) && !value.includes("..") && !value.split(".").some((label) => label.startsWith("xn--")) && !/^[0-9.]+$/.test(value) && !/^0x[0-9a-f]+$/i.test(value) && value !== "localhost";
 const typedValue = (type: PolicyFieldDescriptor["type"], value: unknown, operator: unknown) =>
   operator === "in" || operator === "not_in" ? Array.isArray(value) && value.length > 0 && value.every((item) => type === "number" ? typeof item === "number" && Number.isFinite(item) && !Object.is(item, -0) : typeof item === "string") : type === "number" || type === "timestamp" ? typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0) : type === "boolean" ? typeof value === "boolean" : type === "string_set" ? Array.isArray(value) && value.every((item) => typeof item === "string") : typeof value === "string";
 const canonical = canonicalCurrentPolicyJsonV1;

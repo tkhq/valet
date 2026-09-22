@@ -18,7 +18,7 @@ A provider must reject a request before side effects unless all four states can 
 
 ## Hematite contract
 
-The supported callback contract is `hematite-external-authorization-v1`. The compatible Hematite configuration contract is v1 at source commit `35cdd0bc8816afefb4012ba2f9ca66b927c1aa00`. This source commit does not identify an OCI image.
+The supported callback contract is `hematite-external-authorization-v1`. The compatible Hematite configuration contract is v1 at source commit `35cdd0bc8816afefb4012ba2f9ca66b927c1aa00`. This source commit does not identify an OCI image. Its request generator emits 32 lowercase hexadecimal time digits, one hyphen, and 16 lowercase hexadecimal counter digits. The callback accepts only this request ID grammar.
 
 Operators must configure an immutable registry artifact as `image@sha256:<digest>`. There is no default artifact. A mutable tag does not configure the feature. Local acceptance can build the exact source commit and run its local `sha256:<image-id>`. A local image ID never satisfies production configuration.
 
@@ -35,7 +35,11 @@ A callback without an effective boundary or canonical evaluator returns `deny` w
 
 The callback marks all responses as private and non-cacheable. It reads at most 4 KiB and cancels slow or oversized streams at a fixed deadline. It rejects ambiguous HTTP framing before it parses JSON.
 
-Repeated request IDs with the same input receive the same bounded response. Reuse with different input fails authentication. Token rotation clears replay state. Expiry and revocation remove the binding before token reuse. Global and per-organization limits reject registry overload. An API restart removes all in-memory bindings and fails closed.
+For 60 seconds, repeated request IDs with the same input receive the same bounded response. Reuse with different input fails authentication during this seen window. Token rotation clears replay state. Expiry and revocation remove the binding before token reuse. Global and per-organization limits reject registry overload. An API restart removes all in-memory bindings and fails closed.
+
+Each binding permits 120 fresh evaluations in a fixed one-second window. Valid replay responses do not consume this limit. Excess callbacks receive a fail-closed HTTP 429 deny with reason `rate_limited`. The callback stores this denial only in its bounded 60-second replay audit and does not invoke the evaluator.
+
+The service retains at most 10,000 durable `egress.connect` decisions for each organization. After each new egress decision, it removes older egress rows in deterministic creation-time and decision-ID order. It does not remove decisions for other contexts. Egress decisions have no approval resolutions or execution attempts to preserve.
 
 ## Durable lifecycle state
 
@@ -75,4 +79,6 @@ Explicit proxy variables are client configuration. They are not the security bou
 
 Cleanup failure keeps the sandbox ineffective and reports an error. A restart cannot downgrade a requested sandbox to unmanaged. Callback registration requires the observed effective state and server-bound policy identity. Revocation occurs when observation, cleanup, replacement, or teardown loses that boundary. The policy bundle keeps `egress.connect` denied by default. Only an explicit published allow rule can permit the canonical destination.
 
-Canonical authoring supports destination scheme, host, port, and destination class conditions. Host conditions support exact values and DNS-label suffixes. The compiler emits suffix checks in generated Rego. The legacy `action_policies` matcher and wire contracts do not support the `suffix` operator. Preview, publication, release migration, and rollback preserve the authored rule and its bundle identity.
+Canonical authoring supports destination scheme, host, port, and destination class conditions. Only organization authority can author and publish `egress.connect`. Team authority cannot activate an egress allow. A future design can add explicit organization delegation, but this design does not implement it.
+
+Host conditions support exact values and DNS-label suffixes. A suffix requires at least two DNS labels. Single-label numeric, octal, decimal-integer, and `0x` hexadecimal IP forms are invalid. The `not_in` operator excludes exact host matches only. It does not apply suffix matching. The compiler emits suffix checks in generated Rego. The legacy `action_policies` matcher and wire contracts do not support the `suffix` operator. Preview, publication, release migration, and rollback preserve the authored rule and its bundle identity.
