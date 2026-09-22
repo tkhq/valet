@@ -7,9 +7,9 @@ import {
   type PolicyDecisionEnvelope,
 } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
+import { GitHubAuthError } from "../services/github-tokens.js";
 import { canonicalDecisionId, type CanonicalAuthorizationService } from "./canonical-authorization-service.js";
 import { completeCanonicalExecution, reserveCanonicalExecution } from "./canonical-execution-lifecycle.js";
-
 export class CredentialUseDeniedError extends Error {
   readonly code: "credential_use_denied" | "credential_use_approval_required" | "credential_use_replay_unavailable" | "credential_provider_failed";
 
@@ -22,7 +22,6 @@ export class CredentialUseDeniedError extends Error {
 
 type AuthorizationService = Pick<CanonicalAuthorizationService, "authorize">;
 type PersistedResult = { authorized: true; found: boolean };
-
 export interface CredentialUseBinding {
   organizationId: string;
   actorUserId: string;
@@ -141,7 +140,7 @@ export async function authorizeCredentialUseOperation<T>(
       outcome: "failed",
       error: "credential_provider_failed",
     }, (value) => value, parseResult, now);
-    if (error instanceof CredentialUseDeniedError) throw error;
+    if (error instanceof CredentialUseDeniedError || error instanceof GitHubAuthError) throw error;
     throw new CredentialUseDeniedError("credential_provider_failed", "The credential provider failed. Reconnect the credential and retry.");
   }
 }
