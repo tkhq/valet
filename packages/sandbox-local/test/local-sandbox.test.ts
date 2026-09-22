@@ -196,6 +196,7 @@ describe("LocalSandboxProvider", () => {
       hibernation: false,
       customImage: false,
       coldStartEstimateMs: 0,
+      managedEgress: { supported: false, configured: false, ready: false, reason: "The local provider has no network isolation boundary." },
     });
   });
 

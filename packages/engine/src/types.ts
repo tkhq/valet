@@ -65,6 +65,8 @@ export interface SessionData {
   purpose: SessionPurpose;
   status: SessionStatus;
   sandboxId?: string;
+  /** Requested and last observed topology metadata. This state never contains credentials or CA keys. */
+  managedEgress?: import("./sandbox/managed-egress.js").ManagedEgressPersistedState;
   snapshotId?: string;
   parentSessionId?: string;
   parentThreadId?: string;
@@ -1362,6 +1364,10 @@ export type SandboxResourceField = "cpu" | "memory";
 
 export interface SandboxCreateOpts {
   image?: string;
+  /** Authoritative proxy boundary request. Providers must reject it before side effects unless every prerequisite is ready. */
+  managedEgress?: import("./sandbox/managed-egress.js").ManagedEgressRequest;
+  /** Host callbacks. Providers register only after secret delivery and before reporting callback readiness. */
+  managedEgressLifecycle?: import("./sandbox/managed-egress.js").ManagedEgressLifecycle;
   workspace?: string;
   /**
    * Requested size for the sandbox's PERSISTENT workspace volume, as a
@@ -1483,6 +1489,8 @@ export interface SandboxCapabilities {
    * false or absent, credsFiles is ignored.
    */
   credsMount?: boolean;
+  /** Managed egress is advertised only when callback and forced-network prerequisites are configured and healthy. */
+  managedEgress?: import("./sandbox/managed-egress.js").ManagedEgressCapability;
 }
 
 export interface SandboxStatus {
@@ -1503,6 +1511,8 @@ export interface SandboxStatus {
   state: "provisioning" | "ready" | "idle" | "snapshotting" | "released" | "error";
   startedAt?: number;
   error?: string;
+  /** Exact observed boundary. Absence means unmanaged. */
+  managedEgress?: import("./sandbox/managed-egress.js").ManagedEgressEffectiveState;
 }
 
 /** One provider-side sandbox, as reported by `SandboxProvider.list` — the

@@ -19,6 +19,7 @@ import {
   SandboxUnavailableError,
   WorkspaceProvisioningError,
 } from "../errors.js";
+import { ManagedEgressPrerequisiteError, validateManagedEgressRequest, type ManagedEgressEffectiveState } from "./managed-egress.js";
 import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
 
 /**
@@ -141,6 +142,7 @@ export class SandboxAttachment {
   /** A resumed container cannot become ready until its required hooks succeed. */
   private pendingResumeEpoch: number | null = null;
   private _sandbox: Sandbox | null = null;
+  private managedEgressObserved: ManagedEgressEffectiveState | undefined;
   private destroyed = false;
   private inFlight: Promise<void> | null = null;
   private readonly waiters = new Set<Waiter>();
@@ -156,6 +158,16 @@ export class SandboxAttachment {
   private ignoredResourceDriftKey: string | null = null;
 
   constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider) {
+    if (createOpts.managedEgress) {
+      validateManagedEgressRequest(createOpts.managedEgress);
+      const capability = provider.capabilities().managedEgress;
+      if (!capability?.supported || !capability.configured || !capability.ready) {
+        throw new ManagedEgressPrerequisiteError(
+          capability?.configured ? "network_isolation" : "unsupported_provider",
+          capability?.reason ?? `The ${provider.backend} provider cannot enforce managed egress. Select a configured provider.`,
+        );
+      }
+    }
     this.provider = provider;
     this.createOpts = createOpts;
     this.specProvider = specProvider;
@@ -208,6 +220,14 @@ export class SandboxAttachment {
 
   get sandboxId(): string | undefined {
     return this._sandbox?.id;
+  }
+
+  managedEgressRequest(): SandboxCreateOpts["managedEgress"] {
+    return this.createOpts.managedEgress;
+  }
+
+  managedEgressEffectiveState(): ManagedEgressEffectiveState | undefined {
+    return this.managedEgressObserved;
   }
 
   /**
@@ -688,6 +708,8 @@ export class SandboxAttachment {
 
     const sandbox = this._sandbox;
     this._sandbox = null;
+    this.managedEgressObserved = undefined;
+    this.createOpts.managedEgressLifecycle?.revokeCallbackBinding();
     this._state = "released";
     this.emitStatus();
 
@@ -900,7 +922,7 @@ export class SandboxAttachment {
       // Same fast-fail rule as doProvision: a terminal SandboxStartupError
       // rejects waiters now; any other failure lets each waiter's own
       // ensureReady timeout govern (a slow wake is not degradation).
-      if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError) {
+      if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError || err instanceof ManagedEgressPrerequisiteError) {
         const waiters = [...this.waiters];
         this.waiters.clear();
         for (const w of waiters) w.reject(err);
@@ -997,6 +1019,18 @@ export class SandboxAttachment {
           }
           : undefined,
       });
+      if (this.createOpts.managedEgress) {
+        const observed = (await provider.status(sandbox.id)).managedEgress;
+        if (!observed || JSON.stringify(observed.identity) !== JSON.stringify(this.createOpts.managedEgress.identity)) {
+          this.createOpts.managedEgressLifecycle?.revokeCallbackBinding();
+          await provider.destroy(sandbox.id).catch(() => {});
+          throw new ManagedEgressPrerequisiteError(
+            "network_isolation",
+            "The provider did not observe the requested managed egress boundary. Re-provision the sandbox and inspect the proxy topology.",
+          );
+        }
+        this.managedEgressObserved = observed;
+      }
       if (this.destroyed) {
         await provider.destroy(sandbox.id).catch(() => {});
         return;
@@ -1053,6 +1087,8 @@ export class SandboxAttachment {
       this.emitStatus();
       this.flushWaiters();
     } catch (err) {
+      this.managedEgressObserved = undefined;
+      this.createOpts.managedEgressLifecycle?.revokeCallbackBinding();
       if (this.destroyed) return;
       this._state = "error";
       this.emitStatus();
@@ -1063,7 +1099,7 @@ export class SandboxAttachment {
       // a `SandboxStartupError` (bad image, crash-loop, unschedulable pod) or
       // a `SandboxPreparationError` (the host prep hook rejected) — waiters
       // get the real cause now instead of a generic timeout later.
-      if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError) {
+      if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError || err instanceof ManagedEgressPrerequisiteError) {
         const waiters = [...this.waiters];
         this.waiters.clear();
         for (const w of waiters) w.reject(err);

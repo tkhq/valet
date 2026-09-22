@@ -97,6 +97,7 @@ import type { Providers } from "./types.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { InstanceConfigError } from "../config/instance-config.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
+import { ManagedEgressBindingRegistry } from "../routes/managed-egress-authorization.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -445,6 +446,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // one-slot indirection — `spawnerRef` is filled in immediately after
   // `engineHost` exists, before any orchestrator session can actually wake
   // and try to call `task`.
+  const managedEgressBindings = new ManagedEgressBindingRegistry();
   let spawnerRef: ChildSpawner | undefined;
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
@@ -452,6 +454,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
+    managedEgressBindings,
     eventStream,
     engineCredentials,
     blobs,
@@ -838,6 +841,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     imageBuilder,
     eventStream,
     engineCredentials,
+    managedEgressBindings,
     onePassword,
     engineHost,
     autoTitleHost,

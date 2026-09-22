@@ -11,6 +11,10 @@ import type { Hono } from "hono";
 import type { AppEnv } from "./env.js";
 import type { RunningServer, ServeOptions, ServerAdapter, WebSocketBinding } from "./server-adapter.js";
 
+/** Absolute header-ingress bound. Activity does not extend the deadline. */
+export const NODE_HEADERS_TIMEOUT_MS = 2_000;
+const NODE_CONNECTIONS_CHECKING_INTERVAL_MS = 100;
+
 export const nodeServerAdapter: ServerAdapter = {
   runtime: "node",
 
@@ -30,9 +34,34 @@ export const nodeServerAdapter: ServerAdapter = {
         // throughput optimisation, and correctness for in-process SDKs is
         // worth more than it. See `onepassword.live-server.test.ts`, which
         // fails without this line.
-        const server = serve({ fetch: app.fetch, port: opts.port, overrideGlobalObjects: false }, (info) => {
+        const server = serve({
+          fetch: app.fetch,
+          port: opts.port,
+          overrideGlobalObjects: false,
+          serverOptions: {
+            headersTimeout: NODE_HEADERS_TIMEOUT_MS,
+            connectionsCheckingInterval: NODE_CONNECTIONS_CHECKING_INTERVAL_MS,
+          },
+        }, (info) => {
           boundPort = info.port;
           opts.onListen?.(info.port);
+        });
+        // Node rejects ambiguous HTTP framing before Hono can add callback
+        // privacy headers. Keep parser-level failures non-cacheable too.
+        server.on("clientError", (_error, socket) => {
+          if (!socket.writable) return;
+          const body = '{"error":"invalid_request"}';
+          socket.end([
+            "HTTP/1.1 400 Bad Request",
+            "Connection: close",
+            "Cache-Control: no-store, no-cache, must-revalidate, private",
+            "Pragma: no-cache",
+            "Expires: 0",
+            "Content-Type: application/json",
+            `Content-Length: ${Buffer.byteLength(body)}`,
+            "",
+            body,
+          ].join("\r\n"));
         });
         // Attach the WS upgrade handler to the running http server.
         injectWebSocket(server);

@@ -1,4 +1,4 @@
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError, withSpan } from "@valet/engine";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError, parseManagedEgressPersistedState, withSpan } from "@valet/engine";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -285,14 +285,15 @@ export class PgSessionStore implements SessionStore {
     await this.db.query(
       `INSERT INTO engine_sessions (
          id, owner_type, owner_id, user_id, org_id, workspace, purpose, status,
-         sandbox_id, snapshot_id, parent_session_id, parent_thread_id, model, reasoning,
+         sandbox_id, managed_egress, snapshot_id, parent_session_id, parent_thread_id, model, reasoning,
          metadata, start_ref, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        ON CONFLICT (id) DO UPDATE SET
          owner_type = EXCLUDED.owner_type,
          owner_id = EXCLUDED.owner_id,
          status = EXCLUDED.status,
          sandbox_id = EXCLUDED.sandbox_id,
+         managed_egress = EXCLUDED.managed_egress,
          snapshot_id = EXCLUDED.snapshot_id,
          parent_thread_id = EXCLUDED.parent_thread_id,
          model = EXCLUDED.model,
@@ -310,6 +311,7 @@ export class PgSessionStore implements SessionStore {
         session.purpose,
         session.status,
         session.sandboxId ?? null,
+        jsonOrNull(session.managedEgress),
         session.snapshotId ?? null,
         session.parentSessionId ?? null,
         session.parentThreadId ?? null,
@@ -1267,6 +1269,7 @@ function rowToSession(r: SessionRow): SessionData {
     purpose: r.purpose as SessionData["purpose"],
     status: r.status as SessionData["status"],
     sandboxId: r.sandboxId ?? undefined,
+    managedEgress: r.managedEgress === null ? undefined : parseManagedEgressPersistedState(JSON.parse(r.managedEgress)),
     snapshotId: r.snapshotId ?? undefined,
     parentSessionId: r.parentSessionId ?? undefined,
     parentThreadId: r.parentThreadId ?? undefined,

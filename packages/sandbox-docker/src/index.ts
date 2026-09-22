@@ -8,4 +8,22 @@ export {
   type BuildDockerRunArgsOpts,
   type DockerSandboxCreateOpts,
   type DockerSandboxOptions,
+  type DockerManagedEgressProviderOptions,
 } from "./sandbox.js";
+export {
+  HEMATITE_COMPATIBLE_CONFIG_CONTRACT,
+  HEMATITE_COMPATIBLE_SOURCE_COMMIT,
+  applyDockerManagedEgressInfrastructure,
+  buildDockerManagedEgressPlan,
+  cleanupDockerManagedEgress,
+  dockerManagedEgressCliRuntime,
+  initializeDockerManagedEgressVolumes,
+  observeDockerManagedEgress,
+  renderHematiteConfig,
+  validateDockerManagedEgressConfig,
+  type DockerManagedEgressConfig,
+  type DockerManagedEgressMaterial,
+  type DockerManagedEgressPlan,
+  type DockerManagedEgressRuntime,
+  type DockerResourceKind,
+} from "./managed-egress.js";

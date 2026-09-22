@@ -18,6 +18,12 @@
           "exclusiveMaximum": 100
         }
       }
+    },
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "managedEgress": false
+      }
     }
   }
 }
