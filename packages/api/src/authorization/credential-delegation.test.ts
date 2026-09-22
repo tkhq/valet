@@ -193,7 +193,7 @@ describe("repository credential delegation", () => {
     await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
     await expect(createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation")).resolves.toBeUndefined();
     await api.providers.db.delete(credentialDelegations).where(eq(credentialDelegations.id, active.id));
-    await api.providers.db.insert(credentialDelegations).values({ ...active, childWatchId: "mismatched" });
+    await api.providers.db.insert(credentialDelegations).values({ ...active, credentialId: "mismatched" });
     await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
     await expect(createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation")).rejects.toThrow("credential_delegation_recovery_ambiguous");
     await api.providers.db.delete(credentialDelegations).where(eq(credentialDelegations.id, active.id));

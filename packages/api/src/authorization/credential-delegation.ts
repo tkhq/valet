@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { PolicyDecision, Principal } from "@valet/engine";
-import { adaptCredentialDelegate, buildDelegatedExecutionObligationPlan, decisionDigestOf, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { adaptCredentialDelegate, buildDelegatedExecutionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, credentialDelegations, credentials, delegationEnvelopes, githubInstallations, orgMembers, sessionRepos, teamMembers } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
@@ -113,7 +113,7 @@ export async function authorizeRepositoryCredentialDelegation(input: {
     const rows = await tx.select().from(credentialDelegations).where(eq(credentialDelegations.decisionId, decisionId));
     if (rows.length === 0) return { kind: "absent" };
     const row = rows[0];
-    if (rows.length === 1 && row.orgId === input.orgId && row.parentSessionId === input.parentSessionId && row.parentThreadId === input.parentThreadId && row.parentOperationId === input.parentOperationId && row.childSessionId === input.childSessionId && row.childWatchId === input.childSessionId && row.ownerType === input.owner.type && row.ownerId === input.owner.id && row.repoHost === repo.host && row.repoOwner === repo.owner && row.repoName === repo.repo) return { kind: "completed", result: { id: row.id } };
+    if (rows.length === 1 && row.orgId === input.orgId && row.parentSessionId === input.parentSessionId && row.parentThreadId === input.parentThreadId && row.parentOperationId === input.parentOperationId && row.childSessionId === input.childSessionId && row.childWatchId === input.childSessionId && row.ownerType === input.owner.type && row.ownerId === input.owner.id && row.repoHost === repo.host && row.repoOwner === repo.owner && row.repoName === repo.repo && row.credentialKind === provenance.kind && row.credentialId === provenance.id && row.credentialVersion === provenance.version && canonicalAuthorizationJson(row.operations) === canonicalAuthorizationJson(OPERATIONS) && row.issuedAt === now && row.expiresAt === now + DAY_MS && row.revokedAt === null && row.createdAt === now && canonicalAuthorizationJson(row.decisionEvidence) === canonicalAuthorizationJson({ requestId: authorization.requestId, requestSubjectDigest: authorization.requestSubjectDigest, inputDigest: authorization.inputDigest, policyDigest: authorization.policyDigest, sourceBundleDigest: authorization.sourceBundleDigest, evaluatorKind: authorization.evaluator.kind, engineDigest: authorization.evaluator.engineDigest, decisionDigest: decisionDigestOf(authorization.decision), effect: authorization.decision.effect, reasonCode: authorization.decision.reasonCode })) return { kind: "completed", result: { id: row.id } };
     return { kind: "ambiguous", error: "credential_delegation_recovery_ambiguous: inspect the grant and execution attempt before retrying." };
   });
   if (reserved.kind === "completed") return;
