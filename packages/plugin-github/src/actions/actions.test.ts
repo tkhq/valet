@@ -7,7 +7,7 @@
  * mocked Octokit method name.
  */
 import process from "node:process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginAction } from "@valet/engine";
 import { githubPlugin } from "./actions.js";
 import { fakeActionContext } from "../test-helpers/action-context.js";
@@ -627,6 +627,35 @@ describe("github.read_repo_file", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(isRecord(result.data) ? result.data.content : undefined).toBe("# NDA");
+  });
+
+  it("passes the action signal to Contents metadata and raw fallback requests", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "none", path, size: bytes.length, content: "" } },
+    });
+    const controller = new AbortController();
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : undefined;
+      signals.push(init?.signal ?? request?.signal);
+      return originalFetch(input, init);
+    });
+
+    try {
+      const result = await findAction("github.read_repo_file").execute(
+        { owner: "acme", repo: "handbook", path: "legal/nda.pdf" },
+        { ...fakeActionContext("test-token"), signal: controller.signal, extractDocument: async () => ({ markdown: "# NDA" }) },
+      );
+      expect(result.success).toBe(true);
+      expect(signals).toHaveLength(2);
+      expect(signals).toEqual([controller.signal, controller.signal]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("extracts an extensionless PDF larger than the Contents API inline limit", async () => {

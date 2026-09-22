@@ -2285,7 +2285,7 @@ const readRepoFile = action(Type.Object({
                 path: args.path,
                 ref: rawRef,
                 mediaType: { format: "raw" },
-                request: { parseSuccessResponseBody: false },
+                request: { parseSuccessResponseBody: false, signal: ctx.signal },
               },
             );
         if (!(rawResponse.data instanceof ReadableStream)) {
