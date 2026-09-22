@@ -8,6 +8,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions, teams } from "../schema/index.js";
 import { ONEPASSWORD_SERVICE, OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
+import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
 import type { StoredCredential } from "@valet/engine";
 
 let api: TestApi | undefined;
@@ -684,5 +685,126 @@ describe("team token scope boundaries", () => {
       });
       expect(response.status).toBe(403);
     }
+  });
+});
+
+// A workflow session has no `agent_sessions` row. Its scopes follow the run's
+// owner (`workflows/session-owner.ts`), the way its own tool calls resolve.
+describe("workflow session scopes", () => {
+  function recordScopes(scopesTried: string[]): OnePasswordService {
+    return {
+      ...fakeOnePassword(),
+      resolveReference: async (scope: string) => {
+        scopesTried.push(scope);
+        if (scope === "personal") return "PERSONAL-VAULT-VALUE";
+        throw new OnePasswordAuthError("no token", "no_token");
+      },
+    };
+  }
+
+  it("a team-owned run reads the team scope and never the actor's personal vault", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = recordScopes(scopesTried);
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_sec_team", orgId: "local-org", owner: { type: "team", id: "team-1" }, actorUserId: "local-user",
+    });
+
+    const res = await resolve(["op://ok/item/field"], await mintToken(sessionId));
+    expect(res.status).toBe(200);
+    expect(scopesTried).toEqual(["team", "org"]);
+    expect(((await res.json()) as Resp).values[0]).toBeNull();
+  });
+
+  it("a user-owned run started by its owner reaches the owner's personal vault", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = recordScopes(scopesTried);
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_sec_user", orgId: "local-org", owner: { type: "user", id: "local-user" }, actorUserId: "local-user",
+    });
+
+    const res = await resolve(["op://ok/item/field"], await mintToken(sessionId));
+    expect(scopesTried).toEqual(["org", "personal"]);
+    expect(decode(((await res.json()) as Resp).values[0])).toBe("PERSONAL-VAULT-VALUE");
+  });
+
+  // Defense in depth: production mints a user-owned run's token for its owner,
+  // so this pair does not occur, but the rule must still refuse it.
+  it("a user-owned run whose token names another user stays on the org scope", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = recordScopes(scopesTried);
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_sec_other", orgId: "local-org", owner: { type: "user", id: "user-b" },
+    });
+
+    // `mintToken` mints for `local-user`, who does not own this run.
+    await resolve(["op://ok/item/field"], await mintToken(sessionId));
+    expect(scopesTried).toEqual(["org"]);
+  });
+
+  it("a scheduled user-owned run, whose token is minted for its owner, reaches the personal vault", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = recordScopes(scopesTried);
+    // An unattended start records no actor; the run context uses the owner.
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_sec_sched", orgId: "local-org", owner: { type: "user", id: "local-user" },
+    });
+
+    await resolve(["op://ok/item/field"], await mintToken(sessionId));
+    expect(scopesTried).toEqual(["org", "personal"]);
+  });
+
+  it("find searches a team-owned run's team scope", async () => {
+    api = await bootTestApi();
+    const scopesSearched: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      findCandidates: async (scope: string) => {
+        scopesSearched.push(scope);
+        return [];
+      },
+    };
+    await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Test team", createdAt: Date.now() }).onConflictDoNothing();
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_sec_find", orgId: "local-org", owner: { type: "team", id: "team-1" }, actorUserId: "local-user",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": await mintToken(sessionId) },
+      body: JSON.stringify({ query: "github" }),
+    });
+    expect(res.status).toBe(200);
+    // The team token answers; an empty team search does not widen to org
+    // (team vault design). A coding-session token with no row would search
+    // the org scope alone.
+    expect(scopesSearched).toEqual(["team"]);
+  });
+
+  it("a team-owned run whose team is gone is refused with workflow wording", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_sec_noteam", orgId: "local-org", owner: { type: "team", id: "team-gone" },
+    });
+
+    const res = await resolve(["op://ok/item/field"], await mintToken(sessionId));
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "The team that owns this workflow no longer exists. Run the workflow from an existing team.",
+    );
+  });
+
+  it("a workflow session whose run is gone gets the org scope only", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = recordScopes(scopesTried);
+
+    await resolve(["op://ok/item/field"], await mintToken("wf:wfrun_sec_gone:sync"));
+    expect(scopesTried).toEqual(["org"]);
   });
 });

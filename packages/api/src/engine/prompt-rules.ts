@@ -123,9 +123,9 @@ export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
 
 /**
  * System prompt for sandbox coding sessions. `secretsCli` says whether this
- * build runs sandbox prep, which installs valet-secrets; a workflow session
- * node does not, and telling it about a command it lacks produced a
- * command-not-found with no scripted response.
+ * build runs sandbox prep, which installs valet-secrets. An unbound build
+ * on a non-isolated provider does not, and telling it about a command it
+ * lacks produced a command-not-found with no scripted response.
  */
 export function codingSystemPrompt(opts: { secretsCli: boolean }): string {
   return `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).

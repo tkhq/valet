@@ -20,6 +20,8 @@ import { agentSessions } from "../schema/index.js";
 import { onePasswordScopesFor } from "../services/credential-resolution.js";
 import { isOnePasswordReference, OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
 import { getTeamInOrg } from "../services/teams.js";
+import { workflowSessionOwner } from "../workflows/session-owner.js";
+import type { AppQueryable } from "../lib/drizzle.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
@@ -116,15 +118,7 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // team- or org-owned session may be prompted by anyone in the group, so its
   // reads never reach the frozen actor's personal vault. One policy, shared
   // with the api-side resolver: `onePasswordScopesFor`.
-  const rows = await db
-    .select({
-      ownerType: agentSessions.ownerType,
-      ownerId: agentSessions.ownerId,
-      userId: agentSessions.userId,
-    })
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, sandbox.sessionId), eq(agentSessions.orgId, sandbox.orgId)))
-    .limit(1);
+  const row = await sessionOwnerRow(db, sandbox);
   // The personal scope belongs to the identity the token was minted for, not
   // to a user-owned row in the abstract. A session can change hands
   // (`PATCH /api/sessions/:id`) while tokens minted before the move stay
@@ -137,12 +131,11 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // still hold it, so a user-owned row names its owner in `user_id` — the
   // same `NULLIF(owner_id, '')` fallback `SCHEMA_REPAIRS` uses. A personal
   // owner move rewrites both columns, so this cannot re-open the gap above.
-  const row = rows[0];
   const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
   const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
   const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
   if (row?.ownerType === "team" && (!teamId || !(await getTeamInOrg(db, sandbox.orgId, teamId)))) {
-    return c.json({ error: "Team not found. Start a new team session." }, 403);
+    return c.json({ error: teamNotFound(row.workflow) }, 403);
   }
   const allowed = onePasswordScopesFor(teamId ? "team" : isOwnUserSession ? "user" : undefined, teamId);
   const narrowed = narrowScopes(allowed, body.scope);
@@ -244,21 +237,12 @@ sandboxSecretsRouter.post("/find", async (c) => {
     return c.json({ error: `query must be ${MAX_QUERY_LENGTH} characters or fewer` }, 400);
   }
 
-  const rows = await db
-    .select({
-      ownerType: agentSessions.ownerType,
-      ownerId: agentSessions.ownerId,
-      userId: agentSessions.userId,
-    })
-    .from(agentSessions)
-    .where(and(eq(agentSessions.id, sandbox.sessionId), eq(agentSessions.orgId, sandbox.orgId)))
-    .limit(1);
-  const row = rows[0];
+  const row = await sessionOwnerRow(db, sandbox);
   const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
   const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
   const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
   if (row?.ownerType === "team" && (!teamId || !(await getTeamInOrg(db, sandbox.orgId, teamId)))) {
-    return c.json({ error: "Team not found. Start a new team session." }, 403);
+    return c.json({ error: teamNotFound(row.workflow) }, 403);
   }
   const allowed = onePasswordScopesFor(teamId ? "team" : isOwnUserSession ? "user" : undefined, teamId);
   const narrowed = narrowScopes(allowed, body.scope);
@@ -287,3 +271,41 @@ sandboxSecretsRouter.post("/find", async (c) => {
 
   return c.text(lines.join("\n"), 200, { "content-type": "text/plain; charset=utf-8" });
 });
+
+/**
+ * The owner columns the scope rule reads. A coding session has an
+ * `agent_sessions` row. A workflow session has none, so its owner comes from
+ * its run (`workflows/session-owner.ts`), with `userId` set to that owner for
+ * a user owner. The personal scope then opens only when the token holder is
+ * the run owner. That holds for every run of a user-owned workflow, because
+ * an unattended start mints the token for the owner. A workflow session
+ * whose run cannot be read gets no row, which the rule answers with the org
+ * scope. `workflow` selects the wording of the team-not-found refusal.
+ */
+async function sessionOwnerRow(
+  db: AppQueryable,
+  sandbox: { sessionId: string; orgId: string },
+): Promise<{ ownerType: string; ownerId: string; userId: string; workflow: boolean } | undefined> {
+  const rows = await db
+    .select({
+      ownerType: agentSessions.ownerType,
+      ownerId: agentSessions.ownerId,
+      userId: agentSessions.userId,
+    })
+    .from(agentSessions)
+    .where(and(eq(agentSessions.id, sandbox.sessionId), eq(agentSessions.orgId, sandbox.orgId)))
+    .limit(1);
+  if (rows[0]) return { ...rows[0], workflow: false };
+  const owner = await workflowSessionOwner(db, sandbox.sessionId, sandbox.orgId);
+  if (!owner) return undefined;
+  return { ownerType: owner.type, ownerId: owner.id, userId: owner.type === "user" ? owner.id : "", workflow: true };
+}
+
+/** The refusal for a team-owned session whose team is gone. A coding
+ * session can be restarted under an existing team. A workflow run cannot, so
+ * its message names the workflow. */
+function teamNotFound(workflow: boolean): string {
+  return workflow
+    ? "The team that owns this workflow no longer exists. Run the workflow from an existing team."
+    : "Team not found. Start a new team session.";
+}

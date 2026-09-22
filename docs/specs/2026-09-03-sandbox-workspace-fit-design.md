@@ -244,8 +244,10 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
   the 1Gi default claim while REST-created sessions honored the declaration.
   The child builder now runs the same read, and the same test file drives
   `childSessionFor` end to end against a GitHub fixture. Workflow sessions
-  (`buildWorkflowSession`) still load no repo bindings and read no flags —
-  open follow-up if workflow sessions ever clone repos.
+  (`buildWorkflowSession`) run the same spec provider since 2026-09-22, but
+  they have no repo bindings, so the flag read answers absent and nothing
+  is persisted. This is an open follow-up if workflow sessions ever clone
+  repos.
 - Adopted claims converge to the declared size (TKAI-402): `create()` on an
   existing CR grows an undersized workspace PVC to the repo-declared
   `workspaceStorage` through the same rate-limited grow path (one EBS modify

@@ -193,7 +193,7 @@ Finally, delete the team. Confirm that the mirrored workflows, their schedules, 
 - Seeding config-declared teams (`packages/api/src/services/config-reconcile.ts`) and identity-provider mirrors. Both are membership structures asserted at boot and at login by writers that must never throw, and neither is created through `POST /api/teams`.
 - A delegated Slack identity for private-channel reads on team runs. Decision 8 locks fail-closed.
 - Personal workflow sync. The 2026-08-24 call put it out of scope unless a GitHub repository backs it.
-- Sandbox-facing route authorization on owner principals, a known limit tracked at `docs/specs/2026-08-17-team-workspace-ui-design.md:72-79`.
+- Sandbox-facing route authorization on owner principals, a known limit tracked in `docs/specs/2026-08-17-team-workspace-ui-design.md`, Known limits, item 1. Since 2026-09-22, workflow session sandboxes are the exception: the git credential route and the secrets broker read their owner from the workflow run (`workflows/session-owner.ts`).
 - New team-oriented template content. The workflows a template repository holds ship with `docs/specs/2026-08-24-business-workflows-design.md`.
 
 ## Open questions
