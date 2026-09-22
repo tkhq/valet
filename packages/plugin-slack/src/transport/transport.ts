@@ -813,18 +813,25 @@ export class SlackTransport implements ChannelTransport {
    * chat.postMessage, retried once without a rejected identity override.
    * Provider error responses are safe to retry because Slack rejected them.
    * Network errors and malformed success responses remain single-attempt.
+   *
+   * If Slack rejects a generated table block, `fallbackBlocks` (its Markdown
+   * rendering) is posted instead. That happens before the identity retry, so
+   * a rejected identity override retries the content Slack accepted.
    */
   private async postMessageAs(
     opts: Parameters<SlackApi["postMessage"]>[0],
+    fallbackBlocks?: Record<string, unknown>[],
   ): Promise<{ ts: string }> {
     try {
       return await this.api.postMessage(opts);
     } catch (err) {
+      if (!(err instanceof SlackApiError) || err.method !== "chat.postMessage") throw err;
+      if (fallbackBlocks && err.detail === "invalid_blocks") {
+        return this.postMessageAs({ ...opts, blocks: fallbackBlocks });
+      }
       const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
       if (
         hadOverride &&
-        err instanceof SlackApiError &&
-        err.method === "chat.postMessage" &&
         err.providerRejected &&
         err.status !== undefined &&
         err.status >= 200 &&
@@ -853,21 +860,13 @@ export class SlackTransport implements ChannelTransport {
         fallbackBlocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS, { nativeTables: false });
       }
     }
-    const post = {
+    const res = await this.postMessageAs({
       channel: target.channelId,
       text,
       threadTs,
       blocks,
       ...slackIdentityOverride(message.sender),
-    };
-    let res: { ts: string };
-    try {
-      res = await this.postMessageAs(post);
-    } catch (err) {
-      // Slack rejected the generated table block; post its Markdown rendering.
-      if (!fallbackBlocks || !(err instanceof SlackApiError) || err.detail !== "invalid_blocks") throw err;
-      res = await this.postMessageAs({ ...post, blocks: fallbackBlocks });
-    }
+    }, fallbackBlocks);
     return { conversationKey, messageId: res.ts };
   }
 

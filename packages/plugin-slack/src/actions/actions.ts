@@ -74,21 +74,23 @@ async function postActionMessage(
     }
   };
   const { iconUrl, ...rest } = override;
-  const postWithIdentity = async (postBody: Record<string, unknown>) => {
-    const first = await post({ ...postBody, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
-    if (
-      !first.providerRejected ||
-      (override.username === undefined && override.iconUrl === undefined)
-    ) {
-      return first;
-    }
-    return post(postBody);
-  };
-  const result = await postWithIdentity(body);
+  const withIdentity = (postBody: Record<string, unknown>) =>
+    ({ ...postBody, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
+  // The table rejection comes first, so the Markdown rendering is what any
+  // later identity retry sends.
+  let sent = body;
+  let result = await post(withIdentity(sent));
   if (fallbackBlocks && result.data.error === 'invalid_blocks') {
-    return postWithIdentity({ ...body, blocks: fallbackBlocks });
+    sent = { ...body, blocks: fallbackBlocks };
+    result = await post(withIdentity(sent));
   }
-  return result;
+  if (
+    !result.providerRejected ||
+    (override.username === undefined && override.iconUrl === undefined)
+  ) {
+    return result;
+  }
+  return post(sent);
 }
 
 /** The Markdown rendering of generated blocks, for a table block Slack rejects. */

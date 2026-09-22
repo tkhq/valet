@@ -41,43 +41,63 @@ interface RichTextElement {
   style?: TextStyle;
 }
 
-const LINE_BREAK = /<br\s*\/?>/gi;
+/** An inline HTML node that is a line break. Code spans and escaped text
+ * never parse as HTML, so they keep a literal `<br>`. */
+const LINE_BREAK_TAG = /^<br\s*\/?>$/i;
 
 type MarkdownNode = ReturnType<typeof fromMarkdown> | ReturnType<typeof fromMarkdown>['children'][number];
 
 /** Plain text of a Markdown subtree, for link labels and header cells. */
 function plainText(node: MarkdownNode): string {
-  if (node.type === 'text' || node.type === 'inlineCode' || node.type === 'html') return node.value;
-  if (node.type === 'break') return '\n';
+  if (node.type === 'html') return LINE_BREAK_TAG.test(node.value) ? ' ' : node.value;
+  if (node.type === 'text' || node.type === 'inlineCode') return node.value;
+  if (node.type === 'break') return ' ';
   if ('children' in node) return node.children.map(plainText).join('');
   return '';
 }
 
-/** Inline elements for one line of a cell, formatting preserved. */
-function inlineElements(line: string): RichTextElement[] {
+/** Rich text elements for one cell, formatting preserved and `<br>` as a
+ * line break. Whitespace around a break is dropped so lines start clean. */
+function inlineElements(cell: string): RichTextElement[] {
   const elements: RichTextElement[] = [];
+  let afterBreak = false;
   const emit = (element: RichTextElement): void => {
+    if (afterBreak && element.type === 'text') element.text = element.text.replace(/^\s+/, '');
+    if (element.text.length === 0) return;
+    afterBreak = false;
     const last = elements.at(-1);
-    if (element.type === 'text' && last?.type === 'text'
+    if (element.type === 'text' && last?.type === 'text' && last.text !== '\n'
       && JSON.stringify(last.style ?? {}) === JSON.stringify(element.style ?? {})) {
       last.text += element.text;
       return;
     }
     elements.push(element);
   };
+  const lineBreak = (): void => {
+    const last = elements.at(-1);
+    if (last?.type === 'text' && last.text !== '\n') {
+      last.text = last.text.replace(/\s+$/, '');
+      if (last.text.length === 0) elements.pop();
+    }
+    elements.push({ type: 'text', text: '\n' });
+    afterBreak = true;
+  };
   const styled = (text: string, style: TextStyle): RichTextElement =>
     Object.keys(style).length ? { type: 'text', text, style: { ...style } } : { type: 'text', text };
   const visit = (node: MarkdownNode, style: TextStyle): void => {
     switch (node.type) {
       case 'text':
-      case 'html':
         emit(styled(node.value, style));
+        return;
+      case 'html':
+        if (LINE_BREAK_TAG.test(node.value)) lineBreak();
+        else emit(styled(node.value, style));
         return;
       case 'inlineCode':
         emit(styled(node.value, { ...style, code: true }));
         return;
       case 'break':
-        emit({ type: 'text', text: '\n' });
+        lineBreak();
         return;
       case 'strong':
         node.children.forEach((child) => visit(child, { ...style, bold: true }));
@@ -90,6 +110,7 @@ function inlineElements(line: string): RichTextElement[] {
         const label = node.type === 'link' ? plainText(node) : node.alt ?? '';
         const element: RichTextElement = { type: 'link', url: node.url, text: label || node.url };
         if (Object.keys(style).length) element.style = { ...style };
+        afterBreak = false;
         elements.push(element);
         return;
       }
@@ -98,27 +119,16 @@ function inlineElements(line: string): RichTextElement[] {
         else if ('value' in node && typeof node.value === 'string') emit(styled(node.value, style));
     }
   };
-  fromMarkdown(line).children.forEach((child) => visit(child, {}));
-  return elements.filter((element) => element.text.length > 0);
-}
-
-/** Lines of a cell, split on `<br>` in any of its spellings. */
-function cellLines(cell: string): string[] {
-  return cell.split(LINE_BREAK).map((line) => line.trim());
+  fromMarkdown(cell).children.forEach((child) => visit(child, {}));
+  // A trailing break has nothing to separate.
+  while (elements.at(-1)?.text === '\n') elements.pop();
+  return elements;
 }
 
 /** Each cell is parsed as CommonMark, so each cell must fit the parse budget. */
-function withinCellBudget(cell: string): boolean {
-  return cellLines(cell).every(withinMarkdownParseBudget);
-}
-
 function richTextCell(cell: string): { block: Block; characters: number } | undefined {
-  if (!withinCellBudget(cell)) return undefined;
-  const elements: RichTextElement[] = [];
-  for (const line of cellLines(cell)) {
-    if (elements.length) elements.push({ type: 'text', text: '\n' });
-    elements.push(...inlineElements(line));
-  }
+  if (!withinMarkdownParseBudget(cell)) return undefined;
+  const elements = inlineElements(cell);
   // Slack rejects an empty section or a zero-length text element; a single
   // space renders blank and stays valid.
   const content = elements.length ? elements : [{ type: 'text', text: ' ' } satisfies RichTextElement];
@@ -129,12 +139,8 @@ function richTextCell(cell: string): { block: Block; characters: number } | unde
 }
 
 function headerCell(header: string | undefined, column: number): { block: Block; characters: number } | undefined {
-  if (header !== undefined && !withinCellBudget(header)) return undefined;
-  const text = header === undefined ? '' : cellLines(header)
-    .map((line) => plainText(fromMarkdown(line)))
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  if (header !== undefined && !withinMarkdownParseBudget(header)) return undefined;
+  const text = header === undefined ? '' : plainText(fromMarkdown(header)).replace(/\s+/g, ' ').trim();
   const label = text || `Column ${column + 1}`;
   return { block: { type: 'raw_text', text: label }, characters: label.length };
 }

@@ -37,6 +37,13 @@ describe('tablesToTableBlocks', () => {
     });
   });
 
+  it('keeps <br> inside inline code and escaped <br> literal', () => {
+    const source = '| `a<br>b` |\n|-|\n| `left<br>right` and \\<br> |';
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
+      rows: [[raw('a<br>b')], [cell(text('left<br>right', { code: true }), text(' and <br>'))]],
+    });
+  });
+
   it('maps inline formatting to rich text styles', () => {
     const source = '| Cell |\n|-|\n| **Bold** and _it_ and `co\\|de` then **[#1](https://x/1)** |';
     expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({

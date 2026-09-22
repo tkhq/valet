@@ -1214,6 +1214,16 @@ describe("discrete sends", () => {
     expect(posts[1].body.blocks).toEqual([{ type: 'markdown', text: markdown }]);
   });
 
+  it("sends the Markdown fallback before retrying without the sender identity", async () => {
+    const transport = makeTransport();
+    const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';
+    fake.failNext("chat.postMessage", "invalid_blocks");
+    await transport.send(KEY, { markdown, sender: { displayName: "Ledger" } });
+    const posts = fake.calls.filter((call) => call.method === "chat.postMessage");
+    expect(posts.map((post) => [post.body.username, ...(post.body.blocks as { type: string }[]).map((block) => block.type)]))
+      .toEqual([["Ledger", "table"], ["Ledger", "markdown"]]);
+  });
+
   it("replies in the turn's thread", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000300");

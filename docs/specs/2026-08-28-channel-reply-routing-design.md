@@ -416,9 +416,11 @@ as `markdown` blocks. This applies to message actions, DM actions, message edits
 and discrete transport replies. Messages with Slack-native spans keep the labeled
 row path.
 
-Inside a table block, `<br>` in a cell becomes a line break, and links, bold,
-italic, and inline code become rich text elements. Explicit GitHub references
-are linked before the table is parsed, so they become links inside cells too.
+Inside a table block, a `<br>` tag in a cell becomes a line break, and links,
+bold, italic, and inline code become rich text elements. The cell is parsed as
+CommonMark first, so a `<br>` inside a code span or behind a backslash stays
+literal. Explicit GitHub references are linked before the table is parsed, so
+they become links inside cells too.
 Header cells are plain text. An empty cell holds a single space, because Slack
 rejects an empty rich text cell and drops the whole message. Every column wraps,
 and the delimiter row sets column alignment.
@@ -434,4 +436,7 @@ message to 10,000 characters in total. A table outside these limits, a header-on
 table, or a result that needs more blocks than the caller's budget keeps the single
 Markdown block, so nothing renders worse than before. If Slack still rejects a
 generated table block with `invalid_blocks`, the sender posts the same content
-once more as a Markdown block. Caller-supplied blocks never get this retry.
+once more as a Markdown block. This happens before the retry without the
+assistant identity, so that retry carries the content Slack accepted and a
+second, unrelated error cannot hide the fallback. Caller-supplied blocks never
+get this retry.
