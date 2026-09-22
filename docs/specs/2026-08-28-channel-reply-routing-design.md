@@ -117,9 +117,13 @@ subscribes to `message_end`. It posts the first assistant message that has
 text. This message is the immediate reply or acknowledgement.
 
 **Later replies are explicit.** The host does not post later assistant messages
-or the final result. The agent uses `reply_to_origin` for progress updates
-and results. Slack also provides `reply_file_to_origin` for sandbox files.
-The `react_to_origin` action remains the explicit reaction path.
+or the final result. For an addressed request, the system prompt requires the
+agent to call `reply_to_origin` before it ends the turn with a final result.
+If work continues after the automatic immediate reply, the agent uses the same
+action for a meaningful progress update. The agent does not repeat a final
+result that `reply_to_origin` already delivered. Slack also provides
+`reply_file_to_origin` for sandbox files. The `react_to_origin` action remains
+the explicit reaction path.
 
 **One delivery.** The host evaluates origin-reply calls across every
 assistant entry in the submission, including text-less entries before the first
@@ -140,11 +144,42 @@ Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the
 tool context, so explicit origin actions work for both paths.
 
-**No final fallback.** The failed-action fallback applies only to a deferred
-first response. A reply action on a later message does not enable a host post.
-Decision-gate cards, command results, attention messages, link-flow messages,
-and other explicit host control messages keep their existing delivery
-behavior.
+**Final delivery guard.** The host finds the terminal assistant result for an
+addressed submission. If the submission has no successful `reply_to_origin`,
+the host posts that result once. A failed automatic acknowledgement does not
+prevent the final-delivery guard. A pending origin action defers the guard. A
+successful origin action in a preceding tool-use entry owns delivery when it
+sets `final: true`; its text can differ from the terminal wrap-up. A legacy
+reply owns delivery only when its text matches the terminal wrap-up. An
+unmarked, text-less reply can be progress, so it does not suppress a missing,
+failed, or pending final reply. An action with `details.ok=false` falls back to
+the terminal result when its tool ends. The guard records fallback delivery only
+after the transport accepts the post. A one-message automatic reply also marks
+delivery only after the transport accepts the post. If it fails, it retries
+twice after one and two seconds. A failed later fallback retries twice after
+one and two seconds. This is bounded best-effort delivery, not durable provider
+confirmation. The host logs and clears retry state after the retry limit.
+Stopping outbound delivery invalidates queued retries and ordinary outbound
+work. An in-flight failed send cannot schedule a retry. An in-flight successful
+send records final delivery after restart, so current-generation work does not
+post a duplicate. This rule applies to first replies and later fallback sends.
+Current work waits briefly for a pre-restart send. If it stalls, the host aborts
+the provider request and waits for its settlement. The host does not send a
+replacement because a provider can accept a post before local cancellation loses
+its response. The host keeps an in-memory uncertain-delivery tombstone for that
+key until the host stops or a confirmed delivery resolves it. A transport error
+also creates this tombstone unless the transport proves the provider rejected
+the post. The tombstone survives outbound stop and start, and suppresses later
+event redelivery and retry work. A full process restart clears this in-memory
+state. Slack and Telegram have no durable idempotency or post lookup boundary,
+so the host cannot guarantee duplicate suppression across process reconstruction.
+A submission abort cancels matching in-flight first and final requests before
+its queued outbound event runs. Slack also aborts a pending `Retry-After` delay.
+A transport that cannot cancel keeps the only owner until it settles. The guard never posts a
+one-message answer twice, a successful explicit final, or a manual-delivery
+turn. Decision-gate cards, command results, attention
+messages, link-flow messages, and other explicit host control messages keep
+their existing delivery behavior.
 
 **Submission surface (TKAI-323).** A bound thread stays bound for its whole
 life. Gate cards and command results inspect the submission surface. A web
@@ -269,12 +304,12 @@ Expected footprint:
 
 ## Invariants (alert, do not auto-repair)
 
-An addressed turn has at most one automatic assistant-text delivery: its first eligible response. Later and final text requires an explicit channel action. A manual-delivery turn has no automatic delivery. Manual delivery does not decide whether a thread message is overheard.
+An addressed turn has at most one automatic first assistant-text delivery. The host posts a later terminal result only when its explicit origin reply is missing or failed. A manual-delivery turn has no automatic delivery. Manual delivery does not decide whether a thread message is overheard.
 
 ## Testing
 
 - **Engine.** Channel-signal origins reach the tool context.
-- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. A manual-delivery turn has no automatic post.
+- **API.** An addressed turn posts its first assistant text once. The host posts a later terminal result once when no explicit origin reply succeeds. A failed terminal origin reply falls back after `tool_end`. A manual-delivery turn has no automatic post.
   Command results and gate cards retain their existing surface checks.
 - **Slack.** `reply_to_origin` posts text exactly once.
   `reply_file_to_origin` uploads a sandbox file exactly once.

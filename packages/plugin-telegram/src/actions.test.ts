@@ -56,7 +56,7 @@ describe("telegram.reply_to_origin", () => {
   it("posts exactly once to the origin chat", async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 42 } })));
     const result = await replyAction().execute(
-      { text: "Done" },
+      { text: "Done", final: true },
       context({ origin: { channelType: "telegram", threadKey: "telegram:99" } }),
     );
 

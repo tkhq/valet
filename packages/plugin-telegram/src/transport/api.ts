@@ -64,13 +64,14 @@ export class TelegramApi {
     chatId: number | string;
     html: string;
     replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+    signal?: AbortSignal;
   }): Promise<{ messageId: number }> {
     const result = (await this.call("sendMessage", {
       chat_id: opts.chatId,
       text: opts.html,
       parse_mode: "HTML",
       reply_markup: opts.replyMarkup,
-    })) as { message_id: number };
+    }, opts.signal)) as { message_id: number };
     return { messageId: result.message_id };
   }
 

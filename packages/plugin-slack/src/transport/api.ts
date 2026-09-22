@@ -85,8 +85,8 @@ export class SlackApi {
     return this.cachedDirectoryKey;
   }
 
-  private async call(method: string, body: Record<string, unknown>): Promise<SlackResponse> {
-    const res = await slackFetch(method, this.token, body, this.baseUrl);
+  private async call(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<SlackResponse> {
+    const res = await slackFetch(method, this.token, body, this.baseUrl, signal);
     const parsed = (await res.json()) as SlackResponse;
     if (!parsed.ok) {
       throw new SlackApiError(
@@ -139,6 +139,7 @@ export class SlackApi {
     /** Per-assistant avatar override (`chat:write.customize` scope).
      * Absent = the app's own icon. */
     iconUrl?: string;
+    signal?: AbortSignal;
   }): Promise<{ ts: string }> {
     const body: Record<string, unknown> = {
       channel: opts.channel,
@@ -150,7 +151,7 @@ export class SlackApi {
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.username !== undefined) body.username = opts.username;
     if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
-    const res = await this.call("chat.postMessage", body);
+    const res = await this.call("chat.postMessage", body, opts.signal);
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");
     return { ts };

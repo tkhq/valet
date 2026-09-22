@@ -98,6 +98,9 @@ const DEDUP_CAP = 2048;
 const UNLINKED_REPLY_COOLDOWN_MS = 60 * 60_000;
 const DELIVERED_CAP = 2048;
 const VERIFY_FAILED_LOG_COOLDOWN_MS = 60_000;
+export const FINAL_DELIVERY_RETRY_DELAY_MS = 1_000;
+export const MAX_FINAL_DELIVERY_RETRIES = 2;
+export const FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS = 150;
 
 /** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️.
  * `resolvedByName` (the resolver's display name, when known) turns the line
@@ -180,6 +183,23 @@ function isGatePromptRef(value: unknown): value is GatePromptRef {
 
 type OriginReplyState = "none" | "pending" | "succeeded" | "failed";
 
+function replyText(
+  part: NonNullable<Extract<SessionEntry, { type: "message" }>["parts"]>[number],
+): string | undefined {
+  if (part.type !== "tool_call" || !isRecord(part.args) || !isRecord(part.args.params)) return undefined;
+  const text = part.args.params.text;
+  return typeof text === "string" ? text : undefined;
+}
+
+function isFinalReply(
+  part: NonNullable<Extract<SessionEntry, { type: "message" }>["parts"]>[number],
+): boolean {
+  return part.type === "tool_call" &&
+    isRecord(part.args) &&
+    isRecord(part.args.params) &&
+    part.args.params.final === true;
+}
+
 /** Classify explicit origin delivery across every assistant entry in a submission. */
 function originReplyState(entries: SessionEntry[], queueItemId: string): OriginReplyState {
   const calls = entries.flatMap((entry) => {
@@ -205,6 +225,57 @@ function originReplyState(entries: SessionEntry[], queueItemId: string): OriginR
   }
   if (calls.some((part) => part.type === "tool_call" && part.status === "running")) return "pending";
   return "failed";
+}
+
+/** The terminal text for a submission. The engine persists `end_turn` only
+ * after the model has completed the turn, so interim acknowledgement text
+ * cannot be selected as a fallback result. */
+function terminalAssistantResult(entries: SessionEntry[], queueItemId: string): Extract<SessionEntry, { type: "message" }> | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (
+      entry?.type === "message" &&
+      entry.role === "assistant" &&
+      entry.queueItemId === queueItemId &&
+      entry.stopReason === "end_turn" &&
+      entry.content
+    ) {
+      return entry;
+    }
+  }
+  return undefined;
+}
+
+/** Find the explicit reply that delivered this terminal result. A tool-use
+ * entry precedes the terminal entry in the engine transcript. A `final: true`
+ * action owns delivery even when the terminal wrap-up uses different text.
+ * Legacy actions own delivery only when their reply text matches the terminal
+ * result. A text-less legacy action can be progress, so it cannot suppress
+ * fallback. */
+function finalOriginReplyState(
+  entries: SessionEntry[],
+  queueItemId: string,
+  final: Extract<SessionEntry, { type: "message" }>,
+): OriginReplyState {
+  const finalIndex = entries.findIndex((entry) => entry.id === final.id);
+  if (finalIndex === -1) return "none";
+  const matchingEntries: SessionEntry[] = [];
+  for (let index = finalIndex; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type !== "message" || entry.role !== "assistant" || entry.queueItemId !== queueItemId) continue;
+    const calls = (entry.parts ?? []).filter(
+      (part) =>
+        part.type === "tool_call" &&
+        isRecord(part.args) &&
+        typeof part.args.tool_id === "string" &&
+        part.args.tool_id.endsWith(".reply_to_origin") &&
+        (index === finalIndex ||
+          isFinalReply(part) ||
+          replyText(part)?.trim() === final.content.trim()),
+    );
+    if (calls.length > 0) matchingEntries.push({ ...entry, parts: calls });
+  }
+  return originReplyState(matchingEntries, queueItemId);
 }
 
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
@@ -285,6 +356,20 @@ export class ChannelHost {
    * card its tool call raised, and fire-and-forget handlers would let the
    * two race. An entry is removed once its chain drains. */
   private outboundChains = new Map<string, Promise<void>>();
+  /** Invalidates queued retry work when outbound delivery stops or restarts. */
+  private outboundGeneration = 0;
+  /** Final fallback sends in progress, including sends that began before a restart. */
+  private finalDeliverySends = new Map<string, { owner: symbol; settled: Promise<void>; controller: AbortController }>();
+  /** First-reply sends in progress, including sends that began before a restart. */
+  private firstReplySends = new Map<string, { owner: symbol; settled: Promise<void>; controller: AbortController }>();
+  /** Bounded retries for final fallback sends that fail at the transport. */
+  private finalRetryAttempts = new Map<string, number>();
+  private finalRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Bounded retries for a one-message first reply that fails to send. */
+  private firstReplyRetryAttempts = new Map<string, number>();
+  private firstReplyRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Requests aborted after the provider may have accepted them. Kept for this host lifetime. */
+  private uncertainDeliveries = new Set<string>();
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
@@ -555,6 +640,7 @@ export class ChannelHost {
    */
   startOutbound(): void {
     if (this.outboundUnsub) return;
+    this.outboundGeneration += 1;
     this.outboundUnsub = this.deps.eventStream.subscribe(
       {
         eventTypes: [
@@ -570,51 +656,88 @@ export class ChannelHost {
           "command_result",
         ],
       },
-      (event) => {
-        // Serialize per (session, thread): each handler awaits transport
-        // sends, and two concurrent handlers can land out of order — the
-        // reader would see the approval card before the text that led to it.
-        // An event without a threadId has no thread to order against.
-        const e = event.event;
-        const threadId = "threadId" in e ? e.threadId : undefined;
-        if (threadId === undefined) {
-          void this.handleOutboundEvent(event);
-          return;
-        }
-        const key = `${event.sessionId}\u0000${threadId}`;
-        const tail = (this.outboundChains.get(key) ?? Promise.resolve()).then(() =>
-          this.handleOutboundEvent(event),
-        );
-        this.outboundChains.set(key, tail);
-        // handleOutboundEvent never throws (its body is try/caught), so the
-        // chain cannot reject; finally is only bookkeeping.
-        void tail.finally(() => {
-          if (this.outboundChains.get(key) === tail) this.outboundChains.delete(key);
-        });
-      },
+      (event) => this.enqueueOutboundEvent(event, this.outboundGeneration),
     );
   }
 
+  private abortDeliverySends(sessionId: string, queueItemId: string): void {
+    for (const dedupeKey of [
+      `${sessionId}:first-reply:${queueItemId}`,
+      `${sessionId}:final-reply:${queueItemId}`,
+    ]) {
+      const send = this.firstReplySends.get(dedupeKey) ?? this.finalDeliverySends.get(dedupeKey);
+      if (send) {
+        this.uncertainDeliveries.add(dedupeKey);
+        send.controller.abort();
+      }
+      this.clearFirstReplyRetry(dedupeKey);
+      this.clearFinalDeliveryRetry(dedupeKey);
+    }
+  }
+
+  private enqueueOutboundEvent(event: DeliveredBusEvent, generation: number): void {
+    const e = event.event;
+    if (e.type === "message_end" && e.reason === "abort" && event.queueItemId !== undefined) {
+      this.abortDeliverySends(event.sessionId, event.queueItemId);
+    }
+    const threadId = "threadId" in e ? e.threadId : undefined;
+    if (threadId === undefined) {
+      void this.handleOutboundEvent(event, generation);
+      return;
+    }
+    this.enqueueOutbound(event.sessionId, threadId, () => this.handleOutboundEvent(event, generation));
+  }
+
+  /** Serialize event delivery and retry work for one session thread. */
+  private enqueueOutbound(sessionId: string, threadId: string, task: () => Promise<void>): void {
+    const key = `${sessionId}\u0000${threadId}`;
+    const tail = (this.outboundChains.get(key) ?? Promise.resolve()).then(task);
+    this.outboundChains.set(key, tail);
+    // Every queued task catches its own errors. `finally` only removes an
+    // idle chain and cannot affect a newer task on the same thread.
+    void tail.finally(() => {
+      if (this.outboundChains.get(key) === tail) this.outboundChains.delete(key);
+    });
+  }
+
   stopOutbound(): void {
+    this.outboundGeneration += 1;
     this.outboundUnsub?.();
     this.outboundUnsub = null;
     this.outboundChains.clear();
+    for (const timer of this.finalRetryTimers.values()) clearTimeout(timer);
+    this.finalRetryTimers.clear();
+    this.finalRetryAttempts.clear();
+    for (const timer of this.firstReplyRetryTimers.values()) clearTimeout(timer);
+    this.firstReplyRetryTimers.clear();
+    this.firstReplyRetryAttempts.clear();
   }
 
   /** Rule 5: every callback body try/caught — errors logged, never thrown into the stream. */
-  private async handleOutboundEvent(event: DeliveredBusEvent): Promise<void> {
+  private async handleOutboundEvent(event: DeliveredBusEvent, generation: number): Promise<void> {
+    if (!this.outboundIsActive(generation)) return;
     try {
       const e = event.event;
       if (e.type === "message_end") {
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
+        const trigger = {
           messageId: e.messageId,
           queueItemId: event.queueItemId,
           reason: e.reason,
-        });
+        };
+        try {
+          await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        } catch (err) {
+          console.error("[channels] first reply delivery failed", err);
+        }
+        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger, generation);
       } else if (e.type === "tool_end" && event.queueItemId !== undefined) {
-        await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
-          queueItemId: event.queueItemId,
-        });
+        const trigger = { queueItemId: event.queueItemId };
+        try {
+          await this.deliverFirstAssistantReply(event.sessionId, e.threadId, trigger, generation);
+        } catch (err) {
+          console.error("[channels] first reply delivery failed", err);
+        }
+        await this.deliverFinalAssistantReply(event.sessionId, e.threadId, trigger, generation);
       } else if (e.type === "decision_gate") {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
@@ -640,7 +763,9 @@ export class ChannelHost {
       queueItemId?: string;
       reason?: "end_turn" | "tool_use" | "error" | "abort";
     },
+    generation: number,
   ): Promise<void> {
+    if (!this.outboundIsActive(generation)) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
@@ -654,11 +779,13 @@ export class ChannelHost {
     if (!queueItemId) return;
     const dedupeKey = `${sessionId}:first-reply:${queueItemId}`;
     if (trigger.reason === "error" || trigger.reason === "abort") {
+      this.clearFirstReplyRetry(dedupeKey);
       if (trigger.reason === "abort") this.markDelivered(dedupeKey);
       return;
     }
     const queueItem = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
     if (queueItem?.abortRequestedAt !== undefined || queueItem?.outcome?.outcome === "aborted") {
+      this.clearFirstReplyRetry(dedupeKey);
       this.markDelivered(dedupeKey);
       return;
     }
@@ -670,24 +797,292 @@ export class ChannelHost {
         entry.queueItemId === queueItemId &&
         Boolean(entry.content),
     );
-    if (!first || first.type !== "message" || !first.content) return;
+    if (!first || first.type !== "message" || !first.content) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
     const origin = turnOrigin(entries, queueItemId);
-    if (!origin || origin.reply === "manual") return;
+    if (!origin || origin.reply === "manual") {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
 
     const explicit = originReplyState(entries, queueItemId);
-    if (explicit === "pending" || explicit === "succeeded") return;
+    if (explicit === "pending" || explicit === "succeeded") {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
 
     const target = this.channelThreadFor(origin.threadKey);
-    if (!target) return;
-    if (this.delivered.has(dedupeKey)) return;
-    this.markDelivered(dedupeKey);
+    if (!target) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
+    if (!this.outboundIsActive(generation)) return;
+    if (this.delivered.has(dedupeKey) || this.uncertainDeliveries.has(dedupeKey)) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
+    const inFlight = this.firstReplySends.get(dedupeKey);
+    if (inFlight) {
+      const settled = await this.waitForFinalDeliverySend(inFlight);
+      if (!settled && this.firstReplySends.get(dedupeKey) === inFlight) {
+        // Abort cannot retract a provider request that may already be accepted.
+        // Do not replace this uncertain first reply after local settlement.
+        this.uncertainDeliveries.add(dedupeKey);
+        inFlight.controller.abort();
+        await inFlight.settled;
+        return;
+      }
+      if (!this.outboundIsActive(generation)) return;
+      await this.deliverFirstAssistantReply(sessionId, threadId, trigger, generation);
+      return;
+    }
     const transport = this.transports.get(target.channelType);
-    if (!transport) return;
+    if (!transport) {
+      this.clearFirstReplyRetry(dedupeKey);
+      return;
+    }
     const sender = await this.assistantSenderIdentity(sessionId);
-    await transport.send(target.conversationKey, {
+    if (!this.outboundIsActive(generation)) return;
+    const controller = new AbortController();
+    const send = Promise.resolve().then(() => transport.send(target.conversationKey, {
       markdown: first.content,
       ...(sender !== undefined ? { sender } : {}),
+    }, { signal: controller.signal }));
+    const inFlightSend = { owner: Symbol(dedupeKey), settled: send.then(() => undefined, () => undefined), controller };
+    this.firstReplySends.set(dedupeKey, inFlightSend);
+    try {
+      await send;
+    } catch (err) {
+      if (this.firstReplySends.get(dedupeKey) === inFlightSend) this.firstReplySends.delete(dedupeKey);
+      if (this.sendFailureIsUncertain(transport, err)) this.uncertainDeliveries.add(dedupeKey);
+      throw err;
+    }
+    if (this.firstReplySends.get(dedupeKey) !== inFlightSend) return;
+    this.markDelivered(dedupeKey);
+    this.clearFirstReplyRetry(dedupeKey);
+    this.firstReplySends.delete(dedupeKey);
+  }
+
+  private scheduleFirstReplyRetry(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+    dedupeKey: string,
+    generation: number,
+  ): void {
+    if (!this.outboundIsActive(generation) || this.uncertainDeliveries.has(dedupeKey) || this.firstReplyRetryTimers.has(dedupeKey)) return;
+    const attempts = this.firstReplyRetryAttempts.get(dedupeKey) ?? 0;
+    if (attempts >= MAX_FINAL_DELIVERY_RETRIES) {
+      this.firstReplyRetryAttempts.delete(dedupeKey);
+      console.error(`[channels] first reply failed after ${attempts} retries (session=${sessionId} queue=${queueItemId})`);
+      return;
+    }
+    this.firstReplyRetryAttempts.set(dedupeKey, attempts + 1);
+    const timer = setTimeout(() => {
+      this.firstReplyRetryTimers.delete(dedupeKey);
+      if (!this.outboundIsActive(generation)) return;
+      this.enqueueOutbound(sessionId, threadId, async () => {
+        if (!this.outboundIsActive(generation)) return;
+        try {
+          await this.deliverFirstAssistantReply(sessionId, threadId, { queueItemId }, generation);
+        } catch (err) {
+          this.scheduleFirstReplyRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
+          console.error("[channels] outbound delivery failed", err);
+        }
+      });
+    }, FINAL_DELIVERY_RETRY_DELAY_MS * 2 ** attempts);
+    this.firstReplyRetryTimers.set(dedupeKey, timer);
+  }
+
+  private clearFirstReplyRetry(dedupeKey: string): void {
+    const timer = this.firstReplyRetryTimers.get(dedupeKey);
+    if (timer) clearTimeout(timer);
+    this.firstReplyRetryTimers.delete(dedupeKey);
+    this.firstReplyRetryAttempts.delete(dedupeKey);
+  }
+
+  private sendFailureIsUncertain(transport: ChannelTransport, error: unknown): boolean {
+    return transport.sendFailureIsCertain?.(error) !== true;
+  }
+
+  private outboundIsActive(generation: number): boolean {
+    return this.outboundUnsub !== null && this.outboundGeneration === generation;
+  }
+
+  private scheduleFinalDeliveryRetry(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+    dedupeKey: string,
+    generation: number,
+  ): void {
+    if (!this.outboundIsActive(generation) || this.uncertainDeliveries.has(dedupeKey) || this.finalRetryTimers.has(dedupeKey)) return;
+    const attempts = this.finalRetryAttempts.get(dedupeKey) ?? 0;
+    if (attempts >= MAX_FINAL_DELIVERY_RETRIES) {
+      this.finalRetryAttempts.delete(dedupeKey);
+      console.error(`[channels] final delivery failed after ${attempts} retries (session=${sessionId} queue=${queueItemId})`);
+      return;
+    }
+    this.finalRetryAttempts.set(dedupeKey, attempts + 1);
+    const timer = setTimeout(() => {
+      this.finalRetryTimers.delete(dedupeKey);
+      if (!this.outboundIsActive(generation)) return;
+      this.enqueueOutbound(sessionId, threadId, async () => {
+        if (!this.outboundIsActive(generation)) return;
+        try {
+          await this.deliverFinalAssistantReply(sessionId, threadId, { queueItemId }, generation);
+        } catch (err) {
+          console.error("[channels] outbound delivery failed", err);
+        }
+      });
+    }, FINAL_DELIVERY_RETRY_DELAY_MS * 2 ** attempts);
+    this.finalRetryTimers.set(dedupeKey, timer);
+  }
+
+  private clearFinalDeliveryRetry(dedupeKey: string): void {
+    const timer = this.finalRetryTimers.get(dedupeKey);
+    if (timer) clearTimeout(timer);
+    this.finalRetryTimers.delete(dedupeKey);
+    this.finalRetryAttempts.delete(dedupeKey);
+  }
+
+  private async waitForFinalDeliverySend(send: { settled: Promise<void> }): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), FINAL_DELIVERY_IN_FLIGHT_TIMEOUT_MS);
+      void send.settled.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
     });
+  }
+
+  /**
+   * Backstop final delivery for addressed turns. The first-response path
+   * intentionally posts only an acknowledgement. When a later terminal result
+   * has no successful explicit origin reply, this path posts that result once.
+   * A pending explicit reply still owns delivery until its tool result records
+   * `details.ok`; a failed result falls back here on `tool_end`.
+   */
+  private async deliverFinalAssistantReply(
+    sessionId: string,
+    threadId: string,
+    trigger: {
+      messageId?: string;
+      queueItemId?: string;
+      reason?: "end_turn" | "tool_use" | "error" | "abort";
+    },
+    generation = this.outboundGeneration,
+  ): Promise<void> {
+    if (!this.outboundIsActive(generation) || trigger.reason === "error" || trigger.reason === "abort") return;
+    const thread = await this.deps.engineStore.getThread(sessionId, threadId);
+    if (!thread) return;
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    const triggerEntry = trigger.messageId === undefined
+      ? undefined
+      : entries.find(
+          (entry) =>
+            entry.id === trigger.messageId && entry.type === "message" && entry.role === "assistant",
+        );
+    const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
+    if (!queueItemId) return;
+    const dedupeKey = `${sessionId}:final-reply:${queueItemId}`;
+    const queueItem = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
+    if (queueItem?.abortRequestedAt !== undefined || queueItem?.outcome?.outcome === "aborted") {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+
+    const origin = turnOrigin(entries, queueItemId);
+    if (!origin || origin.reply === "manual") {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+    const first = entries.find(
+      (entry) =>
+        entry.type === "message" &&
+        entry.role === "assistant" &&
+        entry.queueItemId === queueItemId &&
+        Boolean(entry.content),
+    );
+    const final = terminalAssistantResult(entries, queueItemId);
+    if (!first || first.type !== "message" || !final) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+
+    const explicit = finalOriginReplyState(entries, queueItemId, final);
+    // A one-message answer is the automatic first reply, not a second post.
+    // If that post failed, its own bounded retry remains responsible for it.
+    if (first.id === final.id) {
+      const firstDedupeKey = `${sessionId}:first-reply:${queueItemId}`;
+      this.clearFinalDeliveryRetry(dedupeKey);
+      if (explicit === "pending" || explicit === "succeeded") {
+        this.clearFirstReplyRetry(firstDedupeKey);
+      } else if (!this.delivered.has(firstDedupeKey)) {
+        this.scheduleFirstReplyRetry(sessionId, threadId, queueItemId, firstDedupeKey, generation);
+      }
+      return;
+    }
+    if (explicit === "pending" || explicit === "succeeded") {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+
+    const target = this.channelThreadFor(origin.threadKey);
+    if (!target) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+    if (this.delivered.has(dedupeKey) || this.uncertainDeliveries.has(dedupeKey)) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+    const inFlight = this.finalDeliverySends.get(dedupeKey);
+    if (inFlight) {
+      const settled = await this.waitForFinalDeliverySend(inFlight);
+      if (!settled && this.finalDeliverySends.get(dedupeKey) === inFlight) {
+        // Abort cannot retract a provider request that may already be accepted.
+        // Do not replace this uncertain final reply after local settlement.
+        this.uncertainDeliveries.add(dedupeKey);
+        inFlight.controller.abort();
+        await inFlight.settled;
+        return;
+      }
+      if (!this.outboundIsActive(generation)) return;
+      await this.deliverFinalAssistantReply(sessionId, threadId, trigger, generation);
+      return;
+    }
+    const transport = this.transports.get(target.channelType);
+    if (!transport) {
+      this.clearFinalDeliveryRetry(dedupeKey);
+      return;
+    }
+    const sender = await this.assistantSenderIdentity(sessionId);
+    if (!this.outboundIsActive(generation)) return;
+    const controller = new AbortController();
+    const send = Promise.resolve().then(() => transport.send(target.conversationKey, {
+      markdown: final.content,
+      ...(sender !== undefined ? { sender } : {}),
+    }, { signal: controller.signal }));
+    const inFlightSend = { owner: Symbol(dedupeKey), settled: send.then(() => undefined, () => undefined), controller };
+    this.finalDeliverySends.set(dedupeKey, inFlightSend);
+    try {
+      await send;
+    } catch (err) {
+      if (this.finalDeliverySends.get(dedupeKey) === inFlightSend) this.finalDeliverySends.delete(dedupeKey);
+      if (this.sendFailureIsUncertain(transport, err)) {
+        this.uncertainDeliveries.add(dedupeKey);
+      } else if (!controller.signal.aborted) {
+        this.scheduleFinalDeliveryRetry(sessionId, threadId, queueItemId, dedupeKey, generation);
+      }
+      throw err;
+    }
+    if (this.finalDeliverySends.get(dedupeKey) !== inFlightSend) return;
+    this.markDelivered(dedupeKey);
+    this.clearFinalDeliveryRetry(dedupeKey);
+    this.finalDeliverySends.delete(dedupeKey);
   }
 
   /**
@@ -719,6 +1114,7 @@ export class ChannelHost {
   }
 
   private markDelivered(dedupeKey: string): void {
+    this.uncertainDeliveries.delete(dedupeKey);
     this.delivered.add(dedupeKey);
     this.deliveredOrder.push(dedupeKey);
     if (this.deliveredOrder.length > DELIVERED_CAP) {

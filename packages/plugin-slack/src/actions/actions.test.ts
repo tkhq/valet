@@ -249,7 +249,7 @@ describe('slack actions', () => {
   it('reply_to_origin posts chat.postMessage into the origin thread, no ids from the model', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
     const result = await action('slack.reply_to_origin').execute(
-      { text: 'here is the answer' },
+      { text: 'here is the answer', final: true },
       pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual', messageTs: '1.5' } }),
     );
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];

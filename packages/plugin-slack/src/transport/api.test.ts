@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { slackFetch } from "../actions/api.js";
 import { SlackApi } from "./api.js";
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -78,5 +79,27 @@ describe("SlackApi.joinChannel", () => {
 
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1:9999/conversations.join");
+  });
+});
+
+describe("slackFetch", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("aborts while waiting for Slack Retry-After", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, {
+      status: 429,
+      headers: { "Retry-After": "30" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const pending = slackFetch("chat.postMessage", "xoxb-test", {}, undefined, controller.signal);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    controller.abort(new Error("Request was aborted"));
+
+    await expect(pending).rejects.toThrow("Request was aborted");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

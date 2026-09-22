@@ -33,6 +33,7 @@ import {
   type InboundChannelMedia,
   type OutboundChannelAttachment,
   type OutboundChannelMessage,
+  type OutboundSendOptions,
   type RawChannelUpdate,
   type SendRef,
   type StreamRef,
@@ -836,7 +837,15 @@ export class SlackTransport implements ChannelTransport {
     }
   }
 
-  async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
+  sendFailureIsCertain(error: unknown): boolean {
+    return error instanceof SlackApiError && error.providerRejected;
+  }
+
+  async send(
+    conversationKey: string,
+    message: OutboundChannelMessage,
+    opts?: OutboundSendOptions,
+  ): Promise<SendRef> {
     const target = this.mustParse(conversationKey);
     const threadTs = this.replyThreadTs(conversationKey);
     const formatted = markdownToSlackMrkdwn(message.markdown);
@@ -853,6 +862,7 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
+      signal: opts?.signal,
       ...slackIdentityOverride(message.sender),
     });
     return { conversationKey, messageId: res.ts };
