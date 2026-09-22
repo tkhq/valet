@@ -18,7 +18,7 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
@@ -26,8 +26,9 @@ import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
-import type { UsageUseCase, UsageDrillItem, UsageScopeName } from "@valet/api/wire";
+import type { UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { downloadTextFile } from "~/lib/download";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -35,6 +36,24 @@ export const Route = createFileRoute("/usage")({
 
 const WINDOWS = ["24h", "7d", "30d"] as const;
 type Window = (typeof WINDOWS)[number];
+
+function usageErrorText(error: unknown): string {
+  if (typeof error === "object" && error !== null && "payload" in error) {
+    const payload = error.payload;
+    if (typeof payload === "object" && payload !== null && "error" in payload) {
+      const detail = payload.error;
+      if (
+        typeof detail === "object" &&
+        detail !== null &&
+        "message" in detail &&
+        typeof detail.message === "string"
+      ) {
+        return detail.message;
+      }
+    }
+  }
+  return String(error);
+}
 
 function fmt(n: number) {
   return n.toLocaleString();
@@ -100,17 +119,17 @@ function nestItems(items: UsageDrillItem[]): UsageDrillItem[] {
 
 /** Lazy-loaded item list for one use case. */
 function ItemList({
-  window,
+  period,
   scope,
   teamId,
   useCase,
 }: {
-  window: string;
+  period: UsagePeriodSelection;
   scope: UsageScopeName;
   teamId: string | undefined;
   useCase: UsageUseCase;
 }) {
-  const q = useUsageItems(window, scope, useCase, teamId);
+  const q = useUsageItems(period, scope, useCase, teamId);
 
   if (q.isLoading) {
     return <p className="text-xs text-muted px-4 py-2">Loading…</p>;
@@ -172,7 +191,7 @@ function UseCaseRow({
   costUsd,
   totalTokens,
   turns,
-  window,
+  period,
   scope,
   teamId,
 }: {
@@ -180,7 +199,7 @@ function UseCaseRow({
   costUsd: number;
   totalTokens: number;
   turns: number;
-  window: string;
+  period: UsagePeriodSelection;
   scope: UsageScopeName;
   teamId: string | undefined;
 }) {
@@ -213,14 +232,19 @@ function UseCaseRow({
         <span className="tabular-nums text-muted sm:w-16 sm:text-right">{turns} turns</span>
       </div>
       {expanded && (
-        <ItemList window={window} scope={scope} teamId={teamId} useCase={useCase} />
+        <ItemList period={period} scope={scope} teamId={teamId} useCase={useCase} />
       )}
     </div>
   );
 }
 
 export function UsagePage() {
-  const [window, setWindow] = useState<Window>("7d");
+  const [period, setPeriod] = useState<UsagePeriodSelection>({ kind: "lookback", window: "7d" });
+  const [month, setMonth] = useState("");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [exportError, setExportError] = useState<unknown>();
+  const [exporting, setExporting] = useState(false);
   const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
   // Keep only cursor history, not every loaded row. Each page remains bounded
   // by the server's explicit page size.
@@ -245,8 +269,10 @@ export function UsagePage() {
   const personalWorkspace = ws?.kind === "personal";
   const teamId = ws?.kind === "team" ? ws.team.id : undefined;
   const scope: UsageScopeName = teamId !== undefined ? "team" : personalScope;
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const currentMonthUtc = todayUtc.slice(0, 7);
 
-  const breakdownQ = useUsageBreakdown(window, scope, teamId, { enabled: scopeKnown });
+  const breakdownQ = useUsageBreakdown(period, scope, teamId, { enabled: scopeKnown });
   // Proxy traffic is personal; every consumer of these two queries renders
   // only in the personal workspace, so do not fetch outside it.
   const requestsQ = useProxyRequests({ limit: 25, cursor }, { enabled: personalWorkspace });
@@ -279,10 +305,51 @@ export function UsagePage() {
         (breakdown.totalInputTokens + breakdown.totalCacheReadTokens)
       : null;
 
-  const csvHref = api.usageExportCsvUrl(window, scope, teamId);
+  const csvHref = api.usageExportCsvUrl(period, scope, teamId);
+  const periodLabel = period.kind === "lookback"
+    ? period.window
+    : period.kind === "month"
+      ? period.month
+      : `${period.start} to ${period.end}`;
+  const customPeriodApplied =
+    period.kind === "custom" && period.start === customStart && period.end === customEnd;
+  const customPeriodPending =
+    Boolean(customStart && customEnd && customStart <= customEnd) && !customPeriodApplied;
 
   function handleWindowChange(w: Window) {
-    setWindow(w);
+    setMonth("");
+    setCustomStart("");
+    setCustomEnd("");
+    setPeriod({ kind: "lookback", window: w });
+  }
+
+  function handleMonthChange(next: string) {
+    setMonth(next);
+    setCustomStart("");
+    setCustomEnd("");
+    setPeriod(next ? { kind: "month", month: next } : { kind: "lookback", window: "7d" });
+  }
+
+  function applyCustomPeriod() {
+    setMonth("");
+    setPeriod({ kind: "custom", start: customStart, end: customEnd });
+  }
+
+  async function handleCsvDownload(event: MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault();
+    if (exporting) return;
+    setExportError(undefined);
+    setExporting(true);
+    try {
+      const csv = await api.usageExportCsv(period, scope, teamId);
+      const scopeLabel = scope === "team" ? `team-${teamId}` : scope;
+      const filenamePeriod = periodLabel.replaceAll(" to ", "_to_");
+      downloadTextFile(`valet-usage-${scopeLabel}-${filenamePeriod}.csv`, csv, "text/csv;charset=utf-8");
+    } catch (error) {
+      setExportError(error);
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
@@ -324,7 +391,7 @@ export function UsagePage() {
               type="button"
               onClick={() => handleWindowChange(w)}
               className={`min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 ${
-                window === w
+                period.kind === "lookback" && period.window === w
                   ? "border-moss text-moss bg-moss-wash font-medium"
                   : "border-line text-muted hover:text-ink hover:border-ink"
               }`}
@@ -332,6 +399,61 @@ export function UsagePage() {
               {w}
             </button>
           ))}
+          <label className="flex items-center gap-2 text-sm text-muted">
+            <span>Month</span>
+            <input
+              type="month"
+              aria-label="Calendar month"
+              max={currentMonthUtc}
+              value={month}
+              onChange={(event) => handleMonthChange(event.target.value)}
+              aria-current={period.kind === "month" ? "date" : undefined}
+              className={`min-h-11 rounded border bg-paper px-2 sm:min-h-0 ${
+                period.kind === "month"
+                  ? "border-moss bg-moss-wash font-medium text-moss"
+                  : "border-line text-ink"
+              }`}
+            />
+          </label>
+          <label className="text-sm text-muted">
+            <span className="sr-only">Custom start date</span>
+            <input
+              type="date"
+              aria-label="Custom start date"
+              max={todayUtc}
+              value={customStart}
+              onChange={(event) => setCustomStart(event.target.value)}
+              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+            />
+          </label>
+          <span className="text-sm text-muted">to</span>
+          <label className="text-sm text-muted">
+            <span className="sr-only">Custom end date</span>
+            <input
+              type="date"
+              aria-label="Custom end date"
+              min={customStart}
+              max={todayUtc}
+              value={customEnd}
+              onChange={(event) => setCustomEnd(event.target.value)}
+              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={!customStart || !customEnd || customStart > customEnd}
+            onClick={applyCustomPeriod}
+            aria-pressed={customPeriodApplied}
+            className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
+              customPeriodApplied
+                ? "border-moss bg-moss-wash font-medium text-moss"
+                : customPeriodPending
+                  ? "border-amber-500 bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
+                  : "border-line text-muted hover:border-ink hover:text-ink"
+            }`}
+          >
+            Apply dates
+          </button>
           {personalWorkspace && isOrgAdmin && (
             <div className="flex items-center gap-1 sm:ml-4 rounded border border-line overflow-hidden text-sm">
               <button
@@ -364,20 +486,25 @@ export function UsagePage() {
             <a
               href={csvHref}
               download
+              onClick={handleCsvDownload}
+              aria-disabled={exporting}
               className="inline-flex w-full items-center justify-center sm:ml-auto sm:w-auto min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 border-line text-muted hover:text-ink hover:border-ink"
-              aria-label={`Download CSV (${window}, ${scope})`}
+              aria-label={`Download CSV (${periodLabel}, ${scope})`}
             >
-              Download CSV ({window}, {scope})
+              {exporting ? "Preparing CSV…" : `Download CSV (${periodLabel}, ${scope})`}
             </a>
           )}
         </div>
+        {exportError !== undefined && (
+          <p className="text-sm text-danger-600">{usageErrorText(exportError)}</p>
+        )}
 
         {/* Totals + chart + by-use-case + by-model. A disabled query (scope
             still resolving) reports isLoading=false, so gate on both. */}
         {!scopeKnown || breakdownQ.isLoading ? (
           <p className="text-sm text-muted">Loading…</p>
         ) : breakdownQ.error ? (
-          <p className="text-sm text-danger-600">{String(breakdownQ.error)}</p>
+          <p className="text-sm text-danger-600">{usageErrorText(breakdownQ.error)}</p>
         ) : breakdown ? (
           <>
             {/* Total stat cards — cost + token types + cache-hit-rate + unpriced */}
@@ -443,7 +570,7 @@ export function UsagePage() {
                       costUsd={bucket.costUsd}
                       totalTokens={bucket.totalTokens}
                       turns={bucket.turns}
-                      window={window}
+                      period={period}
                       scope={scope}
                       teamId={teamId}
                     />

@@ -244,6 +244,7 @@ import type {
   UsageDrillResponse,
   UsageDrillItem,
   UsageScopeName,
+  UsagePeriodSelection,
   UsageUseCase,
   AddArtifactCommentRequest,
   AddArtifactCommentResponse,
@@ -433,6 +434,34 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   return requestForm<ProfilePictureUploadResponse>(path, form);
 }
 
+async function requestText(path: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, { signal: controller.signal });
+    const text = await res.text();
+    if (!res.ok) {
+      let payload: unknown = text;
+      try {
+        payload = JSON.parse(text);
+      } catch {}
+      if (res.status === 401) void maybeRedirectToLogin();
+      throw new ApiError(res.status, `GET ${path} → ${res.status}`, payload);
+    }
+    return text;
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        NO_RESPONSE_STATUS,
+        `GET ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -525,6 +554,12 @@ export interface WorkflowRunFilter extends WorkflowRunPage {
   outcome?: WorkflowRunOutcome[];
   parentRunId?: string;
   since?: number;
+}
+
+export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearchParams {
+  if (period.kind === "lookback") return new URLSearchParams({ window: period.window });
+  if (period.kind === "month") return new URLSearchParams({ month: period.month });
+  return new URLSearchParams({ start: period.start, end: period.end });
 }
 
 export const api = {
@@ -1143,20 +1178,30 @@ export const api = {
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (window: string = "7d", scope: UsageScopeName = "me", teamId?: string) => {
-    const qs = new URLSearchParams({ window, scope });
+  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
   },
-  usageItems: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
-    const qs = new URLSearchParams({ window, scope, useCase });
+  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    qs.set("useCase", useCase);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
   },
-  usageExportCsvUrl: (window: string, scope: UsageScopeName, teamId?: string): string => {
-    const qs = new URLSearchParams({ window, scope });
+  usageExportCsvUrl: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string): string => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return `/api/usage/export.csv?${qs}`;
+  },
+  usageExportCsv: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string): Promise<string> => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    return requestText(`/usage/export.csv?${qs}`);
   },
   usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
     const qs = new URLSearchParams({ window });

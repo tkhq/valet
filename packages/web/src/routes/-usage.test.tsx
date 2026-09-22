@@ -24,6 +24,7 @@ import type {
   UsageBreakdownResponse,
   UsageDrillResponse,
   ProxyRequestListItem,
+  UsagePeriodSelection,
 } from "@valet/api/wire";
 
 // --- mock data -----------------------------------------------------------
@@ -303,7 +304,7 @@ vi.mock("~/api/usage", () => ({
     breakdownCalls.push(args);
     return breakdownResult;
   },
-  useUsageItems: (_window: string, _scope: string, useCase: string) =>
+  useUsageItems: (_period: UsagePeriodSelection, _scope: string, useCase: string) =>
     itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null },
   qkUsage: {
     breakdown: () => [],
@@ -378,13 +379,27 @@ vi.mock("~/components/workspace-clause", () => ({
         : { kind: "team", team: { id: workspaceTeamId, name: "Team X", memberCount: 2 } },
 }));
 
+let usageExportError: Error | undefined;
+
 // Mock api client — usageExportCsvUrl is a pure URL builder.
 vi.mock("~/api/client", () => ({
   api: {
-    usageExportCsvUrl: (window: string, scope: string, teamId?: string) =>
-      `/api/usage/export.csv?window=${window}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`,
+    usageExportCsv: async () => {
+      if (usageExportError) throw usageExportError;
+      return "csv";
+    },
+    usageExportCsvUrl: (period: UsagePeriodSelection, scope: string, teamId?: string) => {
+      const query = period.kind === "lookback"
+        ? `window=${period.window}`
+        : period.kind === "month"
+          ? `month=${period.month}`
+          : `start=${period.start}&end=${period.end}`;
+      return `/api/usage/export.csv?${query}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`;
+    },
   },
 }));
+
+vi.mock("~/lib/download", () => ({ downloadTextFile: vi.fn() }));
 
 import { UsagePage } from "./usage";
 
@@ -405,6 +420,7 @@ beforeEach(() => {
   };
   workspaceTeamId = undefined;
   workspaceResolved = true;
+  usageExportError = undefined;
   breakdownCalls = [];
   lastProxyRequestsOpts = undefined;
   lastProxySettingsOpts = undefined;
@@ -814,7 +830,7 @@ describe("UsagePage — team workspace scope", () => {
       expect(within(row).getByText(value ?? "")).toBeTruthy();
     }
     fireEvent.click(screen.getByRole("button", { name: "24h" }));
-    expect(breakdownCalls.at(-1)?.slice(0, 3)).toEqual(["24h", "team", "team-x"]);
+    expect(breakdownCalls.at(-1)?.slice(0, 3)).toEqual([{ kind: "lookback", window: "24h" }, "team", "team-x"]);
     breakdownResult.data = {
       ...breakdownResult.data,
       dailyAgentWindow: { days: 1, sinceMs: DAY_B_MS, untilMs: DAY_B_MS, timezone: "UTC" },
@@ -923,5 +939,124 @@ describe("UsagePage — disabled-gateway notice", () => {
     settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
     expect(screen.queryByText(/recording gateway is disabled/)).toBeNull();
+  });
+});
+
+describe("UsagePage custom period controls", () => {
+  it("selects a calendar month and updates the export URL", () => {
+    render(<UsagePage />);
+    const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
+    fireEvent.change(month, { target: { value: "2024-02" } });
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "month", month: "2024-02" });
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("month=2024-02");
+  });
+
+  it("applies an inclusive custom range to data and CSV", () => {
+    render(<UsagePage />);
+    fireEvent.change(screen.getByLabelText("Custom start date"), { target: { value: "2024-02-01" } });
+    fireEvent.change(screen.getByLabelText("Custom end date"), { target: { value: "2024-02-29" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply dates" }));
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "custom", start: "2024-02-01", end: "2024-02-29" });
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    expect(csvLink.textContent).toContain("2024-02-01 to 2024-02-29");
+  });
+
+  it("marks edited custom dates as pending while data and CSV keep the applied range", () => {
+    render(<UsagePage />);
+    const start = screen.getByLabelText("Custom start date");
+    const end = screen.getByLabelText("Custom end date");
+    const apply = screen.getByRole("button", { name: "Apply dates" });
+
+    fireEvent.change(start, { target: { value: "2024-02-01" } });
+    fireEvent.change(end, { target: { value: "2024-02-29" } });
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.change(start, { target: { value: "2024-02-02" } });
+    expect(apply.getAttribute("aria-pressed")).toBe("false");
+    expect(apply.className).toContain("border-amber-500");
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({
+      kind: "custom",
+      start: "2024-02-01",
+      end: "2024-02-29",
+    });
+
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+    expect(csvLink.href).toContain("start=2024-02-02&end=2024-02-29");
+  });
+
+  it("shows the server range error message", () => {
+    breakdownResult = {
+      data: undefined,
+      isLoading: false,
+      error: Object.assign(new Error("GET /usage/breakdown → 400"), {
+        payload: { error: { code: "reversed_range", message: "Choose an end date on or after the start date." } },
+      }),
+    };
+    render(<UsagePage />);
+    expect(screen.getByText("Choose an end date on or after the start date.")).toBeTruthy();
+    expect(screen.queryByText(/GET \/usage\/breakdown/)).toBeNull();
+  });
+
+  it("shows an oversized export error instead of downloading a partial CSV", async () => {
+    usageExportError = Object.assign(new Error("GET /usage/export.csv → 422"), {
+      payload: {
+        error: {
+          code: "export_too_large",
+          message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+        },
+      },
+    });
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("link", { name: "Download CSV (7d, me)" }));
+    expect(await screen.findByText(
+      "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+    )).toBeTruthy();
+  });
+
+  it("refreshes picker limits when the page renders after UTC midnight", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-12-31T23:59:00Z"));
+    const view = render(<UsagePage />);
+    expect(screen.getByLabelText("Calendar month").getAttribute("max")).toBe("2026-12");
+    expect(screen.getByLabelText("Custom end date").getAttribute("max")).toBe("2026-12-31");
+
+    vi.setSystemTime(new Date("2027-01-01T00:01:00Z"));
+    view.rerender(<UsagePage />);
+    expect(screen.getByLabelText("Calendar month").getAttribute("max")).toBe("2027-01");
+    expect(screen.getByLabelText("Custom end date").getAttribute("max")).toBe("2027-01-01");
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("clears inactive controls and marks the active period", () => {
+    render(<UsagePage />);
+    const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
+    const start = screen.getByLabelText("Custom start date") as HTMLInputElement;
+    const end = screen.getByLabelText("Custom end date") as HTMLInputElement;
+    const apply = screen.getByRole("button", { name: "Apply dates" });
+
+    fireEvent.change(month, { target: { value: "2024-02" } });
+    expect(month.getAttribute("aria-current")).toBe("date");
+    fireEvent.click(screen.getByRole("button", { name: "24h" }));
+    expect(month.value).toBe("");
+    expect(month.getAttribute("aria-current")).toBeNull();
+
+    fireEvent.change(start, { target: { value: "2024-02-01" } });
+    fireEvent.change(end, { target: { value: "2024-02-29" } });
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.change(month, { target: { value: "2024-01" } });
+    expect(start.value).toBe("");
+    expect(end.value).toBe("");
+    expect(apply.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.change(month, { target: { value: "" } });
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "lookback", window: "7d" });
   });
 });

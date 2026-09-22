@@ -9,6 +9,7 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
+import type { ResolvedUsagePeriod } from "./usage-period.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
@@ -24,21 +25,6 @@ import type {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export const USAGE_WINDOWS: Record<string, number> = {
-  "24h": DAY_MS,
-  "7d": 7 * DAY_MS,
-  "30d": 30 * DAY_MS,
-  "90d": 90 * DAY_MS,
-};
-export function windowMsFrom(q: string | undefined): number {
-  return USAGE_WINDOWS[q ?? "30d"] ?? 30 * DAY_MS;
-}
-/** The canonical window key for labels (e.g. the CSV filename), so an unknown
- * `?window=` doesn't mislabel a file as a range it doesn't cover. */
-export function windowLabelFrom(q: string | undefined): string {
-  return q && q in USAGE_WINDOWS ? q : "30d";
-}
-
 const USE_CASES: readonly UsageUseCase[] = ["orchestrator", "session", "workflow", "proxy"];
 export function isUsageUseCase(v: string): v is UsageUseCase {
   return (USE_CASES as readonly string[]).includes(v);
@@ -46,6 +32,24 @@ export function isUsageUseCase(v: string): v is UsageUseCase {
 
 function toNum(v: unknown): number {
   return Number(v ?? 0);
+}
+
+type UsagePeriodOpts =
+  | { period: ResolvedUsagePeriod }
+  | { windowMs: number; now?: number };
+
+function periodFromOpts(opts: UsagePeriodOpts): ResolvedUsagePeriod {
+  if ("period" in opts) return opts.period;
+  const now = opts.now ?? Date.now();
+  return {
+    startMs: now - opts.windowMs,
+    endMs: now + 1,
+    windowMs: opts.windowMs,
+    activityStartMs: Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS,
+    activityDays: opts.windowMs / DAY_MS,
+    label: `${opts.windowMs}ms`,
+    kind: "lookback",
+  };
 }
 
 // ── Scope ──────────────────────────────────────────────────────────────────
@@ -115,9 +119,9 @@ export async function resolveUsageScope(
  * view carries — do not apply a team scope to `llm_proxy_requests` directly
  * (see the proxy branch of `getUsageDrillItems`).
  */
-function scopeWhere(prefix: "" | "ce.", since: number, s: UsageScope): SQL {
+function scopeWhere(prefix: "" | "ce.", period: ResolvedUsagePeriod, s: UsageScope): SQL {
   const col = (name: string): SQL => sql.raw(`${prefix}${name}`);
-  const base = sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}`;
+  const base = sql`${col("created_at")} >= ${period.startMs} AND ${col("created_at")} < ${period.endMs} AND ${col("org_id")} = ${s.orgId}`;
   switch (s.scope) {
     case "team":
       return sql`${base} AND ${col("owner_type")} = 'team' AND ${col("owner_id")} = ${s.teamId}`;
@@ -190,20 +194,20 @@ interface SkillBreakdownRow {
 
 async function getSkillBreakdown(
   db: AppDb,
-  since: number,
+  period: ResolvedUsagePeriod,
   scope: UsageScope,
 ): Promise<SkillUsageBreakdown[]> {
   const where = skillScopeWhere(scope);
   const result = (await db.execute(sql`
     SELECT si.skill_key, si.skill_name, si.origin, si.plugin_name,
-           COUNT(DISTINCT si.id) FILTER (WHERE si.created_at >= ${since}) AS invocations,
-           COUNT(DISTINCT si.invoker_user_id) FILTER (WHERE si.created_at >= ${since}) AS unique_invokers,
+           COUNT(DISTINCT si.id) FILTER (WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) AS invocations,
+           COUNT(DISTINCT si.invoker_user_id) FILTER (WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) AS unique_invokers,
            COUNT(DISTINCT si.id) FILTER (
-             WHERE si.created_at >= ${since} AND si.invoker_user_id IS NULL
+             WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs} AND si.invoker_user_id IS NULL
            ) AS unassigned_invocations,
-           COALESCE(SUM(sca.estimated_skill_tokens) FILTER (WHERE sca.created_at >= ${since}), 0)
+           COALESCE(SUM(sca.estimated_skill_tokens) FILTER (WHERE sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs}), 0)
              AS attributed_context_tokens,
-           COUNT(DISTINCT sca.llm_request_id) FILTER (WHERE sca.created_at >= ${since})
+           COUNT(DISTINCT sca.llm_request_id) FILTER (WHERE sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs})
              AS carrying_calls
     FROM skill_invocations si
     LEFT JOIN skill_context_attributions sca ON sca.skill_invocation_id = si.id
@@ -211,7 +215,7 @@ async function getSkillBreakdown(
     LEFT JOIN workflow_runs r
       ON si.session_id LIKE 'wf:%' AND r.id = split_part(si.session_id, ':', 2)
     LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-    WHERE ${where} AND (si.created_at >= ${since} OR sca.created_at >= ${since})
+    WHERE ${where} AND ((si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) OR (sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs}))
     GROUP BY si.skill_key, si.skill_name, si.origin, si.plugin_name
     ORDER BY invocations DESC, si.skill_name ASC
   `)) as { rows: SkillBreakdownRow[] };
@@ -233,11 +237,11 @@ async function getSkillBreakdown(
  */
 export async function getDailyAgentActivity(
   db: AppDb,
-  opts: { windowMs: number; scope: UsageScope; now?: number },
+  opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<DailyAgentActivityResponse> {
-  const now = opts.now ?? Date.now();
-  const since = Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS;
-  const where = scopeWhere("ce.", since, opts.scope);
+  const period = periodFromOpts(opts);
+  const activityPeriod = period.activityStartMs === undefined ? period : { ...period, startMs: period.activityStartMs };
+  const where = scopeWhere("ce.", activityPeriod, opts.scope);
   type ActivityRow = {
     day_ms: unknown; team_id: string | null; team_name: string | null;
     kind: "assistant" | "child" | "workflow" | "session"; active_agents: unknown;
@@ -260,7 +264,7 @@ export async function getDailyAgentActivity(
       COUNT(DISTINCT ce.session_id) AS active_agents
     FROM cost_entries ce
     LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
-    WHERE ${where} AND ce.created_at <= ${now}
+    WHERE ${where}
       AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
     GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
   `) as { rows: ActivityRow[] };
@@ -280,7 +284,7 @@ export async function getDailyAgentActivity(
  * Shared assistants must not be credited to the first member who opened them.
  * A session used by two members on one day counts once for each member.
  */
-async function getMemberAgentDays(db: AppDb, scope: UsageScope, since: number, now: number) {
+async function getMemberAgentDays(db: AppDb, scope: UsageScope, period: ResolvedUsagePeriod) {
   // The raw query result type describes columns selected below on both DB backends.
   const result = await db.execute(sql`
     WITH active AS (
@@ -294,7 +298,7 @@ async function getMemberAgentDays(db: AppDb, scope: UsageScope, since: number, n
       LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
       LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id AND cw.org_id = ce.org_id
       LEFT JOIN assistants a ON a.session_id = ce.session_id AND a.org_id = ce.org_id
-      WHERE ${scopeWhere("ce.", since, scope)} AND ce.created_at <= ${now}
+      WHERE ${scopeWhere("ce.", period, scope)}
         AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
     ), daily AS (
       SELECT actor_id, day_ms, COUNT(DISTINCT session_id) AS active_agents
@@ -309,16 +313,15 @@ async function getMemberAgentDays(db: AppDb, scope: UsageScope, since: number, n
  * (org scope) by member. */
 export async function getUsageBreakdown(
   db: AppDb,
-  opts: { windowMs: number; scope: UsageScope; now?: number },
+  opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<UsageBreakdownResponse> {
-  const now = opts.now ?? Date.now();
-  const since = now - opts.windowMs;
-  const where = scopeWhere("", since, opts.scope);
+  const period = periodFromOpts(opts);
+  const where = scopeWhere("", period, opts.scope);
   const agentWindow = opts.scope.scope === "team" && opts.scope.byMember
     ? {
-        days: opts.windowMs / DAY_MS,
-        sinceMs: Math.floor(now / DAY_MS) * DAY_MS - opts.windowMs + DAY_MS,
-        untilMs: now,
+        days: period.activityDays ?? Math.max(1, Math.ceil((period.endMs - period.startMs) / DAY_MS)),
+        sinceMs: period.activityStartMs ?? period.startMs,
+        untilMs: period.endMs,
         timezone: "UTC" as const,
       }
     : undefined;
@@ -333,7 +336,7 @@ export async function getUsageBreakdown(
     // Only the engine branch of cost_entries carries session_id. Count across
     // the whole rolling window, not member/day buckets; unpriced usage counts.
     db.execute(sql`SELECT ${BUCKET_COLS}, COUNT(DISTINCT session_id) FILTER (
-      WHERE session_id IS NOT NULL AND total_tokens > 0 AND created_at <= ${now}
+      WHERE session_id IS NOT NULL AND total_tokens > 0
     ) AS active_agents FROM cost_entries WHERE ${where}`) as Promise<{ rows: (BucketRow & { active_agents: unknown })[] }>,
     opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)
       ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
@@ -341,8 +344,8 @@ export async function getUsageBreakdown(
         // dropping it made Σ byUser < totalCostUsd.
         (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
       : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
-    getSkillBreakdown(db, since, opts.scope),
-    agentWindow ? getMemberAgentDays(db, opts.scope, agentWindow.sinceMs, now) : Promise.resolve([]),
+    getSkillBreakdown(db, period, opts.scope),
+    agentWindow ? getMemberAgentDays(db, opts.scope, { ...period, startMs: agentWindow.sinceMs }) : Promise.resolve([]),
   ]);
 
   const total = toBucket(totals.rows[0]);
@@ -365,7 +368,7 @@ export async function getUsageBreakdown(
   }
 
   return {
-    windowMs: opts.windowMs,
+    windowMs: period.windowMs ?? period.endMs - period.startMs,
     scope: opts.scope.scope,
     activeAgents: toNum(totals.rows[0]?.active_agents),
     totalCostUsd: total.costUsd,
@@ -391,13 +394,13 @@ export async function getUsageBreakdown(
  * runs (workflow name), or proxy (by harness). */
 export async function getUsageDrillItems(
   db: AppDb,
-  opts: { windowMs: number; scope: UsageScope; useCase: UsageUseCase },
+  opts: UsagePeriodOpts & { scope: UsageScope; useCase: UsageUseCase },
 ): Promise<UsageDrillItem[]> {
-  const since = Date.now() - opts.windowMs;
+  const period = periodFromOpts(opts);
   const { useCase, scope } = opts;
 
   if (useCase === "session" || useCase === "orchestrator") {
-    const whereCe = scopeWhere("ce.", since, scope);
+    const whereCe = scopeWhere("ce.", period, scope);
     interface Row { session_id: string; title: string | null; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.session_id, s.title, cw.parent_session_id,
@@ -414,7 +417,7 @@ export async function getUsageDrillItems(
     }));
   }
   if (useCase === "workflow") {
-    const whereCe = scopeWhere("ce.", since, scope);
+    const whereCe = scopeWhere("ce.", period, scope);
     interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.workflow_run_id, wd.name,
@@ -431,8 +434,8 @@ export async function getUsageDrillItems(
   }
   // proxy — group the raw proxy rows by harness (cost_entries has no harness).
   const whereProxy = scope.scope === "team"
-    ? sql`created_at >= ${since} AND org_id = ${scope.orgId} AND team_id = ${scope.teamId}`
-    : scopeWhere("", since, scope);
+    ? sql`created_at >= ${period.startMs} AND created_at < ${period.endMs} AND org_id = ${scope.orgId} AND team_id = ${scope.teamId}`
+    : scopeWhere("", period, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
     SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
@@ -450,9 +453,9 @@ export async function getUsageDrillItems(
  * child-nested via `child_watches`, scoped to the caller. */
 export async function getUsageSessions(
   db: AppDb,
-  opts: { windowMs: number; orgId: string; userId: string; useCase?: string },
+  opts: UsagePeriodOpts & { orgId: string; userId: string; useCase?: string },
 ): Promise<UsageSessionRow[]> {
-  const since = Date.now() - opts.windowMs;
+  const period = periodFromOpts(opts);
   // This endpoint only covers the two agent-session use cases; a workflow/proxy
   // filter would contradict the `IN ('orchestrator','session')` clause and
   // silently return nothing, so ignore any other value.
@@ -464,7 +467,7 @@ export async function getUsageSessions(
     FROM cost_entries ce
     LEFT JOIN agent_sessions s ON s.id = ce.session_id
     LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
-    WHERE ce.created_at >= ${since} AND ce.org_id = ${opts.orgId} AND ce.user_id = ${opts.userId}
+    WHERE ce.created_at >= ${period.startMs} AND ce.created_at < ${period.endMs} AND ce.org_id = ${opts.orgId} AND ce.user_id = ${opts.userId}
       AND ce.session_id IS NOT NULL AND ce.use_case IN ('orchestrator','session')
       ${useCaseFilter}
     GROUP BY ce.session_id, s.title, ce.use_case, cw.parent_session_id
@@ -483,22 +486,28 @@ export async function getUsageSessions(
 
 // ── CSV export ───────────────────────────────────────────────────────────────
 
+const USAGE_EXPORT_MAX_ROWS = 100_000;
+
 const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced";
 
 function csvEscape(v: unknown): string {
-  const s = v === null || v === undefined ? "" : String(v);
-  // Quote on comma, quote, newline OR carriage return — a lone \r in a title
-  // would otherwise break a CSV row boundary.
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const value = v === null || v === undefined ? "" : String(v);
+  const formulaPrefix = /^[-=+@\t\r]/.test(value);
+  const safe = formulaPrefix ? `'${value}` : value;
+  // Formula-like values stay quoted after the neutralizing apostrophe.
+  return formulaPrefix || /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** One CSV row per billable turn for the window/scope, capped at 100k rows.
+/** One CSV row per billable turn for the window/scope.
  * A plain member's team export blanks `user_id`: per-member attribution
  * follows the breakdown's byUser rule (org scope, or a team scope whose
  * caller administers the team), and the CSV must not let a plain team
  * member reconstruct it with one GROUP BY. */
-export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; scope: UsageScope }): Promise<string> {
-  const since = Date.now() - opts.windowMs;
+export async function getUsageExportCsv(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): Promise<{ ok: true; csv: string } | { ok: false; error: { code: "export_too_large"; message: string } }> {
+  const period = periodFromOpts(opts);
   const withholdUserId = opts.scope.scope === "team" && !opts.scope.byMember;
   interface Row {
     created_at: unknown; use_case: string; model: string | null; session_id: string | null; workflow_run_id: string | null;
@@ -509,8 +518,18 @@ export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; sco
     SELECT created_at, use_case, model, session_id, workflow_run_id, user_id,
            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_total, priced
     FROM cost_entries
-    WHERE ${scopeWhere("", since, opts.scope)}
-    ORDER BY created_at DESC LIMIT 100000`)) as { rows: Row[] };
+    WHERE ${scopeWhere("", period, opts.scope)}
+    ORDER BY created_at DESC LIMIT ${USAGE_EXPORT_MAX_ROWS + 1}`)) as { rows: Row[] };
+
+  if (result.rows.length > USAGE_EXPORT_MAX_ROWS) {
+    return {
+      ok: false,
+      error: {
+        code: "export_too_large",
+        message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+      },
+    };
+  }
 
   const lines = result.rows.map((r) =>
     [
@@ -519,7 +538,7 @@ export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; sco
       r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
     ].map(csvEscape).join(","),
   );
-  return `${CSV_HEADER}\n${lines.join("\n")}\n`;
+  return { ok: true, csv: `${CSV_HEADER}\n${lines.join("\n")}\n` };
 }
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────

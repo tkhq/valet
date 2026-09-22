@@ -115,3 +115,17 @@ describe("api client: notification preferences", () => {
     expect(JSON.parse(opts.body as string)).toEqual({ kind: "approval", web: false });
   });
 });
+
+describe("api client: usage period URLs", () => {
+  it("builds month and custom URLs with the selected scope", async () => {
+    const fetchMock = stubFetchOk({});
+    await api.usageBreakdown({ kind: "month", month: "2024-02" }, "org");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/usage/breakdown?month=2024-02&scope=org");
+
+    expect(api.usageExportCsvUrl(
+      { kind: "custom", start: "2024-02-01", end: "2024-02-29" },
+      "team",
+      "team-x",
+    )).toBe("/api/usage/export.csv?start=2024-02-01&end=2024-02-29&scope=team&teamId=team-x");
+  });
+});

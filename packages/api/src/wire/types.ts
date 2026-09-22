@@ -3617,6 +3617,12 @@ export interface UsageBucket {
  * org (org-admin only), or one team (team-member only, needs `teamId=`). */
 export type UsageScopeName = "me" | "org" | "team";
 
+/** A Usage page period. Custom start and end dates are inclusive UTC dates. */
+export type UsagePeriodSelection =
+  | { kind: "lookback"; window: "24h" | "7d" | "30d" }
+  | { kind: "month"; month: string }
+  | { kind: "custom"; start: string; end: string };
+
 /** Aggregated usage for one stable skill identity across all revisions. */
 export interface SkillUsageBreakdown {
   skillKey: string;
@@ -3660,7 +3666,7 @@ export interface UsageBreakdownResponse {
     /** Team admins only. Distinct session-days divided by dailyAgentWindow.days. */
     avgDailyActiveAgents?: number;
   })[];
-  /** Calendar window for agent activity; spend continues to use the rolling window. */
+  /** Calendar window for agent activity. `sinceMs` is inclusive and `untilMs` is exclusive. */
   dailyAgentWindow?: { days: number; sinceMs: number; untilMs: number; timezone: "UTC" };
   byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
 }

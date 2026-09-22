@@ -356,7 +356,12 @@ describe("GET /api/usage/export.csv", () => {
     api = await bootTestApi();
     const now = Date.now();
     await api.providers.db.insert(agentSessions).values({ id: "s-csv", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now, title: "CSV" });
-    await seedEngineEntry(api, "e-csv", "s-csv", now);
+    const formulaModels = ["=1+1", "+SUM(A1)", "-2+3", "@cmd", "\tformula", "\rformula"];
+    for (const [index, model] of formulaModels.entries()) {
+      const entryId = `e-csv-${index}`;
+      await seedEngineEntry(api, entryId, "s-csv", now + index);
+      await api.providers.db.execute(sql`UPDATE engine_entries SET model = ${model} WHERE id = ${entryId}`);
+    }
 
     const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d`);
     expect(res.status).toBe(200);
@@ -367,7 +372,33 @@ describe("GET /api/usage/export.csv", () => {
     expect(header).toContain("timestamp,use_case,model");
     expect(header).toContain("cost_usd,priced");
     expect(rows.some((r) => r.includes("session"))).toBe(true);
+    for (const model of formulaModels) expect(text).toContain(`,"'${model}",`);
   });
+
+  it("rejects exports over 100,000 rows without returning a partial CSV", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({
+      id: "s-csv-overflow", userId: "local-user", orgId: "local-org", workspace: "/w",
+      status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await api.providers.db.execute(sql`
+      INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
+      SELECT 'e-csv-overflow-' || i, 's-csv-overflow', 'th', 'message', 'assistant', 'claude',
+             ${USAGE}::text, ${COST}::text, ${now}
+      FROM generate_series(1, 100001) AS i
+    `);
+
+    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d`);
+    expect(res.status).toBe(422);
+    expect(res.headers.get("content-disposition")).toBeNull();
+    expect(await res.json()).toEqual({
+      error: {
+        code: "export_too_large",
+        message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+      },
+    });
+  }, 30_000);
 });
 
 describe("GET /api/usage/summary", () => {
@@ -528,7 +559,7 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     await seedActivity(api);
     const scope = { scope: "team", orgId: "local-org", teamId: "activity-team", byMember: true } as const;
     const week = await getUsageBreakdown(api.providers.db, { scope, windowMs: 7 * DAY, now });
-    expect(week.dailyAgentWindow).toEqual({ days: 7, sinceMs: today - 6 * DAY, untilMs: now, timezone: "UTC" });
+    expect(week.dailyAgentWindow).toEqual({ days: 7, sinceMs: today - 6 * DAY, untilMs: now + 1, timezone: "UTC" });
     const members = new Map(week.byUser?.map((r) => [r.userId, r]));
     // Assistant on three days plus the child today; not turns or range uniques.
     expect(members.get("test-member")?.avgDailyActiveAgents).toBeCloseTo(4 / 7);
@@ -598,5 +629,45 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     expect((await fetch(url.replace("activity-team", "activity-foreign-team"))).status).toBe(404);
     const personal = await (await fetch(`${api.baseUrl}/api/usage/breakdown?scope=me`)).json() as UsageBreakdownResponse;
     expect(personal.dailyAgentWindow).toBeUndefined();
+  });
+});
+
+describe("GET /api/usage custom periods", () => {
+  it("uses one inclusive UTC date range for personal, org, team, and CSV reads", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const today = new Date().toISOString().slice(0, 10);
+    const startMs = Date.parse(`${today}T00:00:00.000Z`);
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(teams).values({ id: "period-team", orgId: "local-org", name: "Period", createdAt: startMs });
+    await db.insert(teamMembers).values({ teamId: "period-team", userId: "local-user", role: "admin" });
+    await db.insert(agentSessions).values([
+      { id: "period-personal", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: startMs, updatedAt: startMs, title: "Personal" },
+      { id: "period-team-session", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "period-team", createdAt: startMs, updatedAt: startMs, title: "Team" },
+    ]);
+    await seedEngineEntry(api, "period-in-personal", "period-personal", startMs);
+    await seedEngineEntry(api, "period-in-team", "period-team-session", startMs + 1);
+    await seedEngineEntry(api, "period-end-exclusive", "period-personal", startMs + 86_400_000);
+
+    const dates = `start=${today}&end=${today}`;
+    const personal = await (await fetch(`${api.baseUrl}/api/usage/breakdown?${dates}`)).json() as UsageBreakdownResponse;
+    const org = await (await fetch(`${api.baseUrl}/api/usage/breakdown?${dates}&scope=org`)).json() as UsageBreakdownResponse;
+    const team = await (await fetch(`${api.baseUrl}/api/usage/breakdown?${dates}&scope=team&teamId=period-team`)).json() as UsageBreakdownResponse;
+    expect(personal.totalTurns).toBe(2);
+    expect(org.totalTurns).toBe(2);
+    expect(team.totalTurns).toBe(1);
+
+    const csv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?${dates}`)).text();
+    expect(csv).toContain("period-personal");
+    expect(csv.match(/period-personal/g)).toHaveLength(1);
+  });
+
+  it("returns typed errors for invalid ranges", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?start=2024-02-02&end=2024-02-01`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: { code: "reversed_range", message: "Choose an end date on or after the start date." },
+    });
   });
 });
