@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { sessionThreads } from "../schema/index.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { recordThreadUserActivity } from "./thread-activity.js";
+import { recordThreadActivityBestEffort, recordThreadUserActivity } from "./thread-activity.js";
 
 describe("recordThreadUserActivity", () => {
   it("does not move activity backward when an older write lands last", async () => {
@@ -28,5 +28,14 @@ describe("recordThreadUserActivity", () => {
       threadId: base.threadId,
       activityAt: 30,
     });
+  });
+
+  it("does not fail an accepted prompt when activity recording fails", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const failure = new Error("database unavailable");
+
+    await expect(recordThreadActivityBestEffort(async () => { throw failure; })).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledWith("Thread activity recording failed after prompt acceptance:", failure);
+    log.mockRestore();
   });
 });

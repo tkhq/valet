@@ -62,7 +62,7 @@ import {
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import { recordThreadUserActivity } from "../services/thread-activity.js";
+import { recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -736,7 +736,7 @@ export async function submitSessionPrompt(
       .update(agentSessions)
       .set({ updatedAt: now, lastActivityAt: now })
       .where(eq(agentSessions.id, row.id));
-    await recordActivity(now);
+    await recordThreadActivityBestEffort(() => recordActivity(now));
     return {
       messageId: receipt.queueItemId || null,
       threadId: receipt.threadId,
@@ -831,6 +831,9 @@ export async function submitSessionPrompt(
       ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
 
+  // This is the user action time. Persist it only after the engine accepts
+  // the prompt, so a slow command cannot overtake a later user submission.
+  const activityAt = Date.now();
   let receipt;
   try {
     // Scan the member's typed text before the turn starts. A skill expansion
@@ -870,12 +873,11 @@ export async function submitSessionPrompt(
     throw err;
   }
 
-  const submitNow = Date.now();
   await db
     .update(agentSessions)
-    .set({ updatedAt: submitNow, lastActivityAt: submitNow })
+    .set({ updatedAt: activityAt, lastActivityAt: activityAt })
     .where(eq(agentSessions.id, row.id));
-  await recordActivity(submitNow);
+  await recordThreadActivityBestEffort(() => recordActivity(activityAt));
 
   return {
     // Commands take no queue item; "" would read as a real (broken) id.

@@ -479,9 +479,18 @@ export function useSendPrompt(sessionId: string) {
   >({
     mutationFn: (body) =>
       api.sendPrompt(sessionId, body),
-    // Thread activity reaches every viewer through the session WebSocket.
-    // Slash commands still refetch because a new socket can miss their result.
-    onSuccess: (_data, { text }) => {
+    // Update the sender now. Socket events update other viewers; a later
+    // thread-list fetch reconciles this local estimate to the persisted value.
+    onSuccess: (data, { text }) => {
+      const activityAt = Date.now();
+      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+        ...current,
+        threads: current.threads.map((thread) =>
+          thread.id === data.threadId
+            ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, activityAt) }
+            : thread,
+        ),
+      }));
       if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
     },
   });

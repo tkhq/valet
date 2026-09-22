@@ -5,6 +5,15 @@ import { sessionThreads } from "../schema/index.js";
 
 type ThreadActivityEvent = Extract<EngineEvent, { type: "thread_user_activity" }>;
 
+/** Log an activity failure without failing a prompt that the engine accepted. */
+export async function recordThreadActivityBestEffort(record: () => Promise<void>): Promise<void> {
+  try {
+    await record();
+  } catch (err) {
+    console.error("Thread activity recording failed after prompt acceptance:", err);
+  }
+}
+
 /** Persist and publish one server-derived user activity timestamp. */
 export async function recordThreadUserActivity(
   db: AppDb,
