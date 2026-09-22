@@ -242,8 +242,8 @@ WHERE p."org_id" IS NOT NULL;
 
 New router `/api/proxy`, mounted under the normal `/api` auth ladder (cookie/session identity). The personal usage surface always returns only the caller's personal rows, including for organization admins. Team rows are excluded.
 
-- `GET /api/proxy/usage/summary?window=...` — time-series buckets plus breakdowns by user, model, and harness. Reads `llm_proxy_requests` with a raw aggregate, same pattern as `routes/usage.ts`.
-- `GET /api/proxy/requests?model=&harness=&from=&to=&cursor=&limit=` — filtered, paginated list (metadata columns, no bodies).
+- `GET /api/proxy/usage/summary?window=...` — time-series buckets plus breakdowns by user, model, and harness. The maximum window is 30d. Reads `llm_proxy_requests` with a raw aggregate, same pattern as `routes/usage.ts`.
+- `GET /api/proxy/requests?model=&harness=&from=&to=&cursor=&limit=` — filtered, paginated list (metadata columns, no bodies). `from` and `to` are non-negative Unix milliseconds within the Date range.
 - `GET /api/proxy/requests/:id` — one row with full request and response bodies for internal analysis. It is personal-scope gated: a row not owned by the caller returns 404.
 - `POST /api/proxy/keys` / `GET /api/proxy/keys` / `DELETE /api/proxy/keys/:id` — issue, list, and revoke `vlt_` proxy keys, wrapping the existing `apiKey` plugin. Reused by the onboarding panel.
 

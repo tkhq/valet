@@ -29,6 +29,8 @@ import type {
 export const proxyUsageRouter = new Hono<AppEnv>();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_WINDOW_MS = 30 * DAY_MS;
+const MAX_TIMESTAMP_MS = 8_640_000_000_000_000;
 
 /** GET `/api/proxy/settings` — the org's gateway governance (enabled + mode).
  * Any member may read it (the onboarding panel shows mode-specific setup and
@@ -65,18 +67,24 @@ proxyUsageRouter.put("/settings", async (c) => {
   return c.json(body);
 });
 
-/** Parse the `?window=` query parameter into milliseconds. */
-function parseWindowMs(window: string | undefined): number {
+/** Parse the `?window=` query parameter into bounded milliseconds. */
+function parseWindowMs(window: string | undefined): number | null {
   if (!window) return 7 * DAY_MS;
   const m = /^(\d+)(d|h|m)$/.exec(window);
   if (!m) return 7 * DAY_MS;
-  const n = parseInt(m[1], 10);
-  switch (m[2]) {
-    case "d": return n * DAY_MS;
-    case "h": return n * 60 * 60 * 1000;
-    case "m": return n * 60 * 1000;
-    default: return 7 * DAY_MS;
-  }
+
+  const count = Number(m[1]);
+  if (!Number.isSafeInteger(count)) return null;
+  const unitMs = m[2] === "d" ? DAY_MS : m[2] === "h" ? 60 * 60 * 1000 : 60 * 1000;
+  if (count > Math.floor(MAX_WINDOW_MS / unitMs)) return null;
+  return count * unitMs;
+}
+
+function parseTimestamp(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const timestamp = Number(value);
+  if (!Number.isSafeInteger(timestamp) || timestamp > MAX_TIMESTAMP_MS) return null;
+  return timestamp;
 }
 
 interface RequestCursor {
@@ -137,6 +145,9 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
   const user = c.var.user;
 
   const windowMs = parseWindowMs(c.req.query("window"));
+  if (windowMs === null) {
+    return c.json({ error: "Window must not exceed 30d. Choose 24h, 7d, or 30d." }, 400);
+  }
   const sinceMs = Date.now() - windowMs;
   // This endpoint backs the personal usage page. It remains personal for
   // admins too: organization and team records must not leak into this scope.
@@ -347,11 +358,19 @@ proxyUsageRouter.get("/requests", async (c) => {
   if (filterHarness) {
     conditions.push(eq(llmProxyRequests.harness, filterHarness));
   }
-  if (filterFrom) {
-    conditions.push(gte(llmProxyRequests.createdAt, parseInt(filterFrom, 10)));
+  if (filterFrom !== undefined) {
+    const from = parseTimestamp(filterFrom);
+    if (from === null) {
+      return c.json({ error: "Invalid from timestamp. Use milliseconds since Unix epoch." }, 400);
+    }
+    conditions.push(gte(llmProxyRequests.createdAt, from));
   }
-  if (filterTo) {
-    conditions.push(lte(llmProxyRequests.createdAt, parseInt(filterTo, 10)));
+  if (filterTo !== undefined) {
+    const to = parseTimestamp(filterTo);
+    if (to === null) {
+      return c.json({ error: "Invalid to timestamp. Use milliseconds since Unix epoch." }, 400);
+    }
+    conditions.push(lte(llmProxyRequests.createdAt, to));
   }
 
   // Cursor pagination: cursor is base64-encoded JSON `{createdAt, id}`.

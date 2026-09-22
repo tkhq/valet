@@ -168,6 +168,18 @@ describe("GET /api/proxy/requests — cursor pagination", () => {
     expect(body.error).toBe("Invalid cursor. Reload the request log.");
     expect(body.error).not.toContain("Failed query");
   });
+
+  it("rejects invalid timestamp filters before SQL binding", async () => {
+    api = await bootTestApi();
+
+    for (const [name, value] of [["from", "NaN"], ["from", "not-a-time"], ["to", "8640000000000001"]]) {
+      const res = await fetch(api.baseUrl + "/api/proxy/requests?" + name + "=" + value);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("timestamp");
+      expect(body.error).not.toContain("Failed query");
+    }
+  });
 });
 
 describe("GET /api/proxy/requests/:id — gating", () => {
@@ -311,6 +323,16 @@ describe("GET /api/proxy/usage/summary — cost aggregation", () => {
     expect(harnessEntry).toBeDefined();
     expect(harnessEntry!.requests).toBe(2);
     expect(harnessEntry!.costUsd).toBeCloseTo(0.03, 5);
+  });
+
+  it("rejects windows larger than the supported 30d maximum", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(api.baseUrl + "/api/proxy/usage/summary?window=999999999999d");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Window must not exceed 30d. Choose 24h, 7d, or 30d.");
+    expect(body.error).not.toContain("Failed query");
   });
 
   it("a member sees only their own rows in the summary", async () => {
