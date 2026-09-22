@@ -101,3 +101,18 @@ The headline uses the selected rolling window. The By member daily average
 keeps its calendar-day definition; its values are not summed for this headline.
 The five headline cards wrap from one to two to five columns as width permits.
 Retained usage and ownership determine the count; this does not add permanent history.
+
+## Usage reporting periods (2026-09-22)
+
+The Usage page keeps the 24h, 7d, and 30d rolling lookbacks. It also accepts a
+UTC calendar month or a custom start and end date. Custom dates are inclusive
+in the UI. The API converts them to a half-open interval from the start day's
+UTC midnight through the midnight after the end date. A completed month uses
+its exact UTC month boundaries. The current month ends after the current UTC
+day.
+
+The API rejects invalid dates, reversed ranges, future dates, and custom ranges
+longer than 366 days. All aggregate, drill-down, activity, and CSV queries use
+the same lower and upper bounds. SQL applies direct comparisons to
+`created_at`; it does not transform the indexed predicate or load raw turns for
+aggregation. CSV filenames include the selected month or custom range.

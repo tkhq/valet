@@ -6,6 +6,7 @@
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   UsageDrillResponse,
+  UsagePeriodSelection,
   UsageBreakdownResponse,
   UsageSessionsResponse,
   UsageScopeName,
@@ -14,38 +15,38 @@ import type {
 import { api } from "~/api/client";
 
 export const qkUsage = {
-  breakdown: (window: string, scope: UsageScopeName = "me", teamId?: string) =>
-    ["usage", "breakdown", window, scope, teamId] as const,
+  breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
+    ["usage", "breakdown", period, scope, teamId] as const,
   sessions: (window: string, useCase?: "orchestrator" | "session") =>
     ["usage", "sessions", window, useCase] as const,
-  items: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
-    ["usage", "items", window, scope, useCase, teamId] as const,
+  items: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
+    ["usage", "items", period, scope, useCase, teamId] as const,
 };
 
 export function useUsageBreakdown(
-  window: string = "7d",
+  period: UsagePeriodSelection,
   scope: UsageScopeName = "me",
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageBreakdownResponse>>,
 ) {
   return useQuery<UsageBreakdownResponse>({
-    queryKey: qkUsage.breakdown(window, scope, teamId),
-    queryFn: () => api.usageBreakdown(window, scope, teamId),
+    queryKey: qkUsage.breakdown(period, scope, teamId),
+    queryFn: () => api.usageBreakdown(period, scope, teamId),
     staleTime: 60_000,
     ...opts,
   });
 }
 
 export function useUsageItems(
-  window: string,
+  period: UsagePeriodSelection,
   scope: UsageScopeName,
   useCase: UsageUseCase,
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageDrillResponse>>,
 ) {
   return useQuery<UsageDrillResponse>({
-    queryKey: qkUsage.items(window, scope, useCase, teamId),
-    queryFn: () => api.usageItems(window, scope, useCase, teamId),
+    queryKey: qkUsage.items(period, scope, useCase, teamId),
+    queryFn: () => api.usageItems(period, scope, useCase, teamId),
     staleTime: 60_000,
     ...opts,
   });

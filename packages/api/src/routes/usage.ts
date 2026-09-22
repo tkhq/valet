@@ -17,10 +17,9 @@ import {
   getUsageSummary,
   isUsageUseCase,
   resolveUsageScope,
-  windowLabelFrom,
-  windowMsFrom,
   type UsageScope,
 } from "../services/usage.js";
+import { resolveUsagePeriod, type ResolvedUsagePeriod } from "../services/usage-period.js";
 
 export const usageRouter = new Hono<AppEnv>();
 
@@ -48,6 +47,17 @@ async function scopeOrError(c: Context<AppEnv>): Promise<UsageScope | Response> 
   return scope;
 }
 
+function periodOrError(c: Context<AppEnv>): ResolvedUsagePeriod | Response {
+  const result = resolveUsagePeriod({
+    window: c.req.query("window"),
+    month: c.req.query("month"),
+    start: c.req.query("start"),
+    end: c.req.query("end"),
+  });
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return result.period;
+}
+
 usageRouter.get("/summary", async (c) => {
   const body = await getUsageSummary(c.var.providers.db, {
     orgId: c.var.user.orgId,
@@ -60,23 +70,27 @@ usageRouter.get("/summary", async (c) => {
 usageRouter.get("/daily-agents", async (c) => {
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
-  return c.json(await getDailyAgentActivity(c.var.providers.db, {
-    windowMs: windowMsFrom(c.req.query("window")), scope,
-  }));
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await getDailyAgentActivity(c.var.providers.db, { period, scope }));
 });
 
 usageRouter.get("/breakdown", async (c) => {
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
-  const body = await getUsageBreakdown(c.var.providers.db, { windowMs: windowMsFrom(c.req.query("window")), scope });
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  const body = await getUsageBreakdown(c.var.providers.db, { period, scope });
   return c.json(body);
 });
 
 /** Superseded by `/items`; kept while the dashboard migrates. */
 usageRouter.get("/sessions", async (c) => {
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
   const body: UsageSessionsResponse = {
     sessions: await getUsageSessions(c.var.providers.db, {
-      windowMs: windowMsFrom(c.req.query("window")),
+      period,
       orgId: c.var.user.orgId,
       userId: c.var.user.id,
       useCase: c.req.query("useCase"),
@@ -93,8 +107,10 @@ usageRouter.get("/items", async (c) => {
   }
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
   const body: UsageDrillResponse = {
-    items: await getUsageDrillItems(db, { windowMs: windowMsFrom(c.req.query("window")), scope, useCase: useCaseQ }),
+    items: await getUsageDrillItems(db, { period, scope, useCase: useCaseQ }),
   };
   return c.json(body);
 });
@@ -102,12 +118,13 @@ usageRouter.get("/items", async (c) => {
 usageRouter.get("/export.csv", async (c) => {
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
-  const windowLabel = windowLabelFrom(c.req.query("window"));
-  const csv = await getUsageExportCsv(c.var.providers.db, { windowMs: windowMsFrom(c.req.query("window")), scope });
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  const csv = await getUsageExportCsv(c.var.providers.db, { period, scope });
   // Name the team in a team export's filename, or a member of two teams
   // downloads two indistinguishable files.
   const scopeLabel = scope.scope === "team" ? `team-${scope.teamId}` : scope.scope;
   c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="valet-usage-${scopeLabel}-${windowLabel}.csv"`);
+  c.header("Content-Disposition", `attachment; filename="valet-usage-${scopeLabel}-${period.label}.csv"`);
   return c.body(csv);
 });

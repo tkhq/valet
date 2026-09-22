@@ -600,3 +600,43 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     expect(personal.dailyAgentWindow).toBeUndefined();
   });
 });
+
+describe("GET /api/usage custom periods", () => {
+  it("uses one inclusive UTC date range for personal, org, team, and CSV reads", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const today = new Date().toISOString().slice(0, 10);
+    const startMs = Date.parse(`${today}T00:00:00.000Z`);
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(teams).values({ id: "period-team", orgId: "local-org", name: "Period", createdAt: startMs });
+    await db.insert(teamMembers).values({ teamId: "period-team", userId: "local-user", role: "admin" });
+    await db.insert(agentSessions).values([
+      { id: "period-personal", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: startMs, updatedAt: startMs, title: "Personal" },
+      { id: "period-team-session", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "period-team", createdAt: startMs, updatedAt: startMs, title: "Team" },
+    ]);
+    await seedEngineEntry(api, "period-in-personal", "period-personal", startMs);
+    await seedEngineEntry(api, "period-in-team", "period-team-session", startMs + 1);
+    await seedEngineEntry(api, "period-end-exclusive", "period-personal", startMs + 86_400_000);
+
+    const dates = `start=${today}&end=${today}`;
+    const personal = await (await fetch(`${api.baseUrl}/api/usage/breakdown?${dates}`)).json() as UsageBreakdownResponse;
+    const org = await (await fetch(`${api.baseUrl}/api/usage/breakdown?${dates}&scope=org`)).json() as UsageBreakdownResponse;
+    const team = await (await fetch(`${api.baseUrl}/api/usage/breakdown?${dates}&scope=team&teamId=period-team`)).json() as UsageBreakdownResponse;
+    expect(personal.totalTurns).toBe(2);
+    expect(org.totalTurns).toBe(2);
+    expect(team.totalTurns).toBe(1);
+
+    const csv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?${dates}`)).text();
+    expect(csv).toContain("period-personal");
+    expect(csv.match(/period-personal/g)).toHaveLength(1);
+  });
+
+  it("returns typed errors for invalid ranges", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?start=2024-02-02&end=2024-02-01`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: { code: "reversed_range", message: "Choose an end date on or after the start date." },
+    });
+  });
+});

@@ -244,6 +244,7 @@ import type {
   UsageDrillResponse,
   UsageDrillItem,
   UsageScopeName,
+  UsagePeriodSelection,
   UsageUseCase,
   AddArtifactCommentRequest,
   AddArtifactCommentResponse,
@@ -525,6 +526,12 @@ export interface WorkflowRunFilter extends WorkflowRunPage {
   outcome?: WorkflowRunOutcome[];
   parentRunId?: string;
   since?: number;
+}
+
+export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearchParams {
+  if (period.kind === "lookback") return new URLSearchParams({ window: period.window });
+  if (period.kind === "month") return new URLSearchParams({ month: period.month });
+  return new URLSearchParams({ start: period.start, end: period.end });
 }
 
 export const api = {
@@ -1143,18 +1150,22 @@ export const api = {
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (window: string = "7d", scope: UsageScopeName = "me", teamId?: string) => {
-    const qs = new URLSearchParams({ window, scope });
+  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
   },
-  usageItems: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
-    const qs = new URLSearchParams({ window, scope, useCase });
+  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    qs.set("useCase", useCase);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
   },
-  usageExportCsvUrl: (window: string, scope: UsageScopeName, teamId?: string): string => {
-    const qs = new URLSearchParams({ window, scope });
+  usageExportCsvUrl: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string): string => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return `/api/usage/export.csv?${qs}`;
   },

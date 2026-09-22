@@ -26,7 +26,7 @@ import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
-import type { UsageUseCase, UsageDrillItem, UsageScopeName } from "@valet/api/wire";
+import type { UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
 
 export const Route = createFileRoute("/usage")({
@@ -35,6 +35,9 @@ export const Route = createFileRoute("/usage")({
 
 const WINDOWS = ["24h", "7d", "30d"] as const;
 type Window = (typeof WINDOWS)[number];
+
+const TODAY_UTC = new Date().toISOString().slice(0, 10);
+const CURRENT_MONTH_UTC = TODAY_UTC.slice(0, 7);
 
 function fmt(n: number) {
   return n.toLocaleString();
@@ -100,17 +103,17 @@ function nestItems(items: UsageDrillItem[]): UsageDrillItem[] {
 
 /** Lazy-loaded item list for one use case. */
 function ItemList({
-  window,
+  period,
   scope,
   teamId,
   useCase,
 }: {
-  window: string;
+  period: UsagePeriodSelection;
   scope: UsageScopeName;
   teamId: string | undefined;
   useCase: UsageUseCase;
 }) {
-  const q = useUsageItems(window, scope, useCase, teamId);
+  const q = useUsageItems(period, scope, useCase, teamId);
 
   if (q.isLoading) {
     return <p className="text-xs text-muted px-4 py-2">Loading…</p>;
@@ -172,7 +175,7 @@ function UseCaseRow({
   costUsd,
   totalTokens,
   turns,
-  window,
+  period,
   scope,
   teamId,
 }: {
@@ -180,7 +183,7 @@ function UseCaseRow({
   costUsd: number;
   totalTokens: number;
   turns: number;
-  window: string;
+  period: UsagePeriodSelection;
   scope: UsageScopeName;
   teamId: string | undefined;
 }) {
@@ -213,14 +216,17 @@ function UseCaseRow({
         <span className="tabular-nums text-muted sm:w-16 sm:text-right">{turns} turns</span>
       </div>
       {expanded && (
-        <ItemList window={window} scope={scope} teamId={teamId} useCase={useCase} />
+        <ItemList period={period} scope={scope} teamId={teamId} useCase={useCase} />
       )}
     </div>
   );
 }
 
 export function UsagePage() {
-  const [window, setWindow] = useState<Window>("7d");
+  const [period, setPeriod] = useState<UsagePeriodSelection>({ kind: "lookback", window: "7d" });
+  const [month, setMonth] = useState("");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
   const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
   // Keep only cursor history, not every loaded row. Each page remains bounded
   // by the server's explicit page size.
@@ -246,7 +252,7 @@ export function UsagePage() {
   const teamId = ws?.kind === "team" ? ws.team.id : undefined;
   const scope: UsageScopeName = teamId !== undefined ? "team" : personalScope;
 
-  const breakdownQ = useUsageBreakdown(window, scope, teamId, { enabled: scopeKnown });
+  const breakdownQ = useUsageBreakdown(period, scope, teamId, { enabled: scopeKnown });
   // Proxy traffic is personal; every consumer of these two queries renders
   // only in the personal workspace, so do not fetch outside it.
   const requestsQ = useProxyRequests({ limit: 25, cursor }, { enabled: personalWorkspace });
@@ -279,10 +285,15 @@ export function UsagePage() {
         (breakdown.totalInputTokens + breakdown.totalCacheReadTokens)
       : null;
 
-  const csvHref = api.usageExportCsvUrl(window, scope, teamId);
+  const csvHref = api.usageExportCsvUrl(period, scope, teamId);
+  const periodLabel = period.kind === "lookback"
+    ? period.window
+    : period.kind === "month"
+      ? period.month
+      : `${period.start} to ${period.end}`;
 
   function handleWindowChange(w: Window) {
-    setWindow(w);
+    setPeriod({ kind: "lookback", window: w });
   }
 
   return (
@@ -324,7 +335,7 @@ export function UsagePage() {
               type="button"
               onClick={() => handleWindowChange(w)}
               className={`min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 ${
-                window === w
+                period.kind === "lookback" && period.window === w
                   ? "border-moss text-moss bg-moss-wash font-medium"
                   : "border-line text-muted hover:text-ink hover:border-ink"
               }`}
@@ -332,6 +343,53 @@ export function UsagePage() {
               {w}
             </button>
           ))}
+          <label className="flex items-center gap-2 text-sm text-muted">
+            <span>Month</span>
+            <input
+              type="month"
+              aria-label="Calendar month"
+              max={CURRENT_MONTH_UTC}
+              value={month}
+              onChange={(event) => {
+                const next = event.target.value;
+                setMonth(next);
+                if (next) setPeriod({ kind: "month", month: next });
+              }}
+              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+            />
+          </label>
+          <label className="text-sm text-muted">
+            <span className="sr-only">Custom start date</span>
+            <input
+              type="date"
+              aria-label="Custom start date"
+              max={TODAY_UTC}
+              value={customStart}
+              onChange={(event) => setCustomStart(event.target.value)}
+              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+            />
+          </label>
+          <span className="text-sm text-muted">to</span>
+          <label className="text-sm text-muted">
+            <span className="sr-only">Custom end date</span>
+            <input
+              type="date"
+              aria-label="Custom end date"
+              min={customStart}
+              max={TODAY_UTC}
+              value={customEnd}
+              onChange={(event) => setCustomEnd(event.target.value)}
+              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={!customStart || !customEnd || customStart > customEnd}
+            onClick={() => setPeriod({ kind: "custom", start: customStart, end: customEnd })}
+            className="min-h-11 rounded border border-line px-3 py-2 text-sm text-muted hover:border-ink hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1"
+          >
+            Apply dates
+          </button>
           {personalWorkspace && isOrgAdmin && (
             <div className="flex items-center gap-1 sm:ml-4 rounded border border-line overflow-hidden text-sm">
               <button
@@ -365,9 +423,9 @@ export function UsagePage() {
               href={csvHref}
               download
               className="inline-flex w-full items-center justify-center sm:ml-auto sm:w-auto min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 border-line text-muted hover:text-ink hover:border-ink"
-              aria-label={`Download CSV (${window}, ${scope})`}
+              aria-label={`Download CSV (${periodLabel}, ${scope})`}
             >
-              Download CSV ({window}, {scope})
+              Download CSV ({periodLabel}, {scope})
             </a>
           )}
         </div>
@@ -443,7 +501,7 @@ export function UsagePage() {
                       costUsd={bucket.costUsd}
                       totalTokens={bucket.totalTokens}
                       turns={bucket.turns}
-                      window={window}
+                      period={period}
                       scope={scope}
                       teamId={teamId}
                     />

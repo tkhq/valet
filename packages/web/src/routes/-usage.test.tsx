@@ -24,6 +24,7 @@ import type {
   UsageBreakdownResponse,
   UsageDrillResponse,
   ProxyRequestListItem,
+  UsagePeriodSelection,
 } from "@valet/api/wire";
 
 // --- mock data -----------------------------------------------------------
@@ -303,7 +304,7 @@ vi.mock("~/api/usage", () => ({
     breakdownCalls.push(args);
     return breakdownResult;
   },
-  useUsageItems: (_window: string, _scope: string, useCase: string) =>
+  useUsageItems: (_period: UsagePeriodSelection, _scope: string, useCase: string) =>
     itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null },
   qkUsage: {
     breakdown: () => [],
@@ -381,8 +382,14 @@ vi.mock("~/components/workspace-clause", () => ({
 // Mock api client — usageExportCsvUrl is a pure URL builder.
 vi.mock("~/api/client", () => ({
   api: {
-    usageExportCsvUrl: (window: string, scope: string, teamId?: string) =>
-      `/api/usage/export.csv?window=${window}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`,
+    usageExportCsvUrl: (period: UsagePeriodSelection, scope: string, teamId?: string) => {
+      const query = period.kind === "lookback"
+        ? `window=${period.window}`
+        : period.kind === "month"
+          ? `month=${period.month}`
+          : `start=${period.start}&end=${period.end}`;
+      return `/api/usage/export.csv?${query}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`;
+    },
   },
 }));
 
@@ -814,7 +821,7 @@ describe("UsagePage — team workspace scope", () => {
       expect(within(row).getByText(value ?? "")).toBeTruthy();
     }
     fireEvent.click(screen.getByRole("button", { name: "24h" }));
-    expect(breakdownCalls.at(-1)?.slice(0, 3)).toEqual(["24h", "team", "team-x"]);
+    expect(breakdownCalls.at(-1)?.slice(0, 3)).toEqual([{ kind: "lookback", window: "24h" }, "team", "team-x"]);
     breakdownResult.data = {
       ...breakdownResult.data,
       dailyAgentWindow: { days: 1, sinceMs: DAY_B_MS, untilMs: DAY_B_MS, timezone: "UTC" },
@@ -923,5 +930,27 @@ describe("UsagePage — disabled-gateway notice", () => {
     settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
     expect(screen.queryByText(/recording gateway is disabled/)).toBeNull();
+  });
+});
+
+describe("UsagePage custom period controls", () => {
+  it("selects a calendar month and updates the export URL", () => {
+    render(<UsagePage />);
+    const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
+    fireEvent.change(month, { target: { value: "2024-02" } });
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "month", month: "2024-02" });
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("month=2024-02");
+  });
+
+  it("applies an inclusive custom range to data and CSV", () => {
+    render(<UsagePage />);
+    fireEvent.change(screen.getByLabelText("Custom start date"), { target: { value: "2024-02-01" } });
+    fireEvent.change(screen.getByLabelText("Custom end date"), { target: { value: "2024-02-29" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply dates" }));
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "custom", start: "2024-02-01", end: "2024-02-29" });
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    expect(csvLink.textContent).toContain("2024-02-01 to 2024-02-29");
   });
 });
