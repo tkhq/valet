@@ -129,8 +129,9 @@ for a document.
 Callers:
 
 - `slack.fetch_file`
-- `drive.download_file`. A PDF uses the 25 MB cap unless the caller sets
-  `maxSizeBytes`. Text stays at 1 MB.
+- `drive.download_file`. A declared PDF or generic byte stream uses the
+  25 MB cap unless the caller sets `maxSizeBytes`. A generic stream is
+  extracted only when its bytes start with `%PDF-`. Text stays at 1 MB.
 - `github.read_repo_file`. It requests raw Contents API media for every PDF,
   because GitHub omits inline bytes from PDFs over 1 MB. It reads the raw
   stream with the 25 MB cap before it extracts text.
@@ -151,11 +152,11 @@ is still one branch, and that branch is `extractDocumentText`.
   extracted text, reports a scan, reports a missing extractor, and keeps the
   metadata answer for a zip.
 - `packages/engine/test/document-text.test.ts`: the shared reader normalizes
-  MIME types, identifies generic PDF bytes, and stops an unknown-length
-  response at its byte cap.
+  MIME types, identifies generic PDF bytes, cancels an oversized declared
+  response, and returns a size result when cancellation fails.
 - `packages/plugin-google-workspace`: `drive.download_file` returns extracted
-  PDF text, rejects an image, and stops a media stream that exceeds stale
-  metadata.
+  PDF text, accepts a generic PDF after it reads the header, rejects a generic
+  non-PDF, and stops a media stream that exceeds stale metadata.
 - `packages/plugin-github`: `github.read_repo_file` requests raw content for
   a PDF larger than the Contents API inline limit and returns extracted text.
 

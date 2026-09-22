@@ -19,6 +19,23 @@ describe("document text helpers", () => {
     expect(isPdfDocument({ mimeType: "application/octet-stream", data: new Uint8Array() })).toBe(false);
   });
 
+  it("cancels an oversized declared response and releases its reader", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const result = await readResponseBytes(
+      new Response(body, { headers: { "content-length": "4" } }),
+      3,
+    );
+
+    expect(result).toEqual({ ok: false, size: 4 });
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
+  });
+
   it("stops an unknown-length response at the byte cap", async () => {
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({
@@ -33,6 +50,21 @@ describe("document text helpers", () => {
     const result = await readResponseBytes(new Response(body), 3);
     expect(result).toEqual({ ok: false, size: 4 });
     expect(cancelled).toBe(true);
+  });
+
+  it("returns a size failure when unknown-length cancellation fails", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        controller.enqueue(new Uint8Array([3, 4]));
+      },
+      cancel() {
+        return Promise.reject(new Error("connection reset"));
+      },
+    });
+
+    await expect(readResponseBytes(new Response(body), 3)).resolves.toEqual({ ok: false, size: 4 });
+    expect(body.locked).toBe(false);
   });
 
   it("extracts a downloaded PDF", async () => {

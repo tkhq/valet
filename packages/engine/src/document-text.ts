@@ -54,21 +54,30 @@ export type BoundedResponseBytes =
  * size avoids a read. An unknown or false size is checked for every chunk.
  */
 export async function readResponseBytes(response: Response, maxBytes: number): Promise<BoundedResponseBytes> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) return { ok: false, size: declared };
-
   if (!response.body) return { ok: true, data: new Uint8Array() };
   const reader = response.body.getReader();
+  const cancel = async () => {
+    try {
+      await reader.cancel();
+    } catch {
+      // The result remains a bounded-size failure when cancellation fails.
+    }
+  };
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await cancel();
+      return { ok: false, size: declared };
+    }
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!value) continue;
       size += value.byteLength;
       if (size > maxBytes) {
-        await reader.cancel();
+        await cancel();
         return { ok: false, size };
       }
       chunks.push(value);

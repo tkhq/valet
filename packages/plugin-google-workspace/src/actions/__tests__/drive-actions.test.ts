@@ -444,6 +444,46 @@ describe('drive actions', () => {
     });
   });
 
+  it('download_file sniffs a generic PDF after its bounded download', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4');
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/octet-stream', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { status: 200 }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# Mutual NDA' }) }),
+    );
+
+    expect(result).toEqual({
+      success: true,
+      data: { name: 'NDA.pdf', mimeType: 'application/octet-stream', content: '# Mutual NDA' },
+    });
+  });
+
+  it('download_file rejects a generic non-PDF without extracting it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'archive.bin', mimeType: 'application/octet-stream', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b]), { status: 200 }));
+    let extracted = false;
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({
+        extractDocument: async () => {
+          extracted = true;
+          return { markdown: 'must not extract' };
+        },
+      }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('Cannot download binary file');
+    expect(extracted).toBe(false);
+  });
+
   it('download_file bounds media when metadata is stale', async () => {
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({

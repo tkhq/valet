@@ -5,6 +5,7 @@ import {
   isPdfDocument,
   isTextDocumentMime,
   MAX_PDF_DOCUMENT_BYTES,
+  normalizeDocumentMime,
   readResponseBytes,
   type PluginAction,
   type PluginActionContext,
@@ -928,10 +929,12 @@ const downloadFile = action(
       const metaRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${metaQs}`, token);
       if (!metaRes.ok) return driveError(metaRes);
       const meta = (await metaRes.json()) as DriveFile;
-      const pdf = isPdfDocument({ mimeType: meta.mimeType });
-      // A PDF uses the shared document cap unless the caller sets its own.
-      // Text exports stay at 1MB.
-      const maxBytes = maxSizeBytes || (pdf ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
+      const mimeType = normalizeDocumentMime(meta.mimeType);
+      const pdf = isPdfDocument({ mimeType });
+      const generic = mimeType === 'application/octet-stream';
+      // A declared PDF or generic byte stream uses the document cap. The
+      // generic stream is accepted only after its bytes identify a PDF.
+      const maxBytes = maxSizeBytes || (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
 
       // Google Workspace files: export as text
       if (isGoogleWorkspaceMimeType(meta.mimeType)) {
@@ -963,7 +966,7 @@ const downloadFile = action(
       }
 
       const binaryError = `Cannot download binary file (${meta.mimeType}). Only text, PDF, and Google Workspace files are supported.`;
-      if (!isTextDocumentMime(meta.mimeType) && !pdf) {
+      if (!isTextDocumentMime(meta.mimeType) && !pdf && !generic) {
         return { success: false, error: binaryError };
       }
 
@@ -979,13 +982,16 @@ const downloadFile = action(
       const dlRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${dlQs}`, token);
       if (!dlRes.ok) return driveError(dlRes);
 
-      if (pdf) {
+      if (pdf || generic) {
         const downloaded = await readResponseBytes(dlRes, maxBytes);
         if (!downloaded.ok) {
           return {
             success: false,
             error: `File is ${downloaded.size} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
           };
+        }
+        if (!isPdfDocument({ mimeType, data: downloaded.data })) {
+          return { success: false, error: binaryError };
         }
         const read = await extractDownloadedPdf({
           data: downloaded.data,
