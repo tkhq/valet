@@ -4,7 +4,7 @@
 export const MAX_PDF_DOCUMENT_BYTES = 25 * 1024 * 1024;
 
 /** Avoid returning unbounded extractor output to an action result. */
-export const MAX_EXTRACTED_DOCUMENT_CHARS = 1_000_000;
+const MAX_EXTRACTED_DOCUMENT_CHARS = 1_000_000;
 
 const TEXT_APPLICATION_MIMES = new Set([
   "application/json",
@@ -43,20 +43,20 @@ function hasPdfHeader(data: Uint8Array): boolean {
 }
 
 /** A PDF must start with the `%PDF-` signature, regardless of its MIME type. */
-export function isPdfDocument(input: { mimeType?: string; data?: Uint8Array }): boolean {
-  return input.data !== undefined && hasPdfHeader(input.data);
+export function isPdfDocument(data: Uint8Array): boolean {
+  return hasPdfHeader(data);
 }
 
-export type BoundedResponseBytes =
+type BoundedResponseBytes =
   | { ok: true; data: Uint8Array }
   | { ok: false; size: number };
 
-export type BoundedResponseText =
+type BoundedResponseText =
   | { ok: true; text: string }
   | { ok: false; size: number };
 
 /** Result of prefix-first inspection for a generic PDF candidate. */
-export type PdfCandidateResponse =
+type PdfCandidateResponse =
   | { kind: "pdf"; data: Uint8Array }
   | { kind: "not-pdf" }
   | { kind: "oversize"; size: number };
@@ -236,7 +236,7 @@ export async function readResponseText(response: Response, maxBytes: number, sig
   return result.ok ? { ok: true, text: new TextDecoder().decode(result.data) } : result;
 }
 
-export type DocumentExtractor = (doc: {
+type DocumentExtractor = (doc: {
   data: Uint8Array;
   mimeType: string;
   name?: string;

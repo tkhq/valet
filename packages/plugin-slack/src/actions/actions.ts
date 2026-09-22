@@ -750,7 +750,7 @@ const fetchFile = action(Type.Object({
         }
         if (candidate.kind === 'pdf') data = candidate.data;
       }
-      if (data && isPdfDocument({ mimeType: contentType, data })) {
+      if (data && isPdfDocument(data)) {
         const read = await extractDownloadedPdf({ data, name: filename, extractDocument: ctx.extractDocument, signal: ctx.signal });
         if (!read.ok) return { success: false, error: read.error };
         return { success: true, data: { content: read.content, mimetype: 'application/pdf', filename } };

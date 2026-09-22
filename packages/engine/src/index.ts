@@ -287,7 +287,6 @@ export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 export {
   MAX_PDF_DOCUMENT_BYTES,
-  MAX_EXTRACTED_DOCUMENT_CHARS,
   normalizeDocumentMime,
   isTextDocumentMime,
   isPdfDocument,
@@ -296,10 +295,6 @@ export {
   readPdfCandidateResponse,
   readResponseText,
   extractDownloadedPdf,
-  type BoundedResponseBytes,
-  type BoundedResponseText,
-  type PdfCandidateResponse,
-  type DocumentExtractor,
 } from "./document-text.js";
 export { formatTranscriptText } from "./transcript-formatter.js";
 export { nestedKubernetesDecision, NESTED_KUBERNETES_IDENTITY, NESTED_KUBERNETES_UNSUPPORTED } from "./sandbox/nested-kubernetes.js";

@@ -1000,7 +1000,7 @@ const downloadFile = action(
           }
           data = downloaded.data;
         }
-        if (!data || !isPdfDocument({ mimeType: mediaMime, data })) {
+        if (!data || !isPdfDocument(data)) {
           return { success: false, error: binaryError };
         }
         const read = await extractDownloadedPdf({

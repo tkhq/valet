@@ -12,13 +12,13 @@ const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]
 describe("document text helpers", () => {
   it("normalizes MIME parameters and case before routing", () => {
     expect(normalizeDocumentMime("Application/PDF; charset=binary")).toBe("application/pdf");
-    expect(isPdfDocument({ mimeType: "Application/PDF; charset=binary", data: pdfBytes })).toBe(true);
-    expect(isPdfDocument({ mimeType: "application/pdf", data: new TextEncoder().encode("<html>") })).toBe(false);
+    expect(isPdfDocument(pdfBytes)).toBe(true);
+    expect(isPdfDocument(new TextEncoder().encode("<html>"))).toBe(false);
   });
 
   it("identifies a PDF header for a generic MIME type", () => {
-    expect(isPdfDocument({ mimeType: "application/octet-stream", data: pdfBytes })).toBe(true);
-    expect(isPdfDocument({ mimeType: "application/octet-stream", data: new Uint8Array() })).toBe(false);
+    expect(isPdfDocument(pdfBytes)).toBe(true);
+    expect(isPdfDocument(new Uint8Array())).toBe(false);
   });
 
   it("rejects an oversized declared response with no body", async () => {

@@ -2258,7 +2258,7 @@ const readRepoFile = action(Type.Object({
         data.encoding === "base64"
           ? Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0))
           : new TextEncoder().encode(raw);
-      const inlinePdf = isPdfDocument({ data: bytes });
+      const inlinePdf = isPdfDocument(bytes);
       const needsRaw = name.toLowerCase().endsWith(".pdf") || inlinePdf || data.encoding === "none";
 
       if (needsRaw) {
