@@ -177,8 +177,14 @@ export {
 
 export { sandboxEvictionApiAdapter, type SandboxEvictionApi } from "./eviction.js";
 export {
+  KubernetesManagedEgressWorkloadSelector,
   buildKubernetesManagedEgressResources,
+  deriveKubernetesManagedEgressWorkloadSelector,
+  evaluateKubernetesManagedEgressReadiness,
   validateKubernetesManagedEgressConfig,
   type KubernetesManagedEgressConfig,
+  type KubernetesManagedEgressObservation,
+  type KubernetesManagedEgressReadiness,
+  type KubernetesManagedEgressResourceIdentity,
   type KubernetesManagedEgressResources,
 } from "./managed-egress.js";

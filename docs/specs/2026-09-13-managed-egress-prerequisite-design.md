@@ -37,9 +37,13 @@ Repeated request IDs receive the same bounded denial. Token rotation clears repl
 
 ### Kubernetes
 
-The plan uses one proxy pod per workload policy domain. The proxy does not share the workload pod or network identity. A workload NetworkPolicy allows only the proxy listener and explicit Valet control-plane CIDRs and ports. It gives the workload no DNS rule and no direct destination route.
+The plan uses one proxy pod per workload policy domain. The proxy does not share the workload pod or network identity. The provider derives the workload selector from `sandboxCrName(sessionKey)`. This selector matches the `valet.dev/session-id` label in the Sandbox manifest. The callback `workloadId` is authorization identity only and never supplies a Kubernetes selector.
 
-A second NetworkPolicy lets the proxy receive only workload listener traffic. It lets the proxy reach selected cluster DNS pods, callback CIDRs, and configured upstream CIDRs. The proxy pod uses `hostUsers: false`, no host network, no service account token, no privilege, a read-only root filesystem, and no added capabilities. Only the proxy mounts the immutable mode-0400 token Secret.
+A workload NetworkPolicy selects egress only. It preserves existing workload ingress. It allows only the proxy listener and explicit Valet control-plane CIDRs and ports. It gives the workload no DNS rule and no direct destination route. IPv4 and IPv6 CIDRs are explicit.
+
+A second NetworkPolicy lets the proxy receive only workload listener traffic. It lets the proxy reach selected cluster DNS pods, callback CIDRs, and configured upstream CIDRs. The proxy pod uses a fixed non-root UID and GID, `RuntimeDefault` seccomp, resource limits, no host network, no service account token, no privilege, a read-only root filesystem, and no capabilities. Only the proxy mounts the immutable mode-0400 token Secret.
+
+Readiness requires exactly one workload selector match. It also requires the exact proxy pod, listener, Secret, Service, and both NetworkPolicies. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
 
 ### Docker
 
