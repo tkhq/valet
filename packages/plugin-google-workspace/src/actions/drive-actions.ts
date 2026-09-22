@@ -975,7 +975,10 @@ const downloadFile = action(
       const mediaMime = normalizeDocumentMime(dlRes.headers.get('content-type') ?? undefined);
       const generic = mediaMime === '' || mediaMime === 'application/octet-stream';
       const pdf = mediaMime === 'application/pdf';
-      const maxBytes = maxSizeBytes ?? (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
+      const requestedMaxBytes = maxSizeBytes ?? (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
+      const maxBytes = pdf || generic
+        ? Math.min(requestedMaxBytes, MAX_PDF_DOCUMENT_BYTES)
+        : requestedMaxBytes;
       const displayMime = mediaMime || metadataMime || 'unknown';
       const binaryError = `Cannot download binary file (${displayMime}). Only text, PDF, and Google Workspace files are supported.`;
 

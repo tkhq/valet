@@ -608,6 +608,25 @@ describe('drive actions', () => {
     expect(extracted).toBe(false);
   });
 
+  it('download_file keeps PDFs within the document cap when a caller raises maxSizeBytes', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-', { status: 200, headers: { 'Content-Type': 'application/pdf', 'Content-Length': String(26 * 1024 * 1024) } }),
+    );
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1', maxSizeBytes: 2_000_000_000 },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: 'File is 27262976 bytes, exceeds max 26214400 bytes. Increase maxSizeBytes.',
+    });
+  });
+
   it('download_file reports an oversized generic PDF candidate', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/octet-stream', size: String(26 * 1024 * 1024) }),
