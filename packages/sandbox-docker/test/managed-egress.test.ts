@@ -4,12 +4,22 @@ import {
   applyDockerManagedEgressInfrastructure,
   buildDockerManagedEgressPlan,
   cleanupDockerManagedEgress,
+  initializeDockerManagedEgressVolumes,
+  renderHematiteConfig,
   type DockerManagedEgressRuntime,
   type DockerResourceKind,
 } from "../src/managed-egress.js";
 
-const request = { requested: true as const, proxyToken: "s".repeat(48), identity: { orgId: "o", sessionId: "s", workloadId: "w", proxyId: "p", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION } };
-const config = { proxyArtifact: `ghcr.io/tkhq/hematite@sha256:${"a".repeat(64)}`, callbackUrl: "https://valet.example/v1/authorize", listenerPort: 3128 };
+const request = { requested: true as const, proxyToken: "s".repeat(48), identity: { orgId: "o", sessionId: "private-session-identity", workloadId: "private-workload-identity", proxyId: "p", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION } };
+const config = {
+  proxyArtifact: `ghcr.io/tkhq/hematite@sha256:${"a".repeat(64)}`,
+  callbackUrl: "https://valet.example/v1/authorize",
+  listenerPort: 3128,
+  httpsListenerPort: 8443,
+  tunnelListenerPort: 8080,
+  allowlistDomains: ["api.example.com"],
+  allowlistCidrs: [],
+};
 
 class FakeRuntime implements DockerManagedEgressRuntime {
   readonly commands: Array<{ args: string[]; stdin?: string }> = [];
@@ -108,6 +118,43 @@ describe("Docker managed egress topology", () => {
     runtime.resources.set(runtime.key("network", plan.internalNetwork), { "valet.dev/managed-egress-owner": "other" });
     await expect(cleanupDockerManagedEgress(plan, "workload", runtime)).rejects.toThrow(/not owned/);
     expect(runtime.commands).toEqual([]);
+  });
+
+  it("renders strict Hematite v1 configuration with no DNS passthrough", () => {
+    const rendered = renderHematiteConfig(config, request.identity);
+    expect(rendered).toContain('http_listen: "0.0.0.0:3128"');
+    expect(rendered).toContain('https_listen: "0.0.0.0:8443"');
+    expect(rendered).toContain('tunnel_listen: "0.0.0.0:8080"');
+    expect(rendered).toContain("passthrough: []");
+    expect(rendered).toContain("- name: allowlist");
+    expect(rendered).toContain("external_authorization:");
+    expect(rendered).toContain(request.identity.sessionId);
+    expect(rendered).toContain(request.identity.workloadId);
+    expect(rendered).not.toContain(request.proxyToken);
+  });
+
+  it("writes token, config, and CA through stdin with strict modes", async () => {
+    const plan = buildDockerManagedEgressPlan(config, request);
+    const runtime = new FakeRuntime();
+    const material = {
+      token: request.proxyToken,
+      config: renderHematiteConfig(config, request.identity),
+      caCert: "test-ca-cert",
+      caKey: "test-ca-private-key",
+    };
+    await initializeDockerManagedEgressVolumes(plan, material, runtime);
+    const argv = runtime.commands.flatMap((entry) => entry.args).join(" ");
+    expect(argv).not.toContain(material.token);
+    expect(argv).not.toContain(material.caKey);
+    expect(argv).not.toContain(request.identity.sessionId);
+    expect(runtime.commands.map((entry) => entry.stdin)).toEqual([
+      material.token,
+      material.config,
+      material.caCert,
+      material.caKey,
+    ]);
+    expect(argv).toContain("chmod 0400 /run/valet-egress/token");
+    expect(argv).toContain("chmod 0400 /etc/hematite/certs/ca.key");
   });
 
   it("rejects a mutable proxy artifact", () => {

@@ -133,6 +133,12 @@ export {
   type ManagedEgressIdentity,
   type ManagedEgressRequest,
 } from "./sandbox/managed-egress.js";
+export {
+  HEMATITE_COMPATIBLE_CONFIG_CONTRACT,
+  HEMATITE_COMPATIBLE_SOURCE_COMMIT,
+  renderHematiteManagedEgressConfig,
+  type HematiteManagedEgressConfig,
+} from "./sandbox/hematite.js";
 // PgSessionStore lives in @valet/store-postgres.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.

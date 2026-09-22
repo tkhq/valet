@@ -1,9 +1,17 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { MANAGED_EGRESS_CONTRACT_VERSION, ManagedEgressPrerequisiteError, validateManagedEgressRequest, type ManagedEgressRequest } from "@valet/engine";
+import {
+  HEMATITE_COMPATIBLE_CONFIG_CONTRACT,
+  HEMATITE_COMPATIBLE_SOURCE_COMMIT,
+  MANAGED_EGRESS_CONTRACT_VERSION,
+  ManagedEgressPrerequisiteError,
+  renderHematiteManagedEgressConfig,
+  validateManagedEgressRequest,
+  type ManagedEgressIdentity,
+  type ManagedEgressRequest,
+} from "@valet/engine";
 
-export const HEMATITE_COMPATIBLE_SOURCE_COMMIT = "35cdd0bc8816afefb4012ba2f9ca66b927c1aa00" as const;
-export const HEMATITE_COMPATIBLE_CONFIG_CONTRACT = "v1" as const;
+export { HEMATITE_COMPATIBLE_CONFIG_CONTRACT, HEMATITE_COMPATIBLE_SOURCE_COMMIT };
 
 const OWNER_LABEL = "valet.dev/managed-egress-owner";
 const KIND_LABEL = "valet.dev/managed-egress-resource";
@@ -13,6 +21,17 @@ export interface DockerManagedEgressConfig {
   proxyArtifact: string;
   callbackUrl: string;
   listenerPort: number;
+  httpsListenerPort: number;
+  tunnelListenerPort: number;
+  allowlistDomains: string[];
+  allowlistCidrs: string[];
+}
+
+export interface DockerManagedEgressMaterial {
+  token: string;
+  config: string;
+  caCert: string;
+  caKey: string;
 }
 
 export type DockerResourceKind = "container" | "network" | "volume";
@@ -46,7 +65,7 @@ function dockerCommand(args: string[], stdin?: string): Promise<DockerCommandRes
 }
 
 function missingDockerResource(message: string): boolean {
-  return /no such (container|network|volume)|network .* not found|is not connected to network|not connected/i.test(message);
+  return /no such (container|network|volume)|network .* not found|endpoint .* not found|is not connected to network|not connected/i.test(message);
 }
 
 function labelsRecord(value: unknown): value is Record<string, string> {
@@ -86,6 +105,7 @@ export function dockerManagedEgressCliRuntime(): DockerManagedEgressRuntime {
 }
 
 export interface DockerManagedEgressPlan {
+  proxyArtifact: string;
   internalNetwork: string;
   outboundNetwork: string;
   proxyContainer: string;
@@ -118,7 +138,15 @@ export function validateDockerManagedEgressConfig(config: DockerManagedEgressCon
   if (callback.protocol !== "https:" || callback.pathname !== "/v1/authorize" || callback.search || callback.hash || callback.username || callback.password) {
     throw new ManagedEgressPrerequisiteError("callback", "Managed egress callback must use HTTPS at exactly /v1/authorize with no user info, query, or fragment.");
   }
-  if (!Number.isInteger(config.listenerPort) || config.listenerPort < 1 || config.listenerPort > 65535) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress listener port is invalid. Configure a port from 1 through 65535.");
+  const listenerPorts = [config.listenerPort, config.httpsListenerPort, config.tunnelListenerPort];
+  if (!listenerPorts.every((port) => Number.isInteger(port) && port >= 1 && port <= 65535) || new Set(listenerPorts).size !== listenerPorts.length) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress listener ports are invalid. Configure three distinct ports from 1 through 65535.");
+  if (config.allowlistDomains.length === 0 && config.allowlistCidrs.length === 0) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress requires a non-empty Hematite allowlist. Configure domains or CIDRs.");
+}
+
+/** Validates provider inputs before using the shared Hematite v1 renderer. */
+export function renderHematiteConfig(config: DockerManagedEgressConfig, identity: ManagedEgressIdentity): string {
+  validateDockerManagedEgressConfig(config);
+  return renderHematiteManagedEgressConfig(config, identity);
 }
 
 function digest(value: string): string {
@@ -163,12 +191,17 @@ export function buildDockerManagedEgressPlan(config: DockerManagedEgressConfig, 
     "--network", internalNetwork,
     "--network-alias", "valet-egress-proxy",
     "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+    "--env", "SSL_CERT_FILE=/etc/hematite/certs/ca.crt",
     "--mount", `type=volume,src=${tokenVolume},dst=/run/valet-egress,readonly`,
     "--mount", `type=volume,src=${configVolume},dst=/etc/hematite,readonly`,
+    "--expose", `${config.listenerPort}/tcp`,
+    "--expose", `${config.httpsListenerPort}/tcp`,
+    "--expose", `${config.tunnelListenerPort}/tcp`,
     ...labelArgs(labels.proxy),
     config.proxyArtifact,
   ];
   return {
+    proxyArtifact: config.proxyArtifact,
     internalNetwork,
     outboundNetwork,
     proxyContainer,
@@ -232,6 +265,28 @@ export async function applyDockerManagedEgressInfrastructure(
     }
     throw error;
   }
+}
+
+function bootstrapArgs(plan: DockerManagedEgressPlan, volume: string, destination: string, mode: "0400" | "0444"): string[] {
+  const parent = destination.slice(0, destination.lastIndexOf("/"));
+  return [
+    "run", "--rm", "-i", "--network", "none", "--entrypoint", "sh",
+    "--mount", `type=volume,src=${volume},dst=${volume === plan.tokenVolume ? "/run/valet-egress" : "/etc/hematite"}`,
+    plan.proxyArtifact,
+    "-c", `umask 077; mkdir -p ${parent}; cat > ${destination}; chmod ${mode} ${destination}`,
+  ];
+}
+
+/** Writes sensitive material through stdin. No material enters argv, environment, labels, or inspect metadata. */
+export async function initializeDockerManagedEgressVolumes(
+  plan: DockerManagedEgressPlan,
+  material: DockerManagedEgressMaterial,
+  runtime: DockerManagedEgressRuntime,
+): Promise<void> {
+  await runtime.run(bootstrapArgs(plan, plan.tokenVolume, "/run/valet-egress/token", "0400"), material.token);
+  await runtime.run(bootstrapArgs(plan, plan.configVolume, "/etc/hematite/hematite.yaml", "0444"), material.config);
+  await runtime.run(bootstrapArgs(plan, plan.configVolume, "/etc/hematite/certs/ca.crt", "0444"), material.caCert);
+  await runtime.run(bootstrapArgs(plan, plan.configVolume, "/etc/hematite/certs/ca.key", "0400"), material.caKey);
 }
 
 /** Disconnects the workload before ordered, ownership-checked, idempotent resource removal. */

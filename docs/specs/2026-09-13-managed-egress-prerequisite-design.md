@@ -18,7 +18,9 @@ A provider must reject a request before side effects unless all four states can 
 
 ## Hematite contract
 
-The supported callback contract is `hematite-external-authorization-v1`. Operators must configure an OCI artifact by digest. A mutable tag does not configure the feature.
+The supported callback contract is `hematite-external-authorization-v1`. The compatible Hematite configuration contract is v1 at source commit `35cdd0bc8816afefb4012ba2f9ca66b927c1aa00`. This source commit does not identify an OCI image.
+
+Operators must configure an immutable registry artifact as `image@sha256:<digest>`. There is no default artifact. A mutable tag does not configure the feature. Local acceptance can build the exact source commit and run its local `sha256:<image-id>`. A local image ID never satisfies production configuration.
 
 Hematite sends one `POST /v1/authorize` request. The request has a closed 4 KiB schema:
 
@@ -50,6 +52,8 @@ Readiness requires exactly one workload selector match. It also requires the exa
 The plan creates an internal workload network and a distinct outbound network. The workload attaches only to the internal network. A separate proxy container attaches to both networks. It has no host-gateway mapping. Only the proxy mounts the token and configuration volumes.
 
 Each managed Docker resource has an exact server-derived ownership label. Restart adoption rejects name collisions with unmanaged resources. Partial setup removes only resources created by that attempt. Terminal cleanup disconnects the workload first. It then removes the proxy, token and configuration volumes, outbound network, and internal network. Missing resources are successful no-ops.
+
+Valet renders the strict Hematite v1 file with an ordered required allowlist and external authorization. The file sets `dns.passthrough` to an empty list. Bootstrap writes the token and CA key through stdin with mode `0400`. Token, CA, and configuration values do not enter Docker argv, environment, or labels. The proxy exposes each configured HTTP, HTTPS, and tunnel listener without publishing a host port.
 
 Explicit proxy variables are client configuration. They are not the security boundary. The isolated network attachment is the boundary.
 
