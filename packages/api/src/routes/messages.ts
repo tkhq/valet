@@ -59,7 +59,7 @@ import {
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import { revokeSessionCredentialDelegations } from "../authorization/credential-delegation.js";
+import { revokeOperationCredentialDelegations } from "../authorization/credential-delegation.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -899,8 +899,11 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const thread = engineSession.threadById(threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
+  const operationIds = (await c.var.providers.engineStore.listUnsettledSubmissions(session.id))
+    .filter((item) => item.threadId === threadId)
+    .map((item) => item.id);
   await engineSession.abort({ threadId });
-  await revokeSessionCredentialDelegations(c.var.providers.db, session.id);
+  await revokeOperationCredentialDelegations(c.var.providers.db, session.id, threadId, operationIds);
   return c.json({ ok: true });
 });
 

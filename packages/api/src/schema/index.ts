@@ -469,7 +469,8 @@ export const credentialDelegations = pgTable("credential_delegations", {
   decisionEvidence: jsonb("decision_evidence").$type<Record<string, string>>(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (t) => [
-  uniqueIndex("credential_delegations_child_repo").on(t.childSessionId, t.repoHost, t.repoOwner, t.repoName),
+  uniqueIndex("credential_delegations_child_repo").on(t.childSessionId, t.repoHost, t.repoOwner, t.repoName).where(sql`${t.revokedAt} IS NULL`),
+  index("credential_delegations_active_uniqueness").on(t.revokedAt),
   index("credential_delegations_parent").on(t.orgId, t.parentSessionId),
 ]);
 

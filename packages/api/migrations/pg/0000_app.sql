@@ -277,7 +277,9 @@ CREATE TABLE "credential_delegations" (
   "decision_id" text NOT NULL UNIQUE, "decision_evidence" jsonb NOT NULL, "created_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "credential_delegations_child_repo" ON "credential_delegations" ("child_session_id","repo_host","repo_owner","repo_name");
+CREATE UNIQUE INDEX "credential_delegations_child_repo" ON "credential_delegations" ("child_session_id","repo_host","repo_owner","repo_name") WHERE "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE INDEX "credential_delegations_active_uniqueness" ON "credential_delegations" ("revoked_at");
 --> statement-breakpoint
 CREATE INDEX "credential_delegations_parent" ON "credential_delegations" ("org_id","parent_session_id");
 --> statement-breakpoint

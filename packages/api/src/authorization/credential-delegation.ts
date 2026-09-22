@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { PolicyDecision, Principal } from "@valet/engine";
 import { adaptCredentialDelegate, buildDelegatedExecutionObligationPlan, decisionDigestOf, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
@@ -82,13 +82,13 @@ export async function authorizeRepositoryCredentialDelegation(input: {
   const now = input.now ?? Date.now();
   const repo = splitRepo(input.binding);
   if (repo.host !== "github") throw new CredentialDelegationDeniedError("credential_delegation_denied");
-  const existing = (await input.db.select().from(credentialDelegations).where(and(
+  const prior = await input.db.select().from(credentialDelegations).where(and(
     eq(credentialDelegations.childSessionId, input.childSessionId),
     eq(credentialDelegations.repoHost, repo.host),
     eq(credentialDelegations.repoOwner, repo.owner),
     eq(credentialDelegations.repoName, repo.repo),
-    isNull(credentialDelegations.revokedAt),
-  )).limit(1))[0];
+  ));
+  const existing = prior.find((row) => row.revokedAt === null);
   if (existing && (existing.parentSessionId !== input.parentSessionId
     || existing.parentThreadId !== input.parentThreadId
     || existing.parentOperationId !== input.parentOperationId)) {
@@ -96,7 +96,8 @@ export async function authorizeRepositoryCredentialDelegation(input: {
   }
   const provenance = await provenanceFor(input.db, input.orgId, input.owner, repo.owner, input.binding.auth);
   if (!provenance) throw new CredentialDelegationDeniedError("credential_delegation_denied");
-  const operationId = opaqueId(`${input.parentSessionId}:${input.parentThreadId}:${input.parentOperationId}:${input.childSessionId}:${repo.host}:${repo.owner}/${repo.repo}`);
+  const generation = prior.filter((row) => row.revokedAt !== null).length;
+  const operationId = opaqueId(`${input.parentSessionId}:${input.parentThreadId}:${input.parentOperationId}:${input.childSessionId}:${repo.host}:${repo.owner}/${repo.repo}:${generation}`);
   const adapted = adaptCredentialDelegate({ schemaVersion: 1, organizationId: input.orgId, actorUserId: input.actorUserId, principal: input.owner,
     requestId: `credential-delegation:${operationId}`, operationId, parentSessionId: input.parentSessionId,
     evaluationTimeMs: now, service: "github", credentialClass: "repository_transport", owner: input.owner,
@@ -179,6 +180,16 @@ export async function assertRepositoryCredentialDelegation(input: {
 
 export async function revokeChildCredentialDelegations(db: AppDb, childSessionId: string, now = Date.now()): Promise<void> {
   await db.update(credentialDelegations).set({ revokedAt: now }).where(and(eq(credentialDelegations.childSessionId, childSessionId), isNull(credentialDelegations.revokedAt)));
+}
+
+export async function revokeOperationCredentialDelegations(db: AppDb, parentSessionId: string, parentThreadId: string, parentOperationIds: string[], now = Date.now()): Promise<void> {
+  if (parentOperationIds.length === 0) return;
+  await db.update(credentialDelegations).set({ revokedAt: now }).where(and(
+    eq(credentialDelegations.parentSessionId, parentSessionId),
+    eq(credentialDelegations.parentThreadId, parentThreadId),
+    inArray(credentialDelegations.parentOperationId, parentOperationIds),
+    isNull(credentialDelegations.revokedAt),
+  ));
 }
 
 export async function revokeSessionCredentialDelegations(db: AppDb, sessionId: string, now = Date.now()): Promise<void> {

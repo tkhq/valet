@@ -10,6 +10,7 @@ import {
   authorizeRepositoryCredentialDelegation,
   CredentialDelegationInvalidError,
   revokeChildCredentialDelegations,
+  revokeOperationCredentialDelegations,
 } from "./credential-delegation.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -183,6 +184,27 @@ describe("repository credential delegation", () => {
     await revokeChildCredentialDelegations(api.providers.db, CHILD_ID, now + 2);
     const [revoked] = await api.providers.db.select().from(credentialDelegations);
     expect(revoked).toMatchObject({ ownerId: "local-user", revokedAt: now + 1 });
+    await expect(api.providers.db.update(credentialDelegations).set({ revokedAt: null }).where(eq(credentialDelegations.id, revoked!.id))).rejects.toThrow();
+    await createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation");
+    const grants = await api.providers.db.select().from(credentialDelegations);
+    expect(grants).toHaveLength(2);
+    expect(grants.filter((row) => row.revokedAt === null)).toHaveLength(1);
+  });
+
+  it("revokes only grants bound to an aborted operation", async () => {
+    api = await bootTestApi();
+    allowCredentialDelegation(api);
+    const now = Date.now();
+    await createGrant(now);
+    const [grant] = await api.providers.db.select().from(credentialDelegations);
+    await api.providers.db.insert(credentialDelegations).values({
+      ...grant!, id: "other-operation-grant", childSessionId: "other-child", childWatchId: "other-child",
+      parentOperationId: "other-operation", decisionId: "other-operation-decision",
+    });
+    await revokeOperationCredentialDelegations(api.providers.db, "parent-credential-delegation", "web:default", ["parent-queue-item"], now + 1);
+    const grants = await api.providers.db.select().from(credentialDelegations);
+    expect(grants.find((row) => row.id === grant!.id)?.revokedAt).toBe(now + 1);
+    expect(grants.find((row) => row.id === "other-operation-grant")?.revokedAt).toBeNull();
   });
 
   it("converges exact retries and rejects cross-attempt reuse", async () => {
