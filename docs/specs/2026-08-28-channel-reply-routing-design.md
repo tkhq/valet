@@ -405,3 +405,27 @@ Row expansion stops at the caller's text budget before formatting. Section split
 keep complete native spans together. Truncated output includes a visible notice.
 This is a deliberate compatibility fallback, not a claim that Markdown blocks
 support native spans.
+
+### Native Slack table blocks (2026-09-22)
+
+A Markdown block renders a pipe table, but a GFM cell has no line break: a
+newline ends the row and Slack shows `<br>` as literal text. Release notes need
+several related pull requests in one cell, one per line. The same block builder
+now renders each pipe table as a Block Kit `table` block and the prose around it
+as `markdown` blocks. This applies to message actions, DM actions, message edits,
+and discrete transport replies. Messages with Slack-native spans keep the labeled
+row path.
+
+Inside a table block, `<br>` in a cell becomes a line break, and links, bold,
+italic, and inline code become rich text elements. Explicit GitHub references
+are linked before the table is parsed, so they become links inside cells too.
+Header cells are plain text. An empty cell holds a single space, because Slack
+rejects an empty rich text cell and drops the whole message. Every column wraps,
+and the delimiter row sets column alignment.
+
+Slack limits a table block to 100 rows and 20 columns, and limits the cells of one
+message to 10,000 characters in total. A table outside these limits, a header-only
+table, or a result that needs more blocks than the caller's budget keeps the single
+Markdown block, so nothing renders worse than before. If Slack still rejects a
+generated table block with `invalid_blocks`, the sender posts the same content
+once more as a Markdown block. Caller-supplied blocks never get this retry.

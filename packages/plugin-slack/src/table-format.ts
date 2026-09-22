@@ -38,13 +38,87 @@ function tableCells(line: string): string[] | null {
   return cells;
 }
 
+export type TableAlignment = 'left' | 'center' | 'right';
+
+/** Column alignment from a GFM delimiter cell such as `:-:`. */
+function alignmentOf(separator: string): TableAlignment {
+  const trimmed = separator.trim();
+  const left = trimmed.startsWith(':');
+  const right = trimmed.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  return 'left';
+}
+
+export interface MarkdownTable {
+  headers: string[];
+  alignments: TableAlignment[];
+  /** Body rows as written; a row may be shorter or longer than the header. */
+  rows: string[][];
+}
+
+export type MarkdownSegment =
+  | { type: 'text'; lines: string[] }
+  | { type: 'table'; table: MarkdownTable };
+
+/**
+ * Split Markdown into prose runs and pipe tables. Fenced and indented code
+ * stay prose, so table examples inside them are never rendered as tables.
+ * This scanner does not invoke a Markdown parser on untrusted action text.
+ */
+export function splitMarkdownTables(text: string): MarkdownSegment[] {
+  const lines = text.split(/\r?\n/);
+  const segments: MarkdownSegment[] = [];
+  const prose = (line: string): void => {
+    const last = segments.at(-1);
+    if (last?.type === 'text') last.lines.push(line);
+    else segments.push({ type: 'text', lines: [line] });
+  };
+  let fence: string | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (fence) {
+      prose(line);
+      if (new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`).test(line)) fence = undefined;
+      continue;
+    }
+    const opening = /^ {0,3}(`{3,})(?!`)[^`]*$|^ {0,3}(~{3,})[^\n]*$/.exec(line);
+    if (opening) {
+      fence = opening[1] ?? opening[2];
+      prose(line);
+      continue;
+    }
+    const delimiter = lines[index + 1];
+    if (/^(?: {4}|\t)/.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
+      prose(line);
+      continue;
+    }
+    const headers = tableCells(line);
+    const separators = tableCells(delimiter);
+    if (!headers || !separators || headers.length !== separators.length) {
+      prose(line);
+      continue;
+    }
+    index += 1;
+    const rows: string[][] = [];
+    while (index + 1 < lines.length) {
+      const next = lines[index + 1];
+      if (/^\s*$|^(?: {4}|\t)|^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/.test(next)) break;
+      const cells = tableCells(next);
+      if (!cells) break;
+      rows.push(cells);
+      index += 1;
+    }
+    segments.push({ type: 'table', table: { headers, alignments: separators.map(alignmentOf), rows } });
+  }
+  return segments;
+}
+
 /**
  * Render pipe tables as labeled rows before converting to Slack mrkdwn.
  * Native Slack spans keep their documented meaning in section blocks.
- * This scanner does not invoke a Markdown parser on untrusted action text.
  */
 export function tablesToLabeledRows(text: string, maxOutputLength: number): { text: string; truncated: boolean } {
-  const lines = text.split(/\r?\n/);
   const output: string[] = [];
   let outputLength = 0;
   const append = (value: string): boolean => {
@@ -62,45 +136,20 @@ export function tablesToLabeledRows(text: string, maxOutputLength: number): { te
     return true;
   };
   const truncated = (): { text: string; truncated: boolean } => ({ text: output.join('\n'), truncated: true });
-  let fence: string | undefined;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (fence) {
-      if (!append(line)) return truncated();
-      if (new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`).test(line)) fence = undefined;
+  for (const segment of splitMarkdownTables(text)) {
+    if (segment.type === 'text') {
+      for (const line of segment.lines) {
+        if (!append(line)) return truncated();
+      }
       continue;
     }
-    const opening = /^ {0,3}(`{3,})(?!`)[^`]*$|^ {0,3}(~{3,})[^\n]*$/.exec(line);
-    if (opening) {
-      fence = opening[1] ?? opening[2];
-      if (!append(line)) return truncated();
-      continue;
-    }
-    const delimiter = lines[index + 1];
-    if (/^(?: {4}|\t)/.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
-      if (!append(line)) return truncated();
-      continue;
-    }
-    const headers = tableCells(line);
-    const separators = tableCells(delimiter);
-    if (!headers || !separators || headers.length !== separators.length) {
-      if (!append(line)) return truncated();
-      continue;
-    }
-    index += 1;
-    let rows = 0;
-    while (index + 1 < lines.length) {
-      const next = lines[index + 1];
-      if (/^\s*$|^(?: {4}|\t)|^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/.test(next)) break;
-      const cells = tableCells(next);
-      if (!cells) break;
+    const { headers, rows } = segment.table;
+    for (const cells of rows) {
       const fields = Array.from({ length: Math.max(headers.length, cells.length) }, (_, column) =>
         `**${headers[column] || `Column ${column + 1}`}**: ${cells[column] ?? ''}`);
       if (!append(fields.join('\n')) || !append('')) return truncated();
-      rows += 1;
-      index += 1;
     }
-    if (rows === 0 && (!append(headers.map((header) => `**${header}**`).join('\n')) || !append(''))) return truncated();
+    if (rows.length === 0 && (!append(headers.map((header) => `**${header}**`).join('\n')) || !append(''))) return truncated();
   }
   return { text: output.join('\n'), truncated: false };
 }

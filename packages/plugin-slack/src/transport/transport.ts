@@ -42,6 +42,7 @@ import {
 } from "@valet/engine";
 import {
   buildContentBlocks,
+  hasTableBlock,
   needsContentBlocks,
   SLACK_HEADER_LIMIT,
   SLACK_MAX_BLOCKS,
@@ -842,19 +843,31 @@ export class SlackTransport implements ChannelTransport {
     const formatted = markdownToSlackMrkdwn(message.markdown);
     let text = formatted;
     let blocks: Record<string, unknown>[] | undefined;
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
     if (needsContentBlocks(message.markdown)) {
       // One API call with blocks — never several messages (chat.postMessage is
       // limited to 1/sec/channel; see message-chunking.ts).
       blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
       text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+      if (hasTableBlock(blocks)) {
+        fallbackBlocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS, { nativeTables: false });
+      }
     }
-    const res = await this.postMessageAs({
+    const post = {
       channel: target.channelId,
       text,
       threadTs,
       blocks,
       ...slackIdentityOverride(message.sender),
-    });
+    };
+    let res: { ts: string };
+    try {
+      res = await this.postMessageAs(post);
+    } catch (err) {
+      // Slack rejected the generated table block; post its Markdown rendering.
+      if (!fallbackBlocks || !(err instanceof SlackApiError) || err.detail !== "invalid_blocks") throw err;
+      res = await this.postMessageAs({ ...post, blocks: fallbackBlocks });
+    }
     return { conversationKey, messageId: res.ts };
   }
 

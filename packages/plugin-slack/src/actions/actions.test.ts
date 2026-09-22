@@ -947,7 +947,7 @@ describe('slack actions', () => {
   });
 
   it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
-    '%s sends short release tables as Markdown blocks', async (name) => {
+    '%s sends short release tables as native table blocks', async (name) => {
       if (name === 'slack.dm_user') {
         fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
       } else {
@@ -958,7 +958,39 @@ describe('slack actions', () => {
       await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
       const init = fetchMock.mock.calls[1]?.[1];
       if (typeof init?.body !== 'string') throw new Error('Expected a JSON request body');
-      expect(JSON.parse(init.body)).toMatchObject({ blocks: [{ type: 'markdown', text }] });
+      expect(JSON.parse(init.body)).toMatchObject({
+        blocks: [
+          { type: 'markdown', text: '**Release infrastructure changes**' },
+          { type: 'table', rows: [[{ type: 'raw_text', text: 'Mono PR' }, { type: 'raw_text', text: 'Merged' }, { type: 'raw_text', text: 'Description' }], [
+            { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'link', url: 'https://github.com/tkhq/mono/pull/8240', text: 'tkhq/mono#8240' }] }] },
+            { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: ' ' }] }] },
+            { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: 'Per-instance credentials' }] }] },
+          ]] },
+        ],
+      });
+    },
+  );
+
+  it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
+    '%s retries with Markdown blocks when Slack rejects the table block', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { blocks?: { type: string }[] } : {};
+        if (body.blocks?.some((block) => block.type === 'table')) {
+          return jsonResponse(200, { ok: false, error: 'invalid_blocks' });
+        }
+        return jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' });
+      });
+      const text = '| Mono PR | Related |\n|---|---|\n| [#1](https://x/1) | [#2](https://x/2)<br>[#3](https://x/3) |';
+      const result = await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
+      expect(result.success).toBe(true);
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as { blocks?: { type: string }[] });
+      expect(posts.map((post) => post.blocks?.map((block) => block.type))).toEqual([['table'], ['markdown']]);
+      expect(posts[1].blocks).toEqual([{ type: 'markdown', text }]);
     },
   );
 
