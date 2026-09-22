@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
-import { ManagedEgressPrerequisiteError, validateManagedEgressRequest, type ManagedEgressRequest } from "@valet/engine";
+import { ManagedEgressPrerequisiteError, renderHematiteManagedEgressConfig, validateManagedEgressRequest, type ManagedEgressRequest } from "@valet/engine";
 import { sandboxCrName, SESSION_LABEL_KEY } from "./manifest.js";
 
 export interface KubernetesManagedEgressConfig {
@@ -12,6 +12,12 @@ export interface KubernetesManagedEgressConfig {
   dnsNamespaceSelector: Record<string, string>;
   dnsPodSelector: Record<string, string>;
   listenerPort: number;
+  httpsListenerPort: number;
+  tunnelListenerPort: number;
+  allowlistDomains: string[];
+  allowlistCidrs: string[];
+  caCert: string;
+  caKey: string;
   callbackPort: number;
   controlPlaneCidrs: string[];
   controlPlanePorts: number[];
@@ -20,14 +26,17 @@ export interface KubernetesManagedEgressConfig {
 export interface KubernetesManagedEgressResourceIdentity {
   proxyPodName: string;
   proxySecretName: string;
+  proxyConfigSecretName: string;
   proxyServiceName: string;
   workloadPolicyName: string;
   proxyPolicyName: string;
+  listenerPort: number;
 }
 
 export interface KubernetesManagedEgressResources {
   identity: KubernetesManagedEgressResourceIdentity;
   proxySecret: Record<string, unknown>;
+  proxyConfigSecret: Record<string, unknown>;
   proxyPod: Record<string, unknown>;
   proxyService: Record<string, unknown>;
   workloadPolicy: Record<string, unknown>;
@@ -58,11 +67,12 @@ export interface KubernetesManagedEgressObservation {
   listeningProxyPodNames: string[];
   secretNames: string[];
   serviceNames: string[];
+  proxyServiceClusterIps: string[];
   networkPolicyNames: string[];
   networkPolicyEnforcement: "enforced" | "unknown" | "unsupported";
 }
 
-export type KubernetesManagedEgressReadiness = { ready: true } | { ready: false; reason: string };
+export type KubernetesManagedEgressReadiness = { ready: true; workloadProxyEndpoints: string[] } | { ready: false; reason: string };
 
 function exactNames(actual: string[], expected: string[]): boolean {
   return actual.length === expected.length && expected.every((name) => actual.includes(name));
@@ -81,7 +91,7 @@ export function evaluateKubernetesManagedEgressReadiness(
       !exactNames(observation.listeningProxyPodNames, [identity.proxyPodName])) {
     return { ready: false, reason: "The exact managed proxy pod must be ready and listening." };
   }
-  if (!exactNames(observation.secretNames, [identity.proxySecretName]) ||
+  if (!exactNames(observation.secretNames, [identity.proxySecretName, identity.proxyConfigSecretName]) ||
       !exactNames(observation.serviceNames, [identity.proxyServiceName]) ||
       !exactNames(observation.networkPolicyNames, [identity.workloadPolicyName, identity.proxyPolicyName])) {
     return { ready: false, reason: "The exact managed proxy resources and policies must exist." };
@@ -89,7 +99,16 @@ export function evaluateKubernetesManagedEgressReadiness(
   if (observation.networkPolicyEnforcement !== "enforced") {
     return { ready: false, reason: "The cluster must prove NetworkPolicy enforcement. Unknown or unsupported enforcement fails closed." };
   }
-  return { ready: true };
+  if (observation.proxyServiceClusterIps.length < 1 || observation.proxyServiceClusterIps.length > 2 ||
+      new Set(observation.proxyServiceClusterIps).size !== observation.proxyServiceClusterIps.length ||
+      !observation.proxyServiceClusterIps.every((address) => isIP(address) !== 0)) {
+    return { ready: false, reason: "The proxy Service must have one or two unique server-assigned IP addresses." };
+  }
+  return {
+    ready: true,
+    workloadProxyEndpoints: observation.proxyServiceClusterIps.map((address) =>
+      `http://${isIP(address) === 6 ? `[${address}]` : address}:${identity.listenerPort}`),
+  };
 }
 
 function name(proxyId: string): string {
@@ -146,7 +165,10 @@ export function validateKubernetesManagedEgressConfig(config: KubernetesManagedE
   if (config.callbackCidrs.length === 0 || config.upstreamCidrs.length === 0) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress needs explicit callback and upstream CIDRs. Configure both allowlists.");
   if (config.controlPlaneCidrs.length === 0 || config.controlPlanePorts.length === 0) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress needs explicit workload control-plane CIDRs and ports. Configure the minimum required paths.");
   if (![...config.callbackCidrs, ...config.upstreamCidrs, ...config.controlPlaneCidrs].every(validCidr)) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress CIDR configuration is invalid.");
-  if (![config.listenerPort, config.callbackPort, ...config.controlPlanePorts].every(validPort)) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress port configuration is invalid.");
+  const listenerPorts = [config.listenerPort, config.httpsListenerPort, config.tunnelListenerPort];
+  if (![...listenerPorts, config.callbackPort, ...config.controlPlanePorts].every(validPort) || new Set(listenerPorts).size !== listenerPorts.length) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress port configuration is invalid.");
+  if (config.allowlistDomains.length === 0 && config.allowlistCidrs.length === 0) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress requires a non-empty Hematite allowlist.");
+  if (!config.caCert.includes("BEGIN CERTIFICATE") || !config.caKey.includes("PRIVATE KEY")) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress requires PEM CA certificate and key material.");
   if (Object.keys(config.dnsNamespaceSelector).length === 0 || Object.keys(config.dnsPodSelector).length === 0) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress DNS selectors must be explicit and non-empty.");
   if (!validSelector(config.dnsNamespaceSelector) || !validSelector(config.dnsPodSelector)) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress DNS selectors must use valid Kubernetes label keys and values.");
 }
@@ -175,56 +197,85 @@ export function buildKubernetesManagedEgressResources(
   const identity = {
     proxyPodName: resourceName,
     proxySecretName: `${resourceName}-token`,
+    proxyConfigSecretName: `${resourceName}-config`,
     proxyServiceName: resourceName,
     workloadPolicyName: `${resourceName}-workload`,
     proxyPolicyName: `${resourceName}-proxy`,
+    listenerPort: config.listenerPort,
   };
   const proxySecret = {
     apiVersion: "v1", kind: "Secret", metadata: { name: identity.proxySecretName, namespace: config.namespace },
     immutable: true, stringData: { token: request.proxyToken },
+  };
+  const renderedConfig = renderHematiteManagedEgressConfig(config, request.identity, {
+    token: "/runtime/token",
+    caCert: "/runtime/certs/ca.crt",
+    caKey: "/runtime/certs/ca.key",
+  });
+  const proxyConfigSecret = {
+    apiVersion: "v1", kind: "Secret", metadata: { name: identity.proxyConfigSecretName, namespace: config.namespace },
+    immutable: true, stringData: { "hematite.yaml": renderedConfig, "ca.crt": config.caCert, "ca.key": config.caKey },
   };
   const proxyPod = {
     apiVersion: "v1", kind: "Pod", metadata: { name: identity.proxyPodName, namespace: config.namespace, labels: proxySelector },
     spec: {
       hostUsers: false, hostNetwork: false, automountServiceAccountToken: false,
       securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: "RuntimeDefault" } },
+      initContainers: [{
+        name: "material-bootstrap", image: config.proxyArtifact,
+        command: ["sh", "-c", "set -eu; mkdir -p /runtime/certs; cp /source-token/token /runtime/token; cp /source-config/hematite.yaml /runtime/hematite.yaml; cp /source-config/ca.crt /runtime/certs/ca.crt; cp /source-config/ca.key /runtime/certs/ca.key; chmod 0400 /runtime/token /runtime/certs/ca.key; chmod 0444 /runtime/hematite.yaml /runtime/certs/ca.crt"],
+        securityContext: { allowPrivilegeEscalation: false, privileged: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, capabilities: { drop: ["ALL"] } },
+        volumeMounts: [
+          { name: "token-source", mountPath: "/source-token", readOnly: true },
+          { name: "config-source", mountPath: "/source-config", readOnly: true },
+          { name: "runtime", mountPath: "/runtime" },
+        ],
+      }],
       containers: [{
         name: "proxy", image: config.proxyArtifact,
+        command: ["hematite", "-config", "/runtime/hematite.yaml"],
         resources: { requests: { cpu: "25m", memory: "32Mi" }, limits: { cpu: "250m", memory: "128Mi" } },
         securityContext: { allowPrivilegeEscalation: false, privileged: false, readOnlyRootFilesystem: true, runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, capabilities: { drop: ["ALL"] } },
-        ports: [{ name: "proxy", containerPort: config.listenerPort, protocol: "TCP" }],
-        env: [
-          { name: "HEMATITE_EXTERNAL_AUTHORIZATION_ENDPOINT", value: config.callbackUrl },
-          { name: "HEMATITE_EXTERNAL_AUTHORIZATION_TOKEN_FILE", value: "/run/valet-egress/token" },
-          { name: "HEMATITE_EXTERNAL_AUTHORIZATION_SESSION_ID", value: request.identity.sessionId },
-          { name: "HEMATITE_EXTERNAL_AUTHORIZATION_WORKLOAD_ID", value: request.identity.workloadId },
+        ports: [
+          { name: "proxy", containerPort: config.listenerPort, protocol: "TCP" },
+          { name: "https", containerPort: config.httpsListenerPort, protocol: "TCP" },
+          { name: "tunnel", containerPort: config.tunnelListenerPort, protocol: "TCP" },
         ],
-        volumeMounts: [{ name: "token", mountPath: "/run/valet-egress", readOnly: true }],
+        env: [{ name: "SSL_CERT_FILE", value: "/runtime/certs/ca.crt" }],
+        volumeMounts: [{ name: "runtime", mountPath: "/runtime", readOnly: true }],
         readinessProbe: { tcpSocket: { port: "proxy" }, periodSeconds: 2, failureThreshold: 3 },
       }],
-      volumes: [{ name: "token", secret: { secretName: identity.proxySecretName, defaultMode: 0o400 } }],
+      volumes: [
+        { name: "token-source", secret: { secretName: identity.proxySecretName, defaultMode: 0o440 } },
+        { name: "config-source", secret: { secretName: identity.proxyConfigSecretName, defaultMode: 0o440 } },
+        { name: "runtime", emptyDir: { sizeLimit: "1Mi" } },
+      ],
     },
   };
   const proxyService = {
     apiVersion: "v1", kind: "Service", metadata: { name: identity.proxyServiceName, namespace: config.namespace },
-    spec: { selector: proxySelector, ports: [{ name: "proxy", port: config.listenerPort, targetPort: "proxy", protocol: "TCP" }] },
+    spec: { selector: proxySelector, ports: [
+      { name: "proxy", port: config.listenerPort, targetPort: "proxy", protocol: "TCP" },
+      { name: "https", port: config.httpsListenerPort, targetPort: "https", protocol: "TCP" },
+      { name: "tunnel", port: config.tunnelListenerPort, targetPort: "tunnel", protocol: "TCP" },
+    ] },
   };
   const workloadPolicy = {
     apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: { name: identity.workloadPolicyName, namespace: config.namespace },
     spec: { podSelector: workloadSelector, policyTypes: ["Egress"], egress: [
-      { to: [{ podSelector: { matchLabels: proxySelector } }], ports: [{ protocol: "TCP", port: config.listenerPort }] },
+      { to: [{ podSelector: { matchLabels: proxySelector } }], ports: ports([config.listenerPort, config.httpsListenerPort, config.tunnelListenerPort]) },
       { to: cidrPeers(config.controlPlaneCidrs), ports: ports(config.controlPlanePorts) },
     ] },
   };
   const proxyPolicy = {
     apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: { name: identity.proxyPolicyName, namespace: config.namespace },
     spec: { podSelector: { matchLabels: proxySelector }, policyTypes: ["Ingress", "Egress"], ingress: [
-      { from: [{ podSelector: workloadSelector }], ports: [{ protocol: "TCP", port: config.listenerPort }] },
+      { from: [{ podSelector: workloadSelector }], ports: ports([config.listenerPort, config.httpsListenerPort, config.tunnelListenerPort]) },
     ], egress: [
       { to: [{ namespaceSelector: { matchLabels: config.dnsNamespaceSelector }, podSelector: { matchLabels: config.dnsPodSelector } }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] },
       { to: cidrPeers(config.callbackCidrs), ports: [{ protocol: "TCP", port: config.callbackPort }] },
       { to: cidrPeers(config.upstreamCidrs) },
     ] },
   };
-  return { identity, proxySecret, proxyPod, proxyService, workloadPolicy, proxyPolicy };
+  return { identity, proxySecret, proxyConfigSecret, proxyPod, proxyService, workloadPolicy, proxyPolicy };
 }

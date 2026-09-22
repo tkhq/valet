@@ -45,7 +45,7 @@ A workload NetworkPolicy selects egress only. It preserves existing workload ing
 
 A second NetworkPolicy lets the proxy receive only workload listener traffic. It lets the proxy reach selected cluster DNS pods, callback CIDRs, and configured upstream CIDRs. The proxy pod uses a fixed non-root UID and GID, `RuntimeDefault` seccomp, resource limits, no host network, no service account token, no privilege, a read-only root filesystem, and no capabilities. Only the proxy mounts the immutable mode-0400 token Secret.
 
-Readiness requires exactly one workload selector match. It also requires the exact proxy pod, listener, Secret, Service, and both NetworkPolicies. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
+Readiness requires exactly one workload selector match. It also requires the exact proxy pod, listeners, Secrets, Service, and both NetworkPolicies. The provider uses the server-assigned Service IPs as workload proxy endpoints only after readiness. The workload does not need external DNS. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
 
 ### Docker
 

@@ -138,6 +138,7 @@ export {
   HEMATITE_COMPATIBLE_SOURCE_COMMIT,
   renderHematiteManagedEgressConfig,
   type HematiteManagedEgressConfig,
+  type HematiteMaterialPaths,
 } from "./sandbox/hematite.js";
 // PgSessionStore lives in @valet/store-postgres.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.

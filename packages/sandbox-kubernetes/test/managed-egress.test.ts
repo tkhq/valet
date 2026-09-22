@@ -32,6 +32,12 @@ const config = {
   dnsNamespaceSelector: { "kubernetes.io/metadata.name": "kube-system" },
   dnsPodSelector: { "k8s-app": "kube-dns" },
   listenerPort: 3128,
+  httpsListenerPort: 8443,
+  tunnelListenerPort: 8080,
+  allowlistDomains: ["api.example.com"],
+  allowlistCidrs: [],
+  caCert: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+  caKey: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
   callbackPort: 443,
   controlPlaneCidrs: ["10.2.0.20/32", "2001:db8:2::20/128"],
   controlPlanePorts: [443],
@@ -101,7 +107,11 @@ describe("Kubernetes managed egress topology", () => {
           seccompProfile: { type: "RuntimeDefault" },
         },
         containers: [{
-          ports: [{ name: "proxy", containerPort: config.listenerPort, protocol: "TCP" }],
+          ports: [
+            { name: "proxy", containerPort: config.listenerPort, protocol: "TCP" },
+            { name: "https", containerPort: config.httpsListenerPort, protocol: "TCP" },
+            { name: "tunnel", containerPort: config.tunnelListenerPort, protocol: "TCP" },
+          ],
           resources: {
             requests: { cpu: "25m", memory: "32Mi" },
             limits: { cpu: "250m", memory: "128Mi" },
@@ -119,10 +129,22 @@ describe("Kubernetes managed egress topology", () => {
       },
     });
     expect(resources.proxyService).toMatchObject({
-      spec: { ports: [{ name: "proxy", port: config.listenerPort, targetPort: "proxy", protocol: "TCP" }] },
+      spec: { ports: [
+        { name: "proxy", port: config.listenerPort, targetPort: "proxy", protocol: "TCP" },
+        { name: "https", port: config.httpsListenerPort, targetPort: "https", protocol: "TCP" },
+        { name: "tunnel", port: config.tunnelListenerPort, targetPort: "tunnel", protocol: "TCP" },
+      ] },
     });
-    expect(JSON.stringify(resources.proxyPod)).not.toContain(request.proxyToken);
+    const podJson = JSON.stringify(resources.proxyPod);
+    const configJson = JSON.stringify(resources.proxyConfigSecret);
+    expect(podJson).not.toContain(request.proxyToken);
+    expect(podJson).not.toContain(request.identity.sessionId);
+    expect(podJson).toContain("chmod 0400 /runtime/token /runtime/certs/ca.key");
     expect(JSON.stringify(resources.proxySecret)).toContain(request.proxyToken);
+    expect(configJson).toContain("passthrough: []");
+    expect(configJson).toContain("- name: allowlist");
+    expect(configJson).toContain(request.identity.sessionId);
+    expect(configJson).not.toContain(request.proxyToken);
   });
 
   it("requires one workload match and exact ready resources with enforced policy", () => {
@@ -132,16 +154,21 @@ describe("Kubernetes managed egress topology", () => {
       proxyPodNames: [resources.identity.proxyPodName],
       readyProxyPodNames: [resources.identity.proxyPodName],
       listeningProxyPodNames: [resources.identity.proxyPodName],
-      secretNames: [resources.identity.proxySecretName],
+      secretNames: [resources.identity.proxySecretName, resources.identity.proxyConfigSecretName],
       serviceNames: [resources.identity.proxyServiceName],
+      proxyServiceClusterIps: ["10.96.12.34", "2001:db8::34"],
       networkPolicyNames: [resources.identity.workloadPolicyName, resources.identity.proxyPolicyName],
       networkPolicyEnforcement: "enforced" as const,
     };
 
-    expect(evaluateKubernetesManagedEgressReadiness(resources.identity, observation)).toEqual({ ready: true });
+    expect(evaluateKubernetesManagedEgressReadiness(resources.identity, observation)).toEqual({
+      ready: true,
+      workloadProxyEndpoints: ["http://10.96.12.34:3128", "http://[2001:db8::34]:3128"],
+    });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, workloadPodNames: [] })).toMatchObject({ ready: false });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, workloadPodNames: ["a", "b"] })).toMatchObject({ ready: false });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, networkPolicyEnforcement: "unknown" })).toMatchObject({ ready: false });
+    expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, proxyServiceClusterIps: [] })).toMatchObject({ ready: false });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, networkPolicyNames: [resources.identity.workloadPolicyName] })).toMatchObject({ ready: false });
   });
 
