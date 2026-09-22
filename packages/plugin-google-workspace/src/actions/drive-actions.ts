@@ -74,12 +74,12 @@ async function driveError(res: Response): Promise<{ success: false; error: strin
   return { success: false, error: `Drive API ${res.status}: ${detail}` };
 }
 
-function isGoogleWorkspaceMimeType(mimeType: string): boolean {
-  return mimeType.startsWith('application/vnd.google-apps.');
+function isGoogleWorkspaceMimeType(mimeType: string | undefined): boolean {
+  return normalizeDocumentMime(mimeType).startsWith('application/vnd.google-apps.');
 }
 
-function getExportMimeType(googleMimeType: string): string | null {
-  return WORKSPACE_EXPORT_DEFAULTS[googleMimeType] || null;
+function getExportMimeType(googleMimeType: string | undefined): string | null {
+  return googleMimeType ? WORKSPACE_EXPORT_DEFAULTS[googleMimeType] || null : null;
 }
 
 /** Resolve a MIME type shortcut or return the value as-is. */
@@ -114,7 +114,7 @@ function composeQuery(userQuery: string, labelFilter: string | undefined): strin
 interface DriveFile {
   id: string;
   name: string;
-  mimeType: string;
+  mimeType?: string;
   description?: string;
   size?: string;
   createdTime?: string;
@@ -934,22 +934,19 @@ const downloadFile = action(
       const metaRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${metaQs}`, token);
       if (!metaRes.ok) return driveError(metaRes);
       const meta = (await metaRes.json()) as DriveFile;
-      const mimeType = normalizeDocumentMime(meta.mimeType);
-      const pdf = isPdfDocument({ mimeType });
-      const generic = mimeType === 'application/octet-stream';
-      // A declared PDF or generic byte stream uses the document cap. The
-      // generic stream is accepted only after its bytes identify a PDF.
-      const maxBytes = maxSizeBytes ?? (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
+      const metadataMime = normalizeDocumentMime(meta.mimeType);
 
-      // Google Workspace files: export as text
+      // Google Workspace files must use metadata because Drive serves them through
+      // the export endpoint instead of media download.
       if (isGoogleWorkspaceMimeType(meta.mimeType)) {
         const exportMime = getExportMimeType(meta.mimeType);
         if (!exportMime) {
           return {
             success: false,
-            error: `Cannot export Google Workspace type: ${meta.mimeType}`,
+            error: `Cannot export Google Workspace type: ${meta.mimeType ?? 'unknown'}.`,
           };
         }
+        const maxBytes = maxSizeBytes ?? 1_048_576;
         const exportQs = new URLSearchParams({ mimeType: exportMime });
         const exportRes = await driveFetch(
           `/files/${encodeURIComponent(fileId)}/export?${exportQs}`,
@@ -969,22 +966,16 @@ const downloadFile = action(
         };
       }
 
-      const binaryError = `Cannot download binary file (${meta.mimeType}). Only text, PDF, and Google Workspace files are supported.`;
-      if (!isTextDocumentMime(meta.mimeType) && !pdf && !generic) {
-        return { success: false, error: binaryError };
-      }
-
-      const fileSize = meta.size ? parseInt(meta.size, 10) : 0;
-      if (!generic && Number.isFinite(fileSize) && fileSize > maxBytes) {
-        return {
-          success: false,
-          error: `File is ${fileSize} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
-        };
-      }
-
       const dlQs = new URLSearchParams({ alt: 'media', supportsAllDrives: 'true' });
       const dlRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${dlQs}`, token);
       if (!dlRes.ok) return driveError(dlRes);
+
+      const mediaMime = normalizeDocumentMime(dlRes.headers.get('content-type') ?? undefined);
+      const generic = mediaMime === '' || mediaMime === 'application/octet-stream';
+      const pdf = mediaMime === 'application/pdf';
+      const maxBytes = maxSizeBytes ?? (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
+      const displayMime = mediaMime || metadataMime || 'unknown';
+      const binaryError = `Cannot download binary file (${displayMime}). Only text, PDF, and Google Workspace files are supported.`;
 
       if (pdf || generic) {
         let data: Uint8Array | undefined;
@@ -1007,7 +998,7 @@ const downloadFile = action(
           }
           data = downloaded.data;
         }
-        if (!data || !isPdfDocument({ mimeType, data })) {
+        if (!data || !isPdfDocument({ mimeType: mediaMime, data })) {
           return { success: false, error: binaryError };
         }
         const read = await extractDownloadedPdf({
@@ -1018,9 +1009,11 @@ const downloadFile = action(
         if (!read.ok) return { success: false, error: read.error };
         return {
           success: true,
-          data: { name: meta.name, mimeType: meta.mimeType, content: read.content },
+          data: { name: meta.name, mimeType: mediaMime || meta.mimeType, content: read.content },
         };
       }
+
+      if (!isTextDocumentMime(mediaMime)) return { success: false, error: binaryError };
 
       const downloaded = await readResponseText(dlRes, maxBytes);
       if (!downloaded.ok) {
@@ -1031,7 +1024,7 @@ const downloadFile = action(
       }
       return {
         success: true,
-        data: { name: meta.name, mimeType: meta.mimeType, content: downloaded.text },
+        data: { name: meta.name, mimeType: mediaMime, content: downloaded.text },
       };
     } catch (error) {
       return { success: false, error: String(error) };

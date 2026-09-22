@@ -130,9 +130,12 @@ the Slack transport uses for a document.
 Callers:
 
 - `slack.fetch_file`
-- `drive.download_file`. A declared PDF or generic byte stream uses the
-  25 MB cap unless the caller sets `maxSizeBytes`. A generic stream is
-  extracted only when its bytes start with `%PDF-`. Text stays at 1 MB.
+- `drive.download_file`. Google Workspace files use metadata to select an
+  export. Other files use the media response MIME type, not metadata, to
+  select PDF, generic, text, or binary handling. A declared PDF or generic
+  byte stream uses the 25 MB cap unless the caller sets `maxSizeBytes`. A
+  generic stream is extracted only when its bytes start with `%PDF-`. Text
+  stays at 1 MB.
 - `github.read_repo_file`. It requests raw Contents API media for every PDF,
   because GitHub omits inline bytes from PDFs over 1 MB. It reads the raw
   stream with the 25 MB cap before it extracts text.

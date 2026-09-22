@@ -413,7 +413,7 @@ describe('drive actions', () => {
       jsonResponse(200, { id: 'f1', name: 'note.txt', mimeType: 'text/plain' }),
     );
     fetchMock.mockResolvedValueOnce(
-      new Response('', { status: 200, headers: { 'Content-Length': '4' } }),
+      new Response('', { status: 200, headers: { 'Content-Type': 'text/plain', 'Content-Length': '4' } }),
     );
 
     const result = await action('drive.download_file').execute({ fileId: 'f1', maxSizeBytes: 3 }, pluginCtx());
@@ -451,10 +451,11 @@ describe('drive actions', () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { id: 'f1', name: 'image.png', mimeType: 'image/png', size: '100' }),
     );
+    fetchMock.mockResolvedValueOnce(new Response('image', { status: 200, headers: { 'Content-Type': 'image/png' } }));
 
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result).toEqual({
       success: false,
       error: 'Cannot download binary file (image/png). Only text, PDF, and Google Workspace files are supported.',
@@ -481,6 +482,64 @@ describe('drive actions', () => {
       success: true,
       data: { name: 'NDA.pdf', mimeType: 'application/pdf', content: '# Mutual NDA' },
     });
+  });
+
+  it('download_file ignores stale PDF metadata size when media is small', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4');
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: String(26 * 1024 * 1024) }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# Mutual NDA' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: '# Mutual NDA' } });
+  });
+
+  it('download_file uses media PDF MIME when metadata says text', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'changed', mimeType: 'text/plain' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-1.4', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# PDF' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { mimeType: 'application/pdf', content: '# PDF' } });
+  });
+
+  it('download_file uses media text MIME when metadata says PDF', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'changed', mimeType: 'application/pdf' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('hello', { status: 200, headers: { 'Content-Type': 'text/plain' } }),
+    );
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result).toEqual({ success: true, data: { name: 'changed', mimeType: 'text/plain', content: 'hello' } });
+  });
+
+  it('download_file uses media MIME when metadata omits MIME', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { id: 'f1', name: 'NDA.pdf' }));
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-1.4', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# PDF' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: '# PDF' } });
   });
 
   it('download_file sniffs a generic PDF after its bounded download', async () => {
@@ -539,7 +598,7 @@ describe('drive actions', () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { id: 'f1', name: 'archive.bin', mimeType: 'application/octet-stream', size: String(26 * 1024 * 1024) }),
     );
-    fetchMock.mockResolvedValueOnce(new Response('PK\x03\x04', { status: 200 }));
+    fetchMock.mockResolvedValueOnce(new Response('PK\x03\x04', { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }));
 
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
 
@@ -561,7 +620,7 @@ describe('drive actions', () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: '100' }),
     );
-    fetchMock.mockResolvedValueOnce(new Response(body, { status: 200 }));
+    fetchMock.mockResolvedValueOnce(new Response(body, { status: 200, headers: { 'Content-Type': 'application/pdf' } }));
 
     const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
 
