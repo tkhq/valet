@@ -141,8 +141,8 @@ export class ManagedEgressBindingRegistry {
   private readonly maxBindingsPerOrg: number;
 
   constructor(options: ManagedEgressBindingRegistryOptions = {}) {
-    this.maxBindings = options.maxBindings ?? 10_000;
-    this.maxBindingsPerOrg = options.maxBindingsPerOrg ?? 1_000;
+    this.maxBindings = options.maxBindings ?? 4_096;
+    this.maxBindingsPerOrg = options.maxBindingsPerOrg ?? 512;
   }
 
   get bindingCount(): number {

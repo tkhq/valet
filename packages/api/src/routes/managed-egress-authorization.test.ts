@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
-import { ManagedEgressBindingRegistry, managedEgressAuthorizationRouter, parseAuthorizationRequestV1 } from "./managed-egress-authorization.js";
+import { ManagedEgressBindingRegistry, managedEgressAuthorizationRouter, parseAuthorizationRequestV1, type AuthorizationRequestV1 } from "./managed-egress-authorization.js";
 
 const identity = { orgId: "org-1", sessionId: "session-1", workloadId: "workload-1", proxyId: "proxy-1", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION };
 const token = "t".repeat(48);
-const request = {
+const request: AuthorizationRequestV1 = {
   version: "1", request_id: "request-1", service: "egress", action: "connect",
   subject: { session_id: "session-1", workload_id: "workload-1" },
   destination: { scheme: "https", protocol: "tcp", host: "example.com", port: 443 },
@@ -130,5 +130,32 @@ describe("managed egress callback", () => {
     registry.register({ ...identity, proxyId: "proxy-2" }, replacement, undefined, now + 100);
     registry.revoke("proxy-2");
     registry.register({ ...identity, proxyId: "proxy-3" }, replacement, undefined, now + 100);
+  });
+
+  it("keeps concurrent replay, rotation, expiry, and registration bounded", async () => {
+    const now = Date.now();
+    const replacement = "r".repeat(48);
+    registry = new ManagedEgressBindingRegistry({ maxBindings: 2, maxBindingsPerOrg: 2 });
+    registry.register(identity, token, now + 10, now);
+
+    const replayRequests = Array.from({ length: 64 }, async () => registry.authorize(token, request, now));
+    const replayResponses = await Promise.all(replayRequests);
+    expect(new Set(replayResponses.map((response) => response?.decision_id))).toHaveLength(1);
+
+    await Promise.all([
+      Promise.resolve().then(() => registry.rotate(identity.proxyId, replacement, now + 1)),
+      Promise.resolve().then(() => registry.prune(now + 10)),
+    ]);
+    expect(registry.bindingCount).toBe(0);
+    expect(registry.authorize(token, request, now + 10)).toBeNull();
+    expect(registry.authorize(replacement, request, now + 10)).toBeNull();
+
+    const registrations = await Promise.allSettled([
+      Promise.resolve().then(() => registry.register({ ...identity, proxyId: "proxy-2" }, replacement, undefined, now + 10)),
+      Promise.resolve().then(() => registry.register({ ...identity, proxyId: "proxy-3" }, replacement, undefined, now + 10)),
+    ]);
+    expect(registrations.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(registrations.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(registry.bindingCount).toBe(1);
   });
 });
