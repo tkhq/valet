@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { validateManagedEgressRequest, type ManagedEgressIdentity } from "@valet/engine";
 
-const MAX_BODY_BYTES = 4096;
+export const MANAGED_EGRESS_MAX_BODY_BYTES = 4096;
 const MAX_ID_BYTES = 128;
 const MAX_HOST_BYTES = 253;
 const MAX_TOKEN_BYTES = 4096;
@@ -79,13 +79,13 @@ function parseContentLength(value: string | undefined): number | null | false {
   if (value === undefined) return null;
   if (!/^(0|[1-9][0-9]*)$/.test(value)) return false;
   const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed <= MAX_BODY_BYTES ? parsed : false;
+  return Number.isSafeInteger(parsed) && parsed <= MANAGED_EGRESS_MAX_BODY_BYTES ? parsed : false;
 }
 
 async function readBoundedBody(request: Request, expectedLength: number | null, timeoutMs: number): Promise<BodyReadResult> {
   const reader = request.body?.getReader();
   if (!reader) return { ok: false, status: 400 };
-  const output = new Uint8Array(MAX_BODY_BYTES);
+  const output = new Uint8Array(MANAGED_EGRESS_MAX_BODY_BYTES);
   let offset = 0;
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -100,7 +100,7 @@ async function readBoundedBody(request: Request, expectedLength: number | null, 
     while (true) {
       const part = await Promise.race([reader.read(), deadline]);
       if (part.done) break;
-      if (offset + part.value.byteLength > MAX_BODY_BYTES) {
+      if (offset + part.value.byteLength > MANAGED_EGRESS_MAX_BODY_BYTES) {
         void reader.cancel("managed egress request body exceeds 4096 bytes").catch(() => {});
         return { ok: false, status: 400 };
       }

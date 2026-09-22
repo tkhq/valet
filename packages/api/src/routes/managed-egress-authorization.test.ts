@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
-import { ManagedEgressBindingRegistry, managedEgressAuthorizationRouter, parseAuthorizationRequestV1, type AuthorizationRequestV1 } from "./managed-egress-authorization.js";
+import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgressAuthorizationRouter, parseAuthorizationRequestV1, type AuthorizationRequestV1 } from "./managed-egress-authorization.js";
 
 const identity = { orgId: "org-1", sessionId: "session-1", workloadId: "workload-1", proxyId: "proxy-1", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION };
 const token = "t".repeat(48);
@@ -58,11 +58,17 @@ describe("managed egress callback", () => {
     registry = new ManagedEgressBindingRegistry(); registry.register(identity, "x".repeat(4096));
     expect((await router().request("/v1/authorize", { method: "GET" })).status).toBe(405);
     expect((await router().request("/v1/authorize", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "text/plain" }, body: "{}" })).status).toBe(415);
-    for (const length of ["-1", "1, 2", "nope", "4097"]) {
+    for (const length of ["-1", "1, 2", "nope", String(MANAGED_EGRESS_MAX_BODY_BYTES + 1)]) {
       const response = await router().request(streamRequest(new ReadableStream({ start(controller) { controller.close(); } }), { "content-length": length }));
       expect(response.status, length).toBe(400);
       expect(response.headers.get("cache-control"), length).toContain("no-store");
     }
+    const oversizedRequest = streamRequest(new ReadableStream({ start(controller) { controller.close(); } }), {
+      "content-length": String(MANAGED_EGRESS_MAX_BODY_BYTES + 1),
+    });
+    const bodyLock = oversizedRequest.body?.getReader();
+    expect((await router().request(oversizedRequest)).status).toBe(400);
+    bodyLock?.releaseLock();
     const smuggled = await router().request(streamRequest(new ReadableStream({ start(controller) { controller.close(); } }), { "content-length": "0", "transfer-encoding": "chunked" }));
     expect(smuggled.status).toBe(400);
     const validBody = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(request))); controller.close(); } });
@@ -73,8 +79,8 @@ describe("managed egress callback", () => {
   it("accepts an exact 4 KiB body", async () => {
     registry = new ManagedEgressBindingRegistry(); registry.register(identity, token);
     const json = JSON.stringify(request);
-    const exact = `${json}${" ".repeat(4096 - Buffer.byteLength(json))}`;
-    const response = await router().request(streamRequest(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(exact)); controller.close(); } }), { "content-length": "4096" }));
+    const exact = `${json}${" ".repeat(MANAGED_EGRESS_MAX_BODY_BYTES - Buffer.byteLength(json))}`;
+    const response = await router().request(streamRequest(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(exact)); controller.close(); } }), { "content-length": String(MANAGED_EGRESS_MAX_BODY_BYTES) }));
     expect(response.status).toBe(200);
   });
 

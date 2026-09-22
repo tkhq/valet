@@ -5,7 +5,7 @@ import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { RunningServer } from "../server-adapter.js";
 import { nodeServerAdapter } from "../server-adapter.node.js";
-import { ManagedEgressBindingRegistry, managedEgressAuthorizationRouter } from "./managed-egress-authorization.js";
+import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgressAuthorizationRouter } from "./managed-egress-authorization.js";
 
 const token = "t".repeat(48);
 const identity = { orgId: "org-1", sessionId: "session-1", workloadId: "workload-1", proxyId: "proxy-1", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION };
@@ -89,6 +89,49 @@ describe("managed egress raw HTTP framing", () => {
     expect(process.memoryUsage().rss - rssBefore).toBeLessThan(32 * 1024 * 1024);
   });
 
+  it("times out an incomplete slow chunked upload", async () => {
+    const socket = await openSocket();
+    const result = response(socket);
+    socket.write([
+      "POST /v1/authorize HTTP/1.1", `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${token}`, "Content-Type: application/json",
+      "Transfer-Encoding: chunked", "Connection: close", "", "1\r\n{\r\n",
+    ].join("\r\n"));
+    expect(await result).toContain("408 Request Timeout");
+  });
+
+  it("does not let a slow upload block a concurrent valid request", async () => {
+    const slow = await openSocket();
+    const slowResult = response(slow);
+    slow.write([
+      "POST /v1/authorize HTTP/1.1", `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${token}`, "Content-Type: application/json",
+      "Transfer-Encoding: chunked", "Connection: close", "", "",
+    ].join("\r\n"));
+
+    const normal = await openSocket();
+    const normalResult = response(normal);
+    normal.end([
+      "POST /v1/authorize HTTP/1.1", `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${token}`, "Content-Type: application/json",
+      `Content-Length: ${Buffer.byteLength(body)}`, "Connection: close", "", body,
+    ].join("\r\n"));
+
+    expect(await normalResult).toContain("200 OK");
+    expect(await slowResult).toContain("408 Request Timeout");
+  });
+
+  it("rejects a body shorter than its declared Content-Length", async () => {
+    const socket = await openSocket();
+    const result = response(socket);
+    socket.end([
+      "POST /v1/authorize HTTP/1.1", `Host: 127.0.0.1:${port}`,
+      `Authorization: Bearer ${token}`, "Content-Type: application/json",
+      `Content-Length: ${Buffer.byteLength(body) + 1}`, "Connection: close", "", body,
+    ].join("\r\n"));
+    expect(await result).toContain("400 Bad Request");
+  });
+
   it("bounds concurrent never-ending chunked requests", async () => {
     const started = Date.now();
     const sockets = await Promise.all(Array.from({ length: 8 }, () => openSocket()));
@@ -106,13 +149,13 @@ describe("managed egress raw HTTP framing", () => {
   });
 
   it("accepts an exact-boundary body", async () => {
-    const exact = `${body}${" ".repeat(4096 - Buffer.byteLength(body))}`;
+    const exact = `${body}${" ".repeat(MANAGED_EGRESS_MAX_BODY_BYTES - Buffer.byteLength(body))}`;
     const socket = await openSocket();
     const result = response(socket);
     socket.end([
       "POST /v1/authorize HTTP/1.1", `Host: 127.0.0.1:${port}`,
       `Authorization: Bearer ${token}`, "Content-Type: application/json",
-      "Content-Length: 4096", "Connection: close", "", exact,
+      `Content-Length: ${MANAGED_EGRESS_MAX_BODY_BYTES}`, "Connection: close", "", exact,
     ].join("\r\n"));
     expect(await result).toContain("200 OK");
   });
