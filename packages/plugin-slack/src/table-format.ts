@@ -61,6 +61,10 @@ export type MarkdownSegment =
   | { type: 'text'; lines: string[] }
   | { type: 'table'; table: MarkdownTable };
 
+/** A line that opens a fence, blockquote, heading, or list item. It never
+ * starts a table header and always ends a table body. */
+const BLOCK_START = /^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/;
+
 /**
  * Split Markdown into prose runs and pipe tables. Fenced and indented code
  * stay prose, so table examples inside them are never rendered as tables.
@@ -89,7 +93,7 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
       continue;
     }
     const delimiter = lines[index + 1];
-    if (/^(?: {4}|\t)/.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
+    if (/^(?: {4}|\t)/.test(line) || BLOCK_START.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
       prose(line);
       continue;
     }
@@ -103,7 +107,7 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
     const rows: string[][] = [];
     while (index + 1 < lines.length) {
       const next = lines[index + 1];
-      if (/^\s*$|^(?: {4}|\t)|^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/.test(next)) break;
+      if (/^\s*$|^(?: {4}|\t)/.test(next) || BLOCK_START.test(next)) break;
       const cells = tableCells(next);
       if (!cells) break;
       rows.push(cells);

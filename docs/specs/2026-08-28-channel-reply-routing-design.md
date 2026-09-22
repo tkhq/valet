@@ -417,10 +417,13 @@ and discrete transport replies. Messages with Slack-native spans keep the labele
 row path.
 
 Inside a table block, a `<br>` tag in a cell becomes a line break, and links,
-bold, italic, and inline code become rich text elements. The cell is parsed as
-CommonMark first, so a `<br>` inside a code span or behind a backslash stays
-literal. Explicit GitHub references are linked before the table is parsed, so
-they become links inside cells too.
+bold, italic, strikethrough, inline code, and bare URLs become rich text
+elements. A cell is parsed as inline GFM with block constructs disabled, so a
+`<br>` inside a code span or behind a backslash stays literal, and a list
+marker, quote marker, heading marker, or rule keeps its characters. Explicit
+GitHub references are linked before the table is parsed, so they become links
+inside cells too. A line that opens a blockquote, list item, or heading never
+starts a table; the text stays in its Markdown block.
 Header cells are plain text. An empty cell holds a single space, because Slack
 rejects an empty rich text cell and drops the whole message. Every column wraps,
 and the delimiter row sets column alignment.

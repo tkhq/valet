@@ -44,6 +44,34 @@ describe('tablesToTableBlocks', () => {
     });
   });
 
+  it('keeps block markers literal because a cell is inline content', () => {
+    const source = '| a | b | c | d | e |\n|-|-|-|-|-|\n| - pending | 1. first | > 5 | --- | # not a heading |';
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
+      rows: [[raw('a'), raw('b'), raw('c'), raw('d'), raw('e')], [
+        cell(text('- pending')), cell(text('1. first')), cell(text('> 5')), cell(text('---')), cell(text('# not a heading')),
+      ]],
+    });
+  });
+
+  it('maps strikethrough to the strike style', () => {
+    const source = '| ~~a~~ |\n|-|\n| ~~gone~~ and ~~**both**~~ |';
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
+      rows: [[raw('a')], [cell(text('gone', { strike: true }), text(' and '), text('both', { strike: true, bold: true }))]],
+    });
+  });
+
+  it('links bare URLs inside a cell', () => {
+    const source = '| x |\n|-|\n| see https://example.com/a?b=1 now |';
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
+      rows: [[raw('x')], [cell(text('see '), link('https://example.com/a?b=1', 'https://example.com/a?b=1'), text(' now'))]],
+    });
+  });
+
+  it('leaves a blockquote or list line before a delimiter row as Markdown', () => {
+    expect(tablesToTableBlocks('> a | b\n|---|---|\n| 1 | 2 |', 50)).toBeUndefined();
+    expect(tablesToTableBlocks('- a | b\n|---|---|\n| 1 | 2 |', 50)).toBeUndefined();
+  });
+
   it('maps inline formatting to rich text styles', () => {
     const source = '| Cell |\n|-|\n| **Bold** and _it_ and `co\\|de` then **[#1](https://x/1)** |';
     expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({

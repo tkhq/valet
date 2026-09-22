@@ -23,6 +23,10 @@
   "dependencies": {
     "@valet/engine": "workspace:*",
     "mdast-util-from-markdown": "^2.0.2",
+    "mdast-util-gfm-autolink-literal": "^2.0.1",
+    "mdast-util-gfm-strikethrough": "^2.0.0",
+    "micromark-extension-gfm-autolink-literal": "^2.1.0",
+    "micromark-extension-gfm-strikethrough": "^2.1.0",
     "typebox": "^1.1.24"
   },
   "devDependencies": {

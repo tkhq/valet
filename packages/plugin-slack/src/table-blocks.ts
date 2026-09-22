@@ -14,6 +14,10 @@
  */
 
 import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmAutolinkLiteralFromMarkdown } from 'mdast-util-gfm-autolink-literal';
+import { gfmStrikethroughFromMarkdown } from 'mdast-util-gfm-strikethrough';
+import { gfmAutolinkLiteral } from 'micromark-extension-gfm-autolink-literal';
+import { gfmStrikethrough } from 'micromark-extension-gfm-strikethrough';
 import { splitMarkdownTables, type MarkdownTable } from './table-format.js';
 import { withinMarkdownParseBudget } from './transport/format.js';
 
@@ -31,6 +35,7 @@ type Block = Record<string, unknown>;
 interface TextStyle {
   bold?: boolean;
   italic?: boolean;
+  strike?: boolean;
   code?: boolean;
 }
 
@@ -44,6 +49,22 @@ interface RichTextElement {
 /** An inline HTML node that is a line break. Code spans and escaped text
  * never parse as HTML, so they keep a literal `<br>`. */
 const LINE_BREAK_TAG = /^<br\s*\/?>$/i;
+
+/** A table cell is inline content. Block constructs stay literal text, so
+ * `- pending`, `> 5`, `1. first`, and `---` keep their characters. */
+const INLINE_ONLY = {
+  disable: {
+    null: ['blockQuote', 'codeFenced', 'codeIndented', 'definition', 'headingAtx', 'htmlFlow', 'list', 'setextUnderline', 'thematicBreak'],
+  },
+};
+
+/** Parse one cell as inline GFM: strikethrough and bare URLs included. */
+function parseCell(cell: string): ReturnType<typeof fromMarkdown> {
+  return fromMarkdown(cell, {
+    extensions: [gfmStrikethrough(), gfmAutolinkLiteral(), INLINE_ONLY],
+    mdastExtensions: [gfmStrikethroughFromMarkdown(), gfmAutolinkLiteralFromMarkdown()],
+  });
+}
 
 type MarkdownNode = ReturnType<typeof fromMarkdown> | ReturnType<typeof fromMarkdown>['children'][number];
 
@@ -105,6 +126,9 @@ function inlineElements(cell: string): RichTextElement[] {
       case 'emphasis':
         node.children.forEach((child) => visit(child, { ...style, italic: true }));
         return;
+      case 'delete':
+        node.children.forEach((child) => visit(child, { ...style, strike: true }));
+        return;
       case 'link':
       case 'image': {
         const label = node.type === 'link' ? plainText(node) : node.alt ?? '';
@@ -119,7 +143,7 @@ function inlineElements(cell: string): RichTextElement[] {
         else if ('value' in node && typeof node.value === 'string') emit(styled(node.value, style));
     }
   };
-  fromMarkdown(cell).children.forEach((child) => visit(child, {}));
+  parseCell(cell).children.forEach((child) => visit(child, {}));
   // A trailing break has nothing to separate.
   while (elements.at(-1)?.text === '\n') elements.pop();
   return elements;
@@ -140,7 +164,7 @@ function richTextCell(cell: string): { block: Block; characters: number } | unde
 
 function headerCell(header: string | undefined, column: number): { block: Block; characters: number } | undefined {
   if (header !== undefined && !withinMarkdownParseBudget(header)) return undefined;
-  const text = header === undefined ? '' : plainText(fromMarkdown(header)).replace(/\s+/g, ' ').trim();
+  const text = header === undefined ? '' : plainText(parseCell(header)).replace(/\s+/g, ' ').trim();
   const label = text || `Column ${column + 1}`;
   return { block: { type: 'raw_text', text: label }, characters: label.length };
 }
