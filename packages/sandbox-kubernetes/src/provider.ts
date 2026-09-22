@@ -67,7 +67,7 @@ import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, ManagedEgressPrerequisiteError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, ManagedEgressPrerequisiteError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow, type ManagedEgressEffectiveState } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -128,6 +128,16 @@ import {
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
+import {
+  buildKubernetesManagedEgressResources,
+  deriveKubernetesManagedEgressWorkloadSelector,
+  evaluateKubernetesManagedEgressReadiness,
+  validateKubernetesManagedEgressConfig,
+  type KubernetesManagedEgressConfig,
+  type KubernetesManagedEgressResourceIdentity,
+  type KubernetesManagedEgressRuntime,
+  type KubernetesManagedEgressWorkloadSelector,
+} from "./managed-egress.js";
 import {
   growWorkspacePvc,
   parseStorageQuantity,
@@ -761,15 +771,28 @@ export interface KubernetesSandboxProviderDeps {
    * growth after an ENOSPC). When absent, growWorkspace reports
    * `grown: false`. Production wiring always supplies it. */
   pvcApi?: SandboxPvcApi;
+  managedEgress?: {
+    config: KubernetesManagedEgressConfig;
+    runtime: KubernetesManagedEgressRuntime;
+  };
+}
+
+interface KubernetesManagedSandboxState {
+  identity: KubernetesManagedEgressResourceIdentity;
+  selector: KubernetesManagedEgressWorkloadSelector;
+  effective: ManagedEgressEffectiveState;
+  revoke: () => void;
 }
 
 export class KubernetesSandboxProvider implements SandboxProvider {
   readonly backend = "kubernetes";
   private readonly deps: KubernetesSandboxProviderDeps;
   private readonly cfg: K8sProviderConfig;
+  private readonly managedSandboxes = new Map<string, KubernetesManagedSandboxState>();
   constructor(deps: KubernetesSandboxProviderDeps, cfg: K8sProviderConfig) {
     this.deps = deps;
     this.cfg = cfg;
+    if (deps.managedEgress) validateKubernetesManagedEgressConfig(deps.managedEgress.config);
   }
 
   /** Spec decision 5's capabilities constant. `persistentWorkspace: true`
@@ -791,7 +814,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       // constructed without secretsApi cannot honor updateCreds().
       credsMount: Boolean(this.deps.secretsApi),
       dockerSupport: true,
-      managedEgress: { supported: false, configured: false, ready: false, reason: "The paired Kubernetes resources are defined but lifecycle observation is not connected." },
+      managedEgress: this.deps.managedEgress
+        ? { supported: true, configured: true, ready: true, contractVersion: "hematite-external-authorization-v1", proxyArtifact: this.deps.managedEgress.config.proxyArtifact }
+        : { supported: false, configured: false, ready: false, reason: "Managed egress is disabled. Configure the Kubernetes lifecycle runtime before retrying." },
     };
   }
 
@@ -832,8 +857,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * the same name, so the label-selector-based readiness poll is unaffected
    * by the pod name. The workspace PVC is retained (decision 5). */
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
-    if (opts.managedEgress) {
-      throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress is not active on Kubernetes. Configure the pinned proxy boundary after resource observation lands.");
+    if (opts.managedEgress && !this.deps.managedEgress) {
+      throw new ManagedEgressPrerequisiteError("configuration", "Managed egress is disabled. Configure the Kubernetes lifecycle runtime before retrying.");
     }
     if (!opts.workspace) {
       throw new Error(
@@ -844,7 +869,18 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const name = sandboxCrName(opts.workspace);
     const neverReadyOwner = opts.sessionId ?? `cr:${name}`;
     const manifest = buildSandboxManifest(this.cfg, name, opts);
+    const managedSelector = opts.managedEgress
+      ? deriveKubernetesManagedEgressWorkloadSelector(opts.workspace)
+      : undefined;
+    const managedResources = opts.managedEgress && managedSelector && this.deps.managedEgress
+      ? buildKubernetesManagedEgressResources(this.deps.managedEgress.config, opts.managedEgress, managedSelector)
+      : undefined;
+    if (managedResources && this.deps.managedEgress) {
+      await this.deps.managedEgress.runtime.apply(managedResources);
+      opts.managedEgressLifecycle?.registerCallbackBinding();
+    }
 
+    try {
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0 && !this.deps.secretsApi) {
@@ -1076,7 +1112,35 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const sandbox = this.makeSandbox(name, Boolean(opts.docker));
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
+    if (managedResources && managedSelector && opts.managedEgress && this.deps.managedEgress) {
+      const readiness = evaluateKubernetesManagedEgressReadiness(
+        managedResources.identity,
+        await this.deps.managedEgress.runtime.observe(managedSelector, managedResources.identity),
+      );
+      if (!readiness.ready) throw new ManagedEgressPrerequisiteError("network_isolation", `${readiness.reason} Re-provision the Kubernetes boundary.`);
+      this.managedSandboxes.set(name, {
+        identity: managedResources.identity,
+        selector: managedSelector,
+        revoke: opts.managedEgressLifecycle?.revokeCallbackBinding ?? (() => {}),
+        effective: {
+          requested: true, configured: true, ready: true, effective: true,
+          identity: opts.managedEgress.identity,
+          proxyArtifact: this.deps.managedEgress.config.proxyArtifact,
+          topology: {
+            proxyResources: [managedResources.identity.proxyPodName, managedResources.identity.proxySecretName, managedResources.identity.proxyConfigSecretName, managedResources.identity.proxyServiceName],
+            policyResources: [managedResources.identity.workloadPolicyName, managedResources.identity.proxyPolicyName],
+            workloadSelector: { ...managedSelector.matchLabels },
+            callbackBindingId: managedResources.identity.proxyPodName,
+          },
+        },
+      });
+    }
     return sandbox;
+    } catch (error) {
+      opts.managedEgressLifecycle?.revokeCallbackBinding();
+      if (managedResources && this.deps.managedEgress) await this.deps.managedEgress.runtime.delete(managedResources.identity);
+      throw error;
+    }
   }
 
   /** Re-asserts (GETs) the same CR name — never creates. The engine
@@ -1105,6 +1169,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * `id` must be the Sandbox CR name (i.e. `sandbox.id` / the value returned
    * by `create()`), not the raw workspace key. */
   async destroy(id: string): Promise<void> {
+    const managed = this.managedSandboxes.get(id);
+    managed?.revoke();
+    if (managed && this.deps.managedEgress) await this.deps.managedEgress.runtime.delete(managed.identity);
+    this.managedSandboxes.delete(id);
     // Best-effort: delete the creds Secret before the CR (or concurrently).
     // A missing Secret is fine — the sandbox may never have had one.
     if (this.deps.secretsApi) {
@@ -1137,7 +1205,19 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   }
 
   async status(id: string): Promise<SandboxStatus> {
-    return sandboxStatus(this.deps.objectsApi, this.cfg, id, this.deps.podsApi, this.deps.podStatusApi);
+    const status = await sandboxStatus(this.deps.objectsApi, this.cfg, id, this.deps.podsApi, this.deps.podStatusApi);
+    const managed = this.managedSandboxes.get(id);
+    if (!managed || status.state !== "ready") return status;
+    if (!this.deps.managedEgress) throw new ManagedEgressPrerequisiteError("configuration", "The Kubernetes managed egress runtime is unavailable. Re-provision the sandbox.");
+    const readiness = evaluateKubernetesManagedEgressReadiness(
+      managed.identity,
+      await this.deps.managedEgress.runtime.observe(managed.selector, managed.identity),
+    );
+    if (!readiness.ready) {
+      managed.revoke();
+      throw new ManagedEgressPrerequisiteError("network_isolation", `${readiness.reason} Re-provision the Kubernetes boundary.`);
+    }
+    return { ...status, managedEgress: managed.effective };
   }
 
   /**

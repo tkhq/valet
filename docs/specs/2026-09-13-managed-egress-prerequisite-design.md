@@ -14,7 +14,7 @@ The engine contract separates four states:
 3. `ready` means the provider observed the proxy listener, token mount, callback binding, and forced network resources.
 4. `effective` persists the exact identity and artifact that hold the boundary.
 
-A provider must reject a request before side effects unless all four states can converge. The local provider is always unsupported. Kubernetes remains unsupported until its lifecycle applies and observes the topology plan. Docker reports support only when it has a pinned proxy artifact and CA material source. Operator configuration cannot assert callback or network readiness.
+A provider must reject a request before side effects unless all four states can converge. The local provider is always unsupported. Docker reports support only with a pinned artifact and CA material source. Kubernetes reports support only with an apply-and-observe runtime. Operator configuration cannot assert callback or network readiness.
 
 ## Hematite contract
 
@@ -53,7 +53,7 @@ A workload NetworkPolicy selects egress only. It preserves existing workload ing
 
 A second NetworkPolicy lets the proxy receive only workload listener traffic. It lets the proxy reach selected cluster DNS pods, callback CIDRs, and configured upstream CIDRs. The proxy pod uses a fixed non-root UID and GID, `RuntimeDefault` seccomp, resource limits, no host network, no service account token, no privilege, a read-only root filesystem, and no capabilities. Only the proxy mounts the immutable mode-0400 token Secret.
 
-Readiness requires exactly one workload selector match. It also requires the exact proxy pod, listeners, Secrets, Service, and both NetworkPolicies. The provider uses the server-assigned Service IPs as workload proxy endpoints only after readiness. The workload does not need external DNS. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
+Readiness requires exactly one workload selector match. It also requires the exact proxy pod, listeners, Secrets, Service, and both NetworkPolicies. The provider applies the rendered resources before it creates the workload. It registers the callback only after material delivery. It reports effective state only after a fresh observation. The provider uses the server-assigned Service IPs as workload proxy endpoints only after readiness. The workload does not need external DNS. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
 
 ### Docker
 

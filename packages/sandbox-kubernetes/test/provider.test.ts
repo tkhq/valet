@@ -4,7 +4,7 @@
  * lifecycle wired through KubernetesSandboxProvider.
  */
 import { describe, expect, it, vi } from "vitest";
-import { SandboxAttachment, SandboxStartupError } from "@valet/engine";
+import { MANAGED_EGRESS_CONTRACT_VERSION, SandboxAttachment, SandboxStartupError } from "@valet/engine";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
@@ -30,6 +30,7 @@ import type {
 import { imageFingerprint, resourceFingerprint, sandboxCpuMemoryResources } from "../src/lifecycle.js";
 import type { PodLivenessApi } from "../src/provider.js";
 import type { PodExecApi } from "../src/exec.js";
+import type { KubernetesManagedEgressConfig, KubernetesManagedEgressRuntime } from "../src/managed-egress.js";
 
 const recordWorkspaceGrow = vi.hoisted(() => vi.fn());
 
@@ -387,6 +388,56 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
     await provider.create({ workspace: "test-sandbox", credsFiles: { token: "abc" } });
     expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/credsFiles provided but secretsApi is not wired/));
     errorSpy.mockRestore();
+  });
+});
+
+describe("Kubernetes managed egress provider lifecycle", () => {
+  it("applies rendered resources, observes the exact selector match, and deletes in order", async () => {
+    const calls: string[] = [];
+    const runtime: KubernetesManagedEgressRuntime = {
+      apply: async () => { calls.push("apply"); },
+      observe: async (_selector, identity) => {
+        calls.push("observe");
+        return {
+          workloadPodNames: ["workload-pod"], proxyPodNames: [identity.proxyPodName],
+          readyProxyPodNames: [identity.proxyPodName], listeningProxyPodNames: [identity.proxyPodName],
+          secretNames: [identity.proxySecretName, identity.proxyConfigSecretName],
+          serviceNames: [identity.proxyServiceName], proxyServiceClusterIps: ["10.96.0.10"],
+          networkPolicyNames: [identity.workloadPolicyName, identity.proxyPolicyName],
+          networkPolicyEnforcement: "enforced",
+        };
+      },
+      delete: async () => { calls.push("delete"); },
+    };
+    const config: KubernetesManagedEgressConfig = {
+      namespace: providerCfg.namespace, proxyArtifact: `registry.example/hematite@sha256:${"a".repeat(64)}`,
+      callbackUrl: "https://valet.example/v1/authorize", callbackCidrs: ["10.1.0.1/32"], upstreamCidrs: ["0.0.0.0/0"],
+      dnsNamespaceSelector: { name: "dns" }, dnsPodSelector: { app: "dns" }, listenerPort: 3128, httpsListenerPort: 8443,
+      tunnelListenerPort: 8080, allowlistDomains: ["api.example.com"], allowlistCidrs: [],
+      caCert: "-----BEGIN CERTIFICATE-----\ntest", caKey: "-----BEGIN PRIVATE KEY-----\ntest", callbackPort: 443,
+      controlPlaneCidrs: ["10.2.0.1/32"], controlPlanePorts: [443],
+    };
+    let registered = false;
+    const provider = new KubernetesSandboxProvider({
+      objectsApi: new FakeObjectsApi(), podsApi: new FakePodsApi(), execApi: fakePodExecApi,
+      livenessApi: new FakeLivenessApi(), managedEgress: { config, runtime },
+    }, providerCfg);
+    const sandbox = await provider.create({
+      workspace: "managed-session",
+      managedEgress: { requested: true, proxyToken: "s".repeat(48), identity: {
+        orgId: "org", sessionId: "session", workloadId: "workload", proxyId: "proxy",
+        contractVersion: MANAGED_EGRESS_CONTRACT_VERSION,
+      } },
+      managedEgressLifecycle: {
+        registerCallbackBinding: () => { registered = true; calls.push("register"); },
+        revokeCallbackBinding: () => { registered = false; calls.push("revoke"); },
+      },
+    });
+    expect(calls.slice(0, 3)).toEqual(["apply", "register", "observe"]);
+    await expect(provider.status(sandbox.id)).resolves.toMatchObject({ managedEgress: { effective: true } });
+    await provider.destroy(sandbox.id);
+    expect(registered).toBe(false);
+    expect(calls.slice(-2)).toEqual(["revoke", "delete"]);
   });
 });
 

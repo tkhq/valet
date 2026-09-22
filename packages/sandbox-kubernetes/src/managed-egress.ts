@@ -33,6 +33,12 @@ export interface KubernetesManagedEgressResourceIdentity {
   listenerPort: number;
 }
 
+export interface KubernetesManagedEgressRuntime {
+  apply(resources: KubernetesManagedEgressResources): Promise<void>;
+  observe(selector: KubernetesManagedEgressWorkloadSelector, identity: KubernetesManagedEgressResourceIdentity): Promise<KubernetesManagedEgressObservation>;
+  delete(identity: KubernetesManagedEgressResourceIdentity): Promise<void>;
+}
+
 export interface KubernetesManagedEgressResources {
   identity: KubernetesManagedEgressResourceIdentity;
   proxySecret: Record<string, unknown>;

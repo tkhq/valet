@@ -187,4 +187,5 @@ export {
   type KubernetesManagedEgressReadiness,
   type KubernetesManagedEgressResourceIdentity,
   type KubernetesManagedEgressResources,
+  type KubernetesManagedEgressRuntime,
 } from "./managed-egress.js";
