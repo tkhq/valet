@@ -681,6 +681,28 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     )`,
   },
   {
+    describe: "model_registry_discoveries table",
+    probe: { kind: "table", table: "model_registry_discoveries" },
+    sql: `CREATE TABLE IF NOT EXISTS "model_registry_discoveries" (
+      "provider_id" text NOT NULL, "model_id" text NOT NULL, "metadata" jsonb NOT NULL,
+      "discovered_at" bigint NOT NULL, PRIMARY KEY ("provider_id", "model_id")
+    )`,
+  },
+  {
+    describe: "org_model_discovery_reviews table",
+    probe: { kind: "table", table: "org_model_discovery_reviews" },
+    sql: `CREATE TABLE IF NOT EXISTS "org_model_discovery_reviews" (
+      "org_id" text NOT NULL, "provider_id" text NOT NULL, "model_id" text NOT NULL,
+      "state" text NOT NULL, "reviewed_by" text NOT NULL, "reviewed_at" bigint NOT NULL,
+      PRIMARY KEY ("org_id", "provider_id", "model_id")
+    )`,
+  },
+  {
+    describe: "org_model_discovery_reviews_org index",
+    probe: { kind: "index", index: "org_model_discovery_reviews_org" },
+    sql: 'CREATE INDEX IF NOT EXISTS "org_model_discovery_reviews_org" ON "org_model_discovery_reviews" ("org_id")',
+  },
+  {
     // Slack thread auto-follow: a thread the assistant follows so later messages
     // route to the bound assistant without a re-mention.
     describe: "followed_threads table",

@@ -1633,6 +1633,35 @@ export const modelRegistryCache = pgTable("model_registry_cache", {
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });
 
+/** Upstream models absent from the bundled catalog. Discovery is global. */
+export const modelRegistryDiscoveries = pgTable(
+  "model_registry_discoveries",
+  {
+    providerId: text("provider_id").notNull(),
+    modelId: text("model_id").notNull(),
+    metadata: jsonb("metadata").notNull().$type<RegistryCacheModel>(),
+    discoveredAt: bigint("discovered_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.modelId] })],
+);
+
+/** One org's explicit decision for a discovered model. Missing means pending. */
+export const orgModelDiscoveryReviews = pgTable(
+  "org_model_discovery_reviews",
+  {
+    orgId: text("org_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    modelId: text("model_id").notNull(),
+    state: text("state", { enum: ["approved", "rejected"] }).notNull(),
+    reviewedBy: text("reviewed_by").notNull(),
+    reviewedAt: bigint("reviewed_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.orgId, t.providerId, t.modelId] }),
+    index("org_model_discovery_reviews_org").on(t.orgId),
+  ],
+);
+
 export const llmProxyRequests = pgTable(
   "llm_proxy_requests",
   {

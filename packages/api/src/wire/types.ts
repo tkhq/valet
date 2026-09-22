@@ -3522,6 +3522,34 @@ export interface ModelRegistryStatusResponse {
   providers: ModelRegistryProviderStatusWire[];
 }
 
+export type ModelDiscoveryStateWire = "pending" | "approved" | "rejected";
+
+export interface ModelDiscoveryWire {
+  providerId: string;
+  modelId: string;
+  name: string;
+  api: string;
+  contextWindow: number;
+  /** Epoch ms when Valet first observed this upstream-only model. */
+  discoveredAt: number;
+  state: ModelDiscoveryStateWire;
+}
+
+export interface ListModelDiscoveriesResponse {
+  discoveries: ModelDiscoveryWire[];
+  registry: ModelRegistryStatusResponse;
+}
+
+export interface ReviewModelDiscoveryRequest {
+  providerId: string;
+  modelId: string;
+  state: "approved" | "rejected";
+}
+
+export interface ReviewModelDiscoveryResponse {
+  discovery: ModelDiscoveryWire;
+}
+
 /** Model tier map: tier id (xs|s|m|l|xl) to list of model ids in that tier. */
 export type WireTierMap = Record<"xs" | "s" | "m" | "l" | "xl", string[]>;
 

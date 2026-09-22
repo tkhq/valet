@@ -921,6 +921,26 @@ CREATE TABLE "model_registry_cache" (
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "model_registry_discoveries" (
+	"provider_id" text NOT NULL,
+	"model_id" text NOT NULL,
+	"metadata" jsonb NOT NULL,
+	"discovered_at" bigint NOT NULL,
+	PRIMARY KEY ("provider_id", "model_id")
+);
+--> statement-breakpoint
+CREATE TABLE "org_model_discovery_reviews" (
+	"org_id" text NOT NULL,
+	"provider_id" text NOT NULL,
+	"model_id" text NOT NULL,
+	"state" text NOT NULL,
+	"reviewed_by" text NOT NULL,
+	"reviewed_at" bigint NOT NULL,
+	PRIMARY KEY ("org_id", "provider_id", "model_id")
+);
+--> statement-breakpoint
+CREATE INDEX "org_model_discovery_reviews_org" ON "org_model_discovery_reviews" ("org_id");
+--> statement-breakpoint
 CREATE TABLE "session_repos" (
 	"session_id" text NOT NULL,
 	"host" text DEFAULT 'github' NOT NULL,

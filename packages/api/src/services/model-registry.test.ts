@@ -12,7 +12,8 @@ import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { modelRegistryCache } from "../schema/index.js";
+import { modelRegistryCache, orgs } from "../schema/index.js";
+import { InMemoryCredentialStore } from "@valet/engine";
 import { PgModelsStore } from "./models-store-pg.js";
 import {
   ModelRegistry,
@@ -20,6 +21,9 @@ import {
   registryModels,
   setModelRegistry,
 } from "./model-registry.js";
+import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
+import { listModelDiscoveries, reviewModelDiscovery } from "./model-discoveries.js";
+import { assertModelSelectable } from "./approved-models.js";
 
 const REGISTRY_URL = "https://registry.test/models";
 
@@ -191,6 +195,56 @@ describe("ModelRegistry", () => {
     // The whole point: available WITHOUT a pi-ai release.
     expect(getBuiltinModels("anthropic").map((m) => m.id)).not.toContain("claude-brand-new");
     expect(registry.getModel("anthropic", "claude-brand-new")?.name).toBe("Claude Brand New");
+  });
+
+  it("persists upstream-only models as pending and requires approval for catalog selection", async () => {
+    routeFetch(() => jsonResponse(catalogPayload(validModel())));
+    await db.insert(orgs).values({
+      id: "org-discovery",
+      name: "Discovery org",
+      createdAt: 1,
+      modelTiers: { xs: ["anthropic/claude-haiku-4-5"], s: [], m: [], l: [], xl: [] },
+    });
+    const registry = new ModelRegistry(db);
+    await registry.refresh();
+    setModelRegistry(registry);
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    const credentials = new InMemoryCredentialStore();
+
+    expect(await listModelDiscoveries(db, "org-discovery")).toEqual([
+      expect.objectContaining({
+        providerId: "anthropic",
+        modelId: "claude-brand-new",
+        name: "Claude Brand New",
+        state: "pending",
+      }),
+    ]);
+    let catalog = await buildOrgCatalog(db, credentials, "org-discovery");
+    expect(catalogValidIds(catalog).has("anthropic/claude-brand-new")).toBe(false);
+    expect(await assertModelSelectable(
+      db, "org-discovery", true, "anthropic/claude-brand-new",
+    )).toMatch(/pending registry review/);
+
+    expect(await reviewModelDiscovery(
+      db, "org-discovery", "admin-1", "anthropic", "claude-brand-new", "approved", 123,
+    )).toBe(true);
+    catalog = await buildOrgCatalog(db, credentials, "org-discovery");
+    expect(catalogValidIds(catalog).has("anthropic/claude-brand-new")).toBe(true);
+    expect(await assertModelSelectable(
+      db, "org-discovery", false, "anthropic/claude-brand-new",
+    )).toBeNull();
+
+    await reviewModelDiscovery(
+      db, "org-discovery", "admin-1", "anthropic", "claude-brand-new", "rejected", 124,
+    );
+    catalog = await buildOrgCatalog(db, credentials, "org-discovery");
+    expect(catalogValidIds(catalog).has("anthropic/claude-brand-new")).toBe(false);
+    expect(await assertModelSelectable(
+      db, "org-discovery", true, "anthropic/claude-brand-new",
+    )).toMatch(/pending registry review/);
+
+    const org = await db.select({ modelTiers: orgs.modelTiers }).from(orgs).where(eq(orgs.id, "org-discovery"));
+    expect(org[0]?.modelTiers).toEqual({ xs: ["anthropic/claude-haiku-4-5"], s: [], m: [], l: [], xl: [] });
   });
 
   it("lets the runtime catalog override supplemental Astra metadata", async () => {

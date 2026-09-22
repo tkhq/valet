@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { ApprovedModelsSection } from "~/components/settings/approved-models-section";
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
 import { ModelTiersSection } from "~/components/settings/model-tiers-section";
+import { ModelDiscoveriesSection } from "~/components/settings/model-discoveries-section";
 import { ReasoningSection } from "~/components/settings/reasoning-section";
 
 /**
@@ -21,6 +22,7 @@ export function OrganizationModelsPage() {
   return (
     <div className="space-y-10">
       <LlmProvidersSection />
+      <ModelDiscoveriesSection />
       <ModelTiersSection />
       <ApprovedModelsSection />
       <ReasoningSection />

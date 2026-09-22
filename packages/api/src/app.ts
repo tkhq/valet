@@ -58,6 +58,7 @@ import { orgInvitesRouter } from "./routes/org-invites.js";
 import { orgSettingsRouter } from "./routes/org-settings.js";
 import { modelTiersRouter } from "./routes/model-tiers.js";
 import { approvedModelsRouter } from "./routes/approved-models.js";
+import { modelDiscoveriesRouter } from "./routes/model-discoveries.js";
 import { orgReasoningRouter } from "./routes/org-reasoning.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
@@ -355,6 +356,7 @@ export function createApp(
   app.route("/api/org/settings", orgSettingsRouter);
   app.route("/api/org/model-tiers", modelTiersRouter);
   app.route("/api/org/approved-models", approvedModelsRouter);
+  app.route("/api/org/model-discoveries", modelDiscoveriesRouter);
   app.route("/api/org/reasoning", orgReasoningRouter);
   app.route("/api/org/invites", orgInvitesRouter);
   app.route("/api/org/llm-providers", llmProvidersRouter);
