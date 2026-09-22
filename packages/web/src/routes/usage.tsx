@@ -311,6 +311,10 @@ export function UsagePage() {
     : period.kind === "month"
       ? period.month
       : `${period.start} to ${period.end}`;
+  const customPeriodApplied =
+    period.kind === "custom" && period.start === customStart && period.end === customEnd;
+  const customPeriodPending =
+    Boolean(customStart && customEnd && customStart <= customEnd) && !customPeriodApplied;
 
   function handleWindowChange(w: Window) {
     setMonth("");
@@ -439,11 +443,13 @@ export function UsagePage() {
             type="button"
             disabled={!customStart || !customEnd || customStart > customEnd}
             onClick={applyCustomPeriod}
-            aria-pressed={period.kind === "custom"}
+            aria-pressed={customPeriodApplied}
             className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
-              period.kind === "custom"
+              customPeriodApplied
                 ? "border-moss bg-moss-wash font-medium text-moss"
-                : "border-line text-muted hover:border-ink hover:text-ink"
+                : customPeriodPending
+                  ? "border-amber-500 bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
+                  : "border-line text-muted hover:border-ink hover:text-ink"
             }`}
           >
             Apply dates

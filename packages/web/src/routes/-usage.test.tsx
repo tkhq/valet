@@ -963,6 +963,33 @@ describe("UsagePage custom period controls", () => {
     expect(csvLink.textContent).toContain("2024-02-01 to 2024-02-29");
   });
 
+  it("marks edited custom dates as pending while data and CSV keep the applied range", () => {
+    render(<UsagePage />);
+    const start = screen.getByLabelText("Custom start date");
+    const end = screen.getByLabelText("Custom end date");
+    const apply = screen.getByRole("button", { name: "Apply dates" });
+
+    fireEvent.change(start, { target: { value: "2024-02-01" } });
+    fireEvent.change(end, { target: { value: "2024-02-29" } });
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.change(start, { target: { value: "2024-02-02" } });
+    expect(apply.getAttribute("aria-pressed")).toBe("false");
+    expect(apply.className).toContain("border-amber-500");
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({
+      kind: "custom",
+      start: "2024-02-01",
+      end: "2024-02-29",
+    });
+
+    fireEvent.click(apply);
+    expect(apply.getAttribute("aria-pressed")).toBe("true");
+    expect(csvLink.href).toContain("start=2024-02-02&end=2024-02-29");
+  });
+
   it("shows the server range error message", () => {
     breakdownResult = {
       data: undefined,
