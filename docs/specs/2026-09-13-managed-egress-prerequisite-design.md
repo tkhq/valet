@@ -14,7 +14,7 @@ The engine contract separates four states:
 3. `ready` means the provider observed the proxy listener, token mount, callback binding, and forced network resources.
 4. `effective` persists the exact identity and artifact that hold the boundary.
 
-A provider must reject a request before side effects unless all four states can converge. The local provider is always unsupported. Docker and Kubernetes remain unsupported in this checkpoint because their lifecycle code does not yet apply and observe the topology plans. This is deliberate. Configuration flags cannot override missing structural readiness.
+A provider must reject a request before side effects unless all four states can converge. The local provider is always unsupported. Docker and Kubernetes remain unsupported in this checkpoint because their lifecycle code does not yet apply and observe the topology plans. This is deliberate. Operator configuration can request and provision resources only. It cannot assert callback or network readiness.
 
 ## Hematite contract
 

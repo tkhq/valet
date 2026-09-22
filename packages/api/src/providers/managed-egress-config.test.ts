@@ -3,16 +3,32 @@ import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
 import { managedEgressCapability, readManagedEgressOperatorConfig } from "./managed-egress-config.js";
 
 const artifact = `ghcr.io/tkhq/hematite@sha256:${"a".repeat(64)}`;
+const configured = {
+  enabled: true,
+  contractVersion: MANAGED_EGRESS_CONTRACT_VERSION,
+  proxyArtifact: artifact,
+  callbackUrl: "https://valet/v1/authorize",
+};
+
 describe("managed egress operator configuration", () => {
   it("is disabled and unsupported by default", () => {
     expect(managedEgressCapability(readManagedEgressOperatorConfig({}))).toMatchObject({ supported: false, configured: false, ready: false });
   });
-  it("fails closed for partial configuration and stays inactive without observed lifecycle readiness", () => {
-    expect(managedEgressCapability({ enabled: true, callbackReady: true, networkIsolationReady: true })).toMatchObject({ configured: false, ready: false });
-    expect(managedEgressCapability({ enabled: true, contractVersion: MANAGED_EGRESS_CONTRACT_VERSION, proxyArtifact: artifact, callbackUrl: "http://valet/v1/authorize", callbackReady: true, networkIsolationReady: true }, true)).toMatchObject({ configured: false, ready: false });
-    expect(managedEgressCapability({ enabled: true, contractVersion: MANAGED_EGRESS_CONTRACT_VERSION, proxyArtifact: artifact, callbackUrl: "https://valet/v1/authorize", callbackReady: true, networkIsolationReady: true })).toMatchObject({ supported: false, configured: true, ready: false });
+
+  it("does not consume operator readiness assertions", () => {
+    expect(readManagedEgressOperatorConfig({
+      VALET_MANAGED_EGRESS_ENABLED: "1",
+      UNRELATED_OPERATOR_READINESS_ASSERTION: "1",
+    })).toEqual({ enabled: true, contractVersion: undefined, proxyArtifact: undefined, callbackUrl: undefined });
   });
-  it("requires all readiness inputs before advertising support", () => {
-    expect(managedEgressCapability({ enabled: true, contractVersion: MANAGED_EGRESS_CONTRACT_VERSION, proxyArtifact: artifact, callbackUrl: "https://valet/v1/authorize", callbackReady: true, networkIsolationReady: true }, true)).toMatchObject({ supported: true, configured: true, ready: true, proxyArtifact: artifact });
+
+  it("fails closed for partial configuration", () => {
+    expect(managedEgressCapability({ enabled: true })).toMatchObject({ configured: false, ready: false });
+    expect(managedEgressCapability({ ...configured, callbackUrl: "http://valet/v1/authorize" })).toMatchObject({ configured: false, ready: false });
+  });
+
+  it("cannot turn configuration intent into readiness or support", () => {
+    expect(managedEgressCapability(configured)).toMatchObject({ supported: false, configured: true, ready: false, proxyArtifact: artifact });
+    expect(Reflect.apply(managedEgressCapability, undefined, [configured, true])).toMatchObject({ supported: false, ready: false });
   });
 });
