@@ -7,7 +7,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { assemblePlugins, pluginSessionExtras } from "../plugins/assemble.js";
 import { buildActionInvoker } from "../plugins/action-invoker.js";
-import { GoogleWorkspaceLinkScope, linkedDriveFileId, bindLinkedDriveThread } from "./google-workspace-link-scope.js";
+import { GoogleWorkspaceLinkScope, linkedDriveFileId, bindLinkedDriveThread, recordLinkedDrivePrompt } from "./google-workspace-link-scope.js";
 
 const owner = { type: "team", id: "legal" } satisfies PluginActionContext["owner"];
 const slackMessage = (text: string, overrides: Record<string, unknown> = {}) => ({
@@ -155,6 +155,52 @@ describe("linked Drive scope", () => {
     expect((await action(scope, "drive.download_file", real).execute({ fileId: "fileA" }, context())).success).toBe(false);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(String(fetch.mock.calls[0]?.[0])).toContain("/files/fileA?");
+  });
+
+  const sitePrompt = (args: { sessionId?: string; threadId: string; threadKey: string; text: string; purpose?: string }) =>
+    recordLinkedDrivePrompt(db, {
+      orgId: "org1", owner, sessionId: args.sessionId ?? "assistant1", threadId: args.threadId, threadKey: args.threadKey,
+      purpose: args.purpose ?? "orchestrator", text: args.text,
+    });
+
+  it("grants a file linked in the site chat without granting another assistant the same thread key", async () => {
+    await engineStore.saveThread("assistant1", { id: "site", sessionId: "assistant1", key: "web:default", status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+    await engineStore.saveThread("assistant1", { id: "site-b", sessionId: "assistant1", key: "web:t-other", status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+    await sitePrompt({ threadId: "site", threadKey: "web:default", text: "review https://docs.google.com/document/d/fileA/edit" });
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ threadId: "site" }))).success).toBe(true);
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ threadId: "site-b" }))).success).toBe(false);
+    expect((await action(scope).execute({ documentId: "fileA" }, context())).success).toBe(false);
+
+    await engineStore.saveSession({ id: "assistant2", userId: "user1", orgId: "org1", owner, workspace: "/tmp", purpose: "orchestrator", status: "running", createdAt: 0, updatedAt: 0 });
+    await engineStore.saveThread("assistant2", { id: "site2", sessionId: "assistant2", key: "web:default", status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ sessionId: "assistant2", threadId: "site2" }))).success).toBe(false);
+  });
+
+  it("records a site prompt on a Slack thread that routing already bound", async () => {
+    await sitePrompt({ threadId: "thread1", threadKey: "slack:C123:100.001", text: "https://drive.google.com/file/d/fileA/view" });
+    expect((await action(scope).execute({ documentId: "fileA" }, context())).success).toBe(true);
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ threadId: "thread2" }))).success).toBe(false);
+  });
+
+  it("does not let a site prompt bind or grant a Slack-looking thread", async () => {
+    await engineStore.saveThread("assistant1", { id: "forged-site", sessionId: "assistant1", key: "slack:C999:300.001", status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+    await sitePrompt({ threadId: "forged-site", threadKey: "slack:C999:300.001", text: "https://docs.google.com/document/d/fileA/edit" });
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ threadId: "forged-site" }))).success).toBe(false);
+    expect((await action(scope).execute({ documentId: "fileA" }, context())).success).toBe(false);
+  });
+
+  it("ignores site prompts from a child session", async () => {
+    await engineStore.saveThread("assistant1", { id: "site", sessionId: "assistant1", key: "web:default", status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+    await sitePrompt({ threadId: "site", threadKey: "web:default", purpose: "child", text: "https://docs.google.com/document/d/fileA/edit" });
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ threadId: "site" }))).success).toBe(false);
+  });
+
+  it("uses a site-linked file for a workflow started from that chat", async () => {
+    await engineStore.saveThread("assistant1", { id: "site", sessionId: "assistant1", key: "web:default", status: "active", queueMode: "followup", createdAt: 0, updatedAt: 0 });
+    await sitePrompt({ threadId: "site", threadKey: "web:default", text: "https://docs.google.com/document/d/fileA/edit" });
+    await db.insert(workflowDefinitions).values({ id: "def-site", orgId: "org1", ownerType: "team", ownerId: "legal", name: "review", definition: {}, createdAt: 0, updatedAt: 0 });
+    run = { runId: "run-site", status: "running", waitingOn: [], updatedAt: 0, params: { workflowId: "def-site", definitionVersionId: "v1", origin: { assistantSessionId: "assistant1", threadId: "site" } }, definition: {}, definitionVersionId: "v1", attempt: 1, wakeRequested: false, createdAt: 0, owner: { ownerType: "team", ownerId: "legal" } };
+    expect((await action(scope).execute({ documentId: "fileA" }, context({ sessionId: "wf:run-site:review", sessionPurpose: "workflow" }))).success).toBe(true);
   });
 
   it("keeps the restriction in the interactive catalog", async () => {

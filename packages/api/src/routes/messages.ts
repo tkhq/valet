@@ -23,6 +23,7 @@ import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@vale
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { recordLinkedDrivePrompt } from "../services/google-workspace-link-scope.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -800,6 +801,20 @@ export async function submitSessionPrompt(
 
   let receipt;
   try {
+    // Scan the member's typed text before the turn starts. A skill expansion
+    // can add a link the member did not post, so it must not grant access.
+    const ownerType = row.ownerType;
+    if (ownerType === "user" || ownerType === "team" || ownerType === "org") {
+      await recordLinkedDrivePrompt(db, {
+        orgId: row.orgId,
+        owner: { type: ownerType, id: row.ownerId },
+        sessionId: row.id,
+        threadId: thread.id,
+        threadKey: thread.key,
+        purpose: engineSession.options.purpose,
+        text,
+      });
+    }
     receipt =
       outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), {

@@ -117,12 +117,18 @@ No environment variable, team allowlist, or channel configuration is required.
 Personal and organization-owned integrations retain their current behavior.
 
 The signed Slack webhook records direct Drive and Docs links before event dispatch.
-Bot posts, edits, attachments, unfurls, and fetched history cannot grant access.
+A site chat prompt records direct links from the member's typed text before the prompt is queued.
+Bot posts, edits, attachments, unfurls, fetched history, and skill expansions cannot grant access.
 A person must post the direct link again if it only appears in older history.
-The core plugin store records links by organization, Slack thread, and file ID.
+The core plugin store records Slack links by organization, Slack thread, and file ID.
+It records site links by organization, assistant session, thread key, and file ID.
+Two site threads that share a key stay separate.
 After existing Slack routing authorizes delivery, it binds the team assistant session and thread to that Slack thread.
-The wrapper requires this binding; creating a thread with a Slack-looking key cannot grant access.
-They survive restarts and remain available for later messages in that Slack thread.
+A site prompt on a team assistant binds that site thread.
+A site prompt does not bind a Slack-looking key.
+The wrapper requires this binding.
+Creating a thread with a Slack-looking key cannot grant access.
+Links stay available for later messages in that conversation.
 Deleting the Slack message does not revoke its grant.
 
 One API-owned wrapper checks every `google_workspace` action before execution.
@@ -140,17 +146,19 @@ A linked document does not authorize links inside it or its shortcut targets.
 This patch does not add binary PDF or Word extraction to the existing Google actions.
 Existing action policies and approvals still apply; an approval cannot bypass this restriction.
 
-Workflow tool and session nodes resolve their stored run origin to the same team assistant and Slack thread.
+Workflow tool and session nodes resolve their stored run origin to the same team assistant thread.
 The wrapper verifies the run's team, the definition's organization/team, and the origin session's ownership.
 Runs without an origin, unattended event-triggered runs, and ordinary child sessions cannot use this integration.
-For the supported workflow, the Slack assistant must start the workflow from the intake thread.
+For the supported workflow, start it from the conversation that linked the file.
 Use `workflows.start_run` from that conversation so the backend records the origin.
 
-This restriction assumes trusted intake-channel participants: posting a link authorizes the connected account to access that file.
+This restriction assumes trusted participants. Posting a link authorizes the connected account to access that file.
+On Slack, those participants are the people in the intake channel.
+On the site, a member who can prompt the team assistant is trusted the same way.
 It does not verify the sender's Google permissions, narrow OAuth scopes, or implement folder permissions.
 Use the native Google Workspace connection. Do not separately expose its token through custom MCP, sandbox environment, or 1Password secrets.
 The sandbox token cannot read the browser credential routes; the sandbox secret broker resolves 1Password references, not native OAuth credentials.
 
-Validate a linked contract, an unlinked control file, a second Slack thread, and a workflow started from the first thread.
+Validate a linked contract from Slack, the same link posted in the site chat, an unlinked control file, a second thread, and a workflow started from the first thread.
 If rollback is needed, disconnect the team integration before removing the restriction.
 Keep the wrapper until Policies provides equivalent linked-file enforcement and passes the isolation tests.
