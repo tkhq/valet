@@ -479,13 +479,19 @@ export function useSendPrompt(sessionId: string) {
   >({
     mutationFn: (body) =>
       api.sendPrompt(sessionId, body),
-    // Invalidation is not needed for prompts — live updates flow through the
-    // WS store. Slash commands are the exception: the command_result entry
-    // persists before the POST returns, so a WS subscription still in its
-    // handshake can miss the live event. A refetch closes that race.
-    onSuccess: (_data, { text }) => {
-      if (!text.startsWith("/")) return;
-      void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
+    // Keep the sidebar's activity sort current without a refetch. The server
+    // records the same submission before this response resolves.
+    onSuccess: (data, { text }) => {
+      const now = Date.now();
+      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+        ...current,
+        threads: current.threads.map((thread) =>
+          thread.id === data.threadId
+            ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, now) }
+            : thread,
+        ),
+      }));
+      if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
     },
   });
 }

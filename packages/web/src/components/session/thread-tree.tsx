@@ -5,6 +5,7 @@ import {
   ArchiveRestore,
   ArrowDownUp,
   Bell,
+  Check,
   ChevronDown,
   MessageSquare,
   MoreHorizontal,
@@ -58,24 +59,11 @@ import { cn } from "~/lib/cn";
 import { sameModelSpec } from "~/lib/models";
 import { isSizeTier, selectionLabel, tierSubtitle, TIER_LABELS } from "~/lib/model-tiers";
 import { getSubconversationsCollapsed, setSubconversationsCollapsed } from "~/lib/preferences";
+import { defaultThreadId } from "~/lib/thread-default";
 
-/**
- * What an untitled thread is called.
- *
- * This used to be `Thread ${index + 1}`, which is a number that claims an
- * identity and then reassigns it: threads sort newest-first, so every new
- * thread pushed "Thread 5" down to "Thread 6" and renumbered every row
- * below it. At two threads nobody notices. At thirty it is a wall of
- * numbers that all move.
- *
- * A creation stamp never swaps between rows. It is also the only thing we
- * actually know about a thread nobody has titled and nothing has been said
- * in. The newest thread keeps a friendlier name because it is the one the
- * "New thread" button just created and is about to be typed into.
- */
-export function untitledThreadLabel(thread: ThreadSummary, index: number): string {
-  if (index === 0) return "New thread";
-  return formatWhen(thread.createdAt);
+/** Creation order, not the current sidebar order, determines this label. */
+export function untitledThreadLabel(thread: ThreadSummary, isNewestCreated: boolean): string {
+  return isNewestCreated ? "New thread" : formatWhen(thread.createdAt);
 }
 
 const BUCKET_STORAGE_KEY = "valet:thread-bucket";
@@ -272,7 +260,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     () => sortThreads(threadsQ.data?.threads ?? [], sortMode),
     [threadsQ.data, sortMode],
   );
-  const activeThreadId = search.thread ?? threads[0]?.id;
+  // Both the sidebar and SessionView use this creation-order default. Sort only changes row order.
+  const defaultId = defaultThreadId(threads);
+  const activeThreadId = search.thread ?? defaultId;
   const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
 
   // Seed pending gates from REST for ourselves — the tree must not depend
@@ -393,6 +383,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                 aria-checked={sortMode === mode.id}
                 role="menuitemradio"
               >
+                {sortMode === mode.id && <Check className="h-3.5 w-3.5" aria-hidden />}
                 {mode.label}
               </DropdownMenuItem>
             ))}
@@ -468,7 +459,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             <ThreadNode
               key={t.id}
               thread={t}
-              index={threads.indexOf(t)}
+              isDefault={t.id === defaultId}
               sessionModel={sessionModel}
               models={modelsQ.data?.models ?? []}
               tierMap={tierMapQ.data}
@@ -541,7 +532,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 
 function ThreadNode({
   thread,
-  index,
+  isDefault,
   sessionModel,
   models,
   tierMap,
@@ -555,7 +546,7 @@ function ThreadNode({
   onRename,
 }: {
   thread: ThreadSummary;
-  index: number;
+  isDefault: boolean;
   /** Session default model — the pin chip shows only when the thread's pin diverges from it. */
   sessionModel?: string;
   models: ModelInfo[];
@@ -571,7 +562,7 @@ function ThreadNode({
   /** Send `null` to clear the stored title. */
   onRename: (threadId: string, title: string | null) => void;
 }) {
-  const label = thread.title ?? untitledThreadLabel(thread, index);
+  const label = thread.title ?? untitledThreadLabel(thread, isDefault);
   const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id));
 
   useEffect(() => {
@@ -696,7 +687,7 @@ function ThreadNode({
               to="/chat"
               search={(prev) => ({
                 ...prev,
-                thread: index === 0 ? undefined : thread.id,
+                thread: isDefault ? undefined : thread.id,
                 child: undefined,
               })}
               className={cn(
