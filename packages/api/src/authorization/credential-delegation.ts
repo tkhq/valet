@@ -69,7 +69,7 @@ export async function authorizeRepositoryCredentialDelegation(input: {
   ));
   const existing = prior.find((row) => row.revokedAt === null && row.expiresAt > now);
   const expired = prior.filter((row) => row.revokedAt === null && row.expiresAt <= now);
-  if (expired.length) await input.db.update(credentialDelegations).set({ revokedAt: now }).where(inArray(credentialDelegations.id, expired.map((row) => row.id)));
+  if (expired.length) await input.db.update(credentialDelegations).set({ revokedAt: now }).where(and(inArray(credentialDelegations.id, expired.map((row) => row.id)), isNull(credentialDelegations.revokedAt)));
   if (existing && (existing.parentSessionId !== input.parentSessionId
     || existing.parentThreadId !== input.parentThreadId
     || existing.parentOperationId !== input.parentOperationId)) {

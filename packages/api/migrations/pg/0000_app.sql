@@ -451,7 +451,7 @@ WITH candidates AS (
   LEFT JOIN engine_sessions p ON p.id = w.parent_session_id
   LEFT JOIN engine_threads t ON t.id = w.parent_thread_id
   LEFT JOIN delegation_envelopes e ON e.child_session_id = w.child_session_id
-  WHERE NOT w.settled AND e.child_session_id IS NULL
+  WHERE e.child_session_id IS NULL
 ), valid AS (
   SELECT * FROM candidates WHERE child_org_id = org_id AND parent_org_id = org_id
     AND child_parent_id = parent_session_id AND child_parent_thread_id = parent_thread_id
@@ -470,7 +470,7 @@ WITH candidates AS (
   ON CONFLICT DO NOTHING RETURNING child_session_id
 ), diagnosed AS (
   INSERT INTO event_drop_log (id, org_id, reason, conversation_key, detail, created_at)
-  SELECT 'delegation-integrity:' || md5(child_session_id), org_id, 'delegation_integrity', queue_item_id,
+  SELECT 'delegation-integrity-migration:' || md5(child_session_id), org_id, 'delegation_integrity', queue_item_id,
     'legacy_delegation_envelope_invalid: unsettled child watch does not match a root-to-child engine edge', created_at
   FROM candidates WHERE child_session_id NOT IN (SELECT child_session_id FROM valid)
   ON CONFLICT DO NOTHING RETURNING id
