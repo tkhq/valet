@@ -34,6 +34,23 @@ export const nodeServerAdapter: ServerAdapter = {
           boundPort = info.port;
           opts.onListen?.(info.port);
         });
+        // Node rejects ambiguous HTTP framing before Hono can add callback
+        // privacy headers. Keep parser-level failures non-cacheable too.
+        server.on("clientError", (_error, socket) => {
+          if (!socket.writable) return;
+          const body = '{"error":"invalid_request"}';
+          socket.end([
+            "HTTP/1.1 400 Bad Request",
+            "Connection: close",
+            "Cache-Control: no-store, no-cache, must-revalidate, private",
+            "Pragma: no-cache",
+            "Expires: 0",
+            "Content-Type: application/json",
+            `Content-Length: ${Buffer.byteLength(body)}`,
+            "",
+            body,
+          ].join("\r\n"));
+        });
         // Attach the WS upgrade handler to the running http server.
         injectWebSocket(server);
         return {

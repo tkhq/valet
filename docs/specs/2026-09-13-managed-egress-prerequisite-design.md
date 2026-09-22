@@ -29,7 +29,9 @@ Hematite sends one `POST /v1/authorize` request. The request has a closed 4 KiB 
 
 The callback rejects extra fields. It does not accept method, path, query, headers, body, SNI, resolved IP, client address, token, credentials, or raw request data. A per-proxy bearer token selects one server-side binding of organization, session, workload, proxy, and contract version. The workload does not receive this token.
 
-This checkpoint always returns `deny` with reason `unsupported_prerequisite`. It uses `Cache-Control: no-store` and `Pragma: no-cache`. Repeated request IDs receive the same bounded denial. Token rotation clears replay state. Revocation removes the binding. An API restart removes all in-memory bindings and fails closed.
+This checkpoint always returns `deny` with reason `unsupported_prerequisite`. It marks all callback responses as private and non-cacheable. The callback reads at most 4 KiB and cancels slow or oversized streams at a fixed deadline. It rejects ambiguous HTTP framing before it parses JSON.
+
+Repeated request IDs receive the same bounded denial. Token rotation clears replay state. Expiry and revocation remove the binding before token reuse. Global and per-organization limits reject registry overload. An API restart removes all in-memory bindings and fails closed.
 
 ## Forced topology plans
 

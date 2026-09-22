@@ -10,9 +10,19 @@ function provider(ready: boolean): SandboxProvider {
   };
 }
 describe("managed egress provider contract", () => {
-  it("rejects malformed runtime requests", () => {
-    expect(() => validateManagedEgressRequest({ ...request, requested: false } as unknown as typeof request)).toThrow(ManagedEgressPrerequisiteError);
-    expect(() => validateManagedEgressRequest({ ...request, proxyToken: undefined } as unknown as typeof request)).toThrow(ManagedEgressPrerequisiteError);
+  it("rejects malformed and open runtime request shapes", () => {
+    const malformed: unknown[] = [
+      null,
+      { ...request, requested: false },
+      { ...request, proxyToken: undefined },
+      { ...request, extra: true },
+      { ...request, identity: { ...request.identity, extra: true } },
+      { ...request, identity: { orgId: "o", sessionId: "s", workloadId: "w", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION } },
+    ];
+    for (const value of malformed) expect(() => validateManagedEgressRequest(value)).toThrow(ManagedEgressPrerequisiteError);
+    const valid: unknown = request;
+    validateManagedEgressRequest(valid);
+    expect(valid.identity.proxyId).toBe("p");
   });
 
   it("rejects before attachment side effects unless capability is fully ready", () => {

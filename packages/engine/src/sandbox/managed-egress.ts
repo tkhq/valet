@@ -41,13 +41,23 @@ export class ManagedEgressPrerequisiteError extends Error {
   }
 }
 
-export function validateManagedEgressRequest(request: ManagedEgressRequest): void {
-  if (!request || request.requested !== true || !request.identity || typeof request.identity !== "object") {
-    throw new ManagedEgressPrerequisiteError("identity", "Managed egress requests must explicitly set requested to true and include an identity.");
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+export function validateManagedEgressRequest(request: unknown): asserts request is ManagedEgressRequest {
+  if (!record(request) || !exactKeys(request, ["requested", "identity", "proxyToken"]) || request.requested !== true || !record(request.identity)) {
+    throw new ManagedEgressPrerequisiteError("identity", "Managed egress requests must use the exact required request and identity fields.");
   }
   const identity = request.identity;
-  if (identity.contractVersion !== MANAGED_EGRESS_CONTRACT_VERSION) {
-    throw new ManagedEgressPrerequisiteError("identity", "Managed egress contract version is unsupported. Configure hematite-external-authorization-v1.");
+  if (!exactKeys(identity, ["orgId", "sessionId", "workloadId", "proxyId", "contractVersion"]) || identity.contractVersion !== MANAGED_EGRESS_CONTRACT_VERSION) {
+    throw new ManagedEgressPrerequisiteError("identity", "Managed egress identity fields or contract version are invalid. Configure hematite-external-authorization-v1.");
   }
   for (const [name, value] of Object.entries(identity)) {
     if (typeof value !== "string" || value.length < 1 || value.length > 128 || !/^[\x21-\x7e]+$/.test(value) || /["\\]/.test(value)) {
