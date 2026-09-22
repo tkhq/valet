@@ -3858,6 +3858,27 @@ export class EngineHost {
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
+    // Workspace prep for the session's sandbox (credential helper, `gh`
+    // shim, `valet-secrets`, git identity). Until 2026-09-22 this build
+    // wired no `specProvider`, so a workflow sandbox never ran prep: the
+    // `github.*` tools worked through `credentialResolver`, but an ad-hoc
+    // `git push` had no credential helper and failed anonymously. A
+    // workflow session has no `agent_sessions` row and no repo bindings,
+    // so the meta is assembled from the build opts the way `buildChild`
+    // does; `loadSessionMeta` then supplies the git identity for a
+    // user-owned run and leaves it unset (generic identity) for a team or
+    // org owner, whose `actorUserId` names no user.
+    const metaSource = {
+      id: sessionId,
+      userId: opts.actorUserId,
+      orgId: opts.orgId,
+      workspace: opts.workspace,
+      profile: "headless" as const,
+      ownerType: opts.owner.type,
+      ownerId: opts.owner.id,
+    };
+    const meta: SessionMeta = this.opts.db ? await loadSessionMeta(this.opts.db, metaSource) : metaSource;
+    const specProvider = await this.buildSpecProvider(sessionId, meta);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
@@ -3867,6 +3888,7 @@ export class EngineHost {
       workspace: opts.workspace,
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
+      ...(specProvider ? { specProvider } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       extractDocument: extractDocumentText,
@@ -3893,7 +3915,7 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-      systemPrompt: codingSystemPrompt({ secretsCli: false }),
+      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,

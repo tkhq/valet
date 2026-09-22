@@ -469,4 +469,46 @@ describe("EngineHost buildSpecProvider", () => {
     expect(provider.createCalls.length).toBeGreaterThan(0);
     expect(provider.createCalls[0].image).toBe("valet-prebuild/acme-widgets:sha1");
   });
+
+  it("workflow sessions run credential-only prep on an isolated provider", async () => {
+    const provider = makeIsolatedProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+
+    // The shape a scheduled team run builds: no app row, no repo bindings,
+    // and a synthesized `team:<id>` actor (workflows/engine-deps.ts).
+    const session = await api.providers.engineHost.workflowSessionFor("wf:wfrun_prep:sync", {
+      actorUserId: "team:team-1",
+      orgId: ORG,
+      owner: { type: "team", id: "team-1" },
+      workspace: "/tmp/wf-prep-sync",
+    });
+    expect(session.options.specProvider).toBeDefined();
+
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    expect(session.attachment.state).toBe("ready");
+
+    // The credential helper, its hard prerequisite, and a git identity are
+    // installed so an ad-hoc `git push` authenticates; nothing clones.
+    expect(provider.execs.some((c) => c.includes("git-credential-valet"))).toBe(true);
+    expect(provider.execs.some((c) => c.includes("credential.useHttpPath true"))).toBe(true);
+    expect(provider.execs.some((c) => c.includes("user.name"))).toBe(true);
+    expect(provider.execs.some((c) => c.includes("git clone"))).toBe(false);
+  });
+
+  it("workflow sessions skip prep on a non-isolated provider", async () => {
+    const provider = makeNonIsolatedProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+
+    const session = await api.providers.engineHost.workflowSessionFor("wf:wfrun_noprep:sync", {
+      actorUserId: USER,
+      orgId: ORG,
+      owner: { type: "user", id: USER },
+      workspace: "/tmp/wf-noprep-sync",
+    });
+    expect(session.options.specProvider).toBeUndefined();
+
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    expect(session.attachment.state).toBe("ready");
+    expect(provider.execs).toHaveLength(0);
+  });
 });
