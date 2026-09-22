@@ -167,7 +167,12 @@ export function createApp(
   app.use("*", providersMiddleware(providers));
 
   // Proxy-only callback. Bearer authentication is the complete auth mechanism; workloads never receive this token.
-  app.route("", managedEgressAuthorizationRouter(opts.managedEgressBindings ?? new ManagedEgressBindingRegistry()));
+  app.route(
+    "",
+    managedEgressAuthorizationRouter(
+      opts.managedEgressBindings ?? providers.managedEgressBindings ?? new ManagedEgressBindingRegistry(),
+    ),
+  );
 
   // LLM recording proxy — /proxy/anthropic/* and /proxy/openai/*. Uses its
   // own vlt_ key auth (resolveProxyPrincipal); intentionally outside /api/*

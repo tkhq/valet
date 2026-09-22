@@ -15,6 +15,11 @@ export interface ManagedEgressRequest {
   proxyToken: string;
 }
 
+export interface ManagedEgressLifecycle {
+  registerCallbackBinding(): void;
+  revokeCallbackBinding(): void;
+}
+
 export interface ManagedEgressTopologyIdentity {
   proxyResources: string[];
   policyResources: string[];

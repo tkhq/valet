@@ -1343,6 +1343,8 @@ export interface SandboxCreateOpts {
   image?: string;
   /** Authoritative proxy boundary request. Providers must reject it before side effects unless every prerequisite is ready. */
   managedEgress?: import("./sandbox/managed-egress.js").ManagedEgressRequest;
+  /** Host callbacks. Providers register only after secret delivery and before reporting callback readiness. */
+  managedEgressLifecycle?: import("./sandbox/managed-egress.js").ManagedEgressLifecycle;
   workspace?: string;
   /**
    * Requested size for the sandbox's PERSISTENT workspace volume, as a

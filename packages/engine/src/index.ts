@@ -132,6 +132,7 @@ export {
   type ManagedEgressCapability,
   type ManagedEgressEffectiveState,
   type ManagedEgressIdentity,
+  type ManagedEgressLifecycle,
   type ManagedEgressPersistedState,
   type ManagedEgressRequest,
   type ManagedEgressTopologyIdentity,

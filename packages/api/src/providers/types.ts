@@ -30,6 +30,7 @@ import type { CanonicalPolicyBundleManager } from "../authorization/canonical-po
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import type { ResourceAuthorizationPort } from "../authorization/resource-authorization.js";
 import type { AutoTitleHost } from "../sessions/auto-title-host.js";
+import type { ManagedEgressBindingRegistry } from "../routes/managed-egress-authorization.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -50,6 +51,8 @@ export interface Providers {
   sandboxProvider: SandboxProvider;
   eventStream: EventStream;
   engineCredentials: CredentialStore;
+  /** Process-local managed-egress callback bindings. */
+  managedEgressBindings?: ManagedEgressBindingRegistry;
   /** 1Password reference-credential service (1Password credential provider
    * plan, Task 1/2) — same instance threaded into `EngineHost`'s
    * `onePassword` opt, and used directly by the (Task 3) `/api/onepassword`

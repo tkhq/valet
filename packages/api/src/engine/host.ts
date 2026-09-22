@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import {
   parseAssistantSessionId,
   NoCredentialsError,
   isReasoningLevel,
+  ManagedEgressPrerequisiteError,
   type BlobStore,
   type ChildReader,
   type ChildSender,
@@ -26,6 +28,7 @@ import {
   type Thread,
   type StoredCredential,
   type ResolvedModel,
+  type SandboxCreateOpts,
   type PolicyResolver,
   type BuiltinPolicyResolver,
   type PluginStore,
@@ -144,6 +147,7 @@ import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } fro
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
+import type { ManagedEgressBindingRegistry } from "../routes/managed-egress-authorization.js";
 
 
 /**
@@ -203,6 +207,8 @@ export function securityRolesForCell(
 export interface EngineHostOpts {
   engineStore: SessionStore;
   sandboxProvider: SandboxProvider;
+  /** Process-local callback registry. Required to restore a managed boundary. */
+  managedEgressBindings?: ManagedEgressBindingRegistry;
   eventStream: EventStream;
   engineCredentials: CredentialStore;
   blobs?: BlobStore;
@@ -524,6 +530,43 @@ interface CacheEntry {
 
 /** Durable events for submissions settled longer ago than this are pruned on restore. */
 const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function managedEgressRestoreOptions(
+  persisted: SessionData["managedEgress"],
+  expected: { sessionId: string; orgId: string },
+  registry: ManagedEgressBindingRegistry | undefined,
+): Pick<SandboxCreateOpts, "managedEgress" | "managedEgressLifecycle"> | undefined {
+  if (!persisted) return undefined;
+  if (!registry) {
+    throw new ManagedEgressPrerequisiteError(
+      "callback",
+      "Managed egress callback registration is unavailable. Configure the process-local binding registry and re-provision the sandbox.",
+    );
+  }
+  const identity = persisted.requested.identity;
+  if (identity.sessionId !== expected.sessionId || identity.orgId !== expected.orgId) {
+    throw new ManagedEgressPrerequisiteError(
+      "identity",
+      "Persisted managed egress identity does not match this session. Correct the session metadata and re-provision the sandbox.",
+    );
+  }
+  const proxyToken = randomBytes(32).toString("base64url");
+  let registered = false;
+  return {
+    managedEgress: { requested: true, identity: { ...identity }, proxyToken },
+    managedEgressLifecycle: {
+      registerCallbackBinding() {
+        if (registered) return;
+        registry.register(identity, proxyToken);
+        registered = true;
+      },
+      revokeCallbackBinding() {
+        registry.revoke(identity.proxyId);
+        registered = false;
+      },
+    },
+  };
+}
 
 /** The action ids a pin list protects from the behavior filter — pins are
  * substrate the host injects, never gated (assistant-editor design). */
@@ -988,6 +1031,11 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
+    const managedEgress = managedEgressRestoreOptions(
+      existing?.managedEgress,
+      { sessionId, orgId: meta.orgId },
+      this.opts.managedEgressBindings,
+    );
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
     // `docker` (session-create opt ORs over it), `workspaceStorage`, and
     // CPU/memory resources
@@ -1077,6 +1125,7 @@ export class EngineHost {
       // A claim never shrinks.
       ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+      ...(managedEgress ?? {}),
     };
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
@@ -2500,6 +2549,11 @@ export class EngineHost {
     // to. See `PATCH /api/sessions/:id`.
     const profile = await this.storedProfile(sessionId);
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
+    const managedEgress = managedEgressRestoreOptions(
+      existing?.managedEgress,
+      { sessionId, orgId: meta.orgId },
+      this.opts.managedEgressBindings,
+    );
     // Same row read as the profile: a team assistant from before team-owner
     // resolution keeps reading credentials as the member prompting it.
     const credentialOwnerMode = await this.storedCredentialOwnerMode(sessionId);
@@ -2553,6 +2607,7 @@ export class EngineHost {
         env: sandboxMint?.env,
         profile,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+        ...(managedEgress ?? {}),
       },
       model,
       modelSpec,
@@ -3506,6 +3561,11 @@ export class EngineHost {
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
+    const managedEgress = managedEgressRestoreOptions(
+      existing?.managedEgress,
+      { sessionId: childSessionId, orgId: opts.orgId },
+      this.opts.managedEgressBindings,
+    );
     // A first child build has no app row yet, so the mode the spawner is
     // about to write travels in the options: a legacy team orchestrator's
     // child keeps acting as the member from its first turn.
@@ -3625,6 +3685,7 @@ export class EngineHost {
         // (TKAI-402). A claim never shrinks.
         ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+        ...(managedEgress ?? {}),
       },
       model,
       modelSpec,
@@ -3740,6 +3801,11 @@ export class EngineHost {
     });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
+    const managedEgress = managedEgressRestoreOptions(
+      existing?.managedEgress,
+      { sessionId, orgId: opts.orgId },
+      this.opts.managedEgressBindings,
+    );
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
@@ -3772,6 +3838,7 @@ export class EngineHost {
         env: sandboxMint?.env,
         profile: "headless" as const,
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+        ...(managedEgress ?? {}),
       },
       model,
       modelSpec,
