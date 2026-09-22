@@ -7,6 +7,7 @@ import {
   MAX_PDF_DOCUMENT_BYTES,
   normalizeDocumentMime,
   readResponseBytes,
+  readPdfCandidateResponse,
   readResponseText,
   type PluginAction,
   type PluginActionContext,
@@ -974,7 +975,7 @@ const downloadFile = action(
       }
 
       const fileSize = meta.size ? parseInt(meta.size, 10) : 0;
-      if (Number.isFinite(fileSize) && fileSize > maxBytes) {
+      if (!generic && Number.isFinite(fileSize) && fileSize > maxBytes) {
         return {
           success: false,
           error: `File is ${fileSize} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
@@ -986,18 +987,31 @@ const downloadFile = action(
       if (!dlRes.ok) return driveError(dlRes);
 
       if (pdf || generic) {
-        const downloaded = await readResponseBytes(dlRes, maxBytes);
-        if (!downloaded.ok) {
-          return {
-            success: false,
-            error: `File is ${downloaded.size} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
-          };
+        let data: Uint8Array | undefined;
+        if (generic) {
+          const candidate = await readPdfCandidateResponse(dlRes, maxBytes);
+          if (candidate.kind === 'oversize') {
+            return {
+              success: false,
+              error: `File is ${candidate.size} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
+            };
+          }
+          if (candidate.kind === 'pdf') data = candidate.data;
+        } else {
+          const downloaded = await readResponseBytes(dlRes, maxBytes);
+          if (!downloaded.ok) {
+            return {
+              success: false,
+              error: `File is ${downloaded.size} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
+            };
+          }
+          data = downloaded.data;
         }
-        if (!isPdfDocument({ mimeType, data: downloaded.data })) {
+        if (!data || !isPdfDocument({ mimeType, data })) {
           return { success: false, error: binaryError };
         }
         const read = await extractDownloadedPdf({
-          data: downloaded.data,
+          data,
           name: meta.name,
           extractDocument: ctx.extractDocument,
         });

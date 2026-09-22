@@ -803,29 +803,37 @@ describe('slack actions', () => {
     expect(result).toMatchObject({ success: true, data: { content: '## Report', mimetype: 'application/pdf' } });
   });
 
-  it('fetch_file bounds an unknown-length generic stream before PDF routing', async () => {
-    let cancelled = false;
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(20 * 1024 * 1024));
-        controller.enqueue(new Uint8Array(6 * 1024 * 1024));
-      },
-      cancel() {
-        cancelled = true;
-      },
-    });
+  it('reports an oversized generic PDF candidate', async () => {
     fetchMock.mockResolvedValueOnce(
-      new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }),
+      new Response('%PDF-', {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(26 * 1024 * 1024) },
+      }),
     );
 
     const result = await action('slack.fetch_file').execute(
       { url: 'https://files.slack.com/files-pri/T1-F1/unknown' },
-      pluginCtx({ extractDocument: async () => ({ markdown: 'must not extract' }) }),
+      pluginCtx(),
     );
 
     expect(result.success).toBe(false);
     expect(String(result.error)).toContain('PDF too large');
-    expect(cancelled).toBe(true);
+  });
+
+  it('keeps an oversized generic non-PDF as unsupported metadata', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('PK\x03\x04', {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(26 * 1024 * 1024) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/archive' },
+      pluginCtx(),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { mimetype: 'application/octet-stream' } });
   });
 
   it('fetch_file says why a scanned PDF has no text', async () => {

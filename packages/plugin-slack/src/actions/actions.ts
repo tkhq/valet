@@ -7,6 +7,7 @@ import {
   MAX_PDF_DOCUMENT_BYTES,
   normalizeDocumentMime,
   readResponseBytes,
+  readPdfCandidateResponse,
   readResponseText,
   type ActionPlugin,
   type Credential,
@@ -732,19 +733,24 @@ const fetchFile = action(Type.Object({
       return { success: true, data: { content: downloaded.text, mimetype: contentType } };
     }
 
-    // A generic byte stream is read only up to the PDF cap. This lets us sniff
-    // its header without allocating an unlimited response body.
     if (contentType === 'application/pdf' || contentType === 'application/octet-stream') {
       const filename = parsedUrl.pathname.split('/').pop() || 'document.pdf';
-      const downloaded = await readResponseBytes(res, MAX_PDF_FETCH);
-      if (!downloaded.ok) {
-        return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
-      } else if (isPdfDocument({ mimeType: contentType, data: downloaded.data })) {
-        const read = await extractDownloadedPdf({
-          data: downloaded.data,
-          name: filename,
-          extractDocument: ctx.extractDocument,
-        });
+      let data: Uint8Array | undefined;
+      if (contentType === 'application/pdf') {
+        const downloaded = await readResponseBytes(res, MAX_PDF_FETCH);
+        if (!downloaded.ok) {
+          return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
+        }
+        data = downloaded.data;
+      } else {
+        const candidate = await readPdfCandidateResponse(res, MAX_PDF_FETCH);
+        if (candidate.kind === 'oversize') {
+          return { success: false, error: `PDF too large (${Math.round(candidate.size / 1024 / 1024)}MB). Max 25MB.` };
+        }
+        if (candidate.kind === 'pdf') data = candidate.data;
+      }
+      if (data && isPdfDocument({ mimeType: contentType, data })) {
+        const read = await extractDownloadedPdf({ data, name: filename, extractDocument: ctx.extractDocument });
         if (!read.ok) return { success: false, error: read.error };
         return { success: true, data: { content: read.content, mimetype: 'application/pdf', filename } };
       }

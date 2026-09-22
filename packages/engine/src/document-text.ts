@@ -53,6 +53,12 @@ export type BoundedResponseText =
   | { ok: true; text: string }
   | { ok: false; size: number };
 
+/** Result of prefix-first inspection for a generic PDF candidate. */
+export type PdfCandidateResponse =
+  | { kind: "pdf"; data: Uint8Array }
+  | { kind: "not-pdf" }
+  | { kind: "oversize"; size: number };
+
 /** Start cancellation without waiting for a peer that never settles it. */
 function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
   void reader.cancel().catch(() => {});
@@ -103,6 +109,69 @@ export async function readResponseBytes(response: Response, maxBytes: number): P
     offset += chunk.byteLength;
   }
   return { ok: true, data };
+}
+
+/**
+ * Inspect a generic stream prefix before buffering it. Non-PDF bodies are
+ * cancelled after their first five bytes. PDF candidates keep the same chunks
+ * while they continue through the byte cap.
+ */
+export async function readPdfCandidateResponse(response: Response, maxBytes: number): Promise<PdfCandidateResponse> {
+  if (!response.body) return { kind: "not-pdf" };
+
+  const declared = Number(response.headers.get("content-length"));
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let prefix = new Uint8Array();
+  let pdf: boolean | undefined;
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      if (pdf === undefined) {
+        const needed = 5 - prefix.byteLength;
+        const nextPrefix = new Uint8Array(Math.min(5, prefix.byteLength + value.byteLength));
+        nextPrefix.set(prefix);
+        nextPrefix.set(value.subarray(0, needed), prefix.byteLength);
+        prefix = nextPrefix;
+        if (prefix.byteLength < 5) {
+          chunks.push(value);
+          size += value.byteLength;
+          continue;
+        }
+        pdf = hasPdfHeader(prefix);
+        if (!pdf) {
+          cancelReader(reader);
+          return { kind: "not-pdf" };
+        }
+        if (Number.isFinite(declared) && declared > maxBytes) {
+          cancelReader(reader);
+          return { kind: "oversize", size: declared };
+        }
+      }
+
+      size += value.byteLength;
+      if (size > maxBytes) {
+        cancelReader(reader);
+        return { kind: "oversize", size };
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!pdf) return { kind: "not-pdf" };
+  const data = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { kind: "pdf", data };
 }
 
 /** Decode a bounded UTF-8 response. The cap applies to bytes, not characters. */

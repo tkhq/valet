@@ -4,6 +4,7 @@ import {
   isPdfDocument,
   normalizeDocumentMime,
   readResponseBytes,
+  readPdfCandidateResponse,
 } from "../src/document-text.js";
 
 const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
@@ -88,6 +89,36 @@ describe("document text helpers", () => {
 
     await expect(readResponseBytes(new Response(body), 3)).resolves.toEqual({ ok: false, size: 4 });
     expect(body.locked).toBe(false);
+  });
+
+  it("stops a generic non-PDF after its prefix", async () => {
+    let reads = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        if (reads === 1) controller.enqueue(new Uint8Array([0x50, 0x4b, 3, 4, 0]));
+        else controller.enqueue(new Uint8Array(1024 * 1024));
+      },
+    });
+
+    await expect(readPdfCandidateResponse(new Response(body), 3)).resolves.toEqual({ kind: "not-pdf" });
+    expect(reads).toBe(1);
+  });
+
+  it("bounds a generic PDF after its prefix", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("%PDF-"));
+        controller.enqueue(new Uint8Array(4));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    await expect(readPdfCandidateResponse(new Response(body), 5)).resolves.toEqual({ kind: "oversize", size: 9 });
+    expect(cancelled).toBe(true);
   });
 
   it("extracts a downloaded PDF", async () => {

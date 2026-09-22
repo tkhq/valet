@@ -523,6 +523,30 @@ describe('drive actions', () => {
     expect(extracted).toBe(false);
   });
 
+  it('download_file reports an oversized generic PDF candidate', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/octet-stream', size: String(26 * 1024 * 1024) }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response('%PDF-', { status: 200, headers: { 'Content-Length': String(26 * 1024 * 1024) } }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('exceeds max');
+  });
+
+  it('download_file rejects an oversized generic non-PDF as binary', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'archive.bin', mimeType: 'application/octet-stream', size: String(26 * 1024 * 1024) }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response('PK\x03\x04', { status: 200 }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('Cannot download binary file');
+  });
+
   it('download_file bounds media when metadata is stale', async () => {
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({

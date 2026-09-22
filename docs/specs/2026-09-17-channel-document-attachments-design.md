@@ -122,9 +122,9 @@ not grow a private PDF extractor branch.
 `readResponseBytes` reads a response stream only up to its byte cap. It
 checks each chunk when Content-Length is absent, invalid, or stale. It starts
 cancellation without waiting when a source does not settle cancellation.
-`readResponseText` decodes the same bounded bytes as UTF-8. A declared PDF is
-routed to the extractor. A generic type (`application/octet-stream`) is a PDF
-only when its bytes start with `%PDF-`. The PDF cap is 25 MB, the same budget
+`readResponseText` decodes the same bounded bytes as UTF-8. Generic streams
+are inspected through the `%PDF-` prefix before they are buffered. A non-PDF
+stream is cancelled after the prefix. The PDF cap is 25 MB, the same budget
 the Slack transport uses for a document.
 
 Callers:
