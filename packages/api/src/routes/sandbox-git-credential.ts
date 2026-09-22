@@ -54,9 +54,10 @@ import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import { authorizeCredentialUseOperation, CredentialUseDeniedError } from "../authorization/credential-use-provider.js";
+import { assertRepositoryCredentialDelegation, CredentialDelegationInvalidError } from "../authorization/credential-delegation.js";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { agentSessions, sessionRepos } from "../schema/index.js";
+import { agentSessions, delegationEnvelopes, sessionRepos } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { repoHostForUrl, type GitTokenRequest, type RepoHostContext } from "../repos/host.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
@@ -85,6 +86,7 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   const rawOwner = (body as Record<string, unknown> | null)?.owner;
   const rawRepo = (body as Record<string, unknown> | null)?.repo;
   const rawPurpose = (body as Record<string, unknown> | null)?.purpose;
+  const rawOperation = (body as Record<string, unknown> | null)?.operation;
   if (!isNonEmptyString(host)) {
     return c.json({ error: "host is required" }, 400);
   }
@@ -101,6 +103,11 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   // "git" (default; installation-first) for clone/push, "api" (user-first,
   // sole-installation fallback) for the `gh` shim's REST/GraphQL calls.
   const purpose = rawPurpose === "api" ? "api" : "git";
+  const operation = rawOperation === "clone"
+    ? "repository.clone" as const
+    : rawOperation === "push"
+      ? "repository.push" as const
+      : "repository.fetch" as const;
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
 
@@ -136,6 +143,36 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   const tokenRequest: GitTokenRequest = binding
     ? { owner: ownerOf(binding.fullName), repo: repoOf(binding.fullName), purpose, auth: binding.auth }
     : { owner: owner ?? "", repo: wantRepo ?? "", purpose, auth: "auto" as const };
+  const childEdge = (await db
+    .select({ childSessionId: delegationEnvelopes.childSessionId })
+    .from(delegationEnvelopes)
+    .where(eq(delegationEnvelopes.childSessionId, sandbox.sessionId))
+    .limit(1))[0];
+  if (childEdge) {
+    if (purpose !== "git" || !binding) {
+      return c.json({ error: "repository credential delegation does not allow this operation" }, 403);
+    }
+    try {
+      await assertRepositoryCredentialDelegation({
+        db,
+        orgId: sandbox.orgId,
+        actorUserId: sandbox.userId,
+        childSessionId: sandbox.sessionId,
+        owner: credentialOwner,
+        binding: {
+          host: binding.host,
+          fullName: binding.fullName,
+          cloneUrl: binding.cloneUrl,
+          ...(binding.ref ? { ref: binding.ref } : {}),
+          auth: binding.auth,
+        },
+        operation,
+      });
+    } catch (error) {
+      if (!(error instanceof CredentialDelegationInvalidError)) throw error;
+      return c.json({ error: error.message }, 403);
+    }
+  }
   let result: Awaited<ReturnType<typeof repoHost.resolveGitToken>>;
   try {
     result = await authorizeCredentialUseOperation({

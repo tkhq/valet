@@ -51,6 +51,7 @@ import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATO
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
 import { completeCanonicalExecution, reserveCanonicalExecution } from "../authorization/canonical-execution-lifecycle.js";
+import { authorizeRepositoryCredentialDelegation, revokeChildCredentialDelegations } from "../authorization/credential-delegation.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
 const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
@@ -336,6 +337,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       parentThreadId: string;
       actorUserId: string;
       owner: Principal;
+      parentQueueItemId?: string;
       origin?: ChannelOrigin;
     },
   ): Promise<SpawnChildResult> => {
@@ -396,6 +398,23 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     buildDelegatedExecutionObligationPlan(authorization.decision);
     if (authorization.decision.effect === "deny") throw new DelegationPolicyDeniedError("authorization_denied");
     if (authorization.decision.effect === "require_approval") throw new DelegationPolicyDeniedError("authorization_approval_unsupported");
+    if (binding) {
+      if (!ctx.parentQueueItemId) {
+        throw new Error("Repository delegation requires a stable parent queue item identity.");
+      }
+      await authorizeRepositoryCredentialDelegation({
+        db: deps.db,
+        authorization: deps.canonicalAuthorizationService,
+        orgId,
+        actorUserId: ctx.actorUserId,
+        owner: ctx.owner,
+        parentSessionId: ctx.parentSessionId,
+        parentThreadId: ctx.parentThreadId,
+        parentQueueItemId: ctx.parentQueueItemId,
+        childSessionId,
+        binding,
+      });
+    }
     const decisionId = canonicalDecisionId(orgId, adapted.request.idempotencyKey);
     const executionInputDigest = createHash("sha256").update(adapted.canonicalBytes).digest("hex");
     const policyDecision = executionDecision(authorization, decisionId, executionInputDigest);
@@ -856,10 +875,12 @@ export class ChildWatcher {
     // fresh reclaim cycle for a re-opened child. `parkedSandboxId` is
     // deliberately kept — it is the only durable handle to a sandbox a
     // prior cycle parked, and the next park overwrites it anyway.
+    const now = Date.now();
     await this.deps.db
       .update(childWatches)
-      .set({ settled: true, settledAt: Date.now(), sandboxReclaimedAt: null })
+      .set({ settled: true, settledAt: now, sandboxReclaimedAt: null })
       .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId)));
+    await revokeChildCredentialDelegations(this.deps.db, childSessionId, now);
   }
 
   private async markReclaimed(childSessionId: string, now: number): Promise<void> {

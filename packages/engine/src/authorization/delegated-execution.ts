@@ -108,6 +108,7 @@ export interface CredentialDelegateAdapterInputV1 extends CommonInput {
   readonly delegatorSessionId: string;
   readonly delegateeSessionId: string;
   readonly operations: readonly string[];
+  readonly resource: { readonly type: "repository"; readonly id: string };
   readonly expiresAtMs: number;
   readonly transitive: false;
 }
@@ -171,7 +172,9 @@ export function adaptCredentialUse(input: CredentialUseAdapterInputV1): Delegate
 export function adaptCredentialDelegate(input: CredentialDelegateAdapterInputV1): DelegatedExecutionAdapterOutputV1 {
   common(input); for (const value of [input.service, input.credentialClass, input.owner.id, input.delegatorSessionId, input.delegateeSessionId]) validId(value);
   if (input.delegatorSessionId === input.delegateeSessionId || input.transitive !== false || input.expiresAtMs <= input.evaluationTimeMs || input.expiresAtMs - input.evaluationTimeMs > 72 * 60 * 60 * 1000) fail("invalid_credential_scope");
-  return output(input, "credential.delegate", "credential.delegate", "credential", "critical", { service: input.service, credentialClass: input.credentialClass, owner: { type: input.owner.type, id: input.owner.id }, delegatorSessionId: input.delegatorSessionId, delegateeSessionId: input.delegateeSessionId, operations: cleanSet(input.operations), expiresAtMs: input.expiresAtMs, transitive: false });
+  const resource = cleanResource(input.resource);
+  if (resource.type !== "repository" || resource.id === undefined) fail("invalid_credential_scope");
+  return output(input, "credential.delegate", "credential.delegate", "credential", "critical", { service: input.service, credentialClass: input.credentialClass, owner: { type: input.owner.type, id: input.owner.id }, delegatorSessionId: input.delegatorSessionId, delegateeSessionId: input.delegateeSessionId, operations: cleanSet(input.operations), resource, expiresAtMs: input.expiresAtMs, transitive: false });
 }
 
 export function adaptEgressConnect(input: EgressConnectAdapterInputV1): DelegatedExecutionAdapterOutputV1 {

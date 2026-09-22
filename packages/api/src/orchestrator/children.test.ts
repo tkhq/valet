@@ -39,9 +39,9 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, delegationEnvelopes, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, bakes, childWatches, credentialDelegations, delegationEnvelopes, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
-import type { DelegationEnvelopeV1 } from "@valet/engine/authorization";
+import type { AuthorizationRequest, DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
 import { SignalEdgeDeniedError } from "./signals.js";
 
@@ -54,6 +54,25 @@ afterEach(async () => {
   await githubFixture?.close();
   githubFixture = undefined;
 });
+
+function mockDelegationDecision(a: TestApi, effectFor: (request: AuthorizationRequest) => "allow" | "deny"): void {
+  const preview = a.providers.canonicalAuthorizationService.preview.bind(a.providers.canonicalAuthorizationService);
+  vi.spyOn(a.providers.canonicalAuthorizationService, "preview").mockImplementation(async (request) => {
+    const envelope = await preview(request);
+    const effect = effectFor(request);
+    const { decisionDigest: _decisionDigest, obligationDigest: _obligationDigest, decision: _decision, ...identity } = envelope;
+    return {
+      ...identity,
+      decision: {
+        effect,
+        reasonCode: `test.${effect}`,
+        matchedRuleIds: [`test.${effect}`],
+        obligations: [],
+        redactions: [],
+      },
+    };
+  });
+}
 
 function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): ChildrenDeps {
   return {
@@ -478,6 +497,7 @@ describe("buildChildSpawner", () => {
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
     githubFixture = startGithubFixture();
     api = await bootTestApi({ githubApiUrl: githubFixture.url });
+    mockDelegationDecision(api, () => "allow");
     await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github", {
       type: "api_key", accessToken: "org-test-token",
     });
@@ -489,15 +509,28 @@ describe("buildChildSpawner", () => {
       orgId: "local-org",
       workspace: "/tmp",
     });
+    const originalChildSessionFor = api.providers.engineHost.childSessionFor.bind(api.providers.engineHost);
+    const orderingSpy = vi.spyOn(api.providers.engineHost, "childSessionFor").mockImplementation(async (...args) => {
+      const childSessionId = args[0];
+      const [envelopes, grants] = await Promise.all([
+        api!.providers.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, childSessionId)),
+        api!.providers.db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, childSessionId)),
+      ]);
+      expect(envelopes).toHaveLength(1);
+      expect(grants).toHaveLength(1);
+      return originalChildSessionFor(...args);
+    });
     const result = await spawner(
       { prompt: "explore the repo", repo: "tkhq/sdk", branch: "main" },
       {
         parentSessionId: "parent-repo",
         parentThreadId: parent.thread("web:default").id,
+        parentQueueItemId: "parent-queue-repo",
         actorUserId: "local-user",
         owner: { type: "user", id: "local-user" },
       },
     );
+    expect(orderingSpy).toHaveBeenCalledOnce();
 
     // The binding row mirrors what the REST create route writes.
     const rows = await api.providers.db
@@ -529,6 +562,36 @@ describe("buildChildSpawner", () => {
     });
   });
 
+  it("denies repository credential delegation before child-side effects", async () => {
+    api = await bootTestApi();
+    mockDelegationDecision(api, (request) => request.kind === "credential.delegate" ? "deny" : "allow");
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const create = vi.spyOn(api.providers.engineHost, "childSessionFor");
+    const parent = await api.providers.engineHost.sessionFor("parent-repo-denied", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+
+    await expect(spawner(
+      { prompt: "explore the repo", repo: "acme/widgets" },
+      {
+        parentSessionId: parent.id,
+        parentThreadId: parent.thread("web:default").id,
+        parentQueueItemId: "parent-queue-denied",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    )).rejects.toThrow("Repository credential delegation was denied.");
+
+    expect(create).not.toHaveBeenCalled();
+    expect(await api.providers.db.select().from(credentialDelegations)).toHaveLength(0);
+    expect(await api.providers.db.select().from(delegationEnvelopes)).toHaveLength(0);
+    expect(await api.providers.db.select().from(sessionRepos)).toHaveLength(0);
+    expect(await api.providers.db.select().from(childWatches)).toHaveLength(0);
+  });
+
   it("spawns without repo: no session_repos row, no clone prep", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
@@ -548,11 +611,12 @@ describe("buildChildSpawner", () => {
         owner: { type: "user", id: "local-user" },
       },
     );
-    const rows = await api.providers.db
-      .select()
-      .from(sessionRepos)
-      .where(eq(sessionRepos.sessionId, result.childSessionId));
+    const [rows, grants] = await Promise.all([
+      api.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, result.childSessionId)),
+      api.providers.db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, result.childSessionId)),
+    ]);
     expect(rows).toHaveLength(0);
+    expect(grants).toHaveLength(0);
   });
 
   it("rejects an unparseable repo before creating anything", async () => {

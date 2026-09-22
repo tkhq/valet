@@ -14,11 +14,11 @@
  * anonymous when nothing resolves; unrecognized hosts 403.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import type { DelegationEnvelopeV1, PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { githubHost } from "../repos/github-host.js";
-import { sessionRepos } from "../schema/index.js";
+import { delegationEnvelopes, sessionRepos } from "../schema/index.js";
 import type { PostSandboxGitCredentialResponse, SandboxGitCredential } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -56,6 +56,34 @@ async function bindRepo(
   });
 }
 
+async function seedChildEdge(): Promise<void> {
+  const envelope: DelegationEnvelopeV1 = {
+    schemaVersion: 1,
+    organizationId: "local-org",
+    parentSessionId: "parent-git-credential",
+    parentThreadId: "web:default",
+    childSessionId: SESSION_ID,
+    actorUserId: "local-user",
+    owner: { type: "user", id: "local-user" },
+    depth: 1,
+    parentRootCapable: true,
+    constraints: {},
+    capabilities: ["repository.read"],
+    policyDigest: "test-policy",
+    sourceBundleDigest: "test-source",
+    evaluatorKind: "local_valet",
+    engineDigest: "test-engine",
+  };
+  await api!.providers.db.insert(delegationEnvelopes).values({
+    childSessionId: SESSION_ID,
+    orgId: "local-org",
+    parentSessionId: "parent-git-credential",
+    envelope,
+    decisionId: "test-git-credential-edge",
+    createdAt: Date.now(),
+  });
+}
+
 async function saveUserCredential(accessToken: string, login = "octocat"): Promise<void> {
   // No expiresAt / refreshToken → PAT-shaped, resolves without a network call.
   await api!.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
@@ -76,6 +104,32 @@ function post(token: string | undefined, body: unknown): Promise<Response> {
 }
 
 describe("POST /api/sandbox/git-credential", () => {
+  it("denies child API and cross-repository requests before token resolution", async () => {
+    api = await bootTestApi();
+    await bindRepo();
+    await seedChildEdge();
+    const resolveGitToken = vi.spyOn(githubHost, "resolveGitToken");
+    const token = await mintToken();
+
+    const apiResponse = await post(token, {
+      host: "github.com",
+      owner: "acme",
+      repo: "widgets",
+      purpose: "api",
+    });
+    expect(apiResponse.status).toBe(403);
+
+    const crossRepoResponse = await post(token, {
+      host: "github.com",
+      owner: "other",
+      repo: "repo",
+      purpose: "git",
+      operation: "clone",
+    });
+    expect(crossRepoResponse.status).toBe(403);
+    expect(resolveGitToken).not.toHaveBeenCalled();
+  });
+
   it("keeps token resolution at spy zero when credential policy denies", async () => {
     api = await bootTestApi();
     const resolveGitToken = vi.spyOn(githubHost, "resolveGitToken");
