@@ -11,8 +11,8 @@ export function projectDraftToCurrentSnapshot(draft: NormalizedPolicyDraftV1, or
     personalOverrides: CurrentPersonalOverrideV1[] = [];
   const teamIds = new Set<string>();
   for (const rule of draft.rules) {
-    if (rule.context === "workflow.action" || rule.context === "plugin.entitlement" || rule.context === "egress.connect") throw new TypeError("Current source projection does not support this context.");
-    if (rule.context !== "tool.action" && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Descriptor rules do not support content matchers.");
+    if (rule.context === "workflow.action" || rule.context === "plugin.entitlement") throw new TypeError("Current source projection does not support this context.");
+    if (rule.context !== "tool.action" && rule.context !== "egress.connect" && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Descriptor rules do not support content matchers.");
     if (rule.matcherGroups.some((group) => group.mode !== "all")) throw new TypeError("Current source projection supports all matcher groups only.");
     if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
     if (rule.subjects.length !== 1 || rule.subjects[0] !== rule.owner.kind) throw new TypeError("Current source projection rejects subject scope loss.");

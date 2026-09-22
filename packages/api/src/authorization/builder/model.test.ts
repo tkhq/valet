@@ -156,8 +156,8 @@ describe("policy draft validation", () => {
     expect(POLICY_CONTEXTS["tool.action"]).toMatchObject({ publishable: true, humanApproval: true, obligations: [] });
     expect(POLICY_CONTEXTS["api.route"]).toMatchObject({ publishable: true, obligations: [] });
     expect(POLICY_CONTEXTS["resource.access"]).toMatchObject({ publishable: true, obligations: [] });
-    expect(POLICY_CONTEXTS["egress.connect"]).toMatchObject({ publishable: false, humanApproval: false });
-    expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(9);
+    expect(POLICY_CONTEXTS["egress.connect"]).toMatchObject({ publishable: true, humanApproval: false });
+    expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(10);
   });
 
   it.each(["delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate"] as const)("rejects unsupported %s approval with a specific issue", (context) => {

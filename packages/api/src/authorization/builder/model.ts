@@ -95,7 +95,7 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     });
   if (descriptor.publishable) {
     if (descriptor.targets.length && (!record(value.target) || Object.keys(value.target).length !== 1 || !selectedTarget)) issues.push(issue("unknown_descriptor", `${path}.target`, "Select a registered descriptor for this context."));
-    if (descriptor.targets.length && Array.isArray(value.matcherGroups) && value.matcherGroups.some((group) => record(group) && Array.isArray(group.matchers) && group.matchers.length)) issues.push(issue("unsupported_content_matcher", `${path}.matcherGroups`, "Remove content conditions. This context supports descriptor metadata only."));
+    if (descriptor.targets.length && value.context !== "egress.connect" && Array.isArray(value.matcherGroups) && value.matcherGroups.some((group) => record(group) && Array.isArray(group.matchers) && group.matchers.length)) issues.push(issue("unsupported_content_matcher", `${path}.matcherGroups`, "Remove content conditions. This context supports descriptor metadata only."));
     const targetIssue = record(value.target) ? currentPolicyTargetIssueV1({ service: value.target["action.service"], actionId: value.target["action.id"], riskLevel: value.target["action.riskLevel"] }) : "invalid_target";
     if (targetIssue) issues.push(issue(targetIssue, `${path}.target`, "Use one valid service, qualified action ID, or risk level."));
     if (Array.isArray(value.matcherGroups) && value.matcherGroups.some((group) => record(group) && (group.mode !== "all" || (Array.isArray(group.matchers) && group.matchers.some((matcher) => record(matcher) && typeof matcher.field === "string" && !matcher.field.startsWith("parameters.")))))) issues.push(issue("unsupported_action_matcher", `${path}.matcherGroups`, "Use all groups and action parameter fields for the current source builder."));
@@ -125,6 +125,10 @@ function validateMatcher(value: unknown, fields: readonly PolicyFieldDescriptor[
   const noValue = value.operator === "exists" || value.operator === "not_exists";
   const typed = fieldPath.startsWith("parameters.") ? noValue ? value.value === undefined : currentPolicyValueComplexityV1(value.value) !== null && (!["in", "not_in"].includes(String(value.operator)) || Array.isArray(value.value)) : noValue ? value.value === undefined : typedValue(descriptor.type, value.value, value.operator);
   if (!typed) issues.push(issue("invalid_value", `${path}.value`, "Enter a value that matches the field type and operator."));
+  if (fieldPath === "parameters.destination.host" && value.value !== undefined) {
+    const hosts = Array.isArray(value.value) ? value.value : [value.value];
+    if (hosts.some((host) => typeof host !== "string" || !canonicalPolicyHost(host))) issues.push(issue("invalid_value", `${path}.value`, "Use a lowercase canonical DNS host without a trailing dot."));
+  }
   if (descriptor.sensitivity !== "public" && value.value !== undefined) issues.push(issue("sensitive_literal", `${path}.value`, "Remove the sensitive literal. Use a server-held reference instead."));
   if (value.value !== undefined && currentPolicyValueComplexityV1(value.value) && containsSensitiveTextV1(value.value as JsonValue)) issues.push(issue("unsafe_value", `${path}.value`, "Remove secret-like text from the value."));
   if (fieldPath.startsWith("parameters.")) for (const code of currentPolicyMatcherIssuesV1({ path: fieldPath.slice(11), op: String(value.operator), ...(value.value === undefined ? {} : { value: value.value }) })) issues.push(issue(code, path, "Use a matcher supported by the current source builder."));
@@ -200,6 +204,7 @@ const unknownKeys = (value: Record<string, unknown>, allowed: readonly string[],
   Reflect.ownKeys(value)
     .filter((key): key is string => typeof key !== "string" || !allowed.includes(key))
     .forEach((key) => issues.push(issue("unknown_field", `${path}.${key}`, "Remove the unknown field.")));
+const canonicalPolicyHost = (value: string): boolean => /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value) && !value.includes("..") && !value.split(".").some((label) => label.startsWith("xn--")) && !/^[0-9.]+$/.test(value) && value !== "localhost";
 const typedValue = (type: PolicyFieldDescriptor["type"], value: unknown, operator: unknown) =>
   operator === "in" || operator === "not_in" ? Array.isArray(value) && value.length > 0 && value.every((item) => type === "number" ? typeof item === "number" && Number.isFinite(item) && !Object.is(item, -0) : typeof item === "string") : type === "number" || type === "timestamp" ? typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0) : type === "boolean" ? typeof value === "boolean" : type === "string_set" ? Array.isArray(value) && value.every((item) => typeof item === "string") : typeof value === "string";
 const canonical = canonicalCurrentPolicyJsonV1;

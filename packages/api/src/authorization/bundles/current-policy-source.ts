@@ -17,7 +17,7 @@ import type {
 
 const MODES = new Set(["allow", "require_approval", "deny"]);
 const APPLIES_IN = new Set(["any", "session", "workflow"]);
-const MATCHER_OPS = new Set(["eq", "neq", "regex", "in", "not_in", "gt", "gte", "lt", "lte", "exists", "not_exists"]);
+const MATCHER_OPS = new Set(["eq", "neq", "regex", "in", "not_in", "gt", "gte", "lt", "lte", "exists", "not_exists", "suffix"]);
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
 const ROUTE_ACTIONS = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[1])), ROUTE_SERVICES = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[0])), RESOURCE_ACTIONS = new Set(RESOURCE_ACCESS_REGISTRY.map((entry) => entry.actionId));
 const DELEGATED_KINDS: ReadonlySet<string> = new Set(DELEGATED_EXECUTION_REGISTRY_V1.map((entry) => entry.kind));
@@ -264,7 +264,7 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     if (row.authorizationKind !== undefined && DELEGATED_KINDS.has(row.authorizationKind) && !DELEGATED_APPROVAL_KINDS.has(row.authorizationKind) && row.mode === "require_approval") fail("unsupported_approval", `Human approval is not yet supported for ${row.authorizationKind}; choose allow or deny.`);
     validateMode(row.id, row.mode);
     if ("appliesIn" in row) validatePolicySemantics(row);
-    const valueComplexity = validateMatchers(row.id, row.paramMatchers);
+    const valueComplexity = validateMatchers(row);
     if (row.paramMatchers.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule) fail("complexity_limit", `Rule ${row.id} supports at most ${CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatchersPerRule} active matchers.`);
     matcherCount += row.paramMatchers.length;
     regexCount += row.paramMatchers.filter((matcher) => matcher.op === "regex").length;
@@ -369,19 +369,22 @@ function validateScope(id: string, appliesIn: string, sessionId: string | undefi
 }
 
 function validateTarget(id: string, target: CurrentPolicyTargetV1): void { const code = currentPolicyTargetIssueV1(target); if (code) fail(code, `Rule ${id} has an invalid target.`); }
-function validateMatchers(id: string, matchers: readonly CurrentPolicyMatcherV1[]): { bytes: number; nodes: number } {
+function validateMatchers(row: SnapshotRule): { bytes: number; nodes: number } {
   const identities = new Set<string>();
   let bytes = 0;
   let nodes = 0;
-  for (const [index, matcher] of matchers.entries()) {
-    if (!MATCHER_OPS.has(matcher.op)) fail("unknown_matcher", `Rule ${id} matcher ${index} has an unknown operator.`);
+  for (const [index, matcher] of row.paramMatchers.entries()) {
+    if (!MATCHER_OPS.has(matcher.op)) fail("unknown_matcher", `Rule ${row.id} matcher ${index} has an unknown operator.`);
+    if (matcher.op === "suffix" && (row.authorizationKind !== "egress.connect" || matcher.path !== "destination.host" || !row.sourcePath?.startsWith("builder/"))) {
+      fail("unknown_matcher", `Rule ${row.id} matcher ${index} uses an authored-only operator outside canonical egress authoring.`);
+    }
     const path = parseMatcherPath(matcher.path);
-    if (path.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPathSegments) fail("complexity_limit", `Rule ${id} matcher ${index} exceeds the path segment limit.`);
+    if (path.length > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxPathSegments) fail("complexity_limit", `Rule ${row.id} matcher ${index} exceeds the path segment limit.`);
     const matcherIssues = currentPolicyMatcherIssuesV1(matcher);
-    if (matcherIssues.length) fail(matcherIssues[0] === "unsafe_regex" ? "non_lossless_regex" : matcherIssues[0], `Rule ${id} matcher ${index} cannot be translated losslessly by the current input contract.`);
+    if (matcherIssues.length) fail(matcherIssues[0] === "unsafe_regex" ? "non_lossless_regex" : matcherIssues[0], `Rule ${row.id} matcher ${index} cannot be translated losslessly by the current input contract.`);
     if (Object.hasOwn(matcher, "value")) { const complexity = currentPolicyValueComplexityV1(matcher.value)!; bytes += complexity.bytes; nodes += complexity.nodes; }
     const identity = canonicalJson(matcher);
-    if (identities.has(identity)) fail("duplicate_matcher", `Rule ${id} matcher ${index} is duplicated.`);
+    if (identities.has(identity)) fail("duplicate_matcher", `Rule ${row.id} matcher ${index} is duplicated.`);
     identities.add(identity);
   }
   return { bytes, nodes };
@@ -444,6 +447,11 @@ function buildPolicySource(
     row.matchers.forEach((matcher, matcherIndex) => {
       if (matcher.op === "exists" || matcher.op === "not_exists") {
         lines.push(`path_${index}_${matcherIndex}_found if { _ = ${regoPath(matcher.segments)} }`);
+      }
+      if (matcher.op === "suffix") {
+        const path = regoPath(matcher.segments), value = canonicalJson(matcher.value);
+        lines.push(`host_suffix_${index}_${matcherIndex} if { ${path} == ${value} }`);
+        lines.push(`host_suffix_${index}_${matcherIndex} if { is_string(${path}); endswith(${path}, concat("", [".", ${value}])) }`);
       }
     });
     lines.push(`${name} := ${regoRow(row)} if {`);
@@ -551,6 +559,7 @@ function matcherCondition(matcher: NormalizedRule["matchers"][number], rowIndex:
     case "regex": return `is_string(${path}); regex.match(${value()}, ${path})`;
     case "in": return `${path} in ${value()}`;
     case "not_in": return `not ${path} in ${value()}`;
+    case "suffix": return `host_suffix_${rowIndex}_${matcherIndex}`;
     case "gt": return `is_number(${path}); ${path} > ${value()}`;
     case "gte": return `is_number(${path}); ${path} >= ${value()}`;
     case "lt": return `is_number(${path}); ${path} < ${value()}`;
@@ -694,6 +703,9 @@ else := org if { org != null }
 else := team if { team != null }
 else := null if { true }
 
+authored_or_default(strict, fallback) := strict if { strict != null }
+else := fallback if { true }
+
 base_winner(strict, plugin, builtin, risk, bundle) := strict if { strict != null }
 else := plugin if { input.kind != "tool.builtin"; plugin != null }
 else := builtin if { input.kind == "tool.builtin"; builtin != null }
@@ -709,12 +721,21 @@ else := {"id":"standard.privilege_expansion","mode":"deny","modeRank":3,"source"
 else := {"id":"standard.execution.deny","mode":"deny","modeRank":3,"source":"execution"} if { true }
 
 static_layers := layers if {
-  input.kind in {"delegation.create","agent.signal","sandbox.capability","credential.use","credential.delegate","egress.connect"}
+  input.kind in {"delegation.create","agent.signal","sandbox.capability","credential.use","credential.delegate"}
   org := org_winner
   team := team_winner
   override := override_winner
   strict := strict_winner(org, team)
   base := strict_winner(strict, execution_default)
+  layers := {"org":org,"team":team,"override":override,"base":base}
+}
+static_layers := layers if {
+  input.kind == "egress.connect"
+  org := org_winner
+  team := team_winner
+  override := override_winner
+  strict := strict_winner(org, team)
+  base := authored_or_default(strict, execution_default)
   layers := {"org":org,"team":team,"override":override,"base":base}
 }
 static_layers := layers if {

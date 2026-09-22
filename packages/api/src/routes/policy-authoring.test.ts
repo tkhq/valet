@@ -93,7 +93,7 @@ describe("canonical policy authoring routes", () => {
     expect(body.contexts["api.route"].targets).toContainEqual(expect.objectContaining({ actionId: "api_sessions.post_sessions", template: "/api/sessions" }));
     expect(body.contexts["resource.access"].targets).toContainEqual(expect.objectContaining({ actionId: "resource_artifact.publish", resourceKind: "artifact", operation: "publish" }));
     expect(body.contexts["credential.delegate"]).toMatchObject({ publishable: true, targets: [expect.objectContaining({ actionId: "credential.delegate" })] });
-    expect(body.contexts["egress.connect"].publishable).toBe(false);
+    expect(body.contexts["egress.connect"].publishable).toBe(true);
   });
 
   it.each([["api.route", "api_sessions.post_sessions"], ["resource.access", "resource_artifact.publish"], ["delegation.create", "delegation.create"], ["agent.signal", "agent.cancel"], ["sandbox.capability", "sandbox.provision"], ["credential.use", "credential.repository"], ["credential.delegate", "credential.delegate"]] as const)("publishes a reviewed %s candidate", async (context, actionId) => {

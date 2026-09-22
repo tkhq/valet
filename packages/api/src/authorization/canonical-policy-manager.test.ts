@@ -17,10 +17,15 @@ afterEach(async () => { await pg?.cleanup(); pg = undefined; });
 async function setup() { pg = await freshTestPgDb(); return pg.appDb; }
 const bundle = (value: string) => ({ manifestJson: value, files: [] });
 
-async function seedApprovedCandidate(db: Awaited<ReturnType<typeof setup>>, manager: CanonicalPolicyBundleManager, documentId = "integrity-doc", context: "tool.action" | "api.route" | "resource.access" = "tool.action") {
+async function seedApprovedCandidate(db: Awaited<ReturnType<typeof setup>>, manager: CanonicalPolicyBundleManager, documentId = "integrity-doc", context: "tool.action" | "api.route" | "resource.access" | "egress.connect" = "tool.action") {
   const descriptorTarget = context === "tool.action" ? undefined : POLICY_CONTEXTS[context].targets[0]?.actionId;
   if (context !== "tool.action" && !descriptorTarget) throw new Error(`Missing ${context} test descriptor.`);
-  const draft: PolicyDraftV1 = { schemaVersion: 1, draftId: documentId, rules: [{ ruleId: "authored", context, authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": descriptorTarget ?? "gmail.send" }, matcherGroups: context === "tool.action" ? [{ id: "group", mode: "all", matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq", value: "safe" }] }] : [], effect: "deny", appliesIn: context === "tool.action" ? "any" : undefined, obligations: [], description: "", metadata: {} }] };
+  const matcherGroups = context === "tool.action"
+    ? [{ id: "group", mode: "all" as const, matchers: [{ id: "matcher", field: "parameters.kind", operator: "eq" as const, value: "safe" }] }]
+    : context === "egress.connect"
+      ? [{ id: "group", mode: "all" as const, matchers: [{ id: "host", field: "parameters.destination.host", operator: "suffix" as const, value: "example.com" }] }]
+      : [];
+  const draft: PolicyDraftV1 = { schemaVersion: 1, draftId: documentId, rules: [{ ruleId: "authored", context, authority: "organization", owner: { kind: "org", id: "org-b" }, subjects: ["org"], target: { "action.id": descriptorTarget ?? "gmail.send" }, matcherGroups, effect: "deny", appliesIn: context === "tool.action" ? "any" : undefined, obligations: [], description: "", metadata: {} }] };
   const normalized = normalizePolicyDraft(draft);
   const snapshot = projectDraftToCurrentSnapshot(normalized, "org-b");
   const built = buildCurrentPolicySource({ ...snapshot, builtinDefaults: [] });
@@ -359,7 +364,7 @@ describe("canonical policy readiness", () => {
   }, 120_000);
 
 
-  it.each(["api.route", "resource.access"] as const)("migrates a %s candidate A to B to C, rolls back, and reapplies", async (context) => {
+  it.each(["api.route", "resource.access", "egress.connect"] as const)("migrates a %s candidate A to B to C, rolls back, and reapplies", async (context) => {
     const db = await setup();
     await db.insert(orgs).values({ id: "org-b", name: "B", createdAt: 1 });
     const manager = new CanonicalPolicyBundleManager(db, new Map(), () => 10);

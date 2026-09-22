@@ -5,9 +5,11 @@ import type { ParamMatcherOp } from "../../policies/matchers.js";
 export type CurrentPolicyMode = ApprovalMode;
 export type CurrentPolicyAppliesIn = "any" | "session" | "workflow";
 
+export type CurrentPolicyMatcherOpV1 = ParamMatcherOp | "suffix";
+
 export interface CurrentPolicyMatcherV1 {
   readonly path: string;
-  readonly op: ParamMatcherOp;
+  readonly op: CurrentPolicyMatcherOpV1;
   readonly value?: JsonValue;
 }
 

@@ -74,3 +74,5 @@ Explicit proxy variables are client configuration. They are not the security bou
 ## Activation invariants
 
 Cleanup failure keeps the sandbox ineffective and reports an error. A restart cannot downgrade a requested sandbox to unmanaged. Callback registration requires the observed effective state and server-bound policy identity. Revocation occurs when observation, cleanup, replacement, or teardown loses that boundary. The policy bundle keeps `egress.connect` denied by default. Only an explicit published allow rule can permit the canonical destination.
+
+Canonical authoring supports destination scheme, host, port, and destination class conditions. Host conditions support exact values and DNS-label suffixes. The compiler emits suffix checks in generated Rego. The legacy `action_policies` matcher and wire contracts do not support the `suffix` operator. Preview, publication, release migration, and rollback preserve the authored rule and its bundle identity.
