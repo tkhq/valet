@@ -1012,22 +1012,21 @@ describe("pg app schema + migrations", () => {
       expect(missing.map((r) => r.describe)).toEqual([]);
     });
 
+    it("boots a legacy PGlite schema without delegated-execution indexes or generic approval scope", async () => {
+      await db.query('DROP INDEX "credential_delegations_active_uniqueness", "credential_delegations_child_repo"');
+      await db.query('ALTER TABLE "canonical_approval_resolutions" DROP COLUMN "scope_id" CASCADE, DROP COLUMN "scope_kind"');
+      await db.query('ALTER TABLE "canonical_approval_resolutions" ADD CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int = 1)');
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
     it("backfills valid legacy watches and diagnoses invalid edges", async () => {
       const now = Date.now();
       await db.query('DROP INDEX "delegation_envelopes_legacy_backfill"');
-      await db.query(`INSERT INTO engine_sessions
-        (id,owner_type,owner_id,user_id,org_id,workspace,purpose,status,parent_session_id,parent_thread_id,created_at,updated_at)
-        VALUES ('legacy-parent','user','legacy-user','legacy-user','legacy-org','/tmp','interactive','active',NULL,NULL,$1,$1),
-        ('legacy-child','user','legacy-user','legacy-user','legacy-org','/tmp','child','active','legacy-parent','legacy-thread',$1,$1)`, [now]);
-      await db.query(`INSERT INTO engine_threads (id,session_id,key,status,queue_mode,created_at,updated_at)
-        VALUES ('legacy-thread','legacy-parent','web:default','idle','followup',$1,$1)`, [now]);
-      await db.query(`INSERT INTO child_watches
-        (child_session_id,queue_item_id,parent_session_id,parent_thread_id,actor_user_id,org_id,settled,created_at)
-        VALUES ('legacy-child','legacy-item','legacy-parent','legacy-thread','legacy-user','legacy-org',false,$1),
-        ('legacy-invalid','invalid-item','legacy-parent','legacy-thread','legacy-user','legacy-org',false,$1)`, [now]);
-
+      await db.query(`INSERT INTO engine_sessions (id,owner_type,owner_id,user_id,org_id,workspace,purpose,status,parent_session_id,parent_thread_id,created_at,updated_at) VALUES ('legacy-parent','user','legacy-user','legacy-user','legacy-org','/tmp','interactive','active',NULL,NULL,$1,$1), ('legacy-child','user','legacy-user','legacy-user','legacy-org','/tmp','child','active','legacy-parent','legacy-thread',$1,$1)`, [now]);
+      await db.query(`INSERT INTO engine_threads (id,session_id,key,status,queue_mode,created_at,updated_at) VALUES ('legacy-thread','legacy-parent','web:default','idle','followup',$1,$1)`, [now]);
+      await db.query(`INSERT INTO child_watches (child_session_id,queue_item_id,parent_session_id,parent_thread_id,actor_user_id,org_id,settled,created_at) VALUES ('legacy-child','legacy-item','legacy-parent','legacy-thread','legacy-user','legacy-org',false,$1), ('legacy-invalid','invalid-item','legacy-parent','legacy-thread','legacy-user','legacy-org',false,$1)`, [now]);
       await applyAppMigrations(db);
-
       const envelope = await db.query("SELECT envelope FROM delegation_envelopes WHERE child_session_id = 'legacy-child'");
       expect(envelope.rows[0]?.["envelope"]).toMatchObject({ childSessionId: "legacy-child", capabilities: ["agent.signal"] });
       const diagnostic = await db.query("SELECT reason, detail FROM event_drop_log WHERE conversation_key = 'invalid-item'");
