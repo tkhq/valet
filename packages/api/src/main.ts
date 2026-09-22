@@ -501,7 +501,13 @@ async function runBootChain(): Promise<void> {
     // shapes exit here directly — same outcome, done locally.
     try {
       await reconcileInstanceConfig(
-        { db: providers.db, configPath: process.env.VALET_CONFIG, sourceService: providers.prebuildService },
+        {
+          db: providers.db,
+          configPath: process.env.VALET_CONFIG,
+          sourceService: providers.prebuildService,
+          credentials: providers.engineCredentials,
+          env: process.env,
+        },
         instanceConfig,
       );
     } catch (e) {
