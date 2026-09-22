@@ -190,14 +190,14 @@ describe("repository credential delegation", () => {
     expect(grants).toHaveLength(2);
     expect(grants.filter((row) => row.revokedAt === null)).toHaveLength(1);
     const active = grants.find((row) => row.revokedAt === null)!;
-    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", startedAt: 0, finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
     await expect(createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation")).resolves.toBeUndefined();
     await api.providers.db.delete(credentialDelegations).where(eq(credentialDelegations.id, active.id));
     await api.providers.db.insert(credentialDelegations).values({ ...active, credentialId: "mismatched" });
-    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", startedAt: 0, finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
     await expect(createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation")).rejects.toThrow("credential_delegation_recovery_ambiguous");
     await api.providers.db.delete(credentialDelegations).where(eq(credentialDelegations.id, active.id));
-    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", startedAt: 0, finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
     await createGrant(now + 60_000, { type: "user", id: "local-user" }, "replacement-operation");
     const recovered = (await api.providers.db.select().from(credentialDelegations)).find((row) => row.decisionId === active.decisionId);
     expect(recovered).toMatchObject({ issuedAt: now + 2, expiresAt: now + 2 + DAY_MS });

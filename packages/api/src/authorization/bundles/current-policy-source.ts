@@ -528,6 +528,8 @@ function ruleConditions(row: NormalizedRule, rowIndex: number): string[] {
 }
 
 function ruleApplicabilityConditions(row: NormalizedRule): string[] {
+  // Kind and target are unconditional. An empty Rego body is vacuously true
+  // and would make a malformed authored rule global.
   return [
     row.authorizationKind === "tool.action" ? `input.kind in {"tool.action","workflow.action"}` : `input.kind == ${canonicalJson(row.authorizationKind)}`,
     row.ownerType === "team" ? `input.subject.principal.type == "team"` : row.ownerType === "personal" ? `input.subject.principal.type == "user"` : undefined,

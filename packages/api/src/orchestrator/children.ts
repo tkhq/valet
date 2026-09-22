@@ -27,14 +27,13 @@ import {
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
-  type PolicyDecision,
   type Principal,
   type SessionStore,
   type SpawnChildRequest,
   type SpawnChildResult,
   type SubmissionResult,
 } from "@valet/engine";
-import { adaptAgentSignal, adaptDelegationCreate, assertOneLevelDelegationEnvelope, buildDelegatedExecutionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, type DelegationEnvelopeV1, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { adaptAgentSignal, adaptDelegationCreate, assertOneLevelDelegationEnvelope, buildDelegatedExecutionObligationPlan, canonicalAuthorizationJson, type DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, delegationEnvelopes, eventDropLog, securityCells, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
@@ -50,6 +49,7 @@ import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
+import { canonicalExecutionDecision } from "../authorization/canonical-execution-decision.js";
 import { completeCanonicalExecution, reserveCanonicalExecution } from "../authorization/canonical-execution-lifecycle.js";
 import { authorizeRepositoryCredentialDelegation, CredentialDelegationInvalidError, revokeChildCredentialDelegations } from "../authorization/credential-delegation.js";
 
@@ -238,18 +238,11 @@ function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
 
 export class NestedDelegationUnsupportedError extends Error {
   readonly code = "nested_delegation_unsupported";
-  constructor() {
-    super("Nested delegation is unsupported. Child sessions cannot spawn tasks.");
-    this.name = "NestedDelegationUnsupportedError";
-  }
+  constructor() { super("Nested delegation is unsupported. Child sessions cannot spawn tasks."); this.name = "NestedDelegationUnsupportedError"; }
 }
-
 export class DelegationEnvelopeIntegrityError extends Error {
   readonly code = "delegation_envelope_integrity";
-  constructor(readonly reason: "missing" | "invalid", readonly childSessionId: string) {
-    super(`Delegation envelope is ${reason} for child ${childSessionId}. Repair the delegation edge before rearming its watch.`);
-    this.name = "DelegationEnvelopeIntegrityError";
-  }
+  constructor(readonly reason: "missing" | "invalid", readonly childSessionId: string) { super(`Delegation envelope is ${reason} for child ${childSessionId}. Repair the delegation edge before rearming its watch.`); this.name = "DelegationEnvelopeIntegrityError"; }
 }
 
 class DelegationPolicyDeniedError extends Error {
@@ -271,29 +264,6 @@ function parseDelegationReplay(value: unknown): DelegationReplay {
   return { childSessionId: row.childSessionId, queueItemId: row.queueItemId, ...(warnings ? { warnings } : {}) };
 }
 
-function executionDecision(envelope: PolicyDecisionEnvelope, decisionId: string, executionInputDigest: string): PolicyDecision {
-  return {
-    mode: envelope.decision.effect,
-    provenance: { baseMode: envelope.decision.effect, source: "canonical_service" },
-    canonical: {
-      reasonCode: envelope.decision.reasonCode,
-      obligations: envelope.decision.obligations,
-      redactions: envelope.decision.redactions,
-      ...(envelope.decision.approvalRequirement ? { approvalRequirement: envelope.decision.approvalRequirement } : {}),
-      requestId: envelope.requestId,
-      requestSubjectDigest: envelope.requestSubjectDigest,
-      inputDigest: envelope.inputDigest,
-      policyDigest: envelope.policyDigest,
-      sourceBundleDigest: envelope.sourceBundleDigest,
-      evaluatorKind: envelope.evaluator.kind,
-      engineDigest: envelope.evaluator.engineDigest,
-      decisionDigest: decisionDigestOf(envelope.decision),
-      executionInputDigest,
-      decisionId,
-    },
-  };
-}
-
 async function authorizeAgentSignal(deps: ChildrenDeps, input: { parentSessionId: string; parentThreadId: string; childSessionId: string; actorUserId?: string; fallback?: { orgId: string; userId: string; owner: Principal }; operation: "interrupt" | "queue" | "steer" | "cancel" | "status" | "read" | "approve" }): Promise<void> {
   if (!deps.canonicalAuthorizationService) throw new Error("Canonical agent signal authorization is not wired.");
   const parent = await deps.engineStore.getSession(input.parentSessionId);
@@ -306,7 +276,7 @@ async function authorizeAgentSignal(deps: ChildrenDeps, input: { parentSessionId
   if (!edge) throw new DelegationEnvelopeIntegrityError("missing", input.childSessionId);
   if (!identity) throw new DelegationEnvelopeIntegrityError("invalid", input.childSessionId);
   try {
-    if (edge.orgId !== identity.orgId || edge.parentSessionId !== input.parentSessionId || edge.envelope.parentThreadId !== input.parentThreadId || edge.envelope.childSessionId !== input.childSessionId) throw new Error("invalid delegation edge");
+    if (edge.orgId !== identity.orgId || edge.parentSessionId !== input.parentSessionId || edge.envelope.childSessionId !== input.childSessionId) throw new Error("invalid delegation edge");
     assertOneLevelDelegationEnvelope(edge.envelope, parentRows[0]?.envelope);
   } catch {
     throw new DelegationEnvelopeIntegrityError("invalid", input.childSessionId);
@@ -322,14 +292,7 @@ async function authorizeAgentSignal(deps: ChildrenDeps, input: { parentSessionId
   }
 }
 
-function requestedCapabilities(req: SpawnChildRequest): string[] {
-  return [
-    "agent.signal",
-    ...(req.repo ? ["repository.read"] : []),
-    ...(req.profile === "full" ? ["sandbox.full"] : []),
-    ...(req.docker ? ["sandbox.docker"] : []),
-  ];
-}
+function requestedCapabilities(req: SpawnChildRequest): string[] { return ["agent.signal", ...(req.repo ? ["repository.read"] : []), ...(req.profile === "full" ? ["sandbox.full"] : []), ...(req.docker ? ["sandbox.docker"] : [])]; }
 
 /**
  * Builds the `ChildSpawner` handed to orchestrator sessions via
@@ -426,7 +389,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
     const decisionId = canonicalDecisionId(orgId, adapted.request.idempotencyKey);
     const executionInputDigest = createHash("sha256").update(adapted.canonicalBytes).digest("hex");
-    const policyDecision = executionDecision(authorization, decisionId, executionInputDigest), workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
+    const policyDecision = canonicalExecutionDecision(authorization, decisionId, executionInputDigest), workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
     const delegationEnvelope: DelegationEnvelopeV1 = {
       schemaVersion: 1,
       organizationId: orgId,
@@ -467,7 +430,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       if (envelopes.length === 0 && sessions.length === 0 && watches.length === 0 && repositories.length === 0 && engineRows.length === 0 && queueRows.length === 0 && claimIsConsistent) return { kind: "absent" };
       if (envelopes.length === 1 && sessions.length === 1 && watches.length === 1 && engineRows.length === 1 && claimIsConsistent && repositoryMatches
         && edge.orgId === orgId && edge.parentSessionId === ctx.parentSessionId && edge.decisionId === decisionId && canonicalAuthorizationJson(edge.envelope) === canonicalAuthorizationJson(delegationEnvelope)
-        && session.orgId === orgId && session.userId === ctx.actorUserId && session.workspace === workspace && session.ownerType === ctx.owner.type && session.ownerId === ctx.owner.id
+        && session.orgId === orgId && session.userId === ctx.actorUserId && session.workspace === workspace && session.title === (req.title ?? null) && session.ownerType === ctx.owner.type && session.ownerId === ctx.owner.id
         && watch.parentSessionId === ctx.parentSessionId && watch.parentThreadId === ctx.parentThreadId && watch.actorUserId === ctx.actorUserId && watch.orgId === orgId
         && engine.org_id === orgId && engine.user_id === ctx.actorUserId && engine.workspace === workspace && engine.purpose === "child" && engine.owner_type === ctx.owner.type && engine.owner_id === ctx.owner.id && engine.parent_session_id === ctx.parentSessionId && engine.parent_thread_id === ctx.parentThreadId
         && queue?.session_id === childSessionId && queue.content === JSON.stringify(req.prompt) && queue.role === (req.role ?? null)) return { kind: "completed", result: { childSessionId, queueItemId: watch.queueItemId } };
@@ -1338,7 +1301,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       .limit(1);
     const child = childRows[0];
     if (!child || child.status === "deleted") return null;
-    await authorizeAgentSignal(deps, { parentSessionId: ctx.parentSessionId, parentThreadId: watchRow.parentThreadId, childSessionId: req.childSessionId, actorUserId: ctx.actorUserId, operation: req.interrupt ? "steer" : "queue" });
+    await authorizeAgentSignal(deps, { parentSessionId: ctx.parentSessionId, parentThreadId: ctx.parentThreadId, childSessionId: req.childSessionId, actorUserId: ctx.actorUserId, operation: req.interrupt ? "steer" : "queue" });
 
     // A settled child rejoins the active-children population — enforce the
     // same caps a spawn pays, BEFORE waking anything. A steer/followup to a
@@ -1355,7 +1318,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         await authorizeRepositoryCredentialDelegation({
           db: deps.db, authorization, orgId: watchRow.orgId,
           actorUserId: ctx.actorUserId, owner: { type: child.ownerType, id: child.ownerId },
-          parentSessionId: ctx.parentSessionId, parentThreadId: watchRow.parentThreadId,
+          parentSessionId: ctx.parentSessionId, parentThreadId: ctx.parentThreadId,
           parentOperationId, childSessionId: req.childSessionId,
           binding: { host: repository.host, fullName: repository.fullName, cloneUrl: repository.cloneUrl, ref: repository.ref ?? undefined, auth: repository.auth },
         });
@@ -1390,6 +1353,8 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       .update(childWatches)
       .set({
         queueItemId: receipt.queueItemId,
+        parentThreadId: ctx.parentThreadId,
+        actorUserId: ctx.actorUserId,
         settled: false,
         dismissedAt: null,
       })
@@ -1399,7 +1364,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       childSessionId: req.childSessionId,
       queueItemId: receipt.queueItemId,
       parentSessionId: ctx.parentSessionId,
-      parentThreadId: watchRow.parentThreadId,
+      parentThreadId: ctx.parentThreadId,
       actorUserId: ctx.actorUserId,
       orgId: watchRow.orgId,
     });

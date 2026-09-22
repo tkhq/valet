@@ -236,7 +236,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       FROM child_watches w LEFT JOIN engine_sessions c ON c.id = w.child_session_id
       LEFT JOIN engine_sessions p ON p.id = w.parent_session_id LEFT JOIN engine_threads t ON t.id = w.parent_thread_id
       LEFT JOIN delegation_envelopes e ON e.child_session_id = w.child_session_id
-      WHERE NOT w.settled AND e.child_session_id IS NULL
+      WHERE e.child_session_id IS NULL
     ), valid AS (
       SELECT * FROM candidates WHERE child_org_id = org_id AND parent_org_id = org_id
         AND child_parent_id = parent_session_id AND child_parent_thread_id = parent_thread_id
@@ -253,11 +253,12 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
         'legacy-watch:' || md5(child_session_id),created_at FROM valid ON CONFLICT DO NOTHING RETURNING child_session_id
     ), diagnosed AS (
       INSERT INTO event_drop_log (id,org_id,reason,conversation_key,detail,created_at)
-      SELECT 'delegation-integrity:' || md5(child_session_id),org_id,'delegation_integrity',queue_item_id,
+      SELECT 'delegation-integrity-migration:' || md5(child_session_id),org_id,'delegation_integrity',queue_item_id,
         'legacy_delegation_envelope_invalid: unsettled child watch does not match a root-to-child engine edge',created_at
       FROM candidates WHERE child_session_id NOT IN (SELECT child_session_id FROM valid)
       ON CONFLICT DO NOTHING RETURNING id
-    ) SELECT child_session_id FROM inserted UNION ALL SELECT id FROM diagnosed`,
+    ) SELECT child_session_id AS id, 'envelope' AS kind FROM inserted
+      UNION ALL SELECT id, 'diagnostic' AS kind FROM diagnosed`,
   },
   {
     describe: "credential delegations table",
@@ -1604,13 +1605,14 @@ async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
         // during a rolling update, the previous api pod's.
         await tx.query(`SET LOCAL lock_timeout = '${REPAIR_LOCK_TIMEOUT}'`);
         await tx.query(repair.sql);
-        if (!repair.backfill) return 0;
-        const result = await tx.query(repair.backfill);
-        return result.rows.length;
+        if (!repair.backfill) return undefined;
+        return (await tx.query(repair.backfill)).rows;
       });
-      console.log(
-        `schema repair: added ${repair.describe}` + (repair.backfill ? ` (backfilled ${backfilled} row(s))` : ""),
-      );
+      const kinds = backfilled?.map((row) => row.kind);
+      const detail = kinds?.some(Boolean)
+        ? ` (backfilled ${kinds.filter((kind) => kind === "envelope").length} envelope(s), wrote ${kinds.filter((kind) => kind === "diagnostic").length} diagnostic(s))`
+        : backfilled ? ` (backfilled ${backfilled.length} row(s))` : "";
+      console.log(`schema repair: added ${repair.describe}${detail}`);
       return;
     } catch (err) {
       if (!isPgLockTimeout(err)) throw err;

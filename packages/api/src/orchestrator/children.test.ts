@@ -280,20 +280,24 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
-    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null });
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", startedAt: Date.now(), finishedAt: null });
+    await expect(buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("indeterminate_execution");
+    await api.providers.db.update(authorizationExecutionAttempts).set({ startedAt: 0 });
     const replay = await buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context);
     expect(replay).toEqual(result);
     const [edge] = await api.providers.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
     await api.providers.db.delete(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
     await api.providers.db.insert(delegationEnvelopes).values({ ...edge!, envelope: { ...edge!.envelope, actorUserId: "other-user" } });
-    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null });
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", startedAt: 0, finishedAt: null });
     await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
     await api.providers.db.delete(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
     await api.providers.db.insert(delegationEnvelopes).values(edge!);
     await api.providers.db.update(securityCells).set({ attempts: 2 });
+    await api.providers.db.update(authorizationExecutionAttempts).set({ startedAt: 0 });
     await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
     await api.providers.db.update(securityCells).set({ attempts: 1 });
     await api.providers.db.delete(childWatches).where(eq(childWatches.childSessionId, result.childSessionId));
+    await api.providers.db.update(authorizationExecutionAttempts).set({ startedAt: 0 });
     await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
   });
 
@@ -2244,7 +2248,7 @@ describe("buildChildSender", () => {
     const watcher = new ChildWatcher(deps);
     const { engineStore, db } = api.providers;
 
-    const { parentThread, childThread } = await seedChild(api, {
+    const { parent, childThread } = await seedChild(api, {
       childId: "child-again",
       parentId: "parent-again",
       settled: true,
@@ -2260,8 +2264,8 @@ describe("buildChildSender", () => {
       .where(eq(childWatches.childSessionId, "child-again"));
 
     const sender = buildChildSender(deps, watcher);
-    // Send from a DIFFERENT thread than the spawn origin: the durable edge
-    // (and the settlement signal) must stay with the spawning thread.
+    // Send from a different thread than the spawn origin. The wake grant and
+    // settlement route must bind to this sending turn.
     const res = await sender(
       { childSessionId: "child-again", message: "one more thing: add tests" },
       { parentSessionId: "parent-again", parentThreadId: "th-elsewhere", actorUserId: "local-user", parentOperationId: "send-operation" },
@@ -2272,9 +2276,9 @@ describe("buildChildSender", () => {
     expect(rows[0]?.settled).toBe(false);
     expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
     expect(rows[0]?.dismissedAt).toBeNull();
-    expect(rows[0]?.parentThreadId).toBe(parentThread.id);
+    expect(rows[0]?.parentThreadId).toBe("th-elsewhere");
     const [grant] = await db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, "child-again"));
-    expect(grant).toMatchObject({ parentOperationId: "send-operation", revokedAt: null });
+    expect(grant).toMatchObject({ parentThreadId: "th-elsewhere", parentOperationId: "send-operation", revokedAt: null });
 
     await engineStore.settleUnclaimed("child-again", childThread.id, res?.queueItemId ?? "", { outcome: "completed" });
     await waitFor(async () => {
@@ -2286,7 +2290,7 @@ describe("buildChildSender", () => {
     expect(signals).toHaveLength(1);
     expect((await db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, "child-again")))[0]?.revokedAt).not.toBeNull();
     expect(signals[0]?.dispatchId).toBe(`child-again:settled:child-again:${res?.queueItemId}`);
-    expect(signals[0]?.threadId).toBe(parentThread.id);
+    expect(signals[0]?.threadId).toBe(parent.thread("th-elsewhere").id);
   });
 
   it("denies settled-child repository re-delegation before wake", async () => {

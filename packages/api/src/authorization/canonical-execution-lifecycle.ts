@@ -1,15 +1,18 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { PolicyDecision } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { authorizationDecisions, authorizationExecutionAttempts } from "../schema/index.js";
 
 export const INDETERMINATE_EXECUTION = "indeterminate_execution: the action may have run. Do not retry automatically.";
+const RECOVERY_LEASE_MS = 30_000;
 type Attempt = typeof authorizationExecutionAttempts.$inferSelect;
 export type DurableReplay<T> = { kind: "execute"; attemptId: string } | { kind: "completed"; result: T } | { kind: "failed"; error: string; result?: T } | { kind: "indeterminate"; error: string };
 export type DurableSettlement<T> = { outcome: "completed"; result: T } | { outcome: "failed"; error: string; result?: T };
 
 export type StartedRecovery<T> = { kind: "completed"; result: T } | { kind: "absent" } | { kind: "ambiguous"; error: string };
 
+/** Recovery may return `absent` only when downstream unique constraints prevent
+ * two connections from creating the same authoritative effect. */
 export async function reserveCanonicalExecution<T>(db: AppDb, decision: PolicyDecision, executionInputDigest: string, parse: (value: unknown) => T, now: () => number, recover?: (tx: AppDb) => Promise<StartedRecovery<T>>): Promise<DurableReplay<T>> {
   const identity = await canonicalExecutionIdentity(db, decision, executionInputDigest);
   const attemptId = `attempt:${identity.decisionId.slice("decision:".length)}`;
@@ -17,7 +20,8 @@ export async function reserveCanonicalExecution<T>(db: AppDb, decision: PolicyDe
   if (inserted[0]) return { kind: "execute", attemptId };
   if (!recover) return replay(await loadAttempt(db, attemptId), identity, parse);
   return db.transaction(async (tx) => {
-    const locked = await tx.update(authorizationExecutionAttempts).set({ startedAt: now() }).where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.outcome, "started"))).returning({ attemptId: authorizationExecutionAttempts.attemptId });
+    const recoveryNow = now();
+    const locked = await tx.update(authorizationExecutionAttempts).set({ startedAt: recoveryNow }).where(and(eq(authorizationExecutionAttempts.attemptId, attemptId), eq(authorizationExecutionAttempts.outcome, "started"), sql`${authorizationExecutionAttempts.startedAt} <= ${recoveryNow - RECOVERY_LEASE_MS}`)).returning({ attemptId: authorizationExecutionAttempts.attemptId });
     if (!locked[0]) return replay(await loadAttempt(tx, attemptId), identity, parse);
     const recovered = await recover(tx);
     if (recovered.kind === "completed") {

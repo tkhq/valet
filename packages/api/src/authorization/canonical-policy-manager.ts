@@ -79,6 +79,11 @@ export class CanonicalPolicySourceReadOnlyError extends Error {
   }
 }
 
+export class CanonicalPolicyDelegatedRulesDroppedError extends Error {
+  readonly code = "canonical_policy_delegated_rules_dropped"; readonly statusCode = 409;
+  constructor(readonly ruleIds: readonly string[]) { super(`Publication would remove delegated deny rules: ${ruleIds.join(", ")}. Add rules for those delegated contexts to confirm replacement.`); this.name = "CanonicalPolicyDelegatedRulesDroppedError"; }
+}
+
 export class CanonicalPolicyConfigManagedError extends Error {
   readonly code = "canonical_policy_config_managed";
   readonly statusCode = 409;
@@ -100,6 +105,11 @@ export interface CanonicalReleaseMigrationInput {
 interface ReleasePointerSnapshot { readonly orgId: string; readonly digest: string; readonly generation: number }
 interface AuthoredLineage { readonly rootDigest: string; readonly documentId: string; readonly revision: number; readonly normalizedIdentity: string; readonly policyDigest: string; readonly engineDigest: string }
 interface ReleaseAuditSnapshot { readonly orgId: string | null; readonly params: unknown }
+const DELEGATED_CONTEXTS = new Set(["delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate", "egress.connect"]);
+function assertDelegatedDeniesPreserved(current: NormalizedPolicyDraftV1, next: NormalizedPolicyDraftV1): void {
+  const targeted = new Set(next.rules.map((rule) => rule.context)), dropped = current.rules.filter((rule) => rule.effect === "deny" && DELEGATED_CONTEXTS.has(rule.context) && !targeted.has(rule.context)).map((rule) => rule.ruleId).sort();
+  if (dropped.length) throw new CanonicalPolicyDelegatedRulesDroppedError(dropped);
+}
 
 export function sameConcurrentReleaseTarget(
   current: readonly ReleasePointerSnapshot[],
@@ -164,6 +174,15 @@ export class CanonicalPolicyBundleManager extends CanonicalPolicyBuildManager {
       const pointer = (await tx.select().from(policyActiveBundles).where(eq(policyActiveBundles.orgId, organizationId)).for("update").limit(1))[0];
       if (!pointer) throw new Error(`Canonical policy pointer for ${organizationId} is missing.`);
       if (pointer.digest === validated.sourceBundleDigest) return;
+      if (lineage) {
+        const active = (await tx.select().from(policyBundleLineage).where(and(eq(policyBundleLineage.orgId, organizationId), eq(policyBundleLineage.digest, pointer.digest))).limit(1))[0];
+        if (active?.source === "authored" && active.documentId && active.revision) {
+          const revision = (documentId: string, value: number) => tx.select().from(policyAuthoringRevisions).where(and(eq(policyAuthoringRevisions.orgId, organizationId), eq(policyAuthoringRevisions.documentId, documentId), eq(policyAuthoringRevisions.revision, value))).limit(1);
+          const [current, next] = await Promise.all([revision(active.documentId, active.revision), revision(lineage.documentId, lineage.revision)]);
+          if (!current[0] || !next[0]) throw new Error("Canonical authored policy revision is missing.");
+          assertDelegatedDeniesPreserved(normalizePolicyDraft(current[0].draft), normalizePolicyDraft(next[0].draft));
+        }
+      }
       await putBundle(tx, validated.sourceBundleDigest, bundle, this.now());
       if (lineage) await putLineage(tx, organizationId, validated.sourceBundleDigest, { ...lineage, rootDigest: validated.sourceBundleDigest });
       const changed = await tx.update(policyActiveBundles).set({ digest: validated.sourceBundleDigest, generation: pointer.generation + 1, activatedAt: this.now() }).where(and(eq(policyActiveBundles.orgId, organizationId), eq(policyActiveBundles.digest, pointer.digest), eq(policyActiveBundles.generation, pointer.generation))).returning({ orgId: policyActiveBundles.orgId });
