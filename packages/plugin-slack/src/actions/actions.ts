@@ -1,11 +1,19 @@
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import type {
-  ActionPlugin,
-  Credential,
-  PluginAction,
-  PluginActionContext,
-  PluginActionResult,
+import {
+  extractDownloadedPdf,
+  isPdfDocument,
+  isTextDocumentMime,
+  MAX_PDF_DOCUMENT_BYTES,
+  normalizeDocumentMime,
+  readResponseBytes,
+  readPdfCandidateResponse,
+  readResponseText,
+  type ActionPlugin,
+  type Credential,
+  type PluginAction,
+  type PluginActionContext,
+  type PluginActionResult,
 } from "@valet/engine";
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
@@ -683,20 +691,18 @@ const fetchFile = action(Type.Object({
 
     const res = await fetch(p.url, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: ctx.signal,
     });
     if (!res.ok) {
       return { success: false, error: `Failed to fetch file: ${res.status} ${res.statusText}` };
     }
 
-    const rawContentType = res.headers.get('content-type') || 'application/octet-stream';
-    const contentType = rawContentType.split(';')[0].trim();
+    const contentType = normalizeDocumentMime(res.headers.get('content-type') ?? undefined) || 'application/octet-stream';
     // Images up to 1MB get broadcast to the chat UI; larger ones return metadata only
     const MAX_IMAGE_DISPLAY = 1 * 1024 * 1024;
     const MAX_IMAGE_FETCH = 10 * 1024 * 1024;
     const MAX_TEXT_SIZE = 1 * 1024 * 1024;
-    // Matches the transport's document budget, so a PDF the inbound path
-    // would accept is not refused here.
-    const MAX_PDF_FETCH = 25 * 1024 * 1024;
+    const MAX_PDF_FETCH = MAX_PDF_DOCUMENT_BYTES;
 
     // Image files — return via the attachments pipeline so the user can see them in the chat UI
     if (contentType.startsWith('image/')) {
@@ -719,47 +725,35 @@ const fetchFile = action(Type.Object({
       };
     }
 
-    // Text files — return content directly
-    if (contentType.startsWith('text/') || contentType === 'application/json' || contentType === 'application/xml') {
-      const text = await res.text();
-      if (text.length > MAX_TEXT_SIZE) {
-        return { success: false, error: `File too large for text extraction (${Math.round(text.length / 1024)}KB). Max 1MB.` };
+    // Text files — return content directly. The type list lives in the engine.
+    if (isTextDocumentMime(contentType)) {
+      const downloaded = await readResponseText(res, MAX_TEXT_SIZE, ctx.signal);
+      if (!downloaded.ok) {
+        return { success: false, error: `File too large for text extraction (${Math.round(downloaded.size / 1024)}KB). Max 1MB.` };
       }
-      return { success: true, data: { content: text, mimetype: contentType } };
+      return { success: true, data: { content: downloaded.text, mimetype: contentType } };
     }
 
-    // PDFs — the host extracts the text, because no sandbox image carries a
-    // PDF tool and the extractor is a native binary that lives beside the api.
-    if (contentType === 'application/pdf') {
-      const buf = await res.arrayBuffer();
+    if (contentType === 'application/pdf' || contentType === 'application/octet-stream') {
       const filename = parsedUrl.pathname.split('/').pop() || 'document.pdf';
-      if (buf.byteLength > MAX_PDF_FETCH) {
-        return { success: false, error: `PDF too large (${Math.round(buf.byteLength / 1024 / 1024)}MB). Max 25MB.` };
-      }
-      if (!ctx.extractDocument) {
-        return {
-          success: false,
-          error: 'PDF text extraction is not available on this deployment. Ask the user to paste the relevant text, or to re-share the file so it is attached to the message.',
-        };
-      }
-      try {
-        const extracted = await ctx.extractDocument({
-          data: new Uint8Array(buf),
-          mimeType: contentType,
-          name: filename,
-        });
-        if (!extracted) {
-          return {
-            success: false,
-            error: `${filename} has no text layer — it is probably a scan or an image-only PDF. Ask the user for a text version, or for the specific figures you need.`,
-          };
+      let data: Uint8Array | undefined;
+      if (contentType === 'application/pdf') {
+        const downloaded = await readResponseBytes(res, MAX_PDF_FETCH, ctx.signal);
+        if (!downloaded.ok) {
+          return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
         }
-        return { success: true, data: { content: extracted.markdown, mimetype: contentType, filename } };
-      } catch (err) {
-        return {
-          success: false,
-          error: `Could not read ${filename}: ${err instanceof Error ? err.message : String(err)}`,
-        };
+        data = downloaded.data;
+      } else {
+        const candidate = await readPdfCandidateResponse(res, MAX_PDF_FETCH, ctx.signal);
+        if (candidate.kind === 'oversize') {
+          return { success: false, error: `PDF too large (${Math.round(candidate.size / 1024 / 1024)}MB). Max 25MB.` };
+        }
+        if (candidate.kind === 'pdf') data = candidate.data;
+      }
+      if (data && isPdfDocument(data)) {
+        const read = await extractDownloadedPdf({ data, name: filename, extractDocument: ctx.extractDocument, signal: ctx.signal });
+        if (!read.ok) return { success: false, error: read.error };
+        return { success: true, data: { content: read.content, mimetype: 'application/pdf', filename } };
       }
     }
 

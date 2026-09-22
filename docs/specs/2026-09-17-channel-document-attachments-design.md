@@ -113,6 +113,40 @@ metadata-only fallback:
 The metadata-only fallback stays for formats the api cannot read, with its
 note corrected to name PDFs as fetchable.
 
+## Shared document read
+
+`extractDownloadedPdf` (`packages/engine/src/document-text.ts`) is the one
+place that sends downloaded PDF bytes to `extractDocument`. A plugin does
+not grow a private PDF extractor branch.
+
+`readResponseBytes` reads a response stream only up to its byte cap. It
+checks each chunk when Content-Length is absent, invalid, or stale. It starts
+cancellation without waiting when a source does not settle cancellation. The
+action signal cancels a stalled response read and stops waiting for extraction.
+`readResponseText` decodes the same bounded bytes as UTF-8. A PDF always
+requires the `%PDF-` signature before extraction. Generic streams are
+inspected through the `%PDF-` prefix before they are buffered. A non-PDF
+stream is cancelled after the prefix. The PDF cap is 25 MB, the same budget
+the Slack transport uses for a document. Extracted text is limited to
+1,000,000 characters before an action returns it.
+
+Callers:
+
+- `slack.fetch_file`
+- `drive.download_file`. Google Workspace files use metadata to select an
+  export. Other files use the media response MIME type, not metadata, to
+  select PDF, generic, text, or binary handling. A declared PDF or generic
+  byte stream uses the 25 MB cap unless the caller sets `maxSizeBytes`. A
+  generic stream is extracted only when its bytes start with `%PDF-`. Text
+  stays at 1 MB.
+- `github.read_repo_file`. It requests raw Contents API media for a PDF or a
+  Contents response without inline bytes. When metadata has a blob SHA, it uses
+  the Git Blobs endpoint for raw bytes. The raw stream must have the PDF
+  signature and stay within the 25 MB cap before extraction.
+
+A new downloader calls the same function. Adding a format other than PDF
+is still one branch, and that branch is `extractDocumentText`.
+
 ## Tests
 
 - `packages/api/src/services/channel-file-ingest.test.ts`: a real one-page
@@ -125,6 +159,14 @@ note corrected to name PDFs as fetchable.
 - `packages/plugin-slack/src/actions/actions.test.ts`: `fetch_file` returns
   extracted text, reports a scan, reports a missing extractor, and keeps the
   metadata answer for a zip.
+- `packages/engine/test/document-text.test.ts`: the shared reader normalizes
+  MIME types, identifies generic PDF bytes, cancels an oversized declared
+  response, and returns a size result when cancellation fails.
+- `packages/plugin-google-workspace`: `drive.download_file` returns extracted
+  PDF text, accepts a generic PDF after it reads the header, rejects a generic
+  non-PDF, and stops a media stream that exceeds stale metadata.
+- `packages/plugin-github`: `github.read_repo_file` requests raw content for
+  a PDF larger than the Contents API inline limit and returns extracted text.
 
 ## Not covered
 

@@ -738,6 +738,7 @@ export interface ToolContext {
    * Returns `null` when the document holds no extractable text (a scanned
    * page), and throws when extraction is unavailable. Absent on hosts that
    * wire no extractor — callers must degrade, not fail.
+
    */
   extractDocument?: (doc: {
     data: Uint8Array;

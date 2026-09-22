@@ -7,7 +7,7 @@
  * mocked Octokit method name.
  */
 import process from "node:process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginAction } from "@valet/engine";
 import { githubPlugin } from "./actions.js";
 import { fakeActionContext } from "../test-helpers/action-context.js";
@@ -609,6 +609,136 @@ describe("github.read_repo_file", () => {
     expect(result.error).toContain('no file at ".github/reviewer-routing.csv" in acme/handbook');
     expect(result.error).toContain("Correct the path");
     expect(result.error).toContain("read access to that repository");
+  });
+
+  it("reads a PDF through the shared extractor", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "base64", path, size: bytes.length, content: bytes.toString("base64") } },
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/nda.pdf" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# NDA" }) },
+    );
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(isRecord(result.data) ? result.data.content : undefined).toBe("# NDA");
+  });
+
+  it("passes the action signal to Contents metadata and raw fallback requests", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "none", path, size: bytes.length, content: "" } },
+    });
+    const controller = new AbortController();
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : undefined;
+      signals.push(init?.signal ?? request?.signal);
+      return originalFetch(input, init);
+    });
+
+    try {
+      const result = await findAction("github.read_repo_file").execute(
+        { owner: "acme", repo: "handbook", path: "legal/nda.pdf" },
+        { ...fakeActionContext("test-token"), signal: controller.signal, extractDocument: async () => ({ markdown: "# NDA" }) },
+      );
+      expect(result.success).toBe(true);
+      expect(signals).toHaveLength(2);
+      expect(signals).toEqual([controller.signal, controller.signal]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("extracts an extensionless PDF larger than the Contents API inline limit", async () => {
+    const bytes = new Uint8Array(1_048_577);
+    bytes.set(Buffer.from("%PDF-1.4"));
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        status: 200,
+        body: { type: "file", encoding: "none", path, sha: "metadata-sha", size: bytes.length, content: "" },
+      }),
+      readBlob: (_owner, _repo, sha) => ({ body: bytes, headers: { "Content-Type": "application/pdf", "X-Blob-Sha": sha } }),
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/large" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# Large PDF" }) },
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: "# Large PDF" } });
+    expect(fixture?.calls).toHaveLength(2);
+    expect(fixture?.calls[1].acceptHeader).toContain(".raw");
+    expect(fixture?.calls[1].path).toBe("/repos/acme/handbook/git/blobs/metadata-sha");
+  });
+
+  it("reads an extensionless inline PDF through the extractor", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "base64", path, sha: "pdf-sha", size: bytes.length, content: bytes.toString("base64") } }),
+      readBlob: () => ({ body: bytes, headers: { "Content-Type": "application/pdf" } }),
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/nda", ref: "main" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# NDA" }) },
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: "# NDA", ref: "main" } });
+  });
+
+  it("rejects a declared PDF without a PDF signature", async () => {
+    const html = Buffer.from("<html>sign in</html>");
+    let extracted = false;
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: html, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "base64", path, size: html.length, content: html.toString("base64") } },
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/login.pdf" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => { extracted = true; return { markdown: "must not extract" }; } },
+    );
+
+    expect(result.success).toBe(false);
+    expect(extracted).toBe(false);
+  });
+
+  it("does not return empty content for an unclassified large file", async () => {
+    const bytes = Buffer.from("PK\x03\x04");
+    useFixture({
+      readFile: (_owner, _repo, path) => ({ body: { type: "file", encoding: "none", path, sha: "binary-sha", size: 2_000_000, content: "" } }),
+      readBlob: () => ({ body: bytes, headers: { "Content-Type": "application/octet-stream" } }),
+    });
+
+    const result = await read("legal/archive");
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error).toContain("Cannot read binary file legal/archive");
+  });
+
+  it("names a missing extractor instead of returning PDF bytes as text", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path, accept) => accept?.includes(".raw")
+        ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+        : { body: { type: "file", encoding: "base64", path, size: bytes.length, content: bytes.toString("base64") } },
+    });
+
+    const result = await read("legal/nda.pdf");
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain("PDF text extraction is not available");
   });
 });
 

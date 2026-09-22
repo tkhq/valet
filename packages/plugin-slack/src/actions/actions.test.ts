@@ -717,6 +717,23 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { content: 'hello world', mimetype: 'text/plain' } });
   });
 
+  it('fetch_file bounds application text before decoding it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': String(1_048_577) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/data.json' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('File too large for text extraction');
+  });
+
   it('fetch_file rejects non-slack URLs without calling fetch', async () => {
     const result = await action('slack.fetch_file').execute(
       { url: 'https://example.com/file.png' },
@@ -770,6 +787,68 @@ describe('slack actions', () => {
         filename: 'report.pdf',
       },
     });
+  });
+
+  it('fetch_file rejects a declared PDF without a PDF signature', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('<html>sign in</html>', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+    let extracted = false;
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/login.pdf' },
+      pluginCtx({ extractDocument: async () => { extracted = true; return { markdown: 'must not extract' }; } }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(extracted).toBe(false);
+  });
+
+  it('fetch_file normalizes PDF MIME parameters and case', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'Application/PDF; charset=binary' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '## Report' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: '## Report', mimetype: 'application/pdf' } });
+  });
+
+  it('reports an oversized generic PDF candidate', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('%PDF-', {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(26 * 1024 * 1024) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/unknown' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF too large');
+  });
+
+  it('keeps an oversized generic non-PDF as unsupported metadata', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('PK\x03\x04', {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(26 * 1024 * 1024) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/archive' },
+      pluginCtx(),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { mimetype: 'application/octet-stream' } });
   });
 
   it('fetch_file says why a scanned PDF has no text', async () => {
