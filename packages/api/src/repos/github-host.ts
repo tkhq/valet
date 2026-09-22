@@ -259,6 +259,7 @@ export const githubHost: RepoHost = {
         // installation row, and the no-repo ladder skips that tier.
         ...(req.owner ? { repo: { owner: req.owner, name: req.repo } } : {}),
         auth: req.auth,
+        capability: req.capability,
       });
     } catch (err) {
       if (err instanceof GitHubAuthError) return null;

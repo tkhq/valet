@@ -66,6 +66,7 @@ import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
+import { gitAttributionRouter } from "./routes/git-attribution.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { profilePicturesPublicRouter, profilePicturesRouter } from "./routes/profile-pictures.js";
 import { teamPoliciesRouter } from "./routes/team-policies.js";
@@ -303,6 +304,7 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
 
+  app.route("/api", gitAttributionRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);

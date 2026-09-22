@@ -4955,6 +4955,7 @@ export class Thread {
       pluginStoreFactory: session.options.pluginStoreFactory,
       extractDocument: session.options.extractDocument,
       queueItemId: this.runningItem?.id,
+      executionEnv: session.options.executionEnv?.(this.runningItem?.id),
       // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,

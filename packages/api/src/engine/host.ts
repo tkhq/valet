@@ -78,6 +78,7 @@ import {
 } from "./resolve-repo-resources.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
+import { opaqueCorrelationIds } from "../services/git-attribution.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import {
@@ -483,6 +484,8 @@ export interface SessionMeta {
    */
   userName?: string;
   userEmail?: string;
+  /** Immutable active Git attribution generation loaded before preparation. */
+  gitAttribution?: typeof import("../schema/index.js").sessionGitAttributionSnapshots.$inferSelect;
   /**
    * The owning team when the session lives in a team workspace
    * (`agent_sessions.owner_type = 'team'`), else absent. Feeds the
@@ -1186,6 +1189,13 @@ export class EngineHost {
     const sessionRoles = personaCell
       ? [...extras.roles, ...securityRolesForCell(personaCell.persona, personaRepoRoleMarkdown)]
       : extras.roles;
+    const executionEnv = meta.gitAttribution?.correlationTrailers && this.opts.githubTokenDeps?.key
+      ? (queueItemId: string | undefined) => {
+          if (!queueItemId) return undefined;
+          const ids = opaqueCorrelationIds(this.opts.githubTokenDeps!.key.toString("base64"), sessionId, queueItemId);
+          return { VALET_SESSION_CORRELATION_ID: ids.session, VALET_QUEUE_ITEM_CORRELATION_ID: ids.queueItem };
+        }
+      : undefined;
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -1194,6 +1204,7 @@ export class EngineHost {
             orgId: meta.orgId,
             owner: principal,
             workspace: meta.workspace,
+            ...(executionEnv ? { executionEnv } : {}),
             sandbox: sandboxOpts,
             model,
             modelSpec,
@@ -1221,6 +1232,7 @@ export class EngineHost {
           orgId: meta.orgId,
           owner: principal,
           workspace: meta.workspace,
+          ...(executionEnv ? { executionEnv } : {}),
           sandbox: sandboxOpts,
           model,
           modelSpec,

@@ -811,6 +811,7 @@ export async function mintInstallationToken(
   deps: GithubAppDeps,
   orgId: string,
   accountLogin: string,
+  permissions?: Record<string, "read" | "write">,
 ): Promise<string | null> {
   const nowMs = (deps.now ?? Date.now)();
 
@@ -828,7 +829,7 @@ export async function mintInstallationToken(
   const row = rows[0];
   if (!row) return null;
 
-  if (row.cachedToken !== null && row.cachedTokenExpiresAt !== null) {
+  if (!permissions && row.cachedToken !== null && row.cachedTokenExpiresAt !== null) {
     if (row.cachedTokenExpiresAt - CACHED_TOKEN_MARGIN_MS > nowMs) {
       try {
         return decryptSecret(row.cachedToken, deps.key);
@@ -854,14 +855,16 @@ export async function mintInstallationToken(
       Authorization: `Bearer ${jwt}`,
       Accept: "application/vnd.github+json",
       "User-Agent": "Valet-App",
+      "Content-Type": "application/json",
     },
+    ...(permissions ? { body: JSON.stringify({ permissions }) } : {}),
   });
   if (!res.ok) {
     throw new Error(`GitHub API POST /app/installations/${row.installationId}/access_tokens returned ${res.status}`);
   }
   const { token, expiresAtMs } = parseAccessTokenResponse(await res.json());
 
-  await deps.db
+  if (!permissions) await deps.db
     .update(githubInstallations)
     .set({ cachedToken: encryptSecret(token, deps.key), cachedTokenExpiresAt: expiresAtMs, updatedAt: nowMs })
     .where(eq(githubInstallations.id, row.id));

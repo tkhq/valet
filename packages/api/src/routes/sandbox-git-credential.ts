@@ -59,11 +59,11 @@
  * The token is emitted ONLY in the JSON response body; it is never logged.
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { credentialSecret } from "@valet/engine";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { sessionRepos } from "../schema/index.js";
+import { sessionGitAttributionHeads, sessionGitAttributionSnapshots, sessionRepos } from "../schema/index.js";
 import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-resolution.js";
 import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
 import { getTeamInOrg } from "../services/teams.js";
@@ -180,6 +180,9 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   }
 
   const bindings = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId));
+  const heads = await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1);
+  const active = heads[0] ? (await db.select({ mode: sessionGitAttributionSnapshots.mode }).from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, sandbox.sessionId), eq(sessionGitAttributionSnapshots.generation, heads[0].activeGeneration))).limit(1))[0] : undefined;
+  const appSignedCapability = active?.mode === "valet_app_signed" ? (purpose === "git" ? "sandbox_git_read" : "sandbox_api_limited") : undefined;
 
   const wantOwner = owner?.toLowerCase();
   const binding =
@@ -211,7 +214,8 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
       owner: owner ?? "",
       repo: wantRepo ?? "",
       purpose,
-      auth: "auto",
+      auth: appSignedCapability ? "app" : "auto",
+      capability: appSignedCapability,
     });
     if (result === null || "anonymous" in result) {
       const anon: PostSandboxGitCredentialResponse = { anonymous: true };
@@ -230,7 +234,8 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     owner: ownerOf(binding.fullName),
     repo: repoOf(binding.fullName),
     purpose,
-    auth: binding.auth,
+    auth: appSignedCapability ? "app" : binding.auth,
+    capability: appSignedCapability,
   });
 
   if (result === null) {
@@ -252,4 +257,62 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   // Token material is returned ONLY here, in the response body — never logged.
   const cred: PostSandboxGitCredentialResponse = { username: result.username, password: result.token };
   return c.json(cred);
+});
+
+sandboxGitCredentialRouter.post("/git-push", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  let body: import("../wire/types.js").PostSandboxGitPushRequest;
+  try { body = await c.req.json(); } catch { return c.json({ error: "Send a valid Git push request." }, 400); }
+  if (body.force) return c.json({ error: "App-signed history cannot be force-pushed in V1. Create a new branch." }, 409);
+  if (!body.repoFullName || !body.targetRef || !body.expectedRemoteSha || !Array.isArray(body.commits)) return c.json({ error: "repoFullName, targetRef, expectedRemoteSha, and commits are required." }, 400);
+  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const binding = (await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId)))
+    .find((row) => row.fullName.toLowerCase() === body.repoFullName.toLowerCase());
+  if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
+  const head = (await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1))[0];
+  const snapshot = head ? (await db.select().from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, sandbox.sessionId), eq(sessionGitAttributionSnapshots.generation, head.activeGeneration))).limit(1))[0] : undefined;
+  if (!snapshot || snapshot.mode !== "valet_app_signed") return c.json({ error: "App-signed push is not active for this session." }, 409);
+  const owner = ownerOf(binding.fullName); const repo = repoOf(binding.fullName);
+  let token = "";
+  const refresh = async () => {
+    const result = await repoHostForUrl(binding.cloneUrl)!.resolveGitToken({ orgId: sandbox.orgId, userId: sandbox.userId, deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) } }, { owner, repo, purpose: "git", auth: "app", capability: "host_commit_replay" });
+    if (!result || "anonymous" in result) throw new Error("The host replay credential is unavailable. Reinstall the GitHub App for this repository.");
+    token = result.token;
+  };
+  const api = process.env.GITHUB_API_URL ?? "https://api.github.com";
+  const request = async (path: string, init?: RequestInit) => {
+    const send = () => fetch(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28", ...(init?.headers ?? {}) } });
+    let res = await send();
+    if (res.status === 401) { await refresh(); res = await send(); }
+    if (!res.ok) throw new Error(`GitHub Git Database API returned ${res.status}. Retry after checking the App installation.`);
+    return res.json() as Promise<Record<string, unknown>>;
+  };
+  const client: import("../services/git-attribution.js").GitHubReplayClient = {
+    refresh,
+    async uploadLfs(objects) {
+      const auth = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+      const batch = await fetch(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/info/lfs/objects/batch`, { method: "POST", headers: { Authorization: auth, Accept: "application/vnd.git-lfs+json", "Content-Type": "application/vnd.git-lfs+json" }, body: JSON.stringify({ operation: "upload", transfers: ["basic"], objects: objects.map(({ oid, size }) => ({ oid, size })) }) });
+      if (!batch.ok) throw new Error(`GitHub LFS batch returned ${batch.status}.`);
+      const payload = await batch.json() as { objects?: Array<{ oid?: string; error?: { message?: string }; actions?: { upload?: { href?: string; header?: Record<string, string> } } }> };
+      for (const object of objects) {
+        const action = payload.objects?.find((item) => item.oid === object.oid);
+        if (action?.error) throw new Error(action.error.message ?? "GitHub refused an LFS object.");
+        const upload = action?.actions?.upload; if (!upload?.href) continue;
+        const sent = await fetch(upload.href, { method: "PUT", headers: upload.header, body: Buffer.from(object.contentBase64, "base64") });
+        if (!sent.ok) throw new Error(`GitHub LFS upload returned ${sent.status}.`);
+      }
+    },
+    async createBlob(contentBase64) { const value = await request("/git/blobs", { method: "POST", body: JSON.stringify({ content: contentBase64, encoding: "base64" }) }); if (typeof value.sha !== "string") throw new Error("GitHub returned an invalid blob response."); return value.sha; },
+    async createTree(entries) { const value = await request("/git/trees", { method: "POST", body: JSON.stringify({ tree: entries }) }); if (typeof value.sha !== "string") throw new Error("GitHub returned an invalid tree response."); return value.sha; },
+    async createCommit(input) { return await request("/git/commits", { method: "POST", body: JSON.stringify(input) }) as import("../services/git-attribution.js").GitHubCreatedCommit; },
+    async getCommit(sha) { return await request(`/git/commits/${encodeURIComponent(sha)}`) as import("../services/git-attribution.js").GitHubCreatedCommit; },
+    async getRef(ref) { const path = `/git/ref/${encodeURIComponent(ref.replace(/^refs\//u, ""))}`; const send = () => fetch(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } }); let res = await send(); if (res.status === 401) { await refresh(); res = await send(); } if (res.status === 404) return null; if (!res.ok) throw new Error(`GitHub Git Database API returned ${res.status}.`); const value = await res.json() as Record<string, unknown>; const object = value.object; if (!object || typeof object !== "object" || typeof (object as Record<string, unknown>).sha !== "string") throw new Error("GitHub returned an invalid ref response."); return (object as Record<string, unknown>).sha as string; },
+    async createRef(ref, sha) { await request("/git/refs", { method: "POST", body: JSON.stringify({ ref, sha }) }); },
+    async updateRef(ref, sha) { await request(`/git/refs/${encodeURIComponent(ref.replace(/^refs\//u, ""))}`, { method: "PATCH", body: JSON.stringify({ sha, force: false }) }); },
+  };
+  try {
+    const { replaySignedCommits } = await import("../services/git-attribution.js");
+    return c.json(await replaySignedCommits(db, client, { sessionId: sandbox.sessionId, generation: snapshot.generation, repoFullName: binding.fullName, targetRef: body.targetRef, expectedRemoteSha: body.expectedRemoteSha, createRef: body.createRef, blobs: body.blobs, trees: body.trees, lfsObjects: body.lfsObjects, commits: body.commits }));
+  } catch (error) { return c.json({ error: error instanceof Error ? error.message : "Signed replay failed." }, 409); }
 });

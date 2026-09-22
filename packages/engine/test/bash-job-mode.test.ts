@@ -103,6 +103,18 @@ describe("bash tool: mode selection", () => {
     expect((result as { text: string }).text).toBe("job-out\n");
   });
 
+  it("threads the exact queue environment through sync and job execution", async () => {
+    const sync: FakeSandbox = { id: "sb-env-sync", exec: vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 })) };
+    const syncCtx = { ...makeCtx(sync), queueItemId: "queue-sync", executionEnv: { VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_sync" } };
+    await execute({ command: "true", timeout: 59 }, syncCtx);
+    expect(sync.exec).toHaveBeenCalledWith("true", expect.objectContaining({ env: { VALET_QUEUE_ITEM_ID: "queue-sync", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_sync" } }));
+
+    const job: FakeSandbox = { id: "sb-env-job", execJob: vi.fn(async () => ({ execId: "job-env" })), pollJob: vi.fn(async () => ({ status: "done", exitCode: 0, output: "", nextOffset: 0 })), cancelJob: vi.fn(async () => {}) };
+    const jobCtx = { ...makeCtx(job), queueItemId: "queue-job", executionEnv: { VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_job" } };
+    await execute({ command: "true", timeout: 61 }, jobCtx);
+    expect(job.execJob).toHaveBeenCalledWith("true", expect.objectContaining({ env: { VALET_QUEUE_ITEM_ID: "queue-job", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_job" } }));
+  });
+
   it("execJob rejecting with [job_unsupported] falls back to sync exec", async () => {
     const sandbox: FakeSandbox = {
       id: "sb-3",

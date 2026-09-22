@@ -23,6 +23,7 @@ import {
   prepBinding,
   prepPrebuiltBinding,
   resolveStartRef,
+  installGitAttributionHook,
 } from "./workspace-prep.js";
 
 /**
@@ -51,22 +52,25 @@ export function buildPrepSteps(
         id: spec.id,
         hash: spec.hash,
         critical: spec.critical,
-        afterResume: (sandbox) => installCredentialHelper(sandbox, snap.apiUrl, snap.credentialCommands ?? []),
+        afterResume: (sandbox) => installCredentialHelper(sandbox, snap.apiUrl, snap.credentialCommands ?? [], snap.gitAttribution?.mode === "valet_app_signed"),
         async apply(sandbox) {
-          await installCredentialHelper(sandbox, snap.apiUrl, snap.credentialCommands ?? []);
+          await installCredentialHelper(sandbox, snap.apiUrl, snap.credentialCommands ?? [], snap.gitAttribution?.mode === "valet_app_signed");
         },
       });
       continue;
     }
 
     if (spec.id === "git-identity") {
+      const valetIdentity = snap.gitAttribution?.mode.startsWith("valet_");
+      const name = valetIdentity ? snap.gitAttribution?.valetName : snap.userName;
+      const email = valetIdentity ? snap.gitAttribution?.valetEmail : snap.userEmail;
       steps.push({
         id: spec.id,
         hash: spec.hash,
         critical: spec.critical,
-        afterResume: (sandbox) => configureGitIdentity(sandbox, snap.userName, snap.userEmail),
+        afterResume: (sandbox) => configureGitIdentity(sandbox, name, email),
         async apply(sandbox) {
-          await configureGitIdentity(sandbox, snap.userName, snap.userEmail);
+          await configureGitIdentity(sandbox, name, email);
         },
       });
       continue;
@@ -101,6 +105,15 @@ export function buildPrepSteps(
             } else {
               await prepBinding(sandbox, targetDir, binding);
             }
+          }
+
+          if (snap.gitAttribution) {
+            const userMode = snap.gitAttribution.mode.startsWith("user_");
+            const counterpart = userMode
+              ? { name: snap.gitAttribution.valetName, email: snap.gitAttribution.valetEmail }
+              : snap.gitAttribution.counterpartName && snap.gitAttribution.counterpartEmail
+                ? { name: snap.gitAttribution.counterpartName, email: snap.gitAttribution.counterpartEmail } : undefined;
+            await installGitAttributionHook(sandbox, targetDir, { coAuthor: snap.gitAttribution.coAuthoredBy ? counterpart : undefined, correlationTrailers: snap.gitAttribution.correlationTrailers });
           }
 
           // Start-ref capture for the primary binding — best-effort.

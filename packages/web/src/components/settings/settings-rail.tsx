@@ -27,6 +27,7 @@ import { cn } from "~/lib/cn";
 export const TEAM_SETTINGS_PATH = "/settings/team";
 const TEAM_ITEMS = [
   { to: TEAM_SETTINGS_PATH, label: "General" },
+  { to: "/settings/git", label: "Git commits" },
   { to: "/settings/api-keys", label: "API keys" },
   { to: "/settings/proxy", label: "Proxy" },
   { to: "/settings/policies", label: "Policies" },
@@ -43,6 +44,7 @@ const YOU_ITEMS = [
   { to: "/settings/appearance", label: "Appearance" },
   { to: "/settings/notifications", label: "Notifications" },
   { to: "/settings/connected-accounts", label: "Connected accounts" },
+  { to: "/settings/git", label: "Git commits" },
   { to: "/settings/api-keys", label: "API keys" },
   { to: "/settings/proxy", label: "Proxy" },
   // No "Library sources" item: personal and team repositories are tracked on
@@ -77,6 +79,7 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/proxy", label: "Proxy" },
   { to: "/settings/organization/library", label: "Library" },
   { to: "/settings/organization/github", label: "GitHub" },
+  { to: "/settings/organization/git", label: "Git commits" },
   { to: "/settings/organization/slack", label: "Slack" },
   { to: ORG_ONEPASSWORD_PATH, label: "1Password" },
   { to: "/settings/organization/sandbox-images", label: "Sandbox settings" },

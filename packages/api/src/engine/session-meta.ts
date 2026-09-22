@@ -23,6 +23,7 @@ import type { SessionMeta } from "./host.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { sessionRepos, users } from "../schema/index.js";
 import { computeTargetDirs } from "./workspace-prep.js";
+import { ensureGitSnapshot } from "../services/git-attribution.js";
 import type { RepoBinding } from "../wire/types.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 
@@ -89,9 +90,10 @@ function legacyTargetDirs(repos: RepoBinding[]): string[] {
  * to `legacyTargetDirs` so their existing clones are never relocated.
  */
 export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promise<SessionMeta> {
-  const [repoRows, userRows] = await Promise.all([
+  const [repoRows, userRows, gitAttribution] = await Promise.all([
     db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, src.id)).orderBy(sessionRepos.position),
     db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, src.userId)).limit(1),
+    ensureGitSnapshot(db, src.id, src.userId, false, src),
   ]);
 
   let reposWithDirs: (RepoBinding & { targetDir: string })[] | undefined;
@@ -127,7 +129,8 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     ...(src.ownerType === "team" && src.ownerId ? { ownerTeamId: src.ownerId } : {}),
     ...(src.credentialOwnerMode != null ? { credentialOwnerMode: src.credentialOwnerMode } : {}),
     repos: reposWithDirs,
-    userName: userRows[0]?.name,
-    userEmail: userRows[0]?.email,
+    userName: gitAttribution.mode.startsWith("valet_") ? gitAttribution.valetName : userRows[0]?.name,
+    userEmail: gitAttribution.mode.startsWith("valet_") ? gitAttribution.valetEmail : userRows[0]?.email,
+    gitAttribution,
   };
 }

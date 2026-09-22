@@ -10,7 +10,8 @@ CREATE TABLE "orgs" (
 	"allow_personal_installations" boolean NOT NULL DEFAULT true,
 	"model_tiers" jsonb,
 	"approved_models" jsonb,
-	"reasoning_settings" jsonb
+	"reasoning_settings" jsonb,
+	"git_attribution_settings" jsonb
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -24,7 +25,8 @@ CREATE TABLE "user" (
 	"role" text DEFAULT 'member' NOT NULL,
 	"default_model" text,
 	"default_reasoning" text,
-	"new_thread_behavior" text DEFAULT 'keep_current' NOT NULL
+	"new_thread_behavior" text DEFAULT 'keep_current' NOT NULL,
+	"git_attribution_settings" jsonb
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "user_email_unique" ON "user" ("email");
@@ -234,6 +236,7 @@ CREATE TABLE "agent_sessions" (
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
 	"kubernetes" boolean DEFAULT false NOT NULL,
+	"git_attribution_snapshot_pending" boolean DEFAULT false NOT NULL,
 	"sandbox_resource_overrides" jsonb,
 	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
@@ -283,7 +286,8 @@ CREATE TABLE "teams" (
 	"external_id" text,
 	"created_at" bigint NOT NULL,
 	"default_model" text,
-	"default_reasoning" text
+	"default_reasoning" text,
+	"git_attribution_settings" jsonb
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");
@@ -1492,3 +1496,20 @@ CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
 CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");
+
+--> statement-breakpoint
+CREATE TABLE "session_git_attribution_snapshots" ("session_id" text NOT NULL, "generation" integer NOT NULL, "mode" text NOT NULL, "co_authored_by" boolean NOT NULL, "correlation_trailers" boolean NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL, "counterpart_user_id" text, "counterpart_name" text, "counterpart_email" text, "valet_name" text NOT NULL, "valet_email" text NOT NULL, "settings_fingerprint" text NOT NULL, "created_by" text NOT NULL, "created_at" bigint NOT NULL, PRIMARY KEY("session_id", "generation"));
+--> statement-breakpoint
+CREATE TABLE "session_git_attribution_heads" ("session_id" text PRIMARY KEY NOT NULL, "active_generation" integer NOT NULL, "updated_at" bigint NOT NULL);
+--> statement-breakpoint
+CREATE TABLE "git_push_operations" ("id" text PRIMARY KEY NOT NULL, "session_id" text NOT NULL, "generation" integer NOT NULL, "repo_full_name" text NOT NULL, "target_ref" text NOT NULL, "expected_remote_sha" text NOT NULL, "local_head_sha" text NOT NULL, "signed_head_sha" text, "state" text NOT NULL, "error_code" text, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "git_push_operations_identity" ON "git_push_operations" ("session_id","generation","repo_full_name","target_ref","local_head_sha");
+--> statement-breakpoint
+CREATE TABLE "git_push_commit_map" ("operation_id" text NOT NULL, "local_sha" text NOT NULL, "signed_sha" text NOT NULL, "tree_sha" text NOT NULL, "verification_json" jsonb NOT NULL, "created_at" bigint NOT NULL, PRIMARY KEY("operation_id", "local_sha"));
+--> statement-breakpoint
+CREATE TABLE "session_git_branches" ("session_id" text NOT NULL, "generation" integer NOT NULL, "repo_full_name" text NOT NULL, "ref" text NOT NULL, "head_sha" text NOT NULL, "push_operation_id" text, "observed_at" bigint NOT NULL, PRIMARY KEY("session_id", "repo_full_name", "ref"));
+--> statement-breakpoint
+CREATE TABLE "session_pull_requests" ("session_id" text NOT NULL, "repo_full_name" text NOT NULL, "pr_number" integer NOT NULL, "pr_url" text NOT NULL, "head_ref" text NOT NULL, "head_sha" text NOT NULL, "base_ref" text NOT NULL, "state" text NOT NULL, "first_observed_at" bigint NOT NULL, "updated_at" bigint NOT NULL);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "session_pull_requests_identity" ON "session_pull_requests" ("repo_full_name","pr_number","session_id");

@@ -74,6 +74,8 @@ export const orgs = pgTable("orgs", {
   /** { default?: ThinkingLevel, max?: ThinkingLevel }. Null = no default,
    * no cap. */
   reasoningSettings: jsonb("reasoning_settings"),
+  /** Inheritable Git commit defaults. Null means product defaults. */
+  gitAttributionSettings: jsonb("git_attribution_settings"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -114,6 +116,8 @@ export const users = pgTable("user", {
   newThreadBehavior: text("new_thread_behavior", {
     enum: ["keep_current", "use_defaults"],
   }).notNull().default("keep_current"),
+  /** Personal Git commit overrides. Null fields inherit from the organization. */
+  gitAttributionSettings: jsonb("git_attribution_settings"),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────
@@ -336,6 +340,24 @@ export const orgMembers = pgTable(
   (t) => [primaryKey({ columns: [t.orgId, t.userId] })],
 );
 
+// ─── Git attribution and signed replay ─────────────────────────────────────
+
+export const sessionGitAttributionSnapshots = pgTable("session_git_attribution_snapshots", {
+  sessionId: text("session_id").notNull(), generation: integer("generation").notNull(),
+  mode: text("mode", { enum: ["user_unsigned", "user_turnkey_signed", "valet_unsigned", "valet_app_signed"] }).notNull(),
+  coAuthoredBy: boolean("co_authored_by").notNull(), correlationTrailers: boolean("correlation_trailers").notNull(),
+  ownerType: text("owner_type").notNull(), ownerId: text("owner_id").notNull(), counterpartUserId: text("counterpart_user_id"),
+  counterpartName: text("counterpart_name"), counterpartEmail: text("counterpart_email"), valetName: text("valet_name").notNull(),
+  valetEmail: text("valet_email").notNull(), settingsFingerprint: text("settings_fingerprint").notNull(), createdBy: text("created_by").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [primaryKey({ columns: [t.sessionId, t.generation] })]);
+
+export const sessionGitAttributionHeads = pgTable("session_git_attribution_heads", { sessionId: text("session_id").primaryKey(), activeGeneration: integer("active_generation").notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull() });
+export const gitPushOperations = pgTable("git_push_operations", { id: text("id").primaryKey(), sessionId: text("session_id").notNull(), generation: integer("generation").notNull(), repoFullName: text("repo_full_name").notNull(), targetRef: text("target_ref").notNull(), expectedRemoteSha: text("expected_remote_sha").notNull(), localHeadSha: text("local_head_sha").notNull(), signedHeadSha: text("signed_head_sha"), state: text("state").notNull(), errorCode: text("error_code"), createdAt: bigint("created_at", { mode: "number" }).notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull() }, (t) => [uniqueIndex("git_push_operations_identity").on(t.sessionId, t.generation, t.repoFullName, t.targetRef, t.localHeadSha)]);
+export const gitPushCommitMap = pgTable("git_push_commit_map", { operationId: text("operation_id").notNull(), localSha: text("local_sha").notNull(), signedSha: text("signed_sha").notNull(), treeSha: text("tree_sha").notNull(), verificationJson: jsonb("verification_json").notNull(), createdAt: bigint("created_at", { mode: "number" }).notNull() }, (t) => [primaryKey({ columns: [t.operationId, t.localSha] })]);
+export const sessionGitBranches = pgTable("session_git_branches", { sessionId: text("session_id").notNull(), generation: integer("generation").notNull(), repoFullName: text("repo_full_name").notNull(), ref: text("ref").notNull(), headSha: text("head_sha").notNull(), pushOperationId: text("push_operation_id"), observedAt: bigint("observed_at", { mode: "number" }).notNull() }, (t) => [primaryKey({ columns: [t.sessionId, t.repoFullName, t.ref] })]);
+export const sessionPullRequests = pgTable("session_pull_requests", { sessionId: text("session_id").notNull(), repoFullName: text("repo_full_name").notNull(), prNumber: integer("pr_number").notNull(), prUrl: text("pr_url").notNull(), headRef: text("head_ref").notNull(), headSha: text("head_sha").notNull(), baseRef: text("base_ref").notNull(), state: text("state").notNull(), firstObservedAt: bigint("first_observed_at", { mode: "number" }).notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull() }, (t) => [uniqueIndex("session_pull_requests_identity").on(t.repoFullName, t.prNumber, t.sessionId)]);
+
 // ─── Agent sessions ─────────────────────────────────────────────────────────
 //
 // One row per session the user creates from the UI. The engine maintains its
@@ -380,6 +402,8 @@ export const agentSessions = pgTable(
     docker: boolean("docker").notNull().default(false),
     // Persisted repository capability. Failed YAML reads preserve this value.
     kubernetes: boolean("kubernetes").notNull().default(false),
+    /** New writers opt into Git settings. False marks a legacy first touch. */
+    gitAttributionSnapshotPending: boolean("git_attribution_snapshot_pending").notNull().default(false),
     // Per-child CPU and memory overrides from the task tool. Null means the
     // session uses repository or deployment defaults.
     sandboxResourceOverrides: jsonb("sandbox_resource_overrides").$type<PrebuildResources>(),
@@ -508,6 +532,8 @@ export const teams = pgTable(
     defaultModel: text("default_model"),
     /** Team default reasoning level. Null = inherit. */
     defaultReasoning: text("default_reasoning"),
+    /** Team Git commit overrides. Null fields inherit from the organization. */
+    gitAttributionSettings: jsonb("git_attribution_settings"),
   },
   (t) => [
     uniqueIndex("teams_org_name").on(t.orgId, t.name),

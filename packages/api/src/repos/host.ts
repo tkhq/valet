@@ -41,6 +41,7 @@ export interface GitTokenRequest {
   /** Defaults to `"auto"` — see `services/github-tokens.ts`'s resolution
    * contract doc comment for what each mode does. */
   auth?: "auto" | "app" | "user";
+  capability?: "sandbox_git_read" | "sandbox_api_limited" | "host_commit_replay";
 }
 
 /**

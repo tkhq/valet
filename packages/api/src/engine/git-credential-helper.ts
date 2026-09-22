@@ -190,3 +190,43 @@ fi
 exec "\$real" "\$@"
 `;
 }
+
+/** Transparent git shim for App-signed mode. Non-push commands chain to the image's git. */
+export function appSignedGitWrapperScript(apiUrl: string): string {
+  return String.raw`#!/usr/bin/env node
+const { execFileSync, spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const real = "/usr/bin/git";
+const args = process.argv.slice(2);
+if (args[0] !== "push") process.exit(spawnSync(real, args, { stdio: "inherit" }).status ?? 1);
+function fail(message) { console.error("git push (Valet App signing): " + message); process.exit(2); }
+const rest = args.slice(1); const upstream = rest.includes("-u") || rest.includes("--set-upstream");
+if (rest.some((arg) => arg.startsWith("-") && arg !== "-u" && arg !== "--set-upstream")) fail("force, delete, tags, mirror, atomic, and custom push options are not supported in V1.");
+const positional = rest.filter((arg) => arg !== "-u" && arg !== "--set-upstream");
+if (positional.length > 2) fail("push exactly one branch at a time in V1.");
+const remote = positional[0] || "origin"; const spec = positional[1] || "HEAD";
+if (spec.startsWith(":")) fail("branch deletion is not supported in V1.");
+const [srcRaw, dstRaw] = spec.split(":");
+const src = srcRaw || "HEAD";
+const localSha = execFileSync(real, ["rev-parse", src], { encoding: "utf8" }).trim();
+const branch = dstRaw ? dstRaw.replace(/^refs\/heads\//, "") : execFileSync(real, ["symbolic-ref", "--short", "HEAD"], { encoding: "utf8" }).trim();
+if (!branch || branch === "HEAD") fail("detached HEAD pushes require an explicit source:refs/heads/branch refspec.");
+const targetRef = "refs/heads/" + branch;
+const remoteUrl = execFileSync(real, ["remote", "get-url", remote], { encoding: "utf8" }).trim();
+const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/i);
+if (!match) fail("App-signed replay supports GitHub remotes only.");
+const repoFullName = match[1] + "/" + match[2];
+const ls = execFileSync(real, ["ls-remote", remote, targetRef], { encoding: "utf8" }).trim();
+const createRef = !ls;
+const expectedRemoteSha = createRef ? execFileSync(real, ["rev-parse", "refs/remotes/" + remote + "/HEAD"], { encoding: "utf8" }).trim() : ls.split(/\s+/)[0];
+const commitIds = execFileSync(real, ["rev-list", "--reverse", localSha, "^" + expectedRemoteSha], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+if (!commitIds.length) { console.log("Everything up-to-date"); process.exit(0); }
+const commits = commitIds.map((sha) => { const raw = execFileSync(real, ["cat-file", "commit", sha]); const split = raw.indexOf(Buffer.from("\n\n")); const headers = raw.subarray(0, split).toString("utf8").split("\n"); return { localSha: sha, treeSha: headers.find((line) => line.startsWith("tree ")).slice(5), parents: headers.filter((line) => line.startsWith("parent ")).map((line) => line.slice(7)), message: raw.subarray(split + 2).toString("utf8") }; });
+const objectLines = execFileSync(real, ["rev-list", "--objects", localSha, "^" + expectedRemoteSha], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+const ids = [...new Set(objectLines.map((line) => line.split(" ")[0]))]; const blobs = []; const trees = []; const lfsObjects = []; const gitDir = execFileSync(real, ["rev-parse", "--git-dir"], { encoding: "utf8" }).trim();
+for (const sha of ids) { const type = execFileSync(real, ["cat-file", "-t", sha], { encoding: "utf8" }).trim(); if (type === "blob") { const content = execFileSync(real, ["cat-file", "blob", sha]); blobs.push({ sha, contentBase64: content.toString("base64") }); const pointer = content.toString("utf8").match(/^version https:\/\/git-lfs.github.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize ([0-9]+)\n?$/); if (pointer) { const file = gitDir + "/lfs/objects/" + pointer[1].slice(0, 2) + "/" + pointer[1].slice(2, 4) + "/" + pointer[1]; if (!fs.existsSync(file)) fail("LFS object " + pointer[1] + " is missing locally."); lfsObjects.push({ oid: pointer[1], size: Number(pointer[2]), contentBase64: fs.readFileSync(file).toString("base64") }); } } if (type === "tree") { const raw = execFileSync(real, ["ls-tree", "-z", sha]); const entries = raw.toString("utf8").split("\0").filter(Boolean).map((line) => { const tab = line.indexOf("\t"); const [mode, entryType, entrySha] = line.slice(0, tab).split(" "); return { path: line.slice(tab + 1), mode, type: entryType, sha: entrySha }; }); trees.push({ sha, entries }); } }
+const tok = (() => { try { return fs.readFileSync("/etc/valet/creds/token", "utf8").trim(); } catch { return process.env.VALET_SANDBOX_TOKEN || ""; } })();
+if (!tok) fail("the sandbox credential is unavailable; restart the session.");
+(async () => { const response = await fetch("__API__/api/sandbox/git-push", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok }, body: JSON.stringify({ repoFullName, targetRef, expectedRemoteSha, createRef, blobs, trees, lfsObjects, commits }) }); const body = await response.json(); if (!response.ok) fail(body.error || "host replay failed"); if (upstream) spawnSync(real, ["branch", "--set-upstream-to", remote + "/" + branch], { stdio: "ignore" }); console.log("To " + remoteUrl + "\n   " + expectedRemoteSha.slice(0, 7) + ".." + body.signedHeadSha.slice(0, 7) + "  " + branch + " -> " + branch); })().catch((error) => fail(error.message));
+`.replace("__API__", apiUrl.replace(/\/$/u, ""));
+}

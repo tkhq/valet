@@ -94,6 +94,7 @@ export class GitHubAuthError extends Error {
 }
 
 export type GitHubAuthMode = "auto" | "app" | "user";
+export type GitHubCredentialCapability = "sandbox_git_read" | "sandbox_api_limited" | "host_commit_replay";
 export type GitHubTokenSource = "installation" | "user" | "pat" | "none";
 
 export interface ResolveGitHubTokenRequest {
@@ -104,6 +105,8 @@ export interface ResolveGitHubTokenRequest {
   /** Explicit credential selection. Defaults to `"auto"`. `"app"`/`"user"`
    * are honored STRICTLY (no silent fallback across the selection). */
   auth?: GitHubAuthMode;
+  /** Internal capability fixes App-token permissions and forbids fallback. */
+  capability?: GitHubCredentialCapability;
 }
 
 export interface ResolvedGitHubToken {
@@ -444,9 +447,12 @@ export async function resolveOrgPatApiToken(deps: GitHubTokenDeps, orgId: string
  * malformed `github_app` row. The wrapped message names the failure class
  * and carries the underlying message (which itself never includes secret or
  * response-body material — only a status code at most). */
-async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string): Promise<string | null> {
+async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string, capability?: GitHubCredentialCapability): Promise<string | null> {
   try {
-    return await mintInstallationToken(deps, orgId, accountLogin);
+    const permissions: Record<string, "read" | "write"> | undefined = capability === "sandbox_git_read" ? { contents: "read" as const, metadata: "read" as const }
+      : capability === "sandbox_api_limited" ? { metadata: "read" as const, pull_requests: "write" as const, issues: "write" as const }
+      : capability === "host_commit_replay" ? { contents: "write" as const, metadata: "read" as const } : undefined;
+    return await mintInstallationToken(deps, orgId, accountLogin, permissions);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new GitHubAuthError(`installation token minting failed for ${accountLogin}: ${detail}`);
@@ -573,13 +579,13 @@ export async function resolveGitHubToken(
   deps: GitHubTokenDeps,
   req: ResolveGitHubTokenRequest,
 ): Promise<ResolvedGitHubToken> {
-  const auth = req.auth ?? "auto";
+  const auth = req.capability ? "app" : req.auth ?? "auto";
   await ensureInstallationsSynced(deps, req.orgId);
 
   // ── Explicit selections are strict — no fallback across them. ──
   if (auth === "app") {
     if (req.repo) {
-      const token = await mintInstallation(deps, req.orgId, req.repo.owner);
+      const token = await mintInstallation(deps, req.orgId, req.repo.owner, req.capability);
       if (!token) {
         throw new GitHubAuthError(
           `the GitHub App is not installed on ${req.repo.owner} — open Settings → Organization → GitHub and install it on ${req.repo.owner}`,
@@ -608,7 +614,7 @@ export async function resolveGitHubToken(
   if (req.purpose === "git") {
     // installation(owner) → user → org PAT → tokenless.
     if (req.repo) {
-      const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
+      const installation = await mintInstallation(deps, req.orgId, req.repo.owner, req.capability);
       if (installation) return { token: installation, source: "installation" };
     }
     const user = await resolveUserCredential(deps, req.orgId, req.userId);
@@ -623,7 +629,7 @@ export async function resolveGitHubToken(
   if (user.ok) return { token: user.token, source: user.source, login: user.login };
 
   if (req.repo) {
-    const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
+    const installation = await mintInstallation(deps, req.orgId, req.repo.owner, req.capability);
     if (installation) return { token: installation, source: "installation" };
   }
 

@@ -760,6 +760,8 @@ export interface ToolContext {
    * Consumed by `call_tool`'s policy audit (`PolicyInvocationRecord.queueItemId`).
    */
   queueItemId?: string;
+  /** Host-computed environment bound to this exact queue execution. */
+  executionEnv?: Record<string, string>;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
   signal: AbortSignal;
@@ -2245,6 +2247,8 @@ export interface CreateSessionOptions {
   purpose?: SessionPurpose;
   parentSessionId?: string;
   parentThreadId?: string;
+  /** Host-only queue environment factory. Values are passed to exec and execJob. */
+  executionEnv?: (queueItemId: string | undefined) => Record<string, string> | undefined;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
   /**

@@ -57,6 +57,7 @@ export interface ResolveSnapshot {
   repos: Array<RepoBinding & { targetDir: string }>;
   userName?: string;
   userEmail?: string;
+  gitAttribution?: { generation: number; mode: string; coAuthoredBy: boolean; correlationTrailers: boolean; settingsFingerprint: string; counterpartName?: string | null; counterpartEmail?: string | null; valetName: string; valetEmail: string };
 }
 
 export interface StepSpec {
@@ -128,7 +129,9 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
   steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: true });
 
   // Step 2: git-identity
-  const identityInput = `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${PREP_VERSION}`;
+  const identityInput = snap.gitAttribution
+    ? `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${snap.gitAttribution.generation}|${snap.gitAttribution.mode}|${snap.gitAttribution.coAuthoredBy}|${snap.gitAttribution.correlationTrailers}|${snap.gitAttribution.settingsFingerprint}|${PREP_VERSION}`
+    : `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${PREP_VERSION}`;
   steps.push({ id: "git-identity", hash: sha256(identityInput), critical: true });
 
   // Step 3: one clone step per binding

@@ -312,6 +312,7 @@ export async function ensureAssistantSession(
         workspace: data.workspace,
         title: assistant.name ?? "Assistant",
         status: "active",
+        gitAttributionSnapshotPending: true,
         ownerType: principal.type,
         ownerId: principal.id,
         // A new team assistant resolves credentials as the team (team

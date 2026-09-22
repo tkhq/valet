@@ -45,7 +45,7 @@
  */
 import { recordSandboxWorkspaceGrow } from "@valet/engine";
 import type { ExecResult, Sandbox, SessionStartRef } from "@valet/engine";
-import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
 import type { CredentialCommand } from "./credential-commands.js";
 import { ownerOf } from "../services/session-github-token.js";
@@ -72,6 +72,7 @@ const GH_WRAPPER_PATH = "/usr/local/bin/valet-gh";
  * precedes /usr/bin on PATH, so a plain `gh` transparently authenticates.
  * The script locates the real binary by skipping /usr/local/bin. */
 const GH_SHIM_PATH = "/usr/local/bin/gh";
+const GIT_SHIM_PATH = "/usr/local/bin/git";
 
 const DEFAULT_USER_NAME = "Valet Agent";
 const DEFAULT_USER_EMAIL = "agent@valet.local";
@@ -261,16 +262,19 @@ export async function installCredentialHelper(
   sandbox: Sandbox,
   apiUrl: string,
   credentialCommands: CredentialCommand[] = [],
+  appSigned?: boolean,
 ): Promise<void> {
   await sandbox.mkdir(STAGING_DIR);
   const stagedHelper = posixJoin(STAGING_DIR, "git-credential-valet");
   const stagedGhWrapper = posixJoin(STAGING_DIR, "valet-gh");
   const stagedSecrets = posixJoin(STAGING_DIR, "valet-secrets");
   const stagedOpShim = posixJoin(STAGING_DIR, "op");
+  const stagedGitShim = posixJoin(STAGING_DIR, "git");
   await sandbox.writeFile(stagedHelper, gitCredentialHelperScript(apiUrl));
   await sandbox.writeFile(stagedGhWrapper, ghWrapperScript(apiUrl));
   await sandbox.writeFile(stagedSecrets, secretsCliScript(apiUrl));
   await sandbox.writeFile(stagedOpShim, opShimScript());
+  if (appSigned) await sandbox.writeFile(stagedGitShim, appSignedGitWrapperScript(apiUrl));
   // One wrapper per declared command, staged beside the fixed scripts and
   // installed in the same privileged exec below.
   const staged = credentialCommands.map((cmd) => ({
@@ -294,8 +298,9 @@ export async function installCredentialHelper(
       `cp ${shQuote(stagedGhWrapper)} ${GH_SHIM_PATH}`,
       `cp ${shQuote(stagedSecrets)} ${SECRETS_CLI_PATH}`,
       `cp ${shQuote(stagedOpShim)} ${OP_SHIM_PATH}`,
+      ...(appSigned === true ? [`cp ${shQuote(stagedGitShim)} ${GIT_SHIM_PATH}`] : appSigned === false ? [`rm -f ${GIT_SHIM_PATH}`] : []),
       ...staged.map(({ path, installed }) => `cp ${shQuote(path)} ${installed}`),
-      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH} ${OP_SHIM_PATH}${staged
+      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH} ${OP_SHIM_PATH}${appSigned ? ` ${GIT_SHIM_PATH}` : ""}${staged
         .map(({ installed }) => ` ${installed}`)
         .join("")}`,
     ].join(" && "),
@@ -732,4 +737,40 @@ export async function resolveStartRef(sandbox: Sandbox, dir: string): Promise<Se
     branch: branch && branch !== "HEAD" ? branch : undefined,
     capturedAt: Date.now(),
   };
+}
+
+export interface GitAttributionHookConfig {
+  coAuthor?: { name: string; email: string };
+  correlationTrailers: boolean;
+}
+
+/** Install an enrichment hook without replacing a repository's existing hook. */
+export async function installGitAttributionHook(
+  sandbox: Sandbox,
+  targetDir: string,
+  config: GitAttributionHookConfig,
+): Promise<void> {
+  const hookDir = targetDir === "." ? ".git/hooks" : `${targetDir}/.git/hooks`;
+  const hook = `${hookDir}/prepare-commit-msg`;
+  const original = `${hook}.valet-original`;
+  const coAuthor = config.coAuthor ? `${config.coAuthor.name} <${config.coAuthor.email}>` : "";
+  const script = `#!/bin/sh
+# Valet Git attribution hook; repository hooks are chained below.
+set -eu
+msg="$1"
+original="$(dirname "$0")/prepare-commit-msg.valet-original"
+if [ -x "$original" ]; then "$original" "$@"; fi
+# Remove only Valet-managed trailers. interpret-trailers then appends one canonical block.
+sed -i '/^Valet-Session:/Id;/^Valet-Queue-Item:/Id' "$msg"
+${coAuthor ? `managed_coauthor=${shQuote(`Co-authored-by: ${coAuthor}`)}\ntmp="$msg.valet.$$"\ngrep -Fivx -- "$managed_coauthor" "$msg" > "$tmp" || true\nmv "$tmp" "$msg"` : ""}
+${config.correlationTrailers ? ': "\${VALET_SESSION_CORRELATION_ID:?Valet correlation is enabled, but this command has no session correlation ID. Run git commit through a Valet queue item.}"\n: "\${VALET_QUEUE_ITEM_CORRELATION_ID:?Valet correlation is enabled, but this command has no queue correlation ID. Run git commit through a Valet queue item.}"' : ""}
+${coAuthor ? `git interpret-trailers --in-place --if-exists replace --trailer ${shQuote(`Co-authored-by: ${coAuthor}`)} "$msg"` : ""}
+${config.correlationTrailers ? 'git interpret-trailers --in-place --if-exists replace --trailer "Valet-Session: $VALET_SESSION_CORRELATION_ID" --trailer "Valet-Queue-Item: $VALET_QUEUE_ITEM_CORRELATION_ID" "$msg"' : ""}
+`;
+  const current = await safeExec(sandbox, `test -f ${shQuote(hook)} && grep -q 'Valet Git attribution hook' ${shQuote(hook)}`);
+  if (current.exitCode !== 0) {
+    await sandbox.exec(`mkdir -p ${shQuote(hookDir)} && if [ -e ${shQuote(hook)} ] && [ ! -e ${shQuote(original)} ]; then mv ${shQuote(hook)} ${shQuote(original)}; fi`);
+  }
+  await sandbox.writeFile(hook, script);
+  await sandbox.exec(`chmod 755 ${shQuote(hook)}`);
 }

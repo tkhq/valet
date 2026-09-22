@@ -28,6 +28,7 @@ import { MessageList } from "~/components/session/message-list";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
+import { GitAttributionStatus } from "~/components/session/git-attribution-status";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
@@ -227,6 +228,7 @@ export function SessionView({
   }
 
   const sessionHeader = (
+    <>
     <SessionHeader
       session={session.data}
       agentStatus={threadStatus.status}
@@ -236,6 +238,8 @@ export function SessionView({
       threadId={effectiveThreadId}
       messages={stream.messages}
     />
+    <GitAttributionStatus sessionId={sessionId} idle={session.data.runState === "idle"} />
+    </>
   );
   const sandboxTabs = (
     <SandboxTabs

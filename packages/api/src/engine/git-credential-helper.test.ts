@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 
 const API_URL = "http://valet-api.example.com";
 
@@ -202,6 +202,17 @@ exec "$real" "$@"
   });
 });
 
+
+describe("appSignedGitWrapperScript", () => {
+  it("chains non-push commands and routes pushes through host replay without write credentials", () => {
+    const script = appSignedGitWrapperScript(`${API_URL}/`);
+    expect(script).toContain('args[0] !== "push"');
+    expect(script).toContain(`${API_URL}/api/sandbox/git-push`);
+    expect(script).toContain("force, delete, tags, mirror, atomic");
+    expect(script).toContain("lfsObjects");
+    expect(script).not.toMatch(/gh[pousr]_/u);
+  });
+});
 
 describe("git credential helper execution", () => {
   function runHelper(mountToken: string, mountFails: boolean, envToken: string, expectedToken: string) {

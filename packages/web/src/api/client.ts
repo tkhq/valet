@@ -8,6 +8,9 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * auth lands we'll wire token storage here.
  */
 import type {
+  GitSettingsResponse,
+  PatchGitSettingsRequest,
+  SessionGitAttributionResponse,
   AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
@@ -563,6 +566,11 @@ export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearch
 }
 
 export const api = {
+  getSessionGitAttribution: (sessionId: string) => request<SessionGitAttributionResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/git-attribution`),
+  applySessionGitAttribution: (sessionId: string) => request<SessionGitAttributionResponse>("POST", `/sessions/${encodeURIComponent(sessionId)}/git-attribution/apply`),
+  getGitSettings: (scope: "user" | "team" | "organization", teamId?: string) => request<GitSettingsResponse>("GET", scope === "user" ? "/me/git-settings" : scope === "organization" ? "/org/git-settings" : `/teams/${encodeURIComponent(teamId ?? "")}/git-settings`),
+  patchGitSettings: (scope: "user" | "team" | "organization", body: PatchGitSettingsRequest, teamId?: string) => request<GitSettingsResponse>("PATCH", scope === "user" ? "/me/git-settings" : scope === "organization" ? "/org/git-settings" : `/teams/${encodeURIComponent(teamId ?? "")}/git-settings`, body),
+
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);

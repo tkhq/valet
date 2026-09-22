@@ -51,7 +51,7 @@
  */
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
@@ -78,7 +78,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { ingestEvent } from "../events/ingest.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { parseContentPushPayload } from "../services/content-sync/push.js";
-import { credentials, githubInstallations, orgs } from "../schema/index.js";
+import { credentials, githubInstallations, orgs, sessionGitBranches, sessionPullRequests } from "../schema/index.js";
 import type {
   GetGithubAppResponse,
   GithubAppInstallationSummary,
@@ -697,6 +697,17 @@ async function handleInstallationRepositoriesEvent(db: AppQueryable, orgId: stri
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
 }
 
+async function reconcilePullRequest(db: AppQueryable, payload: unknown): Promise<void> {
+  if (!isRecord(payload) || !isRecord(payload.pull_request) || !isRecord(payload.repository)) return;
+  const pr = payload.pull_request; const repository = payload.repository;
+  if (typeof repository.full_name !== "string" || typeof pr.number !== "number" || typeof pr.html_url !== "string" || !isRecord(pr.head) || !isRecord(pr.base)) return;
+  const headRef = pr.head.ref, headSha = pr.head.sha, baseRef = pr.base.ref;
+  if (typeof headRef !== "string" || typeof headSha !== "string" || typeof baseRef !== "string") return;
+  const branches = await db.select().from(sessionGitBranches).where(and(eq(sessionGitBranches.repoFullName, repository.full_name), or(eq(sessionGitBranches.ref, headRef), eq(sessionGitBranches.ref, `refs/heads/${headRef}`), eq(sessionGitBranches.headSha, headSha))));
+  const now = Date.now(); const state = pr.merged === true ? "merged" : typeof pr.state === "string" ? pr.state : "open";
+  for (const branch of branches) await db.insert(sessionPullRequests).values({ sessionId: branch.sessionId, repoFullName: repository.full_name, prNumber: pr.number, prUrl: pr.html_url, headRef, headSha, baseRef, state, firstObservedAt: now, updatedAt: now }).onConflictDoUpdate({ target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId], set: { prUrl: pr.html_url, headRef, headSha, baseRef, state, updatedAt: now } });
+}
+
 githubAppWebhookRouter.post("/", async (c) => {
   const contentLength = c.req.header("content-length");
   if (contentLength !== undefined && Number(contentLength) > MAX_WEBHOOK_BODY_BYTES) {
@@ -755,6 +766,7 @@ githubAppWebhookRouter.post("/", async (c) => {
         });
     }
   }
+  if (event === "pull_request") await reconcilePullRequest(db, payload);
   if (event === "installation") {
     await handleInstallationEvent(deps, orgId, payload);
   } else if (event === "installation_repositories") {

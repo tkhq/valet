@@ -673,6 +673,7 @@ sessionsRouter.post("/", async (c) => {
         workspace: body.workspace,
         title: sessionTitle,
         status: "active",
+        gitAttributionSnapshotPending: true,
         ownerType: owner.type,
         ownerId: owner.id,
         // A new team session resolves credentials as the team (team

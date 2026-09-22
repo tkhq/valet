@@ -347,6 +347,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
           kubernetes: false,
           sandboxResourceOverrides: req.resources ?? null,
           status: "active",
+        gitAttributionSnapshotPending: true,
           ownerType: ctx.owner.type,
           ownerId: ctx.owner.id,
           credentialOwnerMode,
