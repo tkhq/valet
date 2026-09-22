@@ -30,6 +30,8 @@ import {
   buildChildStatusReader,
   ChildWatcher,
   ChildLimitError,
+  DelegationEnvelopeIntegrityError,
+  NestedDelegationUnsupportedError,
   classifyWatcherError,
   resolveChildSettlement,
   type ChildrenDeps,
@@ -38,8 +40,10 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, authorizationExecutionAttempts, bakes, childWatches, credentialDelegations, delegationEnvelopes, eventDropLog, imageSources, sandboxTokens, securityCells, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
+import type { AuthorizationRequest, DelegationEnvelopeV1 } from "@valet/engine/authorization";
+import type { AppDb } from "../lib/drizzle.js";
 import { SignalEdgeDeniedError } from "./signals.js";
 
 let api: TestApi | undefined;
@@ -52,11 +56,31 @@ afterEach(async () => {
   githubFixture = undefined;
 });
 
+function mockDelegationDecision(a: TestApi, effectFor: (request: AuthorizationRequest) => "allow" | "deny"): void {
+  const preview = a.providers.canonicalAuthorizationService.preview.bind(a.providers.canonicalAuthorizationService);
+  vi.spyOn(a.providers.canonicalAuthorizationService, "preview").mockImplementation(async (request) => {
+    const envelope = await preview(request);
+    const effect = effectFor(request);
+    const { decisionDigest: _decisionDigest, obligationDigest: _obligationDigest, decision: _decision, ...identity } = envelope;
+    return {
+      ...identity,
+      decision: {
+        effect,
+        reasonCode: `test.${effect}`,
+        matchedRuleIds: [`test.${effect}`],
+        obligations: [],
+        redactions: [],
+      },
+    };
+  });
+}
+
 function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): ChildrenDeps {
   return {
     db: a.providers.db,
     engineHost: a.providers.engineHost,
     engineStore: a.providers.engineStore,
+    canonicalAuthorizationService: a.providers.canonicalAuthorizationService,
     prebuildService: a.providers.prebuildService,
     workspaceRoot: mkdtempSync(join(tmpdir(), "valet-children-test-")),
     ...overrides,
@@ -70,6 +94,27 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000): Pr
     await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error("waitFor: timed out");
+}
+
+async function seedDelegationEnvelope(db: AppDb, edge: { childSessionId: string; parentSessionId: string; parentThreadId: string; actorUserId: string; orgId: string }): Promise<void> {
+  const envelope: DelegationEnvelopeV1 = {
+    schemaVersion: 1,
+    organizationId: edge.orgId,
+    parentSessionId: edge.parentSessionId,
+    parentThreadId: edge.parentThreadId,
+    childSessionId: edge.childSessionId,
+    actorUserId: edge.actorUserId,
+    owner: { type: "user", id: edge.actorUserId },
+    depth: 1,
+    parentRootCapable: true,
+    constraints: {},
+    capabilities: ["agent.signal"],
+    policyDigest: "test-policy",
+    sourceBundleDigest: "test-source",
+    evaluatorKind: "local_valet",
+    engineDigest: "test-engine",
+  };
+  await db.insert(delegationEnvelopes).values({ childSessionId: edge.childSessionId, orgId: edge.orgId, parentSessionId: edge.parentSessionId, envelope, decisionId: `test-decision:${edge.childSessionId}`, createdAt: Date.now() }).onConflictDoNothing();
 }
 
 function queuedItem(id: string, threadId: string, prompt: string): QueueItem {
@@ -192,16 +237,11 @@ describe("buildChildSpawner", () => {
     });
     const parentThread = parent.thread("web:default");
     const owner = { type: "team" as const, id: "team-x" };
+    const childSessionId = "child_security_recovery", parentOperationId = "security-dispatch:engagement:cell:1";
+    await api.providers.db.insert(securityCells).values({ id: "cell", engagementId: "engagement", ordinal: 1, persona: "reviewer", goal: "review", dir: "01-review", status: "running", attempts: 1, childSessionId, createdAt: Date.now() });
+    const context = { parentSessionId: "parent-spawn", parentThreadId: parentThread.id, parentOperationId, actorUserId: "local-user", owner };
 
-    const result = await spawner(
-      { prompt: "do the thing", title: "The Thing" },
-      {
-        parentSessionId: "parent-spawn",
-        parentThreadId: parentThread.id,
-        actorUserId: "local-user",
-        owner,
-      },
-    );
+    const result = await spawner({ prompt: "do the thing", title: "The Thing", sessionId: childSessionId }, context);
     expect(result.childSessionId).toMatch(/^child_/);
     expect(result.queueItemId).toBeTruthy();
 
@@ -240,6 +280,38 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", startedAt: Date.now(), finishedAt: null });
+    await expect(buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("indeterminate_execution");
+    await api.providers.db.update(authorizationExecutionAttempts).set({ startedAt: 0 });
+    const replay = await buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context);
+    expect(replay).toEqual(result);
+    const [edge] = await api.providers.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
+    await api.providers.db.delete(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
+    await api.providers.db.insert(delegationEnvelopes).values({ ...edge!, envelope: { ...edge!.envelope, actorUserId: "other-user" } });
+    await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", startedAt: 0, finishedAt: null });
+    await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
+    await api.providers.db.delete(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
+    await api.providers.db.insert(delegationEnvelopes).values(edge!);
+    await api.providers.db.update(securityCells).set({ attempts: 2 });
+    await api.providers.db.update(authorizationExecutionAttempts).set({ startedAt: 0 });
+    await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
+    await api.providers.db.update(securityCells).set({ attempts: 1 });
+    await api.providers.db.delete(childWatches).where(eq(childWatches.childSessionId, result.childSessionId));
+    await api.providers.db.update(authorizationExecutionAttempts).set({ startedAt: 0 });
+    await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
+  });
+
+  it("rejects a child attempting nested delegation before side effects", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("root-nested", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const first = await spawner({ prompt: "first level" }, { parentSessionId: parent.id, parentThreadId: parent.thread().id, actorUserId: "local-user", owner: { type: "user", id: "local-user" } });
+    const create = vi.spyOn(api.providers.engineHost, "childSessionFor");
+    const before = await api.providers.db.select().from(delegationEnvelopes);
+    await expect(spawner({ prompt: "forbidden nested" }, { parentSessionId: first.childSessionId, parentThreadId: "web:default", actorUserId: "local-user", owner: { type: "user", id: "local-user" } })).rejects.toBeInstanceOf(NestedDelegationUnsupportedError);
+    expect(create).not.toHaveBeenCalled();
+    expect(await api.providers.db.select().from(delegationEnvelopes)).toHaveLength(before.length);
   });
 
   // A team orchestrator from before owner-mode resolution keeps resolving
@@ -251,6 +323,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
     const spawner = buildChildSpawner(deps, watcher);
+    const modelCapability = vi.spyOn(api.providers.engineHost, "delegationModelCapability");
     const now = Date.now();
     await api.providers.db.insert(agentSessions).values({
       id: "parent-actor",
@@ -276,6 +349,7 @@ describe("buildChildSpawner", () => {
       { prompt: "do the thing" },
       { parentSessionId: "parent-actor", parentThreadId: parentThread.id, actorUserId: "local-user", owner: { type: "team", id: "team-x" } },
     );
+    expect(modelCapability).toHaveBeenCalledWith("local-org", "s");
     const rows = await api.providers.db
       .select({ mode: agentSessions.credentialOwnerMode })
       .from(agentSessions)
@@ -440,6 +514,9 @@ describe("buildChildSpawner", () => {
   it("binds req.repo: session_repos row, clone prep wired, repo image source upserted", async () => {
     githubFixture = startGithubFixture();
     api = await bootTestApi({ githubApiUrl: githubFixture.url });
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "api_key", accessToken: "user-test-token",
+    });
     await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github", {
       type: "api_key", accessToken: "org-test-token",
     });
@@ -451,15 +528,28 @@ describe("buildChildSpawner", () => {
       orgId: "local-org",
       workspace: "/tmp",
     });
+    const originalChildSessionFor = api.providers.engineHost.childSessionFor.bind(api.providers.engineHost);
+    const orderingSpy = vi.spyOn(api.providers.engineHost, "childSessionFor").mockImplementation(async (...args) => {
+      const childSessionId = args[0];
+      const [envelopes, grants] = await Promise.all([
+        api!.providers.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, childSessionId)),
+        api!.providers.db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, childSessionId)),
+      ]);
+      expect(envelopes).toHaveLength(1);
+      expect(grants).toHaveLength(1);
+      return originalChildSessionFor(...args);
+    });
     const result = await spawner(
       { prompt: "explore the repo", repo: "tkhq/sdk", branch: "main" },
       {
         parentSessionId: "parent-repo",
         parentThreadId: parent.thread("web:default").id,
+        parentOperationId: "parent-queue-repo",
         actorUserId: "local-user",
         owner: { type: "user", id: "local-user" },
       },
     );
+    expect(orderingSpy).toHaveBeenCalledOnce();
 
     // The binding row mirrors what the REST create route writes.
     const rows = await api.providers.db
@@ -491,6 +581,36 @@ describe("buildChildSpawner", () => {
     });
   });
 
+  it("denies repository credential delegation before child-side effects", async () => {
+    api = await bootTestApi();
+    mockDelegationDecision(api, (request) => request.kind === "credential.delegate" ? "deny" : "allow");
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const create = vi.spyOn(api.providers.engineHost, "childSessionFor");
+    const parent = await api.providers.engineHost.sessionFor("parent-repo-denied", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+
+    await expect(spawner(
+      { prompt: "explore the repo", repo: "acme/widgets" },
+      {
+        parentSessionId: parent.id,
+        parentThreadId: parent.thread("web:default").id,
+        parentOperationId: "parent-queue-denied",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    )).rejects.toThrow("Repository credential delegation was denied.");
+
+    expect(create).not.toHaveBeenCalled();
+    expect(await api.providers.db.select().from(credentialDelegations)).toHaveLength(0);
+    expect(await api.providers.db.select().from(delegationEnvelopes)).toHaveLength(0);
+    expect(await api.providers.db.select().from(sessionRepos)).toHaveLength(0);
+    expect(await api.providers.db.select().from(childWatches)).toHaveLength(0);
+  });
+
   it("spawns without repo: no session_repos row, no clone prep", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
@@ -510,11 +630,12 @@ describe("buildChildSpawner", () => {
         owner: { type: "user", id: "local-user" },
       },
     );
-    const rows = await api.providers.db
-      .select()
-      .from(sessionRepos)
-      .where(eq(sessionRepos.sessionId, result.childSessionId));
+    const [rows, grants] = await Promise.all([
+      api.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, result.childSessionId)),
+      api.providers.db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, result.childSessionId)),
+    ]);
     expect(rows).toHaveLength(0);
+    expect(grants).toHaveLength(0);
   });
 
   it("rejects an unparseable repo before creating anything", async () => {
@@ -656,6 +777,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
 
+    await api.providers.canonicalPolicyManager.provisionOrganization("org-release-test", "Release Test");
     await api.providers.engineHost.sessionFor("parent-release", {
       userId: "local-user",
       orgId: "org-release-test",
@@ -707,6 +829,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
 
+    await api.providers.canonicalPolicyManager.provisionOrganization("org-parked-test", "Parked Test");
     await api.providers.engineHost.sessionFor("parent-parked", {
       userId: "local-user",
       orgId: "org-parked-test",
@@ -748,6 +871,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
 
+    await api.providers.canonicalPolicyManager.provisionOrganization("org-single-count", "Single Count Test");
     await api.providers.engineHost.sessionFor("parent-single-count", {
       userId: "local-user",
       orgId: "org-single-count",
@@ -908,6 +1032,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     // Double-fire: direct arm AND a rearm() pass over the unsettled row.
@@ -976,6 +1101,7 @@ describe("ChildWatcher", () => {
     // The row a spawn from a Slack-addressed turn writes: origin captured at
     // spawn time, durable so the boot rearm() path inherits it too.
     const origin = { channelType: "slack", threadKey: "slack:C1:1.2" };
+    await seedDelegationEnvelope(db, { childSessionId: "child-o", parentSessionId: "parent-o", parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org" });
     await db.insert(childWatches).values({
       childSessionId: "child-o",
       queueItemId: itemId,
@@ -1029,6 +1155,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1094,6 +1221,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1176,6 +1304,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1247,6 +1376,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1312,6 +1442,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1368,6 +1499,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
 
     watcher.arm(watch);
@@ -1397,6 +1529,11 @@ describe("classifyWatcherError", () => {
       kind: "retryable",
       pendingCap: false,
     });
+  });
+
+  it("keeps delegation envelope integrity failures unsettled for repair", () => {
+    const error = new DelegationEnvelopeIntegrityError("missing", "child-1");
+    expect(classifyWatcherError(error)).toEqual({ kind: "integrity", error });
   });
 
   it("classifies SignalEdgeDeniedError as permanent, alreadyLogged: true", () => {
@@ -1945,6 +2082,7 @@ describe("buildChildSender", () => {
       createdAt: now,
       updatedAt: now,
     });
+    await seedDelegationEnvelope(db, { childSessionId: opts.childId, parentSessionId: opts.parentId, parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org" });
     await db.insert(childWatches).values({
       childSessionId: opts.childId,
       queueItemId: opts.queueItemId,
@@ -2110,12 +2248,14 @@ describe("buildChildSender", () => {
     const watcher = new ChildWatcher(deps);
     const { engineStore, db } = api.providers;
 
-    const { parentThread, childThread } = await seedChild(api, {
+    const { parent, childThread } = await seedChild(api, {
       childId: "child-again",
       parentId: "parent-again",
       settled: true,
       queueItemId: "qi-done",
     });
+
+    await db.insert(sessionRepos).values({ sessionId: "child-again", host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git", auth: "auto", position: 0 });
 
     // The user dismissed the settled child; a re-open must resurface it.
     await db
@@ -2124,11 +2264,11 @@ describe("buildChildSender", () => {
       .where(eq(childWatches.childSessionId, "child-again"));
 
     const sender = buildChildSender(deps, watcher);
-    // Send from a DIFFERENT thread than the spawn origin: the durable edge
-    // (and the settlement signal) must stay with the spawning thread.
+    // Send from a different thread than the spawn origin. The wake grant and
+    // settlement route must bind to this sending turn.
     const res = await sender(
       { childSessionId: "child-again", message: "one more thing: add tests" },
-      { parentSessionId: "parent-again", parentThreadId: "th-elsewhere", actorUserId: "local-user" },
+      { parentSessionId: "parent-again", parentThreadId: "th-elsewhere", actorUserId: "local-user", parentOperationId: "send-operation" },
     );
     expect(res).not.toBeNull();
 
@@ -2136,7 +2276,9 @@ describe("buildChildSender", () => {
     expect(rows[0]?.settled).toBe(false);
     expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
     expect(rows[0]?.dismissedAt).toBeNull();
-    expect(rows[0]?.parentThreadId).toBe(parentThread.id);
+    expect(rows[0]?.parentThreadId).toBe("th-elsewhere");
+    const [grant] = await db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, "child-again"));
+    expect(grant).toMatchObject({ parentThreadId: "th-elsewhere", parentOperationId: "send-operation", revokedAt: null });
 
     await engineStore.settleUnclaimed("child-again", childThread.id, res?.queueItemId ?? "", { outcome: "completed" });
     await waitFor(async () => {
@@ -2146,8 +2288,28 @@ describe("buildChildSender", () => {
     await new Promise((r) => setTimeout(r, 100));
     const signals = settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-again"));
     expect(signals).toHaveLength(1);
+    expect((await db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, "child-again")))[0]?.revokedAt).not.toBeNull();
     expect(signals[0]?.dispatchId).toBe(`child-again:settled:child-again:${res?.queueItemId}`);
-    expect(signals[0]?.threadId).toBe(parentThread.id);
+    expect(signals[0]?.threadId).toBe(parent.thread("th-elsewhere").id);
+  });
+
+  it("denies settled-child repository re-delegation before wake", async () => {
+    api = await bootTestApi();
+    mockDelegationDecision(api, (request) => request.kind === "credential.delegate" ? "deny" : "allow");
+    const deps = childrenDeps(api);
+    const { db, engineHost } = api.providers;
+    await seedChild(api, { childId: "child-redelegate-denied", parentId: "parent-redelegate-denied", settled: true, queueItemId: "qi-done" });
+    await db.insert(sessionRepos).values({ sessionId: "child-redelegate-denied", host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git", auth: "auto", position: 0 });
+    const wake = vi.spyOn(engineHost, "sessionFor");
+
+    await expect(buildChildSender(deps, new ChildWatcher(deps))(
+      { childSessionId: "child-redelegate-denied", message: "wake" },
+      { parentSessionId: "parent-redelegate-denied", parentThreadId: "elsewhere", actorUserId: "local-user", parentOperationId: "send-denied" },
+    )).rejects.toThrow("Repository credential delegation was denied.");
+
+    expect(wake).not.toHaveBeenCalled();
+    expect(await db.select().from(credentialDelegations)).toHaveLength(0);
+    expect((await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-redelegate-denied")))[0]?.settled).toBe(true);
   });
 
   it("self-heals a steer whose sender died before the re-point: the watch follows the successor", async () => {
@@ -2401,6 +2563,7 @@ describe("child sandbox retention", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
+    await seedDelegationEnvelope(db, watch);
     await db.insert(childWatches).values({ ...watch, settled: false, createdAt: now });
     return { watch, child, childThread };
   }

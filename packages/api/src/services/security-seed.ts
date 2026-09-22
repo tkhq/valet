@@ -26,8 +26,45 @@ import {
   type SecurityScope,
   type ToolDecl,
 } from "@valet/plugin-security";
+import { randomUUID } from "node:crypto";
+import type { Principal } from "@valet/engine";
 import { fetchRepoFile, resolveApiTokenOrNull } from "../bakes/source-service.js";
 import type { GitHubTokenDeps } from "../services/github-tokens.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { authorizeCredentialUseOperation } from "../authorization/credential-use-provider.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+
+export interface SecurityCredentialAuthorization {
+  db: AppDb;
+  authorization: Pick<CanonicalAuthorizationService, "authorize">;
+  actorUserId: string;
+  principal: Principal;
+}
+
+export async function resolveSecurityApiToken(
+  tokenDeps: GitHubTokenDeps,
+  authorization: SecurityCredentialAuthorization | undefined,
+  input: { orgId: string; owner: string; repo: string; actionId: string },
+): Promise<string | null> {
+  const execute = () => resolveApiTokenOrNull(tokenDeps, input.orgId, input.owner, input.repo);
+  if (!authorization) return execute();
+  return authorizeCredentialUseOperation({
+    db: authorization.db,
+    authorization: authorization.authorization,
+    binding: {
+      organizationId: input.orgId,
+      actorUserId: authorization.actorUserId,
+      principal: authorization.principal,
+      owner: { type: "org", id: input.orgId },
+      service: "github",
+      credentialClass: "installation_or_pat",
+      actionId: input.actionId,
+      operation: "repository",
+      resource: { type: "repository", id: `${input.owner}/${input.repo}` },
+      invocationId: randomUUID(),
+    },
+  }, execute, (token) => token !== null);
+}
 
 export interface SeedSecurityReviewArgs {
   /** The repo owner (the `owner` half of `owner/repo`). */
@@ -50,6 +87,7 @@ export interface SeedSecurityReviewArgs {
   tokenDeps: GitHubTokenDeps;
   /** The owning org, for `resolveApiTokenOrNull`. */
   orgId: string;
+  credentialAuthorization?: SecurityCredentialAuthorization;
 }
 
 /** The seeded config + plan a preview shows and a create stores. */
@@ -80,7 +118,7 @@ export interface SeededSecurityReview {
  * (`presetPlan`), because the caller validated it first.
  */
 export async function seedSecurityReview(args: SeedSecurityReviewArgs): Promise<SeededSecurityReview> {
-  const { owner, repo, ref, presetId, paths, includeReport, tokenDeps, orgId } = args;
+  const { owner, repo, ref, presetId, paths, includeReport, tokenDeps, orgId, credentialAuthorization } = args;
 
   const result: SeededSecurityReview = {
     planYaml: presetPlan(presetId, {
@@ -98,7 +136,12 @@ export async function seedSecurityReview(args: SeedSecurityReviewArgs): Promise<
   };
 
   try {
-    const token = await resolveApiTokenOrNull(tokenDeps, orgId, owner, repo);
+    const token = await resolveSecurityApiToken(tokenDeps, credentialAuthorization, {
+      orgId,
+      owner,
+      repo,
+      actionId: "security.seed_config",
+    });
     const raw = await fetchRepoFile(tokenDeps, token, owner, repo, ".valet/security.yml", ref);
     if (raw === null) return result;
 

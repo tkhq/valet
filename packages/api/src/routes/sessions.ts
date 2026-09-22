@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
@@ -23,13 +24,15 @@ import {
   createSecurityEngagementService,
   type SecurityConfigContext,
 } from "../services/security-engagements.js";
-import { seedSecurityReview, seededConfigContext } from "../services/security-seed.js";
+import { resolveSecurityApiToken, seedSecurityReview, seededConfigContext } from "../services/security-seed.js";
 import { planCellInputToCell, PlanCellInputError } from "./security.js";
-import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
+import { resolveRefSha } from "../bakes/source-service.js";
 import { checkRepoExistence } from "../services/repo-existence.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import { authorizeDirectResource, newResourceDelivery } from "../authorization/resource-authorization.js";
+import { authorizeCredentialUseOperation, CredentialUseDeniedError } from "../authorization/credential-use-provider.js";
+import { revokeSessionCredentialDelegations } from "../authorization/credential-delegation.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import {
@@ -299,7 +302,7 @@ const PLUGIN_LABEL: Record<string, string> = {
 };
 
 sessionsRouter.post("/", async (c) => {
-  const { db, engineStore, prebuildService, engineCredentials, encryptionKey } = c.var.providers;
+  const { db, engineStore, prebuildService, engineCredentials, encryptionKey, canonicalAuthorizationService } = c.var.providers;
   const user = c.var.user;
   let body: CreateSessionRequest;
   try {
@@ -542,10 +545,32 @@ sessionsRouter.post("/", async (c) => {
   const checkedRepos: RepoBinding[] = [];
   const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
   for (const repo of repos) {
-    const result = await checkRepoExistence(tokenDeps, {
-      orgId: user.orgId, userId: user.id, host: repo.host ?? "github",
-      fullName: repo.fullName, auth: repo.auth,
-    });
+    let result;
+    try {
+      result = await authorizeCredentialUseOperation({
+        db,
+        authorization: canonicalAuthorizationService,
+        binding: {
+          organizationId: user.orgId,
+          actorUserId: user.id,
+          principal: c.var.principal,
+          owner: { type: "user", id: user.id },
+          service: "github",
+          credentialClass: "installation_or_user",
+          actionId: "session.verify_repository",
+          operation: "repository",
+          resource: { type: "repository", id: repo.fullName },
+          invocationId: randomUUID(),
+        },
+      }, () => checkRepoExistence(tokenDeps, {
+        orgId: user.orgId, userId: user.id, host: repo.host ?? "github",
+        fullName: repo.fullName, auth: repo.auth,
+      }), (value) => value.kind === "found");
+    } catch (error) {
+      if (!(error instanceof CredentialUseDeniedError)) throw error;
+      const status = error.code === "credential_provider_failed" ? 502 : error.code === "credential_use_denied" ? 403 : 409;
+      return c.json({ error: error.message }, status);
+    }
     if (result.kind === "not-found") return c.json({ error: result.error }, 400);
     const binding = result.kind === "found"
       ? { ...repo, fullName: result.fullName, cloneUrl: result.cloneUrl }
@@ -606,6 +631,12 @@ sessionsRouter.post("/", async (c) => {
         ...(body.includeReport !== undefined ? { includeReport: body.includeReport } : {}),
         tokenDeps,
         orgId: user.orgId,
+        credentialAuthorization: {
+          db,
+          authorization: canonicalAuthorizationService,
+          actorUserId: user.id,
+          principal: c.var.principal,
+        },
       });
       engagementHasRepoConfig = seeded.hasRepoConfig;
 
@@ -798,7 +829,12 @@ sessionsRouter.post("/", async (c) => {
           resolvedSha = ref.toLowerCase();
         } else {
           const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
-          const token = await resolveApiTokenOrNull(tokenDeps, user.orgId, owner, repo);
+          const token = await resolveSecurityApiToken(tokenDeps, {
+            db,
+            authorization: canonicalAuthorizationService,
+            actorUserId: user.id,
+            principal: c.var.principal,
+          }, { orgId: user.orgId, owner, repo, actionId: "security.resolve_create_ref" });
           resolvedSha = (await resolveRefSha(tokenDeps, token, owner, repo, ref)).toLowerCase();
         }
         const security = createSecurityEngagementService({ db });
@@ -1521,10 +1557,12 @@ sessionsRouter.delete("/:id", async (c) => {
   // in the same transaction as the soft-delete (TKAI-296): a live row kept
   // the assistant in every teammate's rail, pointing at a dead session.
   await db.transaction(async (tx) => {
+    const now = Date.now();
     await tx
       .update(agentSessions)
-      .set({ status: "deleted", updatedAt: Date.now() })
+      .set({ status: "deleted", updatedAt: now })
       .where(eq(agentSessions.id, id));
+    await revokeSessionCredentialDelegations(tx, id, now);
     if (assistant) await retireAssistant(tx, assistant.id);
   });
 

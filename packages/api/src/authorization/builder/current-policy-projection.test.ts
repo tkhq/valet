@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AuthorizationRequest } from "@valet/engine/authorization";
+import { adaptEgressConnect, type AuthorizationRequest } from "@valet/engine/authorization";
 import { buildCurrentPolicySource } from "../bundles/current-policy-source.js";
 import { SourceBundleHost } from "../bundles/host.js";
 import { InMemorySourceBundleStorage } from "../bundles/in-memory-storage.js";
@@ -108,6 +108,44 @@ describe("browser draft to current source contract", () => {
     const snapshot = projectDraftToCurrentSnapshot(normalizePolicyDraft({ ...draft, rules: [rule] }), "org-1");
     expect(snapshot.organizationPolicies[0]).toMatchObject({ authorizationKind: "tool.builtin" });
     expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
+  });
+
+  it.each([
+    ["delegation.create", "delegation.create"],
+    ["agent.signal", "agent.cancel"],
+    ["sandbox.capability", "sandbox.provision"],
+    ["credential.use", "credential.repository"],
+    ["credential.delegate", "credential.delegate"],
+  ] as const)("projects non-egress %s policies", (context, actionId) => {
+    const rule = { ...draft.rules[0], context, target: { "action.id": actionId }, matcherGroups: [], appliesIn: undefined };
+    const snapshot = projectDraftToCurrentSnapshot(normalizePolicyDraft({ ...draft, rules: [rule] }), "org-1");
+    expect(snapshot.organizationPolicies[0]).toMatchObject({ authorizationKind: context, actionId });
+    expect(() => buildCurrentPolicySource(snapshot)).not.toThrow();
+  });
+
+  it("publishes and evaluates canonical exact and suffix egress targets", async () => {
+    const rule = {
+      ...draft.rules[0], context: "egress.connect" as const, target: { "action.id": "egress.connect" }, appliesIn: undefined,
+      effect: "allow" as const,
+      matcherGroups: [{ id: "egress-targets", mode: "all" as const, matchers: [
+        { id: "scheme", field: "parameters.destination.scheme", operator: "eq" as const, value: "https" },
+        { id: "host", field: "parameters.destination.host", operator: "suffix" as const, value: "example.com" },
+        { id: "port", field: "parameters.destination.port", operator: "eq" as const, value: 443 },
+        { id: "class", field: "parameters.destination.destinationClass", operator: "eq" as const, value: "external" },
+      ] }],
+    };
+    const normalized = normalizePolicyDraft({ ...draft, rules: [rule] });
+    const snapshot = projectDraftToCurrentSnapshot(normalized, "org-1");
+    expect(snapshot.organizationPolicies[0]).toMatchObject({ authorizationKind: "egress.connect", actionId: "egress.connect", paramMatchers: expect.arrayContaining([{ path: "destination.host", op: "suffix", value: "example.com" }]) });
+    const built = buildCurrentPolicySource(snapshot);
+    const host = new SourceBundleHost(new InMemorySourceBundleStorage(), runtime);
+    const identity = await host.publish(built.bundle);
+    await host.activate("org-1", undefined, identity.sourceBundleDigest);
+    const evaluator = await LocalValetEvaluator.create(host, runtime);
+    const egress = (hostName: string) => adaptEgressConnect({ schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" }, requestId: "000000000000000018db1a2b3c4d5e6f-0000000000000001", operationId: `op-${hostName.replaceAll(".", "-")}`, evaluationTimeMs: 100, sessionId: "session-1", operation: "connect", destination: { scheme: "https", protocol: "tcp", host: hostName, port: 443, destinationClass: "external" } }).request;
+    expect((await evaluator.evaluate(egress("api.example.com"))).decision.effect).toBe("allow");
+    expect((await evaluator.evaluate(egress("example.com"))).decision.effect).toBe("allow");
+    expect((await evaluator.evaluate(egress("evil-example.com"))).decision.effect).toBe("deny");
   });
 
   it("projects a bare approval mode without custom approval fields", () => {

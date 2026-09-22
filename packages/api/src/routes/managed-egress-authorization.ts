@@ -1,6 +1,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
-import { validateManagedEgressRequest, type ManagedEgressIdentity } from "@valet/engine";
+import { isHematiteRequestId, validateManagedEgressRequest, type ManagedEgressEffectiveState, type ManagedEgressIdentity } from "@valet/engine";
+import { adaptEgressConnect, canonicalAuthorizationJson, type AuthorizationPrincipal } from "@valet/engine/authorization";
+import { canonicalDecisionId, type CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 
 export const MANAGED_EGRESS_MAX_BODY_BYTES = 4096;
 const MAX_ID_BYTES = 128;
@@ -9,6 +11,8 @@ const MAX_TOKEN_BYTES = 4096;
 const REPLAY_TTL_MS = 60_000;
 const MAX_REPLAY_ENTRIES = 1024;
 const DEFAULT_BODY_READ_TIMEOUT_MS = 2_000;
+const DEFAULT_EVALUATION_WINDOW_MS = 1_000;
+const DEFAULT_MAX_EVALUATIONS_PER_WINDOW = 120;
 
 const SAFE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate, private",
@@ -17,11 +21,25 @@ const SAFE_HEADERS = {
   "Content-Type": "application/json",
 } as const;
 
+export interface ManagedEgressPolicyIdentity {
+  actorUserId: string;
+  principal: AuthorizationPrincipal;
+}
+
+export interface ManagedEgressBindingActivation {
+  effective: ManagedEgressEffectiveState;
+  policyIdentity: ManagedEgressPolicyIdentity;
+}
+
 interface Binding {
   identity: ManagedEgressIdentity;
   tokenHash: Buffer;
   expiresAt?: number;
-  seen: Map<string, { at: number; response: AuthorizationResponse }>;
+  activation?: ManagedEgressBindingActivation;
+  seen: Map<string, { at: number; requestDigest: string; response: AuthorizationResponse }>;
+  pending: Map<string, { requestDigest: string; response: Promise<AuthorizationResponse> }>;
+  evaluationWindowStartedAt: number;
+  evaluationCount: number;
 }
 
 export interface AuthorizationRequestV1 {
@@ -36,14 +54,18 @@ export interface AuthorizationRequestV1 {
 interface AuthorizationResponse {
   version: "1";
   request_id: string;
-  decision: "deny";
+  decision: "allow" | "deny";
   decision_id: string;
-  reason_code: "unsupported_prerequisite";
+  reason_code: "policy_allow" | "policy_denied" | "unsupported_prerequisite" | "authorization_failure" | "rate_limited";
 }
 
 export interface ManagedEgressBindingRegistryOptions {
   maxBindings?: number;
   maxBindingsPerOrg?: number;
+  authorization?: Pick<CanonicalAuthorizationService, "authorize">;
+  evaluationWindowMs?: number;
+  maxEvaluationsPerWindow?: number;
+  now?: () => number;
 }
 
 export interface ManagedEgressAuthorizationRouterOptions {
@@ -120,7 +142,7 @@ async function readBoundedBody(request: Request, expectedLength: number | null, 
 
 export function parseAuthorizationRequestV1(value: unknown): AuthorizationRequestV1 | null {
   if (!record(value) || !exactKeys(value, ["version", "request_id", "service", "action", "subject", "destination"])) return null;
-  if (value.version !== "1" || value.service !== "egress" || value.action !== "connect" || !safe(value.request_id)) return null;
+  if (value.version !== "1" || value.service !== "egress" || value.action !== "connect" || !isHematiteRequestId(value.request_id)) return null;
   if (!record(value.subject) || !exactKeys(value.subject, ["session_id", "workload_id"])) return null;
   if (!safe(value.subject.session_id) || !safe(value.subject.workload_id)) return null;
   if (!record(value.destination) || !exactKeys(value.destination, ["scheme", "protocol", "host", "port"])) return null;
@@ -134,15 +156,37 @@ export function parseAuthorizationRequestV1(value: unknown): AuthorizationReques
   };
 }
 
+function assertActivation(identity: ManagedEgressIdentity, activation: ManagedEgressBindingActivation): void {
+  const effective = activation.effective;
+  if (!effective.requested || !effective.configured || !effective.ready || !effective.effective || canonicalAuthorizationJson(effective.identity) !== canonicalAuthorizationJson(identity)) {
+    throw new Error("managed egress callback activation requires the observed effective boundary identity");
+  }
+  if (effective.topology.callbackBindingId.length === 0 || effective.topology.proxyResources.length === 0 || effective.topology.policyResources.length === 0 || Object.keys(effective.topology.workloadSelector).length === 0) {
+    throw new Error("managed egress callback activation requires complete topology identity");
+  }
+  if (activation.policyIdentity.actorUserId.length === 0 || activation.policyIdentity.principal.id.length === 0) {
+    throw new Error("managed egress callback activation requires server-bound policy identity");
+  }
+}
+
 /** In-memory prerequisite registry. Restart revokes every token and therefore fails closed. */
 export class ManagedEgressBindingRegistry {
   private readonly bindings = new Map<string, Binding>();
   private readonly maxBindings: number;
   private readonly maxBindingsPerOrg: number;
+  private readonly authorization?: Pick<CanonicalAuthorizationService, "authorize">;
+  private readonly evaluationWindowMs: number;
+  private readonly maxEvaluationsPerWindow: number;
+  private readonly now: () => number;
 
   constructor(options: ManagedEgressBindingRegistryOptions = {}) {
     this.maxBindings = options.maxBindings ?? 4_096;
     this.maxBindingsPerOrg = options.maxBindingsPerOrg ?? 512;
+    this.authorization = options.authorization;
+    this.evaluationWindowMs = options.evaluationWindowMs ?? DEFAULT_EVALUATION_WINDOW_MS;
+    this.maxEvaluationsPerWindow = options.maxEvaluationsPerWindow ?? DEFAULT_MAX_EVALUATIONS_PER_WINDOW;
+    if (!Number.isSafeInteger(this.evaluationWindowMs) || this.evaluationWindowMs < 1 || !Number.isSafeInteger(this.maxEvaluationsPerWindow) || this.maxEvaluationsPerWindow < 1) throw new TypeError("Set positive managed egress rate limits.");
+    this.now = options.now ?? Date.now;
   }
 
   get bindingCount(): number {
@@ -168,7 +212,7 @@ export class ManagedEgressBindingRegistry {
     return false;
   }
 
-  register(identity: ManagedEgressIdentity, token: string, expiresAt?: number, now = Date.now()): void {
+  register(identity: ManagedEgressIdentity, token: string, expiresAt?: number, now = Date.now(), activation?: ManagedEgressBindingActivation): void {
     validateManagedEgressRequest({ requested: true, identity, proxyToken: token });
     this.prune(now);
     if (this.bindings.has(identity.proxyId)) throw new Error("managed egress proxy binding already exists");
@@ -179,7 +223,17 @@ export class ManagedEgressBindingRegistry {
     if (orgBindings >= this.maxBindingsPerOrg) throw new Error("managed egress organization capacity exceeded");
     const candidate = tokenHash(token);
     if (this.tokenInUse(candidate)) throw new Error("managed egress proxy token already has a binding");
-    this.bindings.set(identity.proxyId, { identity: { ...identity }, tokenHash: candidate, expiresAt, seen: new Map() });
+    if (activation) assertActivation(identity, activation);
+    this.bindings.set(identity.proxyId, {
+      identity: { ...identity },
+      tokenHash: candidate,
+      expiresAt,
+      ...(activation ? { activation } : {}),
+      seen: new Map(),
+      pending: new Map(),
+      evaluationWindowStartedAt: now,
+      evaluationCount: 0,
+    });
   }
 
   rotate(proxyId: string, token: string, now = Date.now()): void {
@@ -191,35 +245,101 @@ export class ManagedEgressBindingRegistry {
     if (this.tokenInUse(candidate, proxyId)) throw new Error("managed egress proxy token already has a binding");
     binding.tokenHash = candidate;
     binding.seen.clear();
+    binding.pending.clear();
+    binding.evaluationWindowStartedAt = now;
+    binding.evaluationCount = 0;
   }
 
   revoke(proxyId: string): void {
     this.bindings.delete(proxyId);
   }
 
-  authorize(token: string, request: AuthorizationRequestV1, now = Date.now()): AuthorizationResponse | null {
+  async authorize(token: string, request: AuthorizationRequestV1, now = this.now()): Promise<AuthorizationResponse | null> {
     this.prune(now);
     const candidate = tokenHash(token);
     let binding: Binding | undefined;
     for (const item of this.bindings.values()) if (timingSafeEqual(candidate, item.tokenHash)) binding = item;
     if (!binding) return null;
     if (request.subject.session_id !== binding.identity.sessionId || request.subject.workload_id !== binding.identity.workloadId) return null;
+    const requestDigest = createHash("sha256").update(canonicalAuthorizationJson(request)).digest("hex");
     const replay = binding.seen.get(request.request_id);
-    if (replay) return replay.response;
-    const correlation = createHash("sha256").update(JSON.stringify(binding.identity)).digest("hex").slice(0, 16);
-    const response: AuthorizationResponse = {
+    if (replay) return replay.requestDigest === requestDigest ? replay.response : null;
+    const pending = binding.pending.get(request.request_id);
+    if (pending) return pending.requestDigest === requestDigest ? pending.response : null;
+    if (now - binding.evaluationWindowStartedAt >= this.evaluationWindowMs) {
+      binding.evaluationWindowStartedAt = now;
+      binding.evaluationCount = 0;
+    }
+    if (binding.evaluationCount >= this.maxEvaluationsPerWindow) {
+      const throttled: AuthorizationResponse = {
+        version: "1",
+        request_id: request.request_id,
+        decision: "deny",
+        decision_id: `throttled-${createHash("sha256").update(`${binding.identity.proxyId}\0${request.request_id}`).digest("hex").slice(0, 28)}`,
+        reason_code: "rate_limited",
+      };
+      if (binding.seen.size >= MAX_REPLAY_ENTRIES) {
+        const oldest = binding.seen.keys().next().value;
+        if (oldest !== undefined) binding.seen.delete(oldest);
+      }
+      binding.seen.set(request.request_id, { at: now, requestDigest, response: throttled });
+      return throttled;
+    }
+    binding.evaluationCount++;
+    const response = this.evaluate(binding, request, now).then((result) => {
+      if (binding.seen.size >= MAX_REPLAY_ENTRIES) {
+        const oldest = binding.seen.keys().next().value;
+        if (oldest !== undefined) binding.seen.delete(oldest);
+      }
+      binding.seen.set(request.request_id, { at: now, requestDigest, response: result });
+      return result;
+    }).finally(() => binding.pending.delete(request.request_id));
+    binding.pending.set(request.request_id, { requestDigest, response });
+    return response;
+  }
+
+  private async evaluate(binding: Binding, request: AuthorizationRequestV1, now: number): Promise<AuthorizationResponse> {
+    const unsupported = (reason_code: AuthorizationResponse["reason_code"] = "unsupported_prerequisite"): AuthorizationResponse => ({
       version: "1",
       request_id: request.request_id,
       decision: "deny",
-      decision_id: `unsupported-${correlation}-${createHash("sha256").update(request.request_id).digest("hex").slice(0, 12)}`,
-      reason_code: "unsupported_prerequisite",
-    };
-    if (binding.seen.size >= MAX_REPLAY_ENTRIES) {
-      const oldest = binding.seen.keys().next().value;
-      if (oldest !== undefined) binding.seen.delete(oldest);
+      decision_id: `unsupported-${createHash("sha256").update(`${binding.identity.proxyId}\0${request.request_id}`).digest("hex").slice(0, 28)}`,
+      reason_code,
+    });
+    if (!binding.activation || !this.authorization) return unsupported();
+    try {
+      assertActivation(binding.identity, binding.activation);
+      const operationId = `egress:${createHash("sha256").update(`${binding.identity.proxyId}\0${request.request_id}`).digest("hex").slice(0, 32)}`;
+      const adapted = adaptEgressConnect({
+        schemaVersion: 1,
+        organizationId: binding.identity.orgId,
+        actorUserId: binding.activation.policyIdentity.actorUserId,
+        principal: binding.activation.policyIdentity.principal,
+        requestId: request.request_id,
+        operationId,
+        evaluationTimeMs: now,
+        sessionId: binding.identity.sessionId,
+        operation: "connect",
+        destination: {
+          scheme: request.destination.scheme,
+          protocol: request.destination.protocol,
+          host: request.destination.host,
+          port: request.destination.port,
+          destinationClass: "external",
+        },
+      });
+      const envelope = await this.authorization.authorize(adapted.request);
+      const effect = envelope.decision.effect;
+      return {
+        version: "1",
+        request_id: request.request_id,
+        decision: effect === "allow" ? "allow" : "deny",
+        decision_id: canonicalDecisionId(binding.identity.orgId, adapted.request.idempotencyKey),
+        reason_code: effect === "allow" ? "policy_allow" : effect === "require_approval" ? "unsupported_prerequisite" : "policy_denied",
+      };
+    } catch {
+      return unsupported("authorization_failure");
     }
-    binding.seen.set(request.request_id, { at: now, response });
-    return response;
   }
 }
 
@@ -247,9 +367,9 @@ export function managedEgressAuthorizationRouter(registry: ManagedEgressBindingR
     }
     const request = parseAuthorizationRequestV1(parsed);
     if (!request) return c.json({ error: "invalid_request" }, 400, SAFE_HEADERS);
-    const response = registry.authorize(bearer, request);
+    const response = await registry.authorize(bearer, request);
     if (!response) return c.json({ error: "unauthorized" }, 401, SAFE_HEADERS);
-    return c.json(response, 200, SAFE_HEADERS);
+    return c.json(response, response.reason_code === "rate_limited" ? 429 : 200, SAFE_HEADERS);
   });
   return router;
 }

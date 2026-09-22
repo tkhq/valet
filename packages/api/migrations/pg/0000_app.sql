@@ -247,6 +247,55 @@ CREATE INDEX "agent_sessions_user" ON "agent_sessions" ("user_id");
 --> statement-breakpoint
 CREATE INDEX "agent_sessions_status" ON "agent_sessions" ("status");
 --> statement-breakpoint
+CREATE TABLE "delegation_envelopes" (
+	"child_session_id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"parent_session_id" text NOT NULL,
+	"envelope" jsonb NOT NULL,
+	"decision_id" text NOT NULL UNIQUE,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "delegation_envelopes_parent" ON "delegation_envelopes" ("org_id", "parent_session_id");
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION reject_delegation_envelope_update() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'delegation_envelopes rows are immutable';
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER delegation_envelopes_immutable BEFORE UPDATE ON delegation_envelopes
+FOR EACH ROW EXECUTE FUNCTION reject_delegation_envelope_update();
+--> statement-breakpoint
+CREATE TABLE "credential_delegations" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL,
+  "parent_session_id" text NOT NULL, "parent_thread_id" text NOT NULL, "parent_queue_item_id" text NOT NULL,
+  "child_session_id" text NOT NULL, "child_watch_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "repo_host" text NOT NULL, "repo_owner" text NOT NULL, "repo_name" text NOT NULL,
+  "credential_kind" text NOT NULL, "credential_id" text NOT NULL, "credential_version" bigint NOT NULL,
+  "operations" jsonb NOT NULL, "issued_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "revoked_at" bigint,
+  "decision_id" text NOT NULL UNIQUE, "decision_evidence" jsonb NOT NULL, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "credential_delegations_child_repo" ON "credential_delegations" ("child_session_id","repo_host","repo_owner","repo_name") WHERE "revoked_at" IS NULL;
+--> statement-breakpoint
+CREATE INDEX "credential_delegations_active_uniqueness" ON "credential_delegations" ("revoked_at");
+--> statement-breakpoint
+CREATE INDEX "credential_delegations_parent" ON "credential_delegations" ("org_id","parent_session_id");
+--> statement-breakpoint
+CREATE FUNCTION restrict_credential_delegation_update() RETURNS trigger AS $$
+BEGIN
+  IF (to_jsonb(NEW) - 'revoked_at') IS DISTINCT FROM (to_jsonb(OLD) - 'revoked_at')
+     OR OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL THEN
+    RAISE EXCEPTION 'credential_delegations metadata is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER credential_delegations_revoke_only BEFORE UPDATE ON credential_delegations
+FOR EACH ROW EXECUTE FUNCTION restrict_credential_delegation_update();
+--> statement-breakpoint
 CREATE TABLE "session_threads" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
@@ -388,6 +437,47 @@ CREATE TABLE "event_drop_log" (
 );
 --> statement-breakpoint
 CREATE INDEX "event_drop_log_org" ON "event_drop_log" ("org_id");
+--> statement-breakpoint
+-- Upgrade watches created before delegated execution became authoritative. Only
+-- exact, root-to-child engine edges are recoverable. All other rows stay
+-- unsettled and get a durable integrity diagnostic.
+WITH candidates AS (
+  SELECT w.*, c.owner_type, c.owner_id, c.user_id AS child_user_id,
+    c.org_id AS child_org_id, c.parent_session_id AS child_parent_id,
+    c.parent_thread_id AS child_parent_thread_id, p.org_id AS parent_org_id,
+    p.parent_session_id AS parent_parent_id, t.session_id AS thread_session_id
+  FROM child_watches w
+  LEFT JOIN engine_sessions c ON c.id = w.child_session_id
+  LEFT JOIN engine_sessions p ON p.id = w.parent_session_id
+  LEFT JOIN engine_threads t ON t.id = w.parent_thread_id
+  LEFT JOIN delegation_envelopes e ON e.child_session_id = w.child_session_id
+  WHERE e.child_session_id IS NULL
+), valid AS (
+  SELECT * FROM candidates WHERE child_org_id = org_id AND parent_org_id = org_id
+    AND child_parent_id = parent_session_id AND child_parent_thread_id = parent_thread_id
+    AND thread_session_id = parent_session_id AND child_user_id = actor_user_id
+    AND parent_parent_id IS NULL AND owner_type IN ('user','team','org') AND owner_id <> ''
+), inserted AS (
+  INSERT INTO delegation_envelopes (child_session_id, org_id, parent_session_id, envelope, decision_id, created_at)
+  SELECT child_session_id, org_id, parent_session_id,
+    jsonb_build_object('schemaVersion',1,'organizationId',org_id,'parentSessionId',parent_session_id,
+      'parentThreadId',parent_thread_id,'childSessionId',child_session_id,'actorUserId',actor_user_id,
+      'owner',jsonb_build_object('type',owner_type,'id',owner_id),'depth',1,'parentRootCapable',true,
+      'constraints',jsonb_build_object('legacyBackfill',true),'capabilities',jsonb_build_array('agent.signal'),
+      'policyDigest','legacy-watch-backfill-v1','sourceBundleDigest','legacy-watch-backfill-v1',
+      'evaluatorKind','local_valet','engineDigest','legacy-watch-backfill-v1'),
+    'legacy-watch:' || md5(child_session_id), created_at FROM valid
+  ON CONFLICT DO NOTHING RETURNING child_session_id
+), diagnosed AS (
+  INSERT INTO event_drop_log (id, org_id, reason, conversation_key, detail, created_at)
+  SELECT 'delegation-integrity-migration:' || md5(child_session_id), org_id, 'delegation_integrity', queue_item_id,
+    'legacy_delegation_envelope_invalid: unsettled child watch does not match a root-to-child engine edge', created_at
+  FROM candidates WHERE child_session_id NOT IN (SELECT child_session_id FROM valid)
+  ON CONFLICT DO NOTHING RETURNING id
+)
+SELECT child_session_id FROM inserted UNION ALL SELECT id FROM diagnosed;
+--> statement-breakpoint
+CREATE INDEX "delegation_envelopes_legacy_backfill" ON "delegation_envelopes" ("created_at") WHERE "decision_id" LIKE 'legacy-watch:%';
 --> statement-breakpoint
 CREATE TABLE "channel_bindings" (
 	"id" text PRIMARY KEY NOT NULL,

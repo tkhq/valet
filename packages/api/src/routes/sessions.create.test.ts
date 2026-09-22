@@ -13,6 +13,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
+import type { PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { SessionDetail, SessionSummary } from "../wire/types.js";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
@@ -491,6 +492,29 @@ describe("POST /api/sessions: repository existence", () => {
     vi.restoreAllMocks();
   });
 
+  function policyEnvelope(requestId: string, effect: "deny" | "require_approval"): PolicyDecisionEnvelope {
+    return {
+      schemaVersion: 1,
+      requestId,
+      requestSubjectDigest: "a".repeat(64),
+      inputDigest: "b".repeat(64),
+      policyDigest: "c".repeat(64),
+      sourceBundleDigest: "d".repeat(64),
+      evaluator: { kind: "local_valet", engineDigest: "e".repeat(64) },
+      decision: {
+        effect,
+        reasonCode: "test",
+        matchedRuleIds: ["test.rule"],
+        obligations: [],
+        redactions: [],
+        ...(effect === "require_approval"
+          ? { approvalRequirement: { tier: "owner", approverType: "user" as const, replay: "once" as const } }
+          : {}),
+      },
+      evaluatedAtMs: 1,
+    };
+  }
+
   async function create(status: 200 | 404 | 403 | 429 | 503, credential = true, multiple = false) {
     fixture = startGithubFixture({
       getRepo: (owner) => ({ status: owner === "valid" ? 200 : status, body: { full_name: "tkhq/widgets", clone_url: "https://github.com/tkhq/widgets.git" } }),
@@ -510,6 +534,24 @@ describe("POST /api/sessions: repository existence", () => {
     });
     return { response, ensure, db: api.providers.db, workspace };
   }
+
+  it.each(["deny", "require_approval"] as const)("keeps repository credentials at spy zero for %s", async (effect) => {
+    fixture = startGithubFixture();
+    api = await bootTestApi({ imageBuilder: null, githubApiUrl: fixture.url });
+    const get = vi.spyOn(api.providers.engineCredentials, "get");
+    vi.spyOn(api.providers.canonicalAuthorizationService, "authorize")
+      .mockImplementation(async (request) => policyEnvelope(request.requestId, effect));
+    const workspace = await mkdtemp(join(tmpdir(), "valet-repo-policy-"));
+    const response = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, repos: [repo] }),
+    });
+    expect(response.status).toBe(effect === "deny" ? 403 : 409);
+    expect(get).not.toHaveBeenCalled();
+    expect(fixture.calls).toHaveLength(0);
+    expect(await api.providers.db.select().from(agentSessions).where(eq(agentSessions.workspace, workspace))).toHaveLength(0);
+  });
 
   it("rejects a 404 before writing a session, binding, or source", async () => {
     const { response, ensure, db, workspace } = await create(404);

@@ -84,9 +84,18 @@ export async function authorizeRepositoryOperation(authorization: { port: Resour
   return plan;
 }
 
-export async function listAuthorizedRepos(host: RepoHost, ctx: RepoHostContext, authorization: { port: ResourceAuthorizationPort; context: ResourceAuthorizationContext }): Promise<RepoListItem[]> {
+export async function listAuthorizedRepos(
+  host: RepoHost,
+  ctx: RepoHostContext,
+  authorization: {
+    port: ResourceAuthorizationPort;
+    context: ResourceAuthorizationContext;
+    credential?: (execute: () => Promise<RepoListItem[]>) => Promise<RepoListItem[]>;
+  },
+): Promise<RepoListItem[]> {
   const plan = await authorizeRepositoryOperation(authorization, "list");
-  const rows = await host.listRepos(ctx);
+  const execute = () => host.listRepos(ctx);
+  const rows = authorization.credential ? await authorization.credential(execute) : await execute();
   return plan.resultLimit === undefined ? rows : rows.slice(0, plan.resultLimit);
 }
 

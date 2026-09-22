@@ -6,6 +6,7 @@
  * lifecycle scenarios (poll sync, retention, orphan sweep, manual rebuild).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -1001,6 +1002,43 @@ describe("SourceService", () => {
 
   describe("ensureRepoSource", () => {
     const repo = { host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git" };
+
+    it.each(["deny", "require_approval"] as const)("keeps credential resolution at spy zero for %s", async (effect) => {
+      const get = vi.spyOn(credentials, "get");
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const denied = makeService({
+        credentialAuthorization: {
+          authorize: vi.fn(async (request): Promise<PolicyDecisionEnvelope> => ({
+            schemaVersion: 1,
+            requestId: request.requestId,
+            requestSubjectDigest: "a".repeat(64),
+            inputDigest: "b".repeat(64),
+            policyDigest: "c".repeat(64),
+            sourceBundleDigest: "d".repeat(64),
+            evaluator: { kind: "local_valet", engineDigest: "e".repeat(64) },
+            decision: {
+              effect,
+              reasonCode: "test",
+              matchedRuleIds: ["test.rule"],
+              obligations: [],
+              redactions: [],
+              ...(effect === "require_approval"
+                ? { approvalRequirement: { tier: "owner", approverType: "org" as const, replay: "once" as const } }
+                : {}),
+            },
+            evaluatedAtMs: NOW,
+          })),
+        },
+      });
+      try {
+        await denied.ensureRepoSource(orgId, repo);
+        expect(get).not.toHaveBeenCalled();
+        expect(await db.select().from(imageSources)).toHaveLength(0);
+      } finally {
+        denied.stop();
+        log.mockRestore();
+      }
+    });
 
     it.each(([404, 403, 429, 503] as const).flatMap((status) => [
       { status, authenticated: true }, { status, authenticated: false },

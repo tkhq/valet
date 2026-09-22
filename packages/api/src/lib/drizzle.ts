@@ -221,6 +221,68 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "delegation envelopes table", probe: { kind: "table", table: "delegation_envelopes" }, sql: 'CREATE TABLE IF NOT EXISTS "delegation_envelopes" ("child_session_id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "parent_session_id" text NOT NULL, "envelope" jsonb NOT NULL, "decision_id" text NOT NULL UNIQUE, "created_at" bigint NOT NULL)' },
+  { describe: "delegation envelopes parent index", probe: { kind: "index", index: "delegation_envelopes_parent" }, sql: 'CREATE INDEX IF NOT EXISTS "delegation_envelopes_parent" ON "delegation_envelopes" ("org_id","parent_session_id")' },
+  { describe: "delegation envelope immutability function", probe: { kind: "function", function: "reject_delegation_envelope_update" }, sql: "CREATE FUNCTION reject_delegation_envelope_update() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'delegation_envelopes rows are immutable'; END; $$ LANGUAGE plpgsql" },
+  { describe: "delegation envelope immutability trigger", probe: { kind: "trigger", trigger: "delegation_envelopes_immutable" }, sql: "CREATE TRIGGER delegation_envelopes_immutable BEFORE UPDATE ON delegation_envelopes FOR EACH ROW EXECUTE FUNCTION reject_delegation_envelope_update()" },
+  {
+    describe: "legacy delegation envelope backfill",
+    probe: { kind: "index", index: "delegation_envelopes_legacy_backfill" },
+    sql: `CREATE INDEX "delegation_envelopes_legacy_backfill" ON "delegation_envelopes" ("created_at") WHERE "decision_id" LIKE 'legacy-watch:%'`,
+    backfill: `WITH candidates AS (
+      SELECT w.*, c.owner_type, c.owner_id, c.user_id AS child_user_id, c.org_id AS child_org_id,
+        c.parent_session_id AS child_parent_id, c.parent_thread_id AS child_parent_thread_id,
+        p.org_id AS parent_org_id, p.parent_session_id AS parent_parent_id, t.session_id AS thread_session_id
+      FROM child_watches w LEFT JOIN engine_sessions c ON c.id = w.child_session_id
+      LEFT JOIN engine_sessions p ON p.id = w.parent_session_id LEFT JOIN engine_threads t ON t.id = w.parent_thread_id
+      LEFT JOIN delegation_envelopes e ON e.child_session_id = w.child_session_id
+      WHERE e.child_session_id IS NULL
+    ), valid AS (
+      SELECT * FROM candidates WHERE child_org_id = org_id AND parent_org_id = org_id
+        AND child_parent_id = parent_session_id AND child_parent_thread_id = parent_thread_id
+        AND thread_session_id = parent_session_id AND child_user_id = actor_user_id
+        AND parent_parent_id IS NULL AND owner_type IN ('user','team','org') AND owner_id <> ''
+    ), inserted AS (
+      INSERT INTO delegation_envelopes (child_session_id,org_id,parent_session_id,envelope,decision_id,created_at)
+      SELECT child_session_id,org_id,parent_session_id,jsonb_build_object(
+        'schemaVersion',1,'organizationId',org_id,'parentSessionId',parent_session_id,'parentThreadId',parent_thread_id,
+        'childSessionId',child_session_id,'actorUserId',actor_user_id,'owner',jsonb_build_object('type',owner_type,'id',owner_id),
+        'depth',1,'parentRootCapable',true,'constraints',jsonb_build_object('legacyBackfill',true),
+        'capabilities',jsonb_build_array('agent.signal'),'policyDigest','legacy-watch-backfill-v1',
+        'sourceBundleDigest','legacy-watch-backfill-v1','evaluatorKind','local_valet','engineDigest','legacy-watch-backfill-v1'),
+        'legacy-watch:' || md5(child_session_id),created_at FROM valid ON CONFLICT DO NOTHING RETURNING child_session_id
+    ), diagnosed AS (
+      INSERT INTO event_drop_log (id,org_id,reason,conversation_key,detail,created_at)
+      SELECT 'delegation-integrity-migration:' || md5(child_session_id),org_id,'delegation_integrity',queue_item_id,
+        'legacy_delegation_envelope_invalid: unsettled child watch does not match a root-to-child engine edge',created_at
+      FROM candidates WHERE child_session_id NOT IN (SELECT child_session_id FROM valid)
+      ON CONFLICT DO NOTHING RETURNING id
+    ) SELECT child_session_id AS id, 'envelope' AS kind FROM inserted
+      UNION ALL SELECT id, 'diagnostic' AS kind FROM diagnosed`,
+  },
+  {
+    describe: "credential delegations table",
+    probe: { kind: "table", table: "credential_delegations" },
+    sql: `CREATE TABLE IF NOT EXISTS "credential_delegations" (
+      "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL,
+      "parent_session_id" text NOT NULL, "parent_thread_id" text NOT NULL,
+      "parent_queue_item_id" text NOT NULL, "child_session_id" text NOT NULL,
+      "child_watch_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+      "repo_host" text NOT NULL, "repo_owner" text NOT NULL, "repo_name" text NOT NULL,
+      "credential_kind" text NOT NULL, "credential_id" text NOT NULL,
+      "credential_version" bigint NOT NULL, "operations" jsonb NOT NULL,
+      "issued_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "revoked_at" bigint,
+      "decision_id" text NOT NULL UNIQUE, "decision_evidence" jsonb NOT NULL, "created_at" bigint NOT NULL
+    )`,
+  },
+  { describe: "credential delegations child watch", probe: { kind: "column", table: "credential_delegations", column: "child_watch_id" }, sql: 'ALTER TABLE "credential_delegations" ADD COLUMN "child_watch_id" text' },
+  { describe: "credential delegations issued at", probe: { kind: "column", table: "credential_delegations", column: "issued_at" }, sql: 'ALTER TABLE "credential_delegations" ADD COLUMN "issued_at" bigint' },
+  { describe: "credential delegations decision evidence", probe: { kind: "column", table: "credential_delegations", column: "decision_evidence" }, sql: 'ALTER TABLE "credential_delegations" ADD COLUMN "decision_evidence" jsonb' },
+  { describe: "credential delegation update restriction", probe: { kind: "function", function: "restrict_credential_delegation_update" }, sql: "CREATE FUNCTION restrict_credential_delegation_update() RETURNS trigger AS $$ BEGIN IF (to_jsonb(NEW) - 'revoked_at') IS DISTINCT FROM (to_jsonb(OLD) - 'revoked_at') OR OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL THEN RAISE EXCEPTION 'credential_delegations metadata is immutable'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql" },
+  { describe: "credential delegation revoke-only trigger", probe: { kind: "trigger", trigger: "credential_delegations_revoke_only" }, sql: 'CREATE TRIGGER credential_delegations_revoke_only BEFORE UPDATE ON credential_delegations FOR EACH ROW EXECUTE FUNCTION restrict_credential_delegation_update()' },
+  { describe: "credential delegations child repo index", probe: { kind: "index", index: "credential_delegations_child_repo" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "credential_delegations_child_repo" ON "credential_delegations" ("child_session_id","repo_host","repo_owner","repo_name") WHERE "revoked_at" IS NULL' },
+  { describe: "credential delegations active uniqueness", probe: { kind: "index", index: "credential_delegations_active_uniqueness" }, sql: 'CREATE INDEX "credential_delegations_active_uniqueness" ON "credential_delegations" ("revoked_at")' },
+  { describe: "credential delegations parent index", probe: { kind: "index", index: "credential_delegations_parent" }, sql: 'CREATE INDEX IF NOT EXISTS "credential_delegations_parent" ON "credential_delegations" ("org_id","parent_session_id")' },
   { describe: "action policies authorization kind", probe: { kind: "column", table: "action_policies", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policies\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
   { describe: "action policy overrides authorization kind", probe: { kind: "column", table: "action_policy_overrides", column: "authorization_kind" }, sql: "ALTER TABLE \"action_policy_overrides\" ADD COLUMN \"authorization_kind\" text DEFAULT 'tool.action' NOT NULL" },
   { describe: "runtime grants service", probe: { kind: "column", table: "runtime_grants", column: "service" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "service" text' },
@@ -230,7 +292,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "runtime grants expiry", probe: { kind: "column", table: "runtime_grants", column: "expires_at" }, sql: 'ALTER TABLE "runtime_grants" ADD COLUMN "expires_at" bigint' },
   { describe: "authorization decision evidence", probe: { kind: "column", table: "authorization_decisions", column: "evidence" }, sql: 'ALTER TABLE "authorization_decisions" ADD COLUMN "evidence" jsonb' },
   { describe: "canonical approval resolutions", probe: { kind: "table", table: "canonical_approval_resolutions" }, sql: 'CREATE TABLE IF NOT EXISTS "canonical_approval_resolutions" ("resolution_id" text PRIMARY KEY NOT NULL, "approval_id" text NOT NULL, "gate_id" text NOT NULL, "org_id" text NOT NULL, "request_subject_digest" text NOT NULL, "original_decision_digest" text NOT NULL, "approver_id" text NOT NULL, "verdict" text NOT NULL, "applies_in" text NOT NULL, "session_id" text, "workflow_execution_id" text, "scope_kind" text, "scope_id" text, "resolved_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "resolution_version" integer NOT NULL, "revoked_at" bigint, CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int + ("scope_id" IS NOT NULL)::int = 1 AND (("scope_id" IS NULL AND "scope_kind" IS NULL) OR ("scope_id" IS NOT NULL AND "scope_kind" IS NOT NULL AND "applies_in" = "scope_kind"))), CONSTRAINT "canonical_approval_version" CHECK ("resolution_version" = 1), CONSTRAINT "canonical_approval_expiry" CHECK ("expires_at" > "resolved_at"))' },
-  { describe: "canonical approval generic scope", probe: { kind: "column", table: "canonical_approval_resolutions", column: "scope_id" }, sql: 'ALTER TABLE "canonical_approval_resolutions" ADD COLUMN "scope_kind" text; ALTER TABLE "canonical_approval_resolutions" ADD COLUMN "scope_id" text; ALTER TABLE "canonical_approval_resolutions" DROP CONSTRAINT "canonical_approval_scope"; ALTER TABLE "canonical_approval_resolutions" ADD CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int + ("scope_id" IS NOT NULL)::int = 1 AND (("scope_id" IS NULL AND "scope_kind" IS NULL) OR ("scope_id" IS NOT NULL AND "scope_kind" IS NOT NULL AND "applies_in" = "scope_kind")))' },
+  { describe: "canonical approval scope kind", probe: { kind: "column", table: "canonical_approval_resolutions", column: "scope_kind" }, sql: 'ALTER TABLE "canonical_approval_resolutions" ADD COLUMN "scope_kind" text' },
+  { describe: "canonical approval generic scope", probe: { kind: "column", table: "canonical_approval_resolutions", column: "scope_id" }, sql: 'ALTER TABLE "canonical_approval_resolutions" ADD COLUMN "scope_id" text, DROP CONSTRAINT "canonical_approval_scope", ADD CONSTRAINT "canonical_approval_scope" CHECK (("session_id" IS NOT NULL)::int + ("workflow_execution_id" IS NOT NULL)::int + ("scope_id" IS NOT NULL)::int = 1 AND (("scope_id" IS NULL AND "scope_kind" IS NULL) OR ("scope_id" IS NOT NULL AND "scope_kind" IS NOT NULL AND "applies_in" = "scope_kind")))' },
   { describe: "canonical approval gate version", probe: { kind: "index", index: "canonical_approval_gate_version" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "canonical_approval_gate_version" ON "canonical_approval_resolutions" ("org_id","gate_id","resolution_version")' },
   { describe: "canonical approval subject", probe: { kind: "index", index: "canonical_approval_subject" }, sql: 'CREATE INDEX IF NOT EXISTS "canonical_approval_subject" ON "canonical_approval_resolutions" ("org_id","request_subject_digest","expires_at")' },
   { describe: "policy source bundles table", probe: { kind: "table", table: "policy_source_bundles" }, sql: 'CREATE TABLE IF NOT EXISTS "policy_source_bundles" ("digest" text PRIMARY KEY NOT NULL, "bundle" jsonb NOT NULL, "created_at" bigint NOT NULL)' },
@@ -1549,13 +1612,14 @@ async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
         // during a rolling update, the previous api pod's.
         await tx.query(`SET LOCAL lock_timeout = '${REPAIR_LOCK_TIMEOUT}'`);
         await tx.query(repair.sql);
-        if (!repair.backfill) return 0;
-        const result = await tx.query(repair.backfill);
-        return result.rows.length;
+        if (!repair.backfill) return undefined;
+        return (await tx.query(repair.backfill)).rows;
       });
-      console.log(
-        `schema repair: added ${repair.describe}` + (repair.backfill ? ` (backfilled ${backfilled} row(s))` : ""),
-      );
+      const kinds = backfilled?.map((row) => row.kind);
+      const detail = kinds?.some(Boolean)
+        ? ` (backfilled ${kinds.filter((kind) => kind === "envelope").length} envelope(s), wrote ${kinds.filter((kind) => kind === "diagnostic").length} diagnostic(s))`
+        : backfilled ? ` (backfilled ${backfilled.length} row(s))` : "";
+      console.log(`schema repair: added ${repair.describe}${detail}`);
       return;
     } catch (err) {
       if (!isPgLockTimeout(err)) throw err;

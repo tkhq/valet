@@ -62,9 +62,10 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     issues.push(issue("invalid_authority", `${path}.authority`, "Match the owner kind to the selected authority scope."));
   if (!Array.isArray(value.subjects) || !dense(value.subjects) || value.subjects.length === 0 || value.subjects.some((subject) => !descriptor.subjectKinds.includes(subject))) issues.push(issue("invalid_subject", `${path}.subjects`, "Select only subject kinds allowed by this context."));
   if (!descriptor.effects.includes(value.effect as never)) issues.push(issue("invalid_effect", `${path}.effect`, "Select an effect allowed by this context."));
+  if (value.context === "egress.connect" && (authority !== "organization" || !record(owner) || owner.kind !== "org")) issues.push(issue("organization_authority_required", `${path}.authority`, "Use organization authority for egress rules."));
   const selectedTarget = descriptor.targets.find((target) => record(value.target) && value.target["action.id"] === target.actionId);
-  const fixedApproval = value.context === "api.route" || value.context === "resource.access";
-  if (value.effect === "require_approval" && (!descriptor.humanApproval || (fixedApproval ? !record(value.approval) || value.approval.tier !== "human" || value.approval.replay !== "once" || selectedTarget?.approvalSupported === false : descriptor.publishable ? value.approval !== undefined : !record(value.approval) || typeof value.approval.tier !== "string" || !["once", "session", "workflow"].includes(String(value.approval.replay))))) issues.push(issue("unsupported_approval", `${path}.approval`, "Choose an approval-capable target and use the supported approval settings."));
+  const fixedApproval = descriptor.targets.length > 0;
+  if (value.effect === "require_approval" && (!descriptor.humanApproval || (fixedApproval ? !record(value.approval) || value.approval.tier !== "human" || value.approval.replay !== "once" || selectedTarget?.approvalSupported === false : descriptor.publishable ? value.approval !== undefined : !record(value.approval) || typeof value.approval.tier !== "string" || !["once", "session", "workflow"].includes(String(value.approval.replay))))) issues.push(issue("unsupported_approval", `${path}.approval`, descriptor.humanApproval ? "Choose an approval-capable target and use the supported approval settings." : `Human approval is not yet supported for ${value.context}; choose allow or deny.`));
   if (value.effect !== "require_approval" && value.approval !== undefined) issues.push(issue("unexpected_approval", `${path}.approval`, "Remove approval settings or require approval."));
   if (descriptor.appliesIn ? !["any", "session", "workflow"].includes(String(value.appliesIn)) : value.appliesIn !== undefined) issues.push(issue("invalid_applies_in", `${path}.appliesIn`, "Use appliesIn only for action and workflow contexts."));
   if (value.expiresAtMs !== undefined && (!Number.isSafeInteger(value.expiresAtMs) || Number(value.expiresAtMs) <= 0)) issues.push(issue("invalid_expiry", `${path}.expiresAtMs`, "Enter a valid future expiry timestamp."));
@@ -74,9 +75,10 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     `${path}.target`,
     issues,
     false,
+    selectedTarget !== undefined,
   );
   const nestedIds = new Set<string>();
-  if (!Array.isArray(value.matcherGroups) || (value.matcherGroups.length === 0 && !(["tool.builtin", "api.route", "resource.access"] as string[]).includes(String(value.context)))) issues.push(issue("empty_conditions", `${path}.matcherGroups`, "Add at least one condition group."));
+  if (!Array.isArray(value.matcherGroups) || (value.matcherGroups.length === 0 && descriptor.targets.length === 0 && value.context !== "tool.builtin")) issues.push(issue("empty_conditions", `${path}.matcherGroups`, "Add at least one condition group."));
   else
     value.matcherGroups.forEach((group, groupIndex) => {
       if (!record(group) || !validId(group.id) || nestedIds.has(String(group.id)) || !["all", "any", "not"].includes(String(group.mode)) || !Array.isArray(group.matchers) || !dense(group.matchers) || group.matchers.length === 0 || (group.mode === "not" && group.matchers.length !== 1)) {
@@ -94,7 +96,7 @@ function validateRule(value: unknown, path: string, ids: Set<string>, issues: Dr
     });
   if (descriptor.publishable) {
     if (descriptor.targets.length && (!record(value.target) || Object.keys(value.target).length !== 1 || !selectedTarget)) issues.push(issue("unknown_descriptor", `${path}.target`, "Select a registered descriptor for this context."));
-    if (descriptor.targets.length && Array.isArray(value.matcherGroups) && value.matcherGroups.some((group) => record(group) && Array.isArray(group.matchers) && group.matchers.length)) issues.push(issue("unsupported_content_matcher", `${path}.matcherGroups`, "Remove content conditions. This context supports descriptor metadata only."));
+    if (descriptor.targets.length && value.context !== "egress.connect" && Array.isArray(value.matcherGroups) && value.matcherGroups.some((group) => record(group) && Array.isArray(group.matchers) && group.matchers.length)) issues.push(issue("unsupported_content_matcher", `${path}.matcherGroups`, "Remove content conditions. This context supports descriptor metadata only."));
     const targetIssue = record(value.target) ? currentPolicyTargetIssueV1({ service: value.target["action.service"], actionId: value.target["action.id"], riskLevel: value.target["action.riskLevel"] }) : "invalid_target";
     if (targetIssue) issues.push(issue(targetIssue, `${path}.target`, "Use one valid service, qualified action ID, or risk level."));
     if (Array.isArray(value.matcherGroups) && value.matcherGroups.some((group) => record(group) && (group.mode !== "all" || (Array.isArray(group.matchers) && group.matchers.some((matcher) => record(matcher) && typeof matcher.field === "string" && !matcher.field.startsWith("parameters.")))))) issues.push(issue("unsupported_action_matcher", `${path}.matcherGroups`, "Use all groups and action parameter fields for the current source builder."));
@@ -124,12 +126,16 @@ function validateMatcher(value: unknown, fields: readonly PolicyFieldDescriptor[
   const noValue = value.operator === "exists" || value.operator === "not_exists";
   const typed = fieldPath.startsWith("parameters.") ? noValue ? value.value === undefined : currentPolicyValueComplexityV1(value.value) !== null && (!["in", "not_in"].includes(String(value.operator)) || Array.isArray(value.value)) : noValue ? value.value === undefined : typedValue(descriptor.type, value.value, value.operator);
   if (!typed) issues.push(issue("invalid_value", `${path}.value`, "Enter a value that matches the field type and operator."));
+  if (fieldPath === "parameters.destination.host" && value.value !== undefined) {
+    const hosts = Array.isArray(value.value) ? value.value : [value.value];
+    if (hosts.some((host) => typeof host !== "string" || !canonicalPolicyHost(host) || (value.operator === "suffix" && !host.includes(".")))) issues.push(issue("invalid_value", `${path}.value`, "Use a lowercase canonical DNS host. Suffix hosts must have at least two labels."));
+  }
   if (descriptor.sensitivity !== "public" && value.value !== undefined) issues.push(issue("sensitive_literal", `${path}.value`, "Remove the sensitive literal. Use a server-held reference instead."));
   if (value.value !== undefined && currentPolicyValueComplexityV1(value.value) && containsSensitiveTextV1(value.value as JsonValue)) issues.push(issue("unsafe_value", `${path}.value`, "Remove secret-like text from the value."));
   if (fieldPath.startsWith("parameters.")) for (const code of currentPolicyMatcherIssuesV1({ path: fieldPath.slice(11), op: String(value.operator), ...(value.value === undefined ? {} : { value: value.value }) })) issues.push(issue(code, path, "Use a matcher supported by the current source builder."));
 }
 
-function validateFields(value: unknown, fields: readonly PolicyFieldDescriptor[], path: string, issues: DraftValidationIssue[], allowSensitive: boolean): void {
+function validateFields(value: unknown, fields: readonly PolicyFieldDescriptor[], path: string, issues: DraftValidationIssue[], allowSensitive: boolean, serverRegistered = false): void {
   if (!record(value)) {
     issues.push(issue("invalid_target", path, "Use a target object."));
     return;
@@ -137,7 +143,7 @@ function validateFields(value: unknown, fields: readonly PolicyFieldDescriptor[]
   for (const [key, item] of Object.entries(value)) {
     const field = fields.find((candidate) => candidate.path === key);
     if (!field) issues.push(issue("unknown_field", `${path}.${String(key)}`, "Select a target field from this context schema."));
-    else { const size = currentPolicyValueComplexityV1(item); if (!typedValue(field.type, item, "eq") || (typeof item === "string" && item.length === 0) || (!allowSensitive && field.sensitivity !== "public") || !size || size.bytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes || containsSensitiveTextV1(item as JsonValue)) issues.push(issue("invalid_target", `${path}.${key}`, "Remove sensitive or long values and use the declared target type.")); }
+    else { const size = currentPolicyValueComplexityV1(item); if (!typedValue(field.type, item, "eq") || (typeof item === "string" && item.length === 0) || (!allowSensitive && field.sensitivity !== "public") || !size || size.bytes > CURRENT_POLICY_COMPLEXITY_LIMITS_V1.maxMatcherValueBytes || (!serverRegistered && containsSensitiveTextV1(item as JsonValue))) issues.push(issue("invalid_target", `${path}.${key}`, "Remove sensitive or long values and use the declared target type.")); }
   }
 }
 
@@ -199,6 +205,7 @@ const unknownKeys = (value: Record<string, unknown>, allowed: readonly string[],
   Reflect.ownKeys(value)
     .filter((key): key is string => typeof key !== "string" || !allowed.includes(key))
     .forEach((key) => issues.push(issue("unknown_field", `${path}.${key}`, "Remove the unknown field.")));
+const canonicalPolicyHost = (value: string): boolean => /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value) && !value.includes("..") && !value.split(".").some((label) => label.startsWith("xn--")) && !/^[0-9.]+$/.test(value) && !/^0x[0-9a-f]+$/i.test(value) && value !== "localhost";
 const typedValue = (type: PolicyFieldDescriptor["type"], value: unknown, operator: unknown) =>
   operator === "in" || operator === "not_in" ? Array.isArray(value) && value.length > 0 && value.every((item) => type === "number" ? typeof item === "number" && Number.isFinite(item) && !Object.is(item, -0) : typeof item === "string") : type === "number" || type === "timestamp" ? typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0) : type === "boolean" ? typeof value === "boolean" : type === "string_set" ? Array.isArray(value) && value.every((item) => typeof item === "string") : typeof value === "string";
 const canonical = canonicalCurrentPolicyJsonV1;

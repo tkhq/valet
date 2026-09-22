@@ -18,6 +18,7 @@
  *   - `installed`: the org has at least one non-suspended
  *     `github_installations` row.
  */
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
@@ -27,13 +28,32 @@ import { resolveUserApiToken } from "../services/github-tokens.js";
 import { githubHost } from "../repos/github-host.js";
 import { listAuthorizedRepos, type RepoHostContext } from "../repos/host.js";
 import { newResourceDelivery } from "../authorization/resource-authorization.js";
+import { authorizeCredentialUseOperation, CredentialUseDeniedError } from "../authorization/credential-use-provider.js";
 import type { GetReposResponse } from "../wire/types.js";
 
 export const reposRouter = new Hono<AppEnv>();
 
 reposRouter.get("/", async (c) => {
   const user = c.var.user;
-  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const { db, engineCredentials, encryptionKey, canonicalAuthorizationService } = c.var.providers;
+
+  const authorize = <T>(actionId: string, execute: () => Promise<T>, found: (value: T) => boolean) =>
+    authorizeCredentialUseOperation({
+      db,
+      authorization: canonicalAuthorizationService,
+      binding: {
+        organizationId: user.orgId,
+        actorUserId: user.id,
+        principal: c.var.principal,
+        owner: { type: "user", id: user.id },
+        service: "github",
+        credentialClass: "installation_or_user",
+        actionId,
+        operation: "repository",
+        resource: { type: "repository" },
+        invocationId: randomUUID(),
+      },
+    }, execute, found);
 
   const ctx: RepoHostContext = {
     orgId: user.orgId,
@@ -41,15 +61,37 @@ reposRouter.get("/", async (c) => {
     deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) },
   };
 
-  const repos = await listAuthorizedRepos(githubHost, ctx, { port: c.var.providers.resourceAuthorizationPort, context: { organizationId: user.orgId, actorUserId: user.id, principal: c.var.principal, deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")) } });
-  const [userToken, installationRows] = await Promise.all([
-    resolveUserApiToken(ctx.deps, user.orgId, user.id),
-    db
-      .select({ id: githubInstallations.id })
-      .from(githubInstallations)
-      .where(and(eq(githubInstallations.orgId, user.orgId), eq(githubInstallations.suspended, false)))
-      .limit(1),
-  ]);
+  let repos;
+  let userToken;
+  let installationRows;
+  try {
+    repos = await listAuthorizedRepos(githubHost, ctx, {
+      port: c.var.providers.resourceAuthorizationPort,
+      context: {
+        organizationId: user.orgId,
+        actorUserId: user.id,
+        principal: c.var.principal,
+        deliveryId: newResourceDelivery(c.req.header("Idempotency-Key")),
+      },
+      credential: (execute) => authorize("repository.list_credentials", execute, (rows) => rows.length > 0),
+    });
+    [userToken, installationRows] = await Promise.all([
+      authorize(
+        "repository.check_connection",
+        () => resolveUserApiToken(ctx.deps, user.orgId, user.id),
+        (token) => token !== null,
+      ),
+      db
+        .select({ id: githubInstallations.id })
+        .from(githubInstallations)
+        .where(and(eq(githubInstallations.orgId, user.orgId), eq(githubInstallations.suspended, false)))
+        .limit(1),
+    ]);
+  } catch (error) {
+    if (!(error instanceof CredentialUseDeniedError)) throw error;
+    const status = error.code === "credential_provider_failed" ? 502 : error.code === "credential_use_denied" ? 403 : 409;
+    return c.json({ error: error.message }, status);
+  }
 
   const resp: GetReposResponse = {
     repos,

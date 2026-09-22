@@ -1,3 +1,4 @@
+import { isHematiteRequestId } from "@valet/engine";
 import {
   assertEnvelope,
   decisionDigestOf,
@@ -25,6 +26,7 @@ export interface DecisionAuditEvidenceV1 {
   readonly decisionDigest: string;
   readonly obligationDigest: string;
   readonly approvalReplay?: { readonly evaluationTimeMs: number; readonly actorUserId?: string };
+  readonly delegationReplay?: { readonly evaluationTimeMs: number };
 }
 export interface DecisionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationDecisionRow; readonly evidence: DecisionAuditEvidenceV1 }
 
@@ -45,6 +47,7 @@ export function buildDecisionAuditPlan(input: {
   if ((supplied.evaluator?.kind !== "local_valet" && supplied.evaluator?.kind !== "tvc_attested") || (supplied.evaluator.kind === "tvc_attested") !== (supplied.proof !== undefined)) fail("invalid_proof");
   try { envelope = assertEnvelope(request, supplied); } catch { fail("digest_mismatch"); }
   validId(input.decisionId); validId(request.subject.orgId); validId(request.requestId); validId(request.idempotencyKey); timestamp(input.createdAtMs); timestamp(envelope.evaluatedAtMs);
+  if (request.kind === "egress.connect" && !isHematiteRequestId(request.requestId)) fail("invalid_identity");
   for (const value of [input.profileDigest, input.interpreterDigest, input.contractDigest, envelope.inputDigest, envelope.policyDigest, envelope.sourceBundleDigest, envelope.evaluator.engineDigest]) digest(value);
   if (new Set(envelope.decision.matchedRuleIds).size !== envelope.decision.matchedRuleIds.length) fail("invalid_identity");
   const decisionDigest = decisionDigestOf(envelope.decision), obligationDigest = obligationDigestOf(envelope.decision);
@@ -58,6 +61,12 @@ export function buildDecisionAuditPlan(input: {
       ? { method: parameters!.method as string, template: parameters!.template as string, actionId: parameters!.actionId as string, ...(metadata && typeof metadata === "object" && !Array.isArray(metadata) && typeof metadata.safeRequestFingerprint === "string" ? { safeRequestFingerprint: metadata.safeRequestFingerprint } : {}) }
       : undefined;
     approvalReplay = { evaluationTimeMs, ...(request.subject.actorUserId ? { actorUserId: request.subject.actorUserId } : {}), ...(route ? { route } : {}) };
+  }
+  let delegationReplay: DecisionAuditEvidenceV1["delegationReplay"];
+  if (request.kind === "credential.delegate") {
+    const evaluationTimeMs = request.context.evaluationTimeMs;
+    timestamp(evaluationTimeMs);
+    delegationReplay = { evaluationTimeMs };
   }
   const tvc = envelope.evaluator.kind === "tvc_attested";
   if (tvc !== Boolean(envelope.proof) || tvc !== Boolean(input.proofVerification)) fail("invalid_proof");
@@ -81,10 +90,10 @@ export function buildDecisionAuditPlan(input: {
     proofVerificationStatus: verification?.status ?? "not_required", proofVerifiedAt: verification?.atMs ?? null,
     proofVerificationError: verification?.errorCode ? safeCode(verification.errorCode) : null,
     identityFactProvenance: identityFactProvenance.map(copy), policyFactProvenance: policyFactProvenance.map(copy),
-    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}) },
+    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}), ...(delegationReplay ? { delegationReplay } : {}) },
     evaluatedAt: envelope.evaluatedAtMs, createdAt: input.createdAtMs,
   };
-  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}) } });
+  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}), ...(delegationReplay ? { delegationReplay } : {}) } });
 }
 
 export interface ExecutionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationExecutionAttemptRow; readonly requestSubjectDigest: string; readonly resultDigest: string | null }

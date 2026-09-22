@@ -10,7 +10,7 @@ import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgr
 const token = "t".repeat(48);
 const identity = { orgId: "org-1", sessionId: "session-1", workloadId: "workload-1", proxyId: "proxy-1", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION };
 const body = JSON.stringify({
-  version: "1", request_id: "request-1", service: "egress", action: "connect",
+  version: "1", request_id: "000000000000000018db1a2b3c4d5e6f-0000000000000001", service: "egress", action: "connect",
   subject: { session_id: "session-1", workload_id: "workload-1" },
   destination: { scheme: "https", protocol: "tcp", host: "example.com", port: 443 },
 });

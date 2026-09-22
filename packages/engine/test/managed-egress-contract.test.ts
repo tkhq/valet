@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MANAGED_EGRESS_CONTRACT_VERSION, ManagedEgressPrerequisiteError, SandboxAttachment, VirtualSandbox, parseManagedEgressPersistedState, validateManagedEgressRequest, type ManagedEgressEffectiveState, type SandboxProvider } from "../src/index.js";
+import { HEMATITE_COMPATIBLE_SOURCE_COMMIT, HEMATITE_REQUEST_ID_PATTERN, MANAGED_EGRESS_CONTRACT_VERSION, ManagedEgressPrerequisiteError, SandboxAttachment, VirtualSandbox, isHematiteRequestId, parseManagedEgressPersistedState, validateManagedEgressRequest, type ManagedEgressEffectiveState, type SandboxProvider } from "../src/index.js";
 
 const request = { requested: true as const, proxyToken: "t".repeat(48), identity: { orgId: "o", sessionId: "s", workloadId: "w", proxyId: "p", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION } };
 function provider(ready: boolean): SandboxProvider {
@@ -10,6 +10,13 @@ function provider(ready: boolean): SandboxProvider {
   };
 }
 describe("managed egress provider contract", () => {
+  it("pins the Hematite request ID contract to its compatible source", () => {
+    expect(HEMATITE_COMPATIBLE_SOURCE_COMMIT).toBe("35cdd0bc8816afefb4012ba2f9ca66b927c1aa00");
+    expect(HEMATITE_REQUEST_ID_PATTERN.source).toBe("^[0-9a-f]{32}-[0-9a-f]{16}$");
+    expect(isHematiteRequestId("000000000000000018db1a2b3c4d5e6f-0000000000000001")).toBe(true);
+    for (const value of ["request.id", "-request", "request!", "123-1"]) expect(isHematiteRequestId(value), value).toBe(false);
+  });
+
   it("rejects malformed and open runtime request shapes", () => {
     const malformed: unknown[] = [
       null,

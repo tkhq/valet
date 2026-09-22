@@ -1,4 +1,4 @@
-import type { AuthorizationKind } from "@valet/engine/authorization";
+import { DELEGATED_EXECUTION_REGISTRY_V1, type AuthorizationKind } from "@valet/engine/authorization";
 import { API_ROUTE_REGISTRY_V1, RESOURCE_ACCESS_REGISTRY } from "../route-resource-registry.js";
 import type { ComparisonOperator, FieldType, PolicyContextDescriptor, PolicyFieldDescriptor, Sensitivity } from "./types.js";
 
@@ -9,13 +9,14 @@ const OPS: Record<FieldType, readonly ComparisonOperator[]> = {
   string_set: ["in", "not_in", "exists", "not_exists"],
   timestamp: ["eq", "neq", "gt", "gte", "lt", "lte", "exists", "not_exists"],
 };
-const field = (path: string, type: FieldType, location: PolicyFieldDescriptor["location"] = "attribute", sensitivity: Sensitivity = "public", operators = OPS[type]): PolicyFieldDescriptor => ({
+const field = (path: string, type: FieldType, location: PolicyFieldDescriptor["location"] = "attribute", sensitivity: Sensitivity = "public", operators = OPS[type], operatorDescriptions?: PolicyFieldDescriptor["operatorDescriptions"]): PolicyFieldDescriptor => ({
   path,
   label: path.split(".").at(-1) ?? path,
   location,
   type,
   sensitivity,
   operators,
+  ...(operatorDescriptions ? { operatorDescriptions } : {}),
 });
 const common = [field("subject.principalId", "string", "fact"), field("subject.ownerId", "string", "fact", "sensitive")];
 const descriptor = (kind: AuthorizationKind, label: string, fields: readonly PolicyFieldDescriptor[], options: Partial<Pick<PolicyContextDescriptor, "publishable" | "humanApproval" | "appliesIn" | "obligations" | "targets">> = {}): PolicyContextDescriptor => {
@@ -36,6 +37,23 @@ const descriptor = (kind: AuthorizationKind, label: string, fields: readonly Pol
   };
 };
 
+const delegatedContext = (kind: AuthorizationKind, obligations: PolicyContextDescriptor["obligations"], publishable = true): Partial<Pick<PolicyContextDescriptor, "publishable" | "humanApproval" | "obligations" | "targets">> => {
+  const entries = DELEGATED_EXECUTION_REGISTRY_V1.filter((entry) => entry.kind === kind);
+  return {
+    publishable,
+    humanApproval: entries.some((entry) => entry.approvalSupported),
+    obligations,
+    targets: entries.map((entry) => ({
+      actionId: entry.actionId,
+      service: entry.service,
+      operation: entry.actionId.slice(entry.actionId.indexOf(".") + 1),
+      riskLevel: entry.riskLevel,
+      approvalSupported: entry.approvalSupported,
+      label: entry.actionId,
+    })),
+  };
+};
+
 export const POLICY_CONTEXTS = {
   "tool.action": descriptor("tool.action", "Tool and action", [field("action.service", "string", "target"), field("action.id", "string", "target"), field("action.riskLevel", "string", "target"), field("parameters.*", "string", "attribute")], {
     publishable: true,
@@ -48,18 +66,13 @@ export const POLICY_CONTEXTS = {
   "api.route": descriptor("api.route", "Route and API", [field("action.id", "string", "target")], { publishable: true, humanApproval: true, obligations: [], targets: API_ROUTE_REGISTRY_V1.map(({ actionId, service, operation, riskLevel, method, template, approvalSupported }) => ({ actionId, service, operation, riskLevel, method, template, approvalSupported, label: `${method} ${template}` })) }),
   "resource.access": descriptor("resource.access", "Resource", [field("action.id", "string", "target")], { publishable: true, humanApproval: true, obligations: [], targets: RESOURCE_ACCESS_REGISTRY.map(({ actionId, service, operation, resourceKind, riskLevel }) => ({ actionId, service, operation, resourceKind, riskLevel, approvalSupported: false, label: `${resourceKind}: ${operation}` })) }),
   "plugin.entitlement": descriptor("plugin.entitlement", "Entitlement", [field("plugin.id", "string", "target"), field("plugin.available", "boolean", "fact"), field("plugin.organizationMode", "string"), field("plugin.teamIds", "string_set", "fact"), field("plugin.operation", "string")]),
-  "delegation.create": descriptor("delegation.create", "Delegation and child session", [field("delegation.parentId", "string", "fact", "sensitive"), field("delegation.childId", "string", "target", "sensitive"), field("delegation.edgeType", "string"), field("delegation.repository", "string", "attribute", "sensitive"), field("delegation.modelTier", "string"), field("delegation.hopCount", "number")], { humanApproval: true }),
-  "agent.signal": descriptor("agent.signal", "Delegation and child session", [field("delegation.childId", "string", "target", "sensitive"), field("delegation.edgeType", "string")]),
-  "sandbox.capability": descriptor("sandbox.capability", "Sandbox capability", [field("sandbox.profile", "string", "target"), field("sandbox.provider", "string"), field("sandbox.image", "string"), field("sandbox.docker", "boolean"), field("sandbox.cpu", "number"), field("sandbox.memory", "number"), field("sandbox.mount", "string", "attribute", "sensitive"), field("sandbox.terminal", "boolean"), field("sandbox.capability", "string", "target")], {
-    humanApproval: true,
-    obligations: [],
-  }),
-  "credential.use": descriptor("credential.use", "Credential", [field("credential.service", "string", "target"), field("credential.ownerId", "string", "fact", "sensitive"), field("credential.use", "string"), field("credential.secret", "string", "attribute", "secret_reference_only")], { humanApproval: true, obligations: ["credential_owner", "redact"] }),
-  "credential.delegate": descriptor("credential.delegate", "Credential", [field("credential.service", "string", "target"), field("credential.ownerId", "string", "fact", "sensitive"), field("credential.delegationSource", "string", "fact", "sensitive")], { humanApproval: true, obligations: ["credential_owner", "redact"] }),
-  "egress.connect": descriptor("egress.connect", "Egress", [field("egress.scheme", "string", "target"), field("egress.host", "string", "target", "public", ["eq", "neq", "suffix", "in", "not_in"]), field("egress.port", "number", "target"), field("egress.protocol", "string"), field("egress.destinationClass", "string"), field("egress.redirect", "boolean")], {
-    humanApproval: true,
-    obligations: ["egress_hosts", "redact"],
-  }),
+  "delegation.create": descriptor("delegation.create", "Delegation and child session", [field("action.id", "string", "target"), field("parameters.parentSessionId", "string", "fact", "sensitive"), field("parameters.childSessionId", "string", "fact", "sensitive"), field("parameters.model.kind", "string"), field("parameters.model.tier", "string"), field("parameters.model.identityDigest", "string", "fact", "sensitive"), field("parameters.profile", "string"), field("parameters.docker", "boolean"), field("parameters.depth", "number", "fact")], delegatedContext("delegation.create", [])),
+  "agent.signal": descriptor("agent.signal", "Agent signal", [field("action.id", "string", "target"), field("parameters.parentSessionId", "string", "fact", "sensitive"), field("parameters.childSessionId", "string", "fact", "sensitive"), field("parameters.relationship", "string")], delegatedContext("agent.signal", [])),
+  "sandbox.capability": descriptor("sandbox.capability", "Sandbox capability", [field("action.id", "string", "target"), field("parameters.requested.profile", "string"), field("parameters.requested.docker", "boolean"), field("parameters.requested.browser", "boolean"), field("parameters.requested.nestedKubernetes", "boolean"), field("parameters.requested.tunnels", "boolean")], delegatedContext("sandbox.capability", ["sandbox_capabilities"])),
+  "credential.use": descriptor("credential.use", "Credential use", [field("action.id", "string", "target"), field("parameters.service", "string"), field("parameters.credentialClass", "string"), field("parameters.owner.id", "string", "fact", "sensitive"), field("parameters.operation", "string")], delegatedContext("credential.use", ["credential_owner"])),
+  "credential.delegate": descriptor("credential.delegate", "Credential delegation", [field("action.id", "string", "target"), field("parameters.service", "string"), field("parameters.credentialClass", "string"), field("parameters.delegateeSessionId", "string", "fact", "sensitive"), field("parameters.expiresAtMs", "timestamp")], delegatedContext("credential.delegate", ["credential_owner"])),
+  "egress.connect": descriptor("egress.connect", "Egress", [field("action.id", "string", "target"), field("parameters.destination.scheme", "string"), field("parameters.destination.host", "string", "attribute", "public", ["eq", "suffix", "in", "not_in"], { not_in: "Excludes exact host matches only. It does not exclude DNS suffixes." }), field("parameters.destination.port", "number"), field("parameters.destination.protocol", "string"), field("parameters.destination.destinationClass", "string")], delegatedContext("egress.connect", ["egress_hosts"])),
+
 } as const satisfies Record<AuthorizationKind, PolicyContextDescriptor>;
 
 export const AUTHORIZATION_CONTEXT_KINDS = Object.freeze(Object.keys(POLICY_CONTEXTS) as AuthorizationKind[]);

@@ -446,7 +446,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // one-slot indirection — `spawnerRef` is filled in immediately after
   // `engineHost` exists, before any orchestrator session can actually wake
   // and try to call `task`.
-  const managedEgressBindings = new ManagedEgressBindingRegistry();
+  const managedEgressBindings = new ManagedEgressBindingRegistry({ authorization: canonicalAuthorizationService });
   let spawnerRef: ChildSpawner | undefined;
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
@@ -514,6 +514,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     builder: imageBuilder,
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+    credentialAuthorization: canonicalAuthorizationService,
   });
 
   const childrenDeps = {
@@ -521,6 +522,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     engineHost,
     engineStore,
+    canonicalAuthorizationService,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
@@ -823,7 +825,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       db,
       credentials: engineCredentials,
       key: deriveSecretKey(opts.encryptionKey),
-    }),
+    }, { credentialAuthorization: { db, authorization: canonicalAuthorizationService } }),
     orgWebhookLive: () => Boolean(publicUrlFromEnv(process.env)),
   });
 

@@ -251,6 +251,7 @@ export function PolicyBuilder({ contexts, owner, provider = fixturePolicyPreview
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>
+                  {field?.operatorDescriptions?.[matcher.operator] && <p className="text-xs text-muted sm:col-span-4">{field.operatorDescriptions[matcher.operator]}</p>}
                 </div>
               );
             })}

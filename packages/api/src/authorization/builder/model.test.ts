@@ -113,7 +113,7 @@ describe("policy draft validation", () => {
         {
           ...rule,
           context: "credential.use" as const,
-          target: { "credential.service": "github" },
+          target: { "action.id": "credential.resolve" },
           appliesIn: undefined,
           effect: "allow" as const,
           approval: undefined,
@@ -124,7 +124,7 @@ describe("policy draft validation", () => {
               matchers: [
                 {
                   id: "m",
-                  field: "credential.secret",
+                  field: "parameters.owner.id",
                   operator: "eq" as const,
                   value: "do-not-render",
                 },
@@ -137,7 +137,7 @@ describe("policy draft validation", () => {
     expect(validatePolicyDraft(credential).map((issue) => issue.code)).toContain("sensitive_literal");
     expect(
       sanitizeSampleFacts("credential.use", {
-        "credential.secret": "do-not-render",
+        "parameters.owner.id": "do-not-render",
         "subject.principalId": "user-1",
       }),
     ).toEqual({ "subject.principalId": "user-1" });
@@ -149,14 +149,20 @@ describe("policy draft validation", () => {
   });
   it("models approval defaults and reports rule matcher complexity once", () => {
     const value = draft(), rule = value.rules[0], tool: PolicyDraftV1 = { ...value, rules: [{ ...rule, effect: "require_approval", approval: undefined }] };
-    const credential: PolicyDraftV1 = { ...value, rules: [{ ...rule, context: "credential.use", target: { "credential.service": "github" }, matcherGroups: [{ id: "g", mode: "all", matchers: [{ id: "m", field: "credential.use", operator: "eq", value: "read" }] }], appliesIn: undefined, effect: "require_approval", approval: { tier: "human", replay: "once" } }] };
-    expect(validatePolicyDraft(tool)).toEqual([]); expect(validatePolicyDraft(credential)).toEqual([]); expect(validatePolicyDraft({ ...credential, rules: [{ ...credential.rules[0], effect: "allow" }] }).map(issue => issue.code)).toContain("unexpected_approval");
+    const credential: PolicyDraftV1 = { ...value, rules: [{ ...rule, context: "credential.use", target: { "action.id": "credential.resolve" }, matcherGroups: [], appliesIn: undefined, effect: "require_approval", approval: { tier: "human", replay: "once" } }] };
+    expect(validatePolicyDraft(tool)).toEqual([]); expect(validatePolicyDraft(credential).map(issue => issue.code)).toContain("unsupported_approval");
     const groups = Array.from({ length: 2 }, (_, group) => ({ id: "g" + group, mode: "all" as const, matchers: Array.from({ length: 9 }, (_, row) => ({ id: "m" + group + "-" + row, field: "parameters.x", operator: "eq" as const, value: row })) }));
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: groups }] }).filter(issue => issue.code === "complexity_limit" && issue.path.includes("matcherGroups"))).toHaveLength(1);
     expect(POLICY_CONTEXTS["tool.action"]).toMatchObject({ publishable: true, humanApproval: true, obligations: [] });
     expect(POLICY_CONTEXTS["api.route"]).toMatchObject({ publishable: true, obligations: [] });
     expect(POLICY_CONTEXTS["resource.access"]).toMatchObject({ publishable: true, obligations: [] });
-    expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(4);
+    expect(POLICY_CONTEXTS["egress.connect"]).toMatchObject({ publishable: true, humanApproval: false });
+    expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(10);
+  });
+
+  it.each(["delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate"] as const)("rejects unsupported %s approval with a specific issue", (context) => {
+    const value = draft(), rule = { ...value.rules[0], context, target: { "action.id": POLICY_CONTEXTS[context].targets[0].actionId }, matcherGroups: [], appliesIn: undefined, effect: "require_approval" as const, approval: { tier: "human", replay: "once" as const } };
+    expect(validatePolicyDraft({ ...value, rules: [rule] })).toContainEqual(expect.objectContaining({ code: "unsupported_approval", message: `Human approval is not yet supported for ${context}; choose allow or deny.` }));
   });
 
   it("binds route drafts to exact approval-capable descriptors", () => {
@@ -168,6 +174,17 @@ describe("policy draft validation", () => {
     for (const target of [{ "action.id": "unknown.operation" }, { "route.id": "/api/raw" }, { "action.id": POLICY_CONTEXTS[context === "api.route" ? "resource.access" : "api.route"].targets[0].actionId }]) expect(validatePolicyDraft({ ...value, rules: [{ ...rule, target }] }).map((issue) => issue.code)).toContain("unknown_descriptor");
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: draft().rules[0].matcherGroups }] }).map((issue) => issue.code)).toContain("unsupported_content_matcher");
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, obligations: [{ type: "redact" }] }] }).map((issue) => issue.code)).toContain("unsupported_obligation");
+  });
+
+  it("enforces organization egress authority and canonical host semantics", () => {
+    const value = draft(), base = value.rules[0];
+    const egress = { ...base, context: "egress.connect" as const, target: { "action.id": "egress.connect" }, appliesIn: undefined, effect: "allow" as const, matcherGroups: [{ id: "g", mode: "all" as const, matchers: [{ id: "m", field: "parameters.destination.host", operator: "suffix" as const, value: "example.com" }] }] };
+    expect(validatePolicyDraft({ ...value, rules: [egress] })).toEqual([]);
+    expect(POLICY_CONTEXTS["egress.connect"].fields.find((field) => field.path === "parameters.destination.host")?.operatorDescriptions?.not_in).toContain("exact host matches only");
+    expect(validatePolicyDraft({ ...value, rules: [{ ...egress, authority: "team" as const, owner: { kind: "team" as const, id: "team-1" } }] }).map((issue) => issue.code)).toContain("organization_authority_required");
+    for (const host of ["com", "123456", "017700000001", "0x7f000001"]) {
+      expect(validatePolicyDraft({ ...value, rules: [{ ...egress, matcherGroups: [{ id: "g", mode: "all", matchers: [{ id: "m", field: "parameters.destination.host", operator: "suffix", value: host }] }] }] }).map((issue) => issue.code), host).toContain("invalid_value");
+    }
   });
 
   it("rejects resource approvals before publication", () => {

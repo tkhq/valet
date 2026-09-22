@@ -414,6 +414,33 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
+  it("digests bare and namespaced aliases as one model identity", async () => {
+    api = await bootTestApi();
+    const bare = await api.providers.engineHost.delegationModelCapability("local-org", ANTHROPIC_MODEL);
+    expect(await api.providers.engineHost.delegationModelCapability("local-org", `anthropic/${ANTHROPIC_MODEL}`)).toEqual(bare);
+  });
+
+  it("preserves vendor segments in multi-segment wire model identities", async () => {
+    api = await bootTestApi();
+    const { db, engineCredentials, engineHost } = api.providers;
+    const row = await createLlmProvider(db, {
+      orgId: "local-org",
+      kind: "openrouter",
+      name: "OpenRouter",
+      models: [
+        { id: "deepseek/deepseek-v4-pro", name: "DeepSeek" },
+        { id: "moonshotai/deepseek-v4-pro", name: "Moonshot" },
+      ],
+    });
+    await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, {
+      type: "api_key",
+      apiKey: "org-openrouter",
+    });
+    const deepseek = await engineHost.delegationModelCapability("local-org", "openrouter/deepseek/deepseek-v4-pro");
+    const moonshot = await engineHost.delegationModelCapability("local-org", "openrouter/moonshotai/deepseek-v4-pro");
+    expect(deepseek).not.toEqual(moonshot);
+  });
+
   it("remapping the org's \"s\" tier changes what a fallback session resolves to", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;

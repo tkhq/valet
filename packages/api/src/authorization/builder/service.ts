@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, asc, count, eq, gt } from "drizzle-orm";
 import { adaptApiRoute, adaptResourceAccess, type AuthorizationRequest, type JsonValue } from "@valet/engine/authorization";
 import { builtinAuthorization } from "@valet/engine";
-import { CanonicalPolicyConfigManagedError, CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
+import { CanonicalPolicyConfigManagedError, CanonicalPolicyDelegatedRulesDroppedError, CanonicalPolicySourceReadOnlyError, type CanonicalPolicyBundleManager } from "../canonical-policy-manager.js";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import type { ResourceAuthorizationContext, ResourceAuthorizationPort } from "../resource-authorization.js";
 import { policyAuthoringAudit, policyAuthoringDocuments, policyAuthoringOperations, policyAuthoringReviews, policyAuthoringRevisions } from "../../schema/index.js";
@@ -421,7 +421,9 @@ export class PolicyAuthoringService {
     if (!draft || typeof draft !== "object" || "normalizedIdentity" in draft || !("rules" in draft) || !Array.isArray(draft.rules))
       invalid("Remove client-computed identity and digest fields before you retry.");
     for (const rule of draft.rules) {
-      if (!rule || typeof rule !== "object" || !("owner" in rule) || !rule.owner || typeof rule.owner !== "object") continue;
+      if (!rule || typeof rule !== "object") continue;
+      if (scope.teamId && "context" in rule && rule.context === "egress.connect") throw new PolicyAuthoringError("forbidden", "Create and publish egress rules in the organization policy scope.", 403);
+      if (!("owner" in rule) || !rule.owner || typeof rule.owner !== "object") continue;
       const owner = rule.owner as { kind?: unknown; id?: unknown };
       if (scope.teamId ? owner.kind !== "team" || owner.id !== scope.teamId : owner.kind !== "org" || owner.id !== scope.organizationId)
         invalid("Set every rule owner to the policy draft scope before you retry.");
@@ -488,6 +490,7 @@ export class PolicyAuthoringService {
       if (
         error instanceof PolicyAuthoringError ||
         error instanceof CanonicalPolicyConfigManagedError ||
+        error instanceof CanonicalPolicyDelegatedRulesDroppedError ||
         error instanceof CanonicalPolicySourceReadOnlyError
       ) throw error;
       throw internal();

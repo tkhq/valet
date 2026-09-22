@@ -1,4 +1,5 @@
 import type { Model } from "@earendil-works/pi-ai/compat";
+import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -95,8 +96,11 @@ import { listLlmProviders, parseModelId, providerNamespace } from "../services/l
 import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import type { ModelCapability } from "@valet/engine/authorization";
 import { canonicalInteractivePolicyResolver } from "../authorization/canonical-interactive-resolver.js";
 import { canonicalBuiltinPolicyResolver } from "../authorization/canonical-builtin-resolver.js";
+import { withSandboxCapabilityAuthorization } from "../authorization/sandbox-capability-provider.js";
+import { withCredentialUseAuthorization } from "../authorization/credential-use-provider.js";
 import {
   agentSessions,
   orgs,
@@ -147,7 +151,7 @@ import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } fro
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
-import type { ManagedEgressBindingRegistry } from "../routes/managed-egress-authorization.js";
+import type { ManagedEgressBindingRegistry, ManagedEgressPolicyIdentity } from "../routes/managed-egress-authorization.js";
 
 
 /**
@@ -533,7 +537,7 @@ const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function managedEgressRestoreOptions(
   persisted: SessionData["managedEgress"],
-  expected: { sessionId: string; orgId: string },
+  expected: { sessionId: string; orgId: string; policyIdentity: ManagedEgressPolicyIdentity },
   registry: ManagedEgressBindingRegistry | undefined,
 ): Pick<SandboxCreateOpts, "managedEgress" | "managedEgressLifecycle"> | undefined {
   if (!persisted) return undefined;
@@ -555,9 +559,12 @@ export function managedEgressRestoreOptions(
   return {
     managedEgress: { requested: true, identity: { ...identity }, proxyToken },
     managedEgressLifecycle: {
-      registerCallbackBinding() {
+      registerCallbackBinding(effective) {
         if (registered) return;
-        registry.register(identity, proxyToken);
+        registry.register(identity, proxyToken, undefined, Date.now(), {
+          effective,
+          policyIdentity: expected.policyIdentity,
+        });
         registered = true;
       },
       revokeCallbackBinding() {
@@ -771,6 +778,13 @@ export class EngineHost {
   private builtinPolicyResolverInstance: BuiltinPolicyResolver | null = null;
 
   constructor(private readonly opts: EngineHostOpts) {
+    if (opts.db && opts.canonicalAuthorizationService) {
+      opts.sandboxProvider = withSandboxCapabilityAuthorization(opts.sandboxProvider, {
+        db: opts.db,
+        engineStore: opts.engineStore,
+        authorization: opts.canonicalAuthorizationService,
+      });
+    }
     const idleMinutes = opts.idleMinutes ?? 0;
     if (idleMinutes > 0 && opts.sandboxProvider.capabilities().hibernation) {
       this.sweepInterval = setInterval(() => {
@@ -1040,7 +1054,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId, orgId: meta.orgId },
+      { sessionId, orgId: meta.orgId, policyIdentity: { actorUserId: meta.userId, principal } },
       this.opts.managedEgressBindings,
     );
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
@@ -1137,6 +1151,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     // Runner tools sit before the plugin tools so the loop surface reads
     // first in the tool list. The toolConfig mirrors the orchestrator's
     // (apiBaseUrl + internal token for the sec_* HTTP seam; child
@@ -1209,6 +1224,7 @@ export class EngineHost {
             ...(policyResolver ? { policyResolver } : {}),
           ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
           ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
@@ -1236,6 +1252,7 @@ export class EngineHost {
           ...(policyResolver ? { policyResolver } : {}),
           ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+          ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
           ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
@@ -1707,6 +1724,17 @@ export class EngineHost {
    * only its own rows. Returns `undefined` without an app db (db-less tests),
    * so plugin actions then see no `pluginStore` — the pre-store behavior.
    */
+  private getCredentialProviderForAction(): import("@valet/engine").CredentialProviderForAction | undefined {
+    const db = this.opts.db;
+    const authorization = this.opts.canonicalAuthorizationService;
+    if (!db || !authorization) return undefined;
+    return (provider, binding) => withCredentialUseAuthorization(provider, {
+      db,
+      authorization,
+      binding,
+    });
+  }
+
   private getPluginStoreFactory(): ((pluginName: string) => PluginStore) | undefined {
     const db = this.opts.db;
     if (!db) return undefined;
@@ -2558,7 +2586,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId, orgId: meta.orgId },
+      { sessionId, orgId: meta.orgId, policyIdentity: { actorUserId: meta.actorUserId, principal } },
       this.opts.managedEgressBindings,
     );
     // Same row read as the profile: a team assistant from before team-owner
@@ -2589,6 +2617,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, [], behavior);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistantId);
     const sessionOptions = {
@@ -2600,6 +2629,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
       ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
@@ -3450,6 +3480,21 @@ export class EngineHost {
    * `task` tool's absence-of-spawner contract is the engine's depth limit
    * (children can't spawn grandchildren).
    */
+  async delegationModelCapability(orgId: string, spec: string): Promise<ModelCapability> {
+    const normalized = spec.trim().toLowerCase();
+    let identity: string;
+    try {
+      const resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+      if (!resolved) throw new Error(`Unknown model selection: ${spec}`);
+      identity = resolved.model.id.startsWith(`${resolved.model.provider}/`) ? resolved.model.id : `${resolved.model.provider}/${resolved.model.id}`;
+    } catch (error) {
+      if (!(error instanceof NoCredentialsError)) throw error;
+      identity = error.model.id.startsWith(`${error.model.provider}/`) ? error.model.id : `${error.model.provider}/${error.model.id}`;
+    }
+    if (normalized === "xs" || normalized === "s" || normalized === "m" || normalized === "l" || normalized === "xl") return { kind: "tier", tier: normalized };
+    return { kind: "concrete", identityDigest: createHash("sha256").update(identity).digest("hex") };
+  }
+
   async childSessionFor(
     childSessionId: string,
     opts: {
@@ -3570,7 +3615,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId: childSessionId, orgId: opts.orgId },
+      { sessionId: childSessionId, orgId: opts.orgId, policyIdentity: { actorUserId: opts.actorUserId, principal: opts.owner } },
       this.opts.managedEgressBindings,
     );
     // A first child build has no app row yet, so the mode the spawner is
@@ -3585,6 +3630,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     const parentAssistant = this.opts.db
       ? await loadAssistantBySessionId(this.opts.db, opts.parentSessionId)
       : undefined;
@@ -3664,6 +3710,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
       ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
@@ -3810,13 +3857,14 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId, orgId: opts.orgId },
+      { sessionId, orgId: opts.orgId, policyIdentity: { actorUserId: opts.actorUserId, principal: opts.owner } },
       this.opts.managedEgressBindings,
     );
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
     const policyResolver = this.getPolicyResolver();
     const builtinPolicyResolver = this.getBuiltinPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
+    const credentialProviderForAction = this.getCredentialProviderForAction();
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
     const sessionOptions = {
       userId: opts.actorUserId,
@@ -3827,6 +3875,7 @@ export class EngineHost {
       ...(policyResolver ? { policyResolver } : {}),
       ...(builtinPolicyResolver ? { builtinPolicyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...(credentialProviderForAction ? { credentialProviderForAction } : {}),
       ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,

@@ -17,6 +17,7 @@ import {
 import { sql } from "drizzle-orm";
 import type { NormalizedPolicyDraftV1, PolicyAuthoringDocument, PolicyValidationSummary } from "../authorization/builder/types.js";
 import type { CanonicalSourceBundle } from "../authorization/bundles/types.js";
+import type { DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import type { ParamMatcher } from "../policies/matchers.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 import type {
@@ -428,6 +429,51 @@ export const agentSessions = pgTable(
 
 // Threads — the UI groups messages by thread. The engine has its own thread
 // concept too; here we mirror just the fields the chat list needs.
+// Immutable authority delegated to a child. Writers insert this row once at
+// the canonical execution reservation boundary and never update it. Keeping
+// the envelope separate from mutable session metadata prevents lifecycle
+// updates from accidentally replacing delegated authority.
+export const delegationEnvelopes = pgTable("delegation_envelopes", {
+  childSessionId: text("child_session_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  parentSessionId: text("parent_session_id").notNull(),
+  envelope: jsonb("envelope").$type<DelegationEnvelopeV1>().notNull(),
+  decisionId: text("decision_id").notNull().unique(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  index("delegation_envelopes_parent").on(t.orgId, t.parentSessionId),
+  index("delegation_envelopes_legacy_backfill").on(t.createdAt).where(sql`${t.decisionId} LIKE 'legacy-watch:%'`),
+]);
+
+export const credentialDelegations = pgTable("credential_delegations", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  parentSessionId: text("parent_session_id").notNull(),
+  parentThreadId: text("parent_thread_id").notNull(),
+  parentOperationId: text("parent_queue_item_id").notNull(),
+  childSessionId: text("child_session_id").notNull(),
+  childWatchId: text("child_watch_id"),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  repoHost: text("repo_host").notNull(),
+  repoOwner: text("repo_owner").notNull(),
+  repoName: text("repo_name").notNull(),
+  credentialKind: text("credential_kind").notNull(),
+  credentialId: text("credential_id").notNull(),
+  credentialVersion: bigint("credential_version", { mode: "number" }).notNull(),
+  operations: jsonb("operations").$type<string[]>().notNull(),
+  issuedAt: bigint("issued_at", { mode: "number" }),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  revokedAt: bigint("revoked_at", { mode: "number" }),
+  decisionId: text("decision_id").notNull().unique(),
+  decisionEvidence: jsonb("decision_evidence").$type<Record<string, string>>(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  uniqueIndex("credential_delegations_child_repo").on(t.childSessionId, t.repoHost, t.repoOwner, t.repoName).where(sql`${t.revokedAt} IS NULL`),
+  index("credential_delegations_active_uniqueness").on(t.revokedAt),
+  index("credential_delegations_parent").on(t.orgId, t.parentSessionId),
+]);
+
 export const sessionThreads = pgTable(
   "session_threads",
   {
@@ -1766,7 +1812,7 @@ export const authorizationDecisions = pgTable(
     proofVerificationError: text("proof_verification_error"),
     identityFactProvenance: jsonb("identity_fact_provenance").$type<FactProvenance[]>().notNull(),
     policyFactProvenance: jsonb("policy_fact_provenance").$type<FactProvenance[]>().notNull(),
-    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string; approvalReplay?: { evaluationTimeMs: number; actorUserId?: string; route?: { method: string; template: string; actionId: string; safeRequestFingerprint?: string } } }>(),
+    evidence: jsonb("evidence").$type<{ schemaVersion: 1; profileDigest: string; interpreterDigest: string; contractDigest: string; decisionDigest: string; obligationDigest: string; approvalReplay?: { evaluationTimeMs: number; actorUserId?: string; route?: { method: string; template: string; actionId: string; safeRequestFingerprint?: string } }; delegationReplay?: { evaluationTimeMs: number } }>(),
     evaluatedAt: bigint("evaluated_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
@@ -2336,6 +2382,7 @@ export type InviteRow = typeof invites.$inferSelect;
 export type SandboxTokenRow = typeof sandboxTokens.$inferSelect;
 export type OrgMemberRow = typeof orgMembers.$inferSelect;
 export type AgentSessionRow = typeof agentSessions.$inferSelect;
+export type DelegationEnvelopeRow = typeof delegationEnvelopes.$inferSelect;
 export type SessionThreadRow = typeof sessionThreads.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
 export type TeamRow = typeof teams.$inferSelect;

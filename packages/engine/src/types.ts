@@ -732,6 +732,8 @@ export interface ToolContext {
    * hosts (and tests) that wire no store.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /** Host enforcement seam for action-scoped credential reads. */
+  credentialProviderForAction?: CredentialProviderForAction;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /**
    * Optional host policy resolver consulted by `call_tool` before invoking a
@@ -749,6 +751,8 @@ export interface ToolContext {
    * Consumed by `call_tool`'s policy audit (`PolicyInvocationRecord.queueItemId`).
    */
   queueItemId?: string;
+  /** Stable identity of this exact tool call. Host-generated and never model-controlled. */
+  actionInvocationId?: string;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
   signal: AbortSignal;
@@ -801,6 +805,25 @@ export interface Credential {
   scopes?: string[];
   metadata?: Record<string, unknown>;
 }
+
+export interface CredentialActionBinding {
+  organizationId: string;
+  actorUserId: string;
+  principal: Principal;
+  owner: Principal;
+  service: string;
+  credentialClass: string;
+  actionId: string;
+  operation: "plugin" | "resolve";
+  sessionId: string;
+  childSessionId?: string;
+  invocationId: string;
+}
+
+export type CredentialProviderForAction = (
+  provider: CredentialProvider,
+  binding: CredentialActionBinding,
+) => CredentialProvider;
 
 export interface CredentialProvider {
   /**
@@ -2342,6 +2365,8 @@ export interface CreateSessionOptions {
    * behind a resolver it was given.
    */
   credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
+  /** Wrap one trusted catalog action's provider before it can read a credential. */
+  credentialProviderForAction?: CredentialProviderForAction;
   /** Resolve the assistant identity used by provider-specific outbound actions. */
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */
@@ -2658,6 +2683,8 @@ export type ChildSpawner = (
     parentThreadId: string;
     actorUserId: string;
     owner: Principal;
+    /** Stable identity of the parent turn that requested delegation. */
+    parentOperationId?: string;
     /** The spawning submission's channel origin, so the child.settled
      * signal can inherit it and the settlement turn can reach the channel
      * that asked. */
@@ -2717,7 +2744,7 @@ export type ChildStatusReader = (
  */
 export type ChildSender = (
   req: { childSessionId: string; message: string; interrupt?: boolean },
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; parentOperationId?: string },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**

@@ -50,13 +50,16 @@
  *
  * The token is emitted ONLY in the JSON response body; it is never logged.
  */
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
+import { authorizeCredentialUseOperation, CredentialUseDeniedError } from "../authorization/credential-use-provider.js";
+import { assertRepositoryCredentialDelegation, CredentialDelegationInvalidError } from "../authorization/credential-delegation.js";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { sessionRepos } from "../schema/index.js";
+import { agentSessions, delegationEnvelopes, sessionRepos } from "../schema/index.js";
 import { ownerOf, repoOf } from "../services/session-github-token.js";
-import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
+import { repoHostForUrl, type GitTokenRequest, type RepoHostContext } from "../repos/host.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
@@ -83,6 +86,7 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   const rawOwner = (body as Record<string, unknown> | null)?.owner;
   const rawRepo = (body as Record<string, unknown> | null)?.repo;
   const rawPurpose = (body as Record<string, unknown> | null)?.purpose;
+  const rawOperation = (body as Record<string, unknown> | null)?.operation;
   if (!isNonEmptyString(host)) {
     return c.json({ error: "host is required" }, 400);
   }
@@ -99,6 +103,11 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   // "git" (default; installation-first) for clone/push, "api" (user-first,
   // sole-installation fallback) for the `gh` shim's REST/GraphQL calls.
   const purpose = rawPurpose === "api" ? "api" : "git";
+  const operation = rawOperation === "clone"
+    ? "repository.clone" as const
+    : rawOperation === "push"
+      ? "repository.push" as const
+      : "repository.fetch" as const;
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
 
@@ -116,52 +125,81 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
             )
           : undefined) ?? bindings.find((b) => ownerOf(b.fullName).toLowerCase() === wantOwner));
 
+  const sessionRows = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+    .from(agentSessions).where(eq(agentSessions.id, sandbox.sessionId)).limit(1);
+  const sessionOwner = sessionRows[0];
+  const credentialOwner = sessionOwner?.ownerType === "team" && sessionOwner.ownerId
+    ? { type: "team" as const, id: sessionOwner.ownerId }
+    : sessionOwner?.ownerType === "org" || (sessionOwner?.ownerType === "user" && sessionOwner.ownerId !== sandbox.userId)
+      ? { type: "org" as const, id: sandbox.orgId }
+      : { type: "user" as const, id: sandbox.userId };
   const ctx: RepoHostContext = {
     orgId: sandbox.orgId,
-    userId: sandbox.userId,
+    ...(credentialOwner.type === "user" ? { userId: sandbox.userId } : {}),
     deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) },
   };
-
-  if (!binding) {
-    // No binding for this owner (or no owner at all) — org-level fallback.
-    // `auto` resolution only: it degrades to anonymous rather than erroring,
-    // so a public clone in an unbound sandbox still proceeds tokenless.
-    const repoHost = repoHostForUrl(`https://${host}/`);
-    if (!repoHost) {
-      return c.json({ error: "no credential host for this repo" }, 403);
+  const repoHost = repoHostForUrl(binding?.cloneUrl ?? `https://${host}/`);
+  if (!repoHost) return c.json({ error: "no credential host for this repo" }, 403);
+  const tokenRequest: GitTokenRequest = binding
+    ? { owner: ownerOf(binding.fullName), repo: repoOf(binding.fullName), purpose, auth: binding.auth }
+    : { owner: owner ?? "", repo: wantRepo ?? "", purpose, auth: "auto" as const };
+  const childEdge = (await db
+    .select({ childSessionId: delegationEnvelopes.childSessionId })
+    .from(delegationEnvelopes)
+    .where(eq(delegationEnvelopes.childSessionId, sandbox.sessionId))
+    .limit(1))[0];
+  if (childEdge) {
+    if (purpose !== "git" || !binding) {
+      return c.json({ error: "repository credential delegation does not allow this operation" }, 403);
     }
-    const result = await repoHost.resolveGitToken(ctx, {
-      owner: owner ?? "",
-      repo: wantRepo ?? "",
-      purpose,
-      auth: "auto",
-    });
-    if (result === null || "anonymous" in result) {
-      const anon: PostSandboxGitCredentialResponse = { anonymous: true };
-      return c.json(anon);
+    try {
+      await assertRepositoryCredentialDelegation({
+        db,
+        orgId: sandbox.orgId,
+        actorUserId: sandbox.userId,
+        childSessionId: sandbox.sessionId,
+        owner: credentialOwner,
+        binding: {
+          host: binding.host,
+          fullName: binding.fullName,
+          cloneUrl: binding.cloneUrl,
+          ...(binding.ref ? { ref: binding.ref } : {}),
+          auth: binding.auth,
+        },
+        operation,
+      });
+    } catch (error) {
+      if (!(error instanceof CredentialDelegationInvalidError)) throw error;
+      return c.json({ error: error.message }, 403);
     }
-    const cred: PostSandboxGitCredentialResponse = { username: result.username, password: result.token };
-    return c.json(cred);
   }
-
-  const repoHost = repoHostForUrl(binding.cloneUrl);
-  if (!repoHost) {
-    return c.json({ error: "no credential host for this repo" }, 403);
+  let result: Awaited<ReturnType<typeof repoHost.resolveGitToken>>;
+  try {
+    result = await authorizeCredentialUseOperation({
+      db,
+      authorization: c.var.providers.canonicalAuthorizationService,
+      binding: {
+        organizationId: sandbox.orgId,
+        actorUserId: sandbox.userId,
+        principal: { type: "user", id: sandbox.userId },
+        owner: credentialOwner,
+        service: repoHost.id,
+        credentialClass: "api_token",
+        actionId: "sandbox-git.resolve",
+        operation: "repository",
+        sessionId: sandbox.sessionId,
+        invocationId: randomUUID(),
+      },
+    }, () => repoHost.resolveGitToken(ctx, tokenRequest), (value) => value !== null && !("anonymous" in value));
+  } catch (error) {
+    if (!(error instanceof CredentialUseDeniedError)) throw error;
+    const status = error.code === "credential_provider_failed" ? 502 : error.code === "credential_use_denied" ? 403 : 409;
+    return c.json({ error: error.message }, status);
   }
-
-  const result = await repoHost.resolveGitToken(ctx, {
-    owner: ownerOf(binding.fullName),
-    repo: repoOf(binding.fullName),
-    purpose,
-    auth: binding.auth,
-  });
 
   if (result === null) {
-    // The host could not resolve. For an explicit `app`/`user` binding this
-    // is a real failure the user should see, not a silent downgrade — 409.
-    // For `auto`, degrading to tokenless is the documented behavior.
-    if (binding.auth !== "auto") {
-      return c.json({ error: `the selected credential is unavailable for ${ownerOf(binding.fullName)}` }, 409);
+    if (tokenRequest.auth !== "auto") {
+      return c.json({ error: `the selected credential is unavailable for ${tokenRequest.owner}` }, 409);
     }
     const anon: PostSandboxGitCredentialResponse = { anonymous: true };
     return c.json(anon);

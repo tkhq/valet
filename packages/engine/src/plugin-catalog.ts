@@ -119,6 +119,8 @@ export interface ActionPlugin {
   safeParameterProjection?: SafeParameterProjectionV1;
   /** Override credential service name (defaults to `service`). */
   credentialService?: string;
+  /** Trusted catalog class used by credential authorization. */
+  credentialClass?: string;
   /**
    * The plugin's actions are unusable without a connected credential.
    * When set and no credential resolves, `list_tools` HIDES this
@@ -726,10 +728,21 @@ function buildCatalog(plugins: ActionPlugin[], now: () => number): Catalog {
  * Throws propagate to the caller — list_tools turns them into a warning,
  * call_tool turns them into an error-text tool result.
  */
+function catalogCredentials(ctx: ToolContext, plugin: ActionPlugin): CredentialProvider {
+  const service = plugin.credentialService ?? plugin.service;
+  const provider = scopedCredentialProvider(ctx, service);
+  return ctx.credentialProviderForAction ? ctx.credentialProviderForAction(provider, {
+    organizationId: ctx.orgId, actorUserId: ctx.userId, principal: ctx.owner ?? { type: "user", id: ctx.userId }, owner: ctx.owner ?? { type: "user", id: ctx.userId },
+    service, credentialClass: plugin.credentialClass ?? "stored", actionId: `${plugin.service}.catalog`, operation: "resolve", sessionId: ctx.sessionId,
+    ...(ctx.sessionPurpose === "child" ? { childSessionId: ctx.sessionId } : {}), invocationId: `${ctx.actionInvocationId ?? ctx.threadId}:catalog:${plugin.service}`,
+  }) : provider;
+}
+
 async function resolveDynamic(
   catalog: Catalog,
   plugin: ActionPlugin,
   ctx: ToolContext,
+  credentials = catalogCredentials(ctx, plugin),
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
   const cached = catalog.resolved.get(plugin.service);
@@ -739,10 +752,7 @@ async function resolveDynamic(
   // resolveActions is guaranteed present on every entry of dynamicPlugins.
   const resolveActions = plugin.resolveActions;
   if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
-  const credentialService = plugin.credentialService ?? plugin.service;
-  const actions = await resolveActions({
-    credentials: scopedCredentialProvider(ctx, credentialService),
-  });
+  const actions = await resolveActions({ credentials });
   const built = buildEntries(plugin.service, plugin, actions);
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
   catalog.resolved.set(plugin.service, result);
@@ -823,6 +833,14 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       if (query.hasInput) entries = entries.filter((e) => matchesQuery(e.action));
 
       const warnings: Array<{ service: string; reason: string }> = [];
+      const credentialProviders = new Map<ActionPlugin, CredentialProvider>();
+      const credentialsFor = (plugin: ActionPlugin): CredentialProvider => {
+        const existing = credentialProviders.get(plugin);
+        if (existing) return existing;
+        const provider = catalogCredentials(ctx, plugin);
+        credentialProviders.set(plugin, provider);
+        return provider;
+      };
 
       // Merge in dynamic (resolveActions-backed) plugins whose service
       // passes the filter. Discovery failures become warnings, not throws.
@@ -831,7 +849,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         if (a.service && plugin.service !== a.service) continue;
         dynamicServicesConsidered.add(plugin.service);
         try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx, credentialsFor(plugin));
           const dynEntries =
             query.hasInput
               ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
@@ -861,7 +879,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         let cred: Awaited<ReturnType<typeof ctx.credentials.get>>;
         let probeReason: string | undefined;
         try {
-          cred = await ctx.credentials.get(credService);
+          cred = await credentialsFor(plugin).get(credService);
         } catch (err) {
           // A resolver may throw instead of returning null (e.g. a
           // GitHubAuthError when the org has no installation). Treat that
@@ -1289,12 +1307,28 @@ async function executeAction(
   // and writes only its own rows (plugin-store design). The base ToolContext is
   // turn-scoped and plugin-agnostic; the factory it carries re-scopes here.
   const pluginStore = ctx.pluginStoreFactory?.(entry.service);
+  const baseCredentials = scopedCredentialProvider(ctx, credentialService);
+  const credentials = ctx.credentialProviderForAction
+    ? ctx.credentialProviderForAction(baseCredentials, {
+        organizationId: ctx.orgId,
+        actorUserId: ctx.userId,
+        principal: ctx.owner ?? { type: "user", id: ctx.userId },
+        owner: ctx.owner ?? { type: "user", id: ctx.userId },
+        service: credentialService,
+        credentialClass: entry.plugin.credentialClass ?? "stored",
+        actionId: qualifiedId(entry),
+        operation: "plugin",
+        sessionId: ctx.sessionId,
+        ...(ctx.sessionPurpose === "child" ? { childSessionId: ctx.sessionId } : {}),
+        invocationId: `${ctx.actionInvocationId ?? "direct"}:${audit?.input.resumeKey ?? `${qualifiedId(entry)}:${boundedArgsKey(stableJson(args ?? {}))}`}`,
+      })
+    : baseCredentials;
   const actionCtx: PluginActionContext = {
     ...ctx,
     actionId: entry.action.id,
     service: entry.service,
     summary,
-    credentials: scopedCredentialProvider(ctx, credentialService),
+    credentials,
     ...(pluginStore ? { pluginStore } : {}),
   };
 

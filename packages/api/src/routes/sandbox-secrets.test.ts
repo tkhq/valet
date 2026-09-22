@@ -3,7 +3,8 @@
  * The broker route: what a sandbox CLI is allowed to ask for, and what it
  * gets back when it asks for something silly.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions, teams } from "../schema/index.js";
@@ -64,7 +65,50 @@ function decode(value: string | null): string | null {
 }
 type Resp = { values: (string | null)[]; unresolved: string[] };
 
+function policyEnvelope(requestId: string, effect: "allow" | "deny" | "require_approval"): PolicyDecisionEnvelope {
+  return {
+    schemaVersion: 1,
+    requestId,
+    requestSubjectDigest: "a".repeat(64),
+    inputDigest: "b".repeat(64),
+    policyDigest: "c".repeat(64),
+    sourceBundleDigest: "d".repeat(64),
+    evaluator: { kind: "local_valet", engineDigest: "e".repeat(64) },
+    decision: {
+      effect,
+      reasonCode: "test",
+      matchedRuleIds: ["test.rule"],
+      obligations: [],
+      redactions: [],
+      ...(effect === "require_approval"
+        ? { approvalRequirement: { tier: "owner", approverType: "user" as const, replay: "once" as const } }
+        : {}),
+    },
+    evaluatedAtMs: 1,
+  };
+}
+
 describe("POST /api/sandbox-secrets/resolve", () => {
+  it.each(["deny", "require_approval"] as const)("keeps resolve and find providers at spy zero for %s", async (effect) => {
+    api = await bootTestApi();
+    const resolveReference = vi.fn(async () => "UNREACHABLE");
+    const findCandidates = vi.fn(async () => [{ vault: "UNREACHABLE", item: "UNREACHABLE", field: "UNREACHABLE" }]);
+    api.providers.onePassword = { ...fakeOnePassword(), resolveReference, findCandidates };
+    const authorize = vi.spyOn(api.providers.canonicalAuthorizationService, "authorize")
+      .mockImplementation(async (request) => policyEnvelope(request.requestId, effect));
+    const canary = `op://vault/${"SECRET-REFERENCE-CANARY".repeat(256)}/field`;
+    expect((await resolve([canary])).status).toBe(effect === "deny" ? 403 : 409);
+    const found = await fetch(`${api.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": await mintToken() },
+      body: JSON.stringify({ query: "private credential" }),
+    });
+    expect(found.status).toBe(effect === "deny" ? 403 : 409);
+    expect(resolveReference).not.toHaveBeenCalled();
+    expect(findCandidates).not.toHaveBeenCalled();
+    expect(JSON.stringify(authorize.mock.calls)).not.toContain("SECRET-REFERENCE-CANARY");
+  });
+
   it("resolves the references it can and names the ones it cannot", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();

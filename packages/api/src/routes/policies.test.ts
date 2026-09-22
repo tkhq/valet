@@ -146,6 +146,16 @@ describe("POST /api/org/policies — validation", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects the authored-only suffix operator", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/org/policies`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "github.create_issue", mode: "deny", paramMatchers: [{ path: "host", op: "suffix", value: "example.com" }] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("creates a valid org policy with origin=admin, principalType=org", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/policies`, {

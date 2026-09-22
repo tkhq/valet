@@ -11,13 +11,13 @@ export function projectDraftToCurrentSnapshot(draft: NormalizedPolicyDraftV1, or
     personalOverrides: CurrentPersonalOverrideV1[] = [];
   const teamIds = new Set<string>();
   for (const rule of draft.rules) {
-    if (!["tool.action", "tool.builtin", "api.route", "resource.access"].includes(rule.context)) throw new TypeError("Current source projection does not support this context.");
-    if (["tool.builtin", "api.route", "resource.access"].includes(rule.context) && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Built-in tool rules do not support content matchers.");
+    if (rule.context === "workflow.action" || rule.context === "plugin.entitlement") throw new TypeError("Current source projection does not support this context.");
+    if (rule.context !== "tool.action" && rule.context !== "egress.connect" && rule.matcherGroups.some((group) => group.matchers.length > 0)) throw new TypeError("Descriptor rules do not support content matchers.");
     if (rule.matcherGroups.some((group) => group.mode !== "all")) throw new TypeError("Current source projection supports all matcher groups only.");
-    if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length || (rule.approval && !["api.route", "resource.access"].includes(rule.context))) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
+    if (rule.description || Object.keys(rule.metadata).length || rule.obligations.length) throw new TypeError("Current source projection rejects fields that the source snapshot cannot preserve.");
     if (rule.subjects.length !== 1 || rule.subjects[0] !== rule.owner.kind) throw new TypeError("Current source projection rejects subject scope loss.");
     if (rule.authority === "personal" && (rule.appliesIn !== "any" || rule.expiresAtMs !== undefined)) throw new TypeError("Personal overrides cannot preserve scope or expiry.");
-    const target = ["api.route", "resource.access"].includes(rule.context) ? descriptorTarget(rule) : rule.context === "tool.builtin" ? builtinTarget(rule) : actionTarget(rule),
+    const target = rule.context === "tool.action" ? actionTarget(rule) : rule.context === "tool.builtin" ? builtinTarget(rule) : descriptorTarget(rule),
       paramMatchers = rule.matcherGroups.flatMap((group) =>
         group.matchers.map(
           (matcher) =>
@@ -31,7 +31,7 @@ export function projectDraftToCurrentSnapshot(draft: NormalizedPolicyDraftV1, or
     const common = {
       id: rule.ruleId,
       organizationId,
-      authorizationKind: rule.context as "tool.action" | "tool.builtin" | "api.route" | "resource.access",
+      authorizationKind: rule.context,
       ...target,
       mode: rule.effect,
       paramMatchers,
@@ -97,6 +97,6 @@ function builtinTarget(rule: PolicyRuleDraftV1): Pick<CurrentOrganizationPolicyV
 
 function descriptorTarget(rule: PolicyRuleDraftV1): Pick<CurrentOrganizationPolicyV1, "actionId"> {
   const actionId = rule.target["action.id"];
-  if (typeof actionId !== "string" || !POLICY_CONTEXTS[rule.context].targets.some((target) => target.actionId === actionId)) throw new TypeError("Route and resource targets require a registered descriptor.");
+  if (typeof actionId !== "string" || !POLICY_CONTEXTS[rule.context].targets.some((target) => target.actionId === actionId)) throw new TypeError("Descriptor targets require a registered action.");
   return { actionId };
 }

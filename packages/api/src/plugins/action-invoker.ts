@@ -51,6 +51,7 @@ import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../
 import { actionInvocations, authorizationDecisions, authorizationExecutionAttempts, canonicalApprovalResolutions } from "../schema/index.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
+import { withCredentialUseAuthorization } from "../authorization/credential-use-provider.js";
 import { actionProjection } from "../authorization/action-projections.js";
 import { loadCanonicalDynamicFacts } from "../authorization/canonical-facts.js";
 import { persistInvocationAudit, updateInvocationOutcome } from "../policies/service.js";
@@ -312,10 +313,31 @@ async function computeResult(
   // User→org owner precedence + 1Password reference resolution, matching
   // `engine/host.ts`. A user-owned run reads the user row first and falls
   // back to the org row; an org-owned run reads the org row only.
-  const baseProvider =
+  const unresolvedProvider =
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
       : buildCredentialProvider(opts, ctx, owner, credentialService);
+  const requestedActionId = req.action.includes(".") ? req.action : `${req.service}.${req.action}`;
+  const baseProvider = opts.canonicalAuthorizationService
+    ? withCredentialUseAuthorization(unresolvedProvider, {
+        db: opts.db,
+        authorization: opts.canonicalAuthorizationService,
+        now: opts.clock ?? Date.now,
+        binding: {
+          organizationId: ctx.orgId,
+          actorUserId: ctx.userId,
+          principal: ctx.owner,
+          owner: ctx.owner,
+          service: credentialService,
+          credentialClass: declared?.type ?? "stored",
+          actionId: requestedActionId,
+          operation: "workflow",
+          ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+          workflowExecutionId: ctx.workflowExecutionId ?? `route:${req.invocationId}`,
+          invocationId: req.invocationId,
+        },
+      })
+    : unresolvedProvider;
   // Identity enrichment, the second half of the session path's slack branch
   // (`engine/host.ts`): the resolved token alone cannot answer "may the run
   // owner read this private channel" — `slack.dm_owner` and the private-

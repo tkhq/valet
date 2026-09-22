@@ -540,7 +540,7 @@ export const childSendTool = defineTool({
         message: args.message,
         ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
       },
-      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
+      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId, ...(ctx.queueItemId ? { parentOperationId: ctx.queueItemId } : {}) },
     );
     if (result === null) {
       return {
@@ -812,6 +812,7 @@ export const taskTool = defineTool({
       parentThreadId: ctx.threadId,
       actorUserId: ctx.userId,
       owner,
+      ...(ctx.queueItemId !== undefined ? { parentOperationId: ctx.queueItemId } : {}),
       // The spawning submission's channel origin rides to the watcher, so
       // the child.settled signal can inherit it (see ChildWatcher).
       ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),

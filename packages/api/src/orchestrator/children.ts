@@ -13,7 +13,7 @@
  * admission is what actually guarantees "exactly one", not any in-process
  * bookkeeping here — see `arm`'s doc).
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -33,8 +33,9 @@ import {
   type SpawnChildResult,
   type SubmissionResult,
 } from "@valet/engine";
+import { adaptAgentSignal, adaptDelegationCreate, assertOneLevelDelegationEnvelope, buildDelegatedExecutionObligationPlan, canonicalAuthorizationJson, type DelegationEnvelopeV1 } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
+import { agentSessions, childWatches, delegationEnvelopes, eventDropLog, securityCells, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -46,6 +47,11 @@ import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
+import { canonicalExecutionDecision } from "../authorization/canonical-execution-decision.js";
+import { completeCanonicalExecution, reserveCanonicalExecution } from "../authorization/canonical-execution-lifecycle.js";
+import { authorizeRepositoryCredentialDelegation, CredentialDelegationInvalidError, revokeChildCredentialDelegations } from "../authorization/credential-delegation.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
 const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
@@ -58,6 +64,8 @@ export interface ChildrenDeps {
   db: AppDb;
   engineHost: EngineHost;
   engineStore: SessionStore;
+  /** Required by buildChildSpawner; optional for read-only watcher/reader assemblies. */
+  canonicalAuthorizationService?: CanonicalAuthorizationService;
   /**
    * Zero-config repo image sources (sandbox-reconcile spec decision 13). A
    * spawn with `req.repo` upserts the repo's image source and touches
@@ -228,6 +236,64 @@ function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
   return undefined;
 }
 
+export class NestedDelegationUnsupportedError extends Error {
+  readonly code = "nested_delegation_unsupported";
+  constructor() { super("Nested delegation is unsupported. Child sessions cannot spawn tasks."); this.name = "NestedDelegationUnsupportedError"; }
+}
+export class DelegationEnvelopeIntegrityError extends Error {
+  readonly code = "delegation_envelope_integrity";
+  constructor(readonly reason: "missing" | "invalid", readonly childSessionId: string) { super(`Delegation envelope is ${reason} for child ${childSessionId}. Repair the delegation edge before rearming its watch.`); this.name = "DelegationEnvelopeIntegrityError"; }
+}
+
+class DelegationPolicyDeniedError extends Error {
+  readonly code: "authorization_denied" | "authorization_approval_unsupported";
+  constructor(code: DelegationPolicyDeniedError["code"]) {
+    super(code === "authorization_denied" ? "Policy denied child delegation." : "Human approval is not yet supported for delegated execution. Change the policy to allow or deny.");
+    this.name = "DelegationPolicyDeniedError";
+    this.code = code;
+  }
+}
+
+type DelegationReplay = { childSessionId: string; queueItemId: string; warnings?: string[] };
+
+function parseDelegationReplay(value: unknown): DelegationReplay {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Stored delegation result is invalid.");
+  const row = value as Record<string, unknown>;
+  if (typeof row.childSessionId !== "string" || typeof row.queueItemId !== "string") throw new Error("Stored delegation result is invalid.");
+  const warnings = Array.isArray(row.warnings) && row.warnings.every((entry) => typeof entry === "string") ? row.warnings : undefined;
+  return { childSessionId: row.childSessionId, queueItemId: row.queueItemId, ...(warnings ? { warnings } : {}) };
+}
+
+async function authorizeAgentSignal(deps: ChildrenDeps, input: { parentSessionId: string; parentThreadId: string; childSessionId: string; actorUserId?: string; fallback?: { orgId: string; userId: string; owner: Principal }; operation: "interrupt" | "queue" | "steer" | "cancel" | "status" | "read" | "approve" }): Promise<void> {
+  if (!deps.canonicalAuthorizationService) throw new Error("Canonical agent signal authorization is not wired.");
+  const parent = await deps.engineStore.getSession(input.parentSessionId);
+  const identity = parent ?? input.fallback;
+  const [edgeRows, parentRows] = await Promise.all([
+    deps.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, input.childSessionId)).limit(1),
+    deps.db.select({ envelope: delegationEnvelopes.envelope }).from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, input.parentSessionId)).limit(1),
+  ]);
+  const edge = edgeRows[0];
+  if (!edge) throw new DelegationEnvelopeIntegrityError("missing", input.childSessionId);
+  if (!identity) throw new DelegationEnvelopeIntegrityError("invalid", input.childSessionId);
+  try {
+    if (edge.orgId !== identity.orgId || edge.parentSessionId !== input.parentSessionId || edge.envelope.childSessionId !== input.childSessionId) throw new Error("invalid delegation edge");
+    assertOneLevelDelegationEnvelope(edge.envelope, parentRows[0]?.envelope);
+  } catch {
+    throw new DelegationEnvelopeIntegrityError("invalid", input.childSessionId);
+  }
+  const actorUserId = input.actorUserId ?? identity.userId;
+  const adapted = adaptAgentSignal({ schemaVersion: 1, organizationId: identity.orgId, actorUserId, principal: identity.owner, requestId: `signal:${randomUUID()}`, operationId: `${input.operation}:${randomUUID()}`, evaluationTimeMs: Date.now(), parentSessionId: input.parentSessionId, parentThreadId: input.parentThreadId, childSessionId: input.childSessionId, operation: input.operation, relationship: "parent_child" });
+  const envelope = await deps.canonicalAuthorizationService.authorize(adapted.request);
+  buildDelegatedExecutionObligationPlan(envelope.decision);
+  if (envelope.decision.effect !== "allow") {
+    const error = new DelegationPolicyDeniedError(envelope.decision.effect === "deny" ? "authorization_denied" : "authorization_approval_unsupported");
+    error.message = `${error.message} (${envelope.decision.reasonCode})`;
+    throw error;
+  }
+}
+
+function requestedCapabilities(req: SpawnChildRequest): string[] { return ["agent.signal", ...(req.repo ? ["repository.read"] : []), ...(req.profile === "full" ? ["sandbox.full"] : []), ...(req.docker ? ["sandbox.docker"] : [])]; }
+
 /**
  * Builds the `ChildSpawner` handed to orchestrator sessions via
  * `toolConfig.childSpawner`. `watcher.arm` is called (never awaited) once
@@ -243,6 +309,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       parentThreadId: string;
       actorUserId: string;
       owner: Principal;
+      parentOperationId?: string;
       origin?: ChannelOrigin;
     },
   ): Promise<SpawnChildResult> => {
@@ -262,7 +329,121 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       );
     }
 
+    // One-level boundary: reject a child/delegatee before decision persistence,
+    // reservation, workspace, session, sandbox, repository, or watch effects.
+    const [parentEnvelope, legacyChildEdge] = await Promise.all([
+      deps.db.select({ childSessionId: delegationEnvelopes.childSessionId }).from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, ctx.parentSessionId)).limit(1),
+      deps.db.select({ childSessionId: childWatches.childSessionId }).from(childWatches).where(eq(childWatches.childSessionId, ctx.parentSessionId)).limit(1),
+    ]);
+    if (parentEnvelope[0] || legacyChildEdge[0]) throw new NestedDelegationUnsupportedError();
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
+
+    // A pre-assigned id (the security dispatch's cell-claim seam) wins so
+    // the caller's durable claim row names the session this spawn builds.
+    const childSessionId = req.sessionId ?? newChildSessionId();
+    const model = await deps.engineHost.delegationModelCapability(orgId, req.model ?? "s");
+    const adapted = adaptDelegationCreate({
+      schemaVersion: 1,
+      organizationId: orgId,
+      actorUserId: ctx.actorUserId,
+      principal: ctx.owner,
+      requestId: `delegation:${childSessionId}`,
+      operationId: childSessionId,
+      evaluationTimeMs: Date.now(),
+      parentSessionId: ctx.parentSessionId,
+      parentThreadId: ctx.parentThreadId,
+      childSessionId,
+      owner: ctx.owner,
+      ...(ctx.owner.type === "team" ? { teamId: ctx.owner.id } : {}),
+      ...(binding ? { repository: { host: binding.host ?? "github", fullName: binding.fullName, ...(binding.ref ? { branch: binding.ref } : {}) } } : {}),
+      model,
+      profile: req.profile ?? "headless",
+      ...(req.resources ? { resources: req.resources } : {}),
+      docker: req.docker === true,
+      limits: { hopCount: 1 },
+      taskClass: "task",
+      capabilities: requestedCapabilities(req),
+      parentIsDelegatee: false,
+    });
+    if (!deps.canonicalAuthorizationService) throw new Error("Canonical delegation authorization is not wired.");
+    const authorization = await deps.canonicalAuthorizationService.authorize(adapted.request);
+    buildDelegatedExecutionObligationPlan(authorization.decision);
+    if (authorization.decision.effect === "deny") throw new DelegationPolicyDeniedError("authorization_denied");
+    if (authorization.decision.effect === "require_approval") throw new DelegationPolicyDeniedError("authorization_approval_unsupported");
+    if (binding) {
+      if (!ctx.parentOperationId) {
+        throw new Error("Repository delegation requires a stable parent queue item identity.");
+      }
+      await authorizeRepositoryCredentialDelegation({
+        db: deps.db,
+        authorization: deps.canonicalAuthorizationService,
+        orgId,
+        actorUserId: ctx.actorUserId,
+        owner: ctx.owner,
+        parentSessionId: ctx.parentSessionId,
+        parentThreadId: ctx.parentThreadId,
+        parentOperationId: ctx.parentOperationId,
+        childSessionId,
+        binding,
+      });
+    }
+    const decisionId = canonicalDecisionId(orgId, adapted.request.idempotencyKey);
+    const executionInputDigest = createHash("sha256").update(adapted.canonicalBytes).digest("hex");
+    const policyDecision = canonicalExecutionDecision(authorization, decisionId, executionInputDigest), workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
+    const delegationEnvelope: DelegationEnvelopeV1 = {
+      schemaVersion: 1,
+      organizationId: orgId,
+      parentSessionId: ctx.parentSessionId,
+      parentThreadId: ctx.parentThreadId,
+      childSessionId,
+      actorUserId: ctx.actorUserId,
+      owner: ctx.owner,
+      depth: 1,
+      parentRootCapable: true,
+      constraints: adapted.request.action.parameters ?? {},
+      capabilities: requestedCapabilities(req),
+      policyDigest: authorization.policyDigest,
+      sourceBundleDigest: authorization.sourceBundleDigest,
+      evaluatorKind: authorization.evaluator.kind,
+      engineDigest: authorization.evaluator.engineDigest,
+    };
+    assertOneLevelDelegationEnvelope(delegationEnvelope);
+    const reserved = await reserveCanonicalExecution<DelegationReplay>(deps.db, policyDecision, executionInputDigest, parseDelegationReplay, Date.now, async (tx) => {
+      const [envelopes, sessions, watches, claims, repositories, engineResult, queueResult] = await Promise.all([
+        tx.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, childSessionId)),
+        tx.select().from(agentSessions).where(eq(agentSessions.id, childSessionId)),
+        tx.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)),
+        tx.select().from(securityCells).where(eq(securityCells.childSessionId, childSessionId)),
+        tx.select().from(sessionRepos).where(eq(sessionRepos.sessionId, childSessionId)),
+        tx.execute(sql`SELECT id, owner_type, owner_id, user_id, org_id, workspace, purpose, parent_session_id, parent_thread_id FROM engine_sessions WHERE id = ${childSessionId}`),
+        tx.execute(sql`SELECT id, session_id, content, role FROM engine_queue_items WHERE session_id = ${childSessionId}`),
+      ]);
+      const engineRows = (engineResult as { rows: { id: string; owner_type: string; owner_id: string; user_id: string; org_id: string; workspace: string; purpose: string; parent_session_id: string | null; parent_thread_id: string | null }[] }).rows, queueRows = (queueResult as { rows: { id: string; session_id: string; content: string; role: string | null }[] }).rows;
+      const edge = envelopes[0], session = sessions[0], watch = watches[0], claim = claims[0], engine = engineRows[0];
+      const queue = queueRows.find((row) => row.id === watch?.queueItemId);
+      const repositoryMatches = binding
+        ? repositories.length === 1 && repositories[0].host === (binding.host ?? "github") && repositories[0].fullName === binding.fullName && repositories[0].cloneUrl === binding.cloneUrl && repositories[0].ref === (binding.ref ?? null) && repositories[0].auth === (binding.auth ?? "auto") && repositories[0].position === 0 && repositories[0].targetDir === (computeTargetDirs([binding])[0] ?? null)
+        : repositories.length === 0;
+      const securityDispatch = ctx.parentOperationId?.startsWith("security-dispatch:") === true;
+      const claimMatches = claims.length === 1 && claim.status === "running" && claim.childSessionId === childSessionId && ctx.parentOperationId === `security-dispatch:${claim.engagementId}:${claim.id}:${claim.attempts}`;
+      const claimIsConsistent = securityDispatch ? claimMatches : claims.length === 0;
+      if (envelopes.length === 0 && sessions.length === 0 && watches.length === 0 && repositories.length === 0 && engineRows.length === 0 && queueRows.length === 0 && claimIsConsistent) return { kind: "absent" };
+      if (envelopes.length === 1 && sessions.length === 1 && watches.length === 1 && engineRows.length === 1 && claimIsConsistent && repositoryMatches
+        && edge.orgId === orgId && edge.parentSessionId === ctx.parentSessionId && edge.decisionId === decisionId && canonicalAuthorizationJson(edge.envelope) === canonicalAuthorizationJson(delegationEnvelope)
+        && session.orgId === orgId && session.userId === ctx.actorUserId && session.workspace === workspace && session.title === (req.title ?? null) && session.ownerType === ctx.owner.type && session.ownerId === ctx.owner.id
+        && watch.parentSessionId === ctx.parentSessionId && watch.parentThreadId === ctx.parentThreadId && watch.actorUserId === ctx.actorUserId && watch.orgId === orgId
+        && engine.org_id === orgId && engine.user_id === ctx.actorUserId && engine.workspace === workspace && engine.purpose === "child" && engine.owner_type === ctx.owner.type && engine.owner_id === ctx.owner.id && engine.parent_session_id === ctx.parentSessionId && engine.parent_thread_id === ctx.parentThreadId
+        && queue?.session_id === childSessionId && queue.content === JSON.stringify(req.prompt) && queue.role === (req.role ?? null)) return { kind: "completed", result: { childSessionId, queueItemId: watch.queueItemId } };
+      return { kind: "ambiguous", error: "delegation_recovery_ambiguous: inspect the child session, envelope, watch, queue item, repository, and security claim before retrying." };
+    });
+    if (reserved.kind === "completed") return reserved.result;
+    if (reserved.kind === "failed") throw new Error(reserved.error);
+    if (reserved.kind === "indeterminate") throw new Error(reserved.error);
+    const executionAttemptId = reserved.attemptId;
+
+    // Reservation is immediately before this first authoritative side effect.
+    await deps.db.insert(delegationEnvelopes).values({ childSessionId, orgId, parentSessionId: ctx.parentSessionId, envelope: delegationEnvelope, decisionId, createdAt: Date.now() });
+
     const warnings: string[] = [];
     if (deps.sandboxBacked ?? deps.prebuildService.builderBackend === "kubernetes") {
       try {
@@ -281,10 +462,6 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
 
 
-    // A pre-assigned id (the security dispatch's cell-claim seam) wins so
-    // the caller's durable claim row names the session this spawn builds.
-    const childSessionId = req.sessionId ?? newChildSessionId();
-    const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
     await mkdir(workspace, { recursive: true });
 
     if (binding) {
@@ -399,7 +576,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       origin: ctx.origin,
     });
 
-    return { childSessionId, queueItemId: receipt.queueItemId, ...(warnings.length ? { warnings } : {}) };
+    const result = { childSessionId, queueItemId: receipt.queueItemId, ...(warnings.length ? { warnings } : {}) };
+    await completeCanonicalExecution(deps.db, policyDecision, executionInputDigest, executionAttemptId, { outcome: "completed", result }, (value) => value, parseDelegationReplay, Date.now);
+    return result;
   };
 }
 
@@ -435,9 +614,12 @@ interface ArmArgs {
  */
 export type WatcherErrorClassification =
   | { kind: "retryable"; pendingCap: boolean }
+  | { kind: "integrity"; error: DelegationEnvelopeIntegrityError }
   | { kind: "permanent"; alreadyLogged: boolean };
 
 export function classifyWatcherError(err: unknown): WatcherErrorClassification {
+  if (err instanceof DelegationEnvelopeIntegrityError) return { kind: "integrity", error: err };
+  if (err instanceof DelegationPolicyDeniedError) return { kind: "permanent", alreadyLogged: false };
   if (err instanceof SignalEdgeDeniedError) {
     // Always self-logged with reason 'edge_denied' inside `authorizeEdge`.
     return { kind: "permanent", alreadyLogged: true };
@@ -501,6 +683,13 @@ export class ChildWatcher {
       await this.attempt(watch);
     } catch (err) {
       const classification = classifyWatcherError(err);
+
+      if (classification.kind === "integrity") {
+        const id = `delegation-integrity:${createHash("md5").update(watch.childSessionId).digest("hex")}`;
+        await this.deps.db.insert(eventDropLog).values({ id, orgId: watch.orgId, reason: "delegation_integrity", conversationKey: watch.queueItemId, detail: `${classification.error.code}:${classification.error.reason}`, createdAt: Date.now() }).onConflictDoNothing();
+        console.error(`ChildWatcher: ${watch.childSessionId} has an invalid delegation envelope; leaving its watch unsettled:`, err);
+        return;
+      }
 
       if (classification.kind === "retryable") {
         if (classification.pendingCap) {
@@ -659,6 +848,7 @@ export class ChildWatcher {
       .limit(1);
     const title = appRows[0]?.title ?? undefined;
 
+    await authorizeAgentSignal(this.deps, { parentSessionId: watch.parentSessionId, parentThreadId: watch.parentThreadId, childSessionId: watch.childSessionId, actorUserId: watch.actorUserId, fallback: { orgId: childData.orgId, userId: watch.actorUserId, owner: childData.owner }, operation: "queue" });
     await admitSignal(this.deps, {
       from: { sessionId: watch.childSessionId, owner: childData.owner },
       to: watch.parentSessionId,
@@ -692,10 +882,14 @@ export class ChildWatcher {
     // fresh reclaim cycle for a re-opened child. `parkedSandboxId` is
     // deliberately kept — it is the only durable handle to a sandbox a
     // prior cycle parked, and the next park overwrites it anyway.
-    await this.deps.db
-      .update(childWatches)
-      .set({ settled: true, settledAt: Date.now(), sandboxReclaimedAt: null })
-      .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId)));
+    const now = Date.now();
+    await this.deps.db.transaction(async (tx) => {
+      await tx
+        .update(childWatches)
+        .set({ settled: true, settledAt: now, sandboxReclaimedAt: null })
+        .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId)));
+      await revokeChildCredentialDelegations(tx, childSessionId, now);
+    });
   }
 
   private async markReclaimed(childSessionId: string, now: number): Promise<void> {
@@ -886,7 +1080,7 @@ const CHILD_READ_DEFAULT_LIMIT = 30;
 export function buildChildReader(deps: ChildrenDeps): ChildReader {
   return async (req, ctx) => {
     const rows = await deps.db
-      .select({ childSessionId: childWatches.childSessionId })
+      .select({ childSessionId: childWatches.childSessionId, parentThreadId: childWatches.parentThreadId })
       .from(childWatches)
       .where(
         and(
@@ -909,6 +1103,7 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
     // A deleted child answers the same null as a missing one — deletion
     // must not leave the transcript readable through the watch edge.
     if (!child || child.status === "deleted") return null;
+    await authorizeAgentSignal(deps, { parentSessionId: ctx.parentSessionId, parentThreadId: rows[0].parentThreadId, childSessionId: req.childSessionId, operation: "read" });
 
     // Read the store directly. Waking the child through the engine host
     // would mint a sandbox token, run reconcile (resuming any unsettled
@@ -956,7 +1151,7 @@ export async function resolveChildSettlement(
   parentSessionId: string,
 ): Promise<{ settled: boolean; lastActivityAt: number | null } | null> {
   const rows = await deps.db
-    .select({ settled: childWatches.settled })
+    .select({ settled: childWatches.settled, parentThreadId: childWatches.parentThreadId })
     .from(childWatches)
     .where(
       and(
@@ -978,6 +1173,7 @@ export async function resolveChildSettlement(
   const child = childRows[0];
   // A deleted child answers the same null as a missing one.
   if (!child || child.status === "deleted") return null;
+  await authorizeAgentSignal(deps, { parentSessionId, parentThreadId: rows[0].parentThreadId, childSessionId, operation: "status" });
 
   const lastActivityAt = await deps.engineStore.latestActivityAt(childSessionId);
   const rowSettled = rows[0].settled === true;
@@ -1065,7 +1261,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
   const send = async (
     req: { childSessionId: string; message: string; interrupt?: boolean },
-    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; parentOperationId?: string },
   ): Promise<{ queueItemId: string } | null> => {
     const watchRows = await deps.db
       .select()
@@ -1105,12 +1301,28 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       .limit(1);
     const child = childRows[0];
     if (!child || child.status === "deleted") return null;
+    await authorizeAgentSignal(deps, { parentSessionId: ctx.parentSessionId, parentThreadId: ctx.parentThreadId, childSessionId: req.childSessionId, actorUserId: ctx.actorUserId, operation: req.interrupt ? "steer" : "queue" });
 
     // A settled child rejoins the active-children population — enforce the
     // same caps a spawn pays, BEFORE waking anything. A steer/followup to a
     // still-running child changes no counts and pays nothing.
     if (watchRow.settled) {
       await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId, deps.orgSessionCeiling);
+      const repositories = await deps.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, req.childSessionId));
+      const parentOperationId = ctx.parentOperationId;
+      const authorization = deps.canonicalAuthorizationService;
+      if (repositories.length > 0 && (!parentOperationId || !authorization)) throw new CredentialDelegationInvalidError();
+      if (child.ownerType !== "user" && child.ownerType !== "team" && child.ownerType !== "org") throw new CredentialDelegationInvalidError();
+      for (const repository of repositories) {
+        if (!parentOperationId || !authorization) throw new CredentialDelegationInvalidError();
+        await authorizeRepositoryCredentialDelegation({
+          db: deps.db, authorization, orgId: watchRow.orgId,
+          actorUserId: ctx.actorUserId, owner: { type: child.ownerType, id: child.ownerId },
+          parentSessionId: ctx.parentSessionId, parentThreadId: ctx.parentThreadId,
+          parentOperationId, childSessionId: req.childSessionId,
+          binding: { host: repository.host, fullName: repository.fullName, cloneUrl: repository.cloneUrl, ref: repository.ref ?? undefined, auth: repository.auth },
+        });
+      }
     }
 
     const childData = await deps.engineStore.getSession(req.childSessionId);
@@ -1141,6 +1353,8 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       .update(childWatches)
       .set({
         queueItemId: receipt.queueItemId,
+        parentThreadId: ctx.parentThreadId,
+        actorUserId: ctx.actorUserId,
         settled: false,
         dismissedAt: null,
       })
@@ -1150,7 +1364,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       childSessionId: req.childSessionId,
       queueItemId: receipt.queueItemId,
       parentSessionId: ctx.parentSessionId,
-      parentThreadId: watchRow.parentThreadId,
+      parentThreadId: ctx.parentThreadId,
       actorUserId: ctx.actorUserId,
       orgId: watchRow.orgId,
     });

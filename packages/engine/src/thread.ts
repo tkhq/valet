@@ -4590,7 +4590,9 @@ export class Thread {
       policyResolver: session.options.policyResolver,
       builtinPolicyResolver: session.options.builtinPolicyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
+      credentialProviderForAction: session.options.credentialProviderForAction,
       queueItemId: this.runningItem?.id,
+      actionInvocationId: `${this.runningItem?.id ?? "replay"}:${toolCallId}`,
       // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,

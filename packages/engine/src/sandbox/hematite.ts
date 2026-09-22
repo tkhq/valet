@@ -2,6 +2,12 @@ import type { ManagedEgressIdentity } from "./managed-egress.js";
 
 export const HEMATITE_COMPATIBLE_SOURCE_COMMIT = "35cdd0bc8816afefb4012ba2f9ca66b927c1aa00" as const;
 export const HEMATITE_COMPATIBLE_CONFIG_CONTRACT = "v1" as const;
+/** The pinned source formats request IDs as 32 lowercase hex time digits, a dash, and 16 lowercase hex counter digits. */
+export const HEMATITE_REQUEST_ID_PATTERN = /^[0-9a-f]{32}-[0-9a-f]{16}$/;
+
+export function isHematiteRequestId(value: unknown): value is string {
+  return typeof value === "string" && HEMATITE_REQUEST_ID_PATTERN.test(value);
+}
 
 export interface HematiteMaterialPaths {
   token: string;

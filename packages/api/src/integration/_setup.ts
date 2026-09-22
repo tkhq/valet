@@ -411,11 +411,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     builder: opts.imageBuilder ?? null,
     githubTokenDeps,
+    credentialAuthorization: canonicalAuthorizationService,
   });
 
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
-  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children") };
+  const childrenDeps = { db, engineHost, engineStore, canonicalAuthorizationService, prebuildService, workspaceRoot: join(blobsRoot, "children") };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
@@ -569,7 +570,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const contentSync = new ContentSyncService({
     db,
     reader: new GitHubSkillRepoReader({ apiUrl: opts.githubApiUrl }),
-    readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),
+    readerFor: skillRepoReaderFactory(githubTokenDeps, {
+      apiUrl: opts.githubApiUrl,
+      credentialAuthorization: { db, authorization: canonicalAuthorizationService },
+    }),
   });
 
   const providers: Providers = {

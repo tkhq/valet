@@ -79,6 +79,7 @@ export function currentPolicyMatcherIssuesV1(matcher: { path: string; op: string
   if (["in", "not_in"].includes(matcher.op) && !Array.isArray(matcher.value)) out.push("invalid_value");
   if (["gt", "gte", "lt", "lte"].includes(matcher.op) && (typeof matcher.value !== "number" || !Number.isFinite(matcher.value) || Object.is(matcher.value, -0))) out.push("invalid_value");
   if (matcher.op === "regex" && (typeof matcher.value !== "string" || !isLosslessRegexV1(matcher.value))) out.push("unsafe_regex");
+  if (matcher.op === "suffix" && typeof matcher.value !== "string") out.push("invalid_value");
   if (valueBearing) { const size = currentPolicyValueComplexityV1(matcher.value); if (!size) out.push("invalid_value"); else if (size.bytes > limits.maxMatcherValueBytes || size.nodes > limits.maxMatcherValueNodes || size.depth > limits.maxMatcherValueDepth) out.push("complexity_limit"); }
   return [...new Set(out)];
 }

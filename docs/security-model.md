@@ -159,6 +159,25 @@ NET_ADMIN. The residual risk is kernel attack surface through unconfined
 seccomp and SYS_ADMIN — the same trade already accepted for rootless BuildKit
 build pods. Sandboxes that do not opt in are unchanged.
 
+## Canonical Delegation and Egress
+
+Canonical delegation currently has one enforceable edge: a root-capable
+session may create one child under an immutable delegation envelope. Child
+sessions do not receive the `task` spawner. A child, a legacy chain, a cycle,
+or an imported envelope with depth other than one fails closed as
+`nested_delegation_unsupported` before session, watch, repository, workspace,
+or sandbox effects.
+
+`egress.connect` is publishable and denies by default. Organization
+administrators can author and publish egress rules. Team policy scopes cannot
+author or publish these rules. A future design can add explicit organization
+delegation to teams, but the current model has no such delegation.
+
+Valet evaluates canonical egress policy only after the provider observes an
+effective forced proxy or network boundary. If that boundary is not active,
+the callback denies with `unsupported_prerequisite` and does not evaluate the
+policy. An API-side host check alone does not control direct sandbox sockets.
+
 ## Tool-Call Safety
 
 Tool and action definitions carry a `riskLevel` (`low → critical`) and may
@@ -201,13 +220,11 @@ default).
 
 ## Managed egress prerequisite
 
-Managed egress is inactive by default. The current checkpoint defines the
-closed Hematite callback contract and provider topology plans. It does not
-apply those plans or claim live enforcement. Docker, Kubernetes, local, and
-virtual providers therefore do not advertise managed egress as ready.
+Managed egress is inactive by default. Docker and Kubernetes can activate it
+only after they apply and observe the complete forced boundary. Local and
+virtual providers do not advertise managed egress as ready.
 
-Set no managed-egress chart values in production during this checkpoint. A
-future activation requires all of these observed conditions:
+Activation requires all of these observed conditions:
 
 - a digest-pinned Hematite artifact for contract
   `hematite-external-authorization-v1`;
@@ -217,7 +234,7 @@ future activation requires all of these observed conditions:
 - both forced network policies or both Docker networks;
 - deterministic cleanup and restart adoption.
 
-The callback at `/v1/authorize` always denies with
-`unsupported_prerequisite`. It does not invoke canonical policy and does not
-publish `egress.connect`. See
+The callback at `/v1/authorize` evaluates canonical policy only for an active
+observed binding. Otherwise, it denies with `unsupported_prerequisite`.
+`egress.connect` is publishable, but its default result is deny. See
 `docs/specs/2026-09-13-managed-egress-prerequisite-design.md`.

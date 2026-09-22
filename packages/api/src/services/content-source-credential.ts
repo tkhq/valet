@@ -76,8 +76,13 @@
  *                     no App installation that covers the repository.
  *                     The 404 names installing the App.
  */
+import { randomUUID } from "node:crypto";
+import type { Principal } from "@valet/engine";
 import { and, eq } from "drizzle-orm";
 import { contentSources, type ContentSourceRow } from "../schema/index.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { authorizeCredentialUseOperation } from "../authorization/credential-use-provider.js";
+import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import {
   GitHubAuthError,
   resolveGitHubToken,
@@ -173,23 +178,53 @@ async function matchesEnabledOrgSource(
  * A membership query that throws lands in the same catch, which is the safe
  * direction: an unconfirmed membership must not hand out a token.
  */
+export interface ContentSourceCredentialAuthorization {
+  db: AppDb;
+  authorization: Pick<CanonicalAuthorizationService, "authorize">;
+}
+
 export async function resolveContentSourceCredential(
   deps: GitHubTokenDeps,
   source: ContentSourceRow,
+  authorization?: ContentSourceCredentialAuthorization,
 ): Promise<SkillRepoCredential> {
   const appPath = usesOrgApp(source) || (await matchesEnabledOrgSource(deps.db, source));
+  const authorize = <T>(owner: Principal, actorUserId: string, execute: () => Promise<T>, found: (value: T) => boolean): Promise<T> => {
+    if (!authorization) return execute();
+    return authorizeCredentialUseOperation({
+      db: authorization.db,
+      authorization: authorization.authorization,
+      binding: {
+        organizationId: source.orgId,
+        actorUserId,
+        principal: { type: source.ownerType, id: source.ownerId },
+        owner,
+        service: "github",
+        credentialClass: owner.type === "org" ? "installation" : "user",
+        actionId: "content.sync_repository",
+        operation: "repository",
+        resource: { type: "content_source", id: source.id },
+        invocationId: randomUUID(),
+      },
+    }, execute, found);
+  };
   try {
     if (appPath) {
       const owner = ownerOf(source.repoFullName);
       // A row whose repository name carries no `/` cannot name an
       // installation. `parseRepoInput` rejects that shape on the way in.
       if (owner.length === 0) return ANONYMOUS;
-      const resolved = await resolveGitHubToken(deps, {
-        orgId: source.orgId,
-        purpose: "api",
-        auth: "app",
-        repo: { owner, name: repoOf(source.repoFullName) },
-      });
+      const resolved = await authorize(
+        { type: "org", id: source.orgId },
+        source.createdBy ?? "service:content-sync",
+        () => resolveGitHubToken(deps, {
+          orgId: source.orgId,
+          purpose: "api",
+          auth: "app",
+          repo: { owner, name: repoOf(source.repoFullName) },
+        }),
+        (value) => value.token !== null,
+      );
       return resolved.token === null
         ? MISSING_APP
         : { kind: "installation", token: resolved.token };
@@ -210,12 +245,17 @@ export async function resolveContentSourceCredential(
     }
     if (!(await isOrgMember(deps.db, source.orgId, userId))) return ANONYMOUS;
 
-    const resolved = await resolveGitHubToken(deps, {
-      orgId: source.orgId,
+    const resolved = await authorize(
+      { type: "user", id: userId },
       userId,
-      purpose: "api",
-      auth: "user",
-    });
+      () => resolveGitHubToken(deps, {
+        orgId: source.orgId,
+        userId,
+        purpose: "api",
+        auth: "user",
+      }),
+      (value) => value.token !== null,
+    );
     if (resolved.token === null) return ANONYMOUS;
     const ownerScope = source.ownerType === "user" ? "user" : "team";
     return resolved.login === undefined
@@ -241,10 +281,10 @@ export async function resolveContentSourceCredential(
  * the rule above. */
 export function skillRepoReaderFactory(
   deps: GitHubTokenDeps,
-  opts: { apiUrl?: string } = {},
+  opts: { apiUrl?: string; credentialAuthorization?: ContentSourceCredentialAuthorization } = {},
 ): (source: ContentSourceRow) => Promise<SkillRepoReader> {
   return async (source) => {
-    const credential = await resolveContentSourceCredential(deps, source);
+    const credential = await resolveContentSourceCredential(deps, source, opts.credentialAuthorization);
     return new GitHubSkillRepoReader({ apiUrl: opts.apiUrl, credential });
   };
 }

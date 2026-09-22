@@ -75,6 +75,12 @@ async function setup() {
   api = await bootTestApi();
   return api;
 }
+async function reviewAndPrepare(value: PolicyDraftV1, key: string) {
+  const created = await post("/org/policy-drafts", { ...mutation(`${key}-create`, 0, 0), draft: value }).then((r) => r.json()) as { documentId: string; revision: number; stateVersion: number };
+  const submitted = await post(`/org/policy-drafts/${created.documentId}/submit-review`, mutation(`${key}-submit`, created.revision, created.stateVersion)).then((r) => r.json()) as { stateVersion: number };
+  const approved = await post(`/org/policy-drafts/${created.documentId}/reviews`, { ...mutation(`${key}-review`, created.revision, submitted.stateVersion), verdict: "approve", requestId: `${key}-review` }, reviewer).then((r) => r.json()) as { stateVersion: number };
+  return post(`/org/policy-drafts/${created.documentId}/prepare-publication`, { schemaVersion: 1, expectedRevision: created.revision, expectedStateVersion: approved.stateVersion }, reviewer);
+}
 
 const resourceDeps = { resourceAuthorizationPort: ALLOW_RESOURCE_AUTHORIZATION, resourceAuthorizationContext: (scope: { organizationId: string }, actorId: string) => testResourceContext(scope.organizationId, actorId) };
 
@@ -86,9 +92,11 @@ describe("canonical policy authoring routes", () => {
     expect(body.contexts["api.route"].publishable).toBe(true);
     expect(body.contexts["api.route"].targets).toContainEqual(expect.objectContaining({ actionId: "api_sessions.post_sessions", template: "/api/sessions" }));
     expect(body.contexts["resource.access"].targets).toContainEqual(expect.objectContaining({ actionId: "resource_artifact.publish", resourceKind: "artifact", operation: "publish" }));
+    expect(body.contexts["credential.delegate"]).toMatchObject({ publishable: true, targets: [expect.objectContaining({ actionId: "credential.delegate" })] });
+    expect(body.contexts["egress.connect"].publishable).toBe(true);
   });
 
-  it.each([["api.route", "api_sessions.post_sessions"], ["resource.access", "resource_artifact.publish"]] as const)("publishes a reviewed %s candidate", async (context, actionId) => {
+  it.each([["api.route", "api_sessions.post_sessions"], ["resource.access", "resource_artifact.publish"], ["delegation.create", "delegation.create"], ["agent.signal", "agent.cancel"], ["sandbox.capability", "sandbox.provision"], ["credential.use", "credential.repository"], ["credential.delegate", "credential.delegate"]] as const)("publishes a reviewed %s candidate", async (context, actionId) => {
     await setup();
     const key = context.replace(".", "-");
     const authored: PolicyDraftV1 = { ...draft, draftId: `draft-${key}`, rules: [{ ...draft.rules[0], context, target: { "action.id": actionId }, matcherGroups: [], appliesIn: undefined }] };
@@ -104,6 +112,17 @@ describe("canonical policy authoring routes", () => {
     expect(published.status).toBe(200);
     expect(await published.json()).toMatchObject({ notice: "This candidate is the active canonical policy bundle.", draft: { rules: [{ context, target: { "action.id": actionId } }] } });
   });
+
+  it("refuses an unrelated publication that would remove a delegated deny", async () => {
+    const app = await setup();
+    await app.providers.db.update(orgMembers).set({ role: "admin" }).where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
+    const delegated: PolicyDraftV1 = { ...draft, draftId: "delegated-deny", rules: [{ ...draft.rules[0], ruleId: "deny-delegation", context: "credential.delegate", target: { "action.id": "credential.delegate" }, matcherGroups: [], appliesIn: undefined }] };
+    expect((await reviewAndPrepare(delegated, "delegated")).status).toBe(200);
+    const unrelated: PolicyDraftV1 = { ...draft, draftId: "credential-use-only", rules: [{ ...draft.rules[0], ruleId: "credential-use", context: "credential.use", target: { "action.id": "credential.repository" }, matcherGroups: [], appliesIn: undefined }] };
+    const refused = await reviewAndPrepare(unrelated, "unrelated");
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: "canonical_policy_delegated_rules_dropped", error: expect.stringContaining("deny-delegation") });
+  }, 120_000);
 
   it("activates a reviewed immutable candidate without changing structured rows", async () => {
     const app = await setup();
@@ -550,6 +569,26 @@ describe("canonical policy authoring routes", () => {
       }),
     );
     await rejectsWithoutChange(() => failing.restore("author", scope, created.documentId, 1, mutation("audit-restore-fail", 1, submitted.stateVersion)));
+  });
+
+  it("prevents two team administrators from authoring an egress allow", async () => {
+    const app = await setup();
+    await app.providers.db.insert(teams).values({ id: "team-egress", orgId: "local-org", name: "Egress", createdAt: 1 });
+    await app.providers.db.insert(teamMembers).values([
+      { teamId: "team-egress", userId: "local-user", role: "admin" },
+      { teamId: "team-egress", userId: "test-member", role: "admin" },
+    ]);
+    const egressDraft = {
+      ...draft,
+      rules: [{ ...draft.rules[0], context: "egress.connect" as const, authority: "team" as const, owner: { kind: "team" as const, id: "team-egress" }, subjects: ["team" as const], target: { "action.id": "egress.connect" }, matcherGroups: [{ id: "g", mode: "all" as const, matchers: [{ id: "m", field: "parameters.destination.host", operator: "eq" as const, value: "example.com" }] }], effect: "allow" as const, appliesIn: undefined }],
+    };
+    const before = await app.providers.db.select().from(policyActiveBundles);
+    for (const actorHeaders of [headers, reviewer]) {
+      const response = await post("/teams/team-egress/policy-drafts", { ...mutation(`egress-${actorHeaders === headers ? "one" : "two"}`, 0, 0), draft: egressDraft }, actorHeaders);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: "Create and publish egress rules in the organization policy scope.", code: "forbidden" });
+    }
+    expect(await app.providers.db.select().from(policyActiveBundles)).toEqual(before);
   });
 
   it("isolates idempotency and replays across exact team scopes", async () => {

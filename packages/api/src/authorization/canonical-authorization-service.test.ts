@@ -1,11 +1,11 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
-import { adaptInteractiveAction, adaptWorkflowAction } from "@valet/engine/authorization";
+import { adaptEgressConnect, adaptInteractiveAction, adaptWorkflowAction } from "@valet/engine/authorization";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { actionPolicies, authorizationDecisions, orgs, teams } from "../schema/index.js";
 import { CanonicalPolicyBundleManager, type CanonicalOverrideBoundPolicyReference } from "./canonical-policy-manager.js";
-import { CanonicalAuthorizationService } from "./canonical-authorization-service.js";
+import { CanonicalAuthorizationService, pruneEgressDecisions } from "./canonical-authorization-service.js";
 
 let pg: TestPgDb | undefined;
 afterEach(async () => { await pg?.cleanup(); pg = undefined; });
@@ -39,6 +39,31 @@ describe("CanonicalAuthorizationService", () => {
       expect((await restarted.authorize(request({ value: 1 }))).decision).toEqual(first.decision);
       expect(await pg.appDb.select().from(authorizationDecisions)).toHaveLength(1);
       await expect(service.authorize(request({ value: 2 }))).rejects.toThrow(/idempotency conflict/);
+    } finally { await manager.close(); }
+  }, 120_000);
+
+  it("prunes only excess egress decisions and preserves the current row", async () => {
+    pg = await freshTestPgDb();
+    await pg.appDb.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1 });
+    const manager = new CanonicalPolicyBundleManager(pg.appDb, new Map(), () => 10);
+    try {
+      await manager.ensureOrganizationReady("org-1");
+      let now = 200;
+      const service = await CanonicalAuthorizationService.create(manager, () => now++);
+      await service.authorize(request({ retained: "non-egress" }));
+      for (let counter = 1; counter <= 3; counter++) {
+        const requestId = `000000000000000018db1a2b3c4d5e6f-${counter.toString(16).padStart(16, "0")}`;
+        const adapted = adaptEgressConnect({ schemaVersion: 1, organizationId: "org-1", actorUserId: "user-1", principal: { type: "user", id: "user-1" }, requestId, operationId: `egress:${counter}`, evaluationTimeMs: 100 + counter, sessionId: "session-1", operation: "connect", destination: { scheme: "https", protocol: "tcp", host: "example.com", port: 443, destinationClass: "external" } });
+        await service.authorize(adapted.request);
+      }
+      const rows = await pg.appDb.select().from(authorizationDecisions);
+      const newest = rows.find((row) => row.requestId.endsWith("0003"));
+      expect(newest).toBeDefined();
+      await pruneEgressDecisions(pg.appDb, "org-1", newest!.decisionId, 2);
+      const retained = await pg.appDb.select().from(authorizationDecisions);
+      expect(retained.filter((row) => row.idempotencyKey.startsWith("resource:egress:"))).toHaveLength(2);
+      expect(retained.some((row) => row.requestId === "request-1")).toBe(true);
+      expect(retained.some((row) => row.decisionId === newest!.decisionId)).toBe(true);
     } finally { await manager.close(); }
   }, 120_000);
 

@@ -2,6 +2,7 @@ import type { DecisionGateRequest, PolicyDecision, PolicyResolver, PolicyResolve
 import { authorizationSha256Hex, canonicalAuthorizationJson, requestSubjectDigest } from "./identity.js";
 import { trustedJsonClone } from "./trusted-json.js";
 import { buildRouteResourceObligationPlan } from "./route-resource.js";
+import { buildDelegatedExecutionObligationPlan, DELEGATED_EXECUTION_KINDS } from "./delegated-execution.js";
 import type { ApprovalRequirement, AuthorizationRequest, Obligation, PolicyDecisionEnvelope, PolicyDecisionV1, RedactionDirective } from "./types.js";
 
 const HEX = /^[0-9a-f]{64}$/;
@@ -113,6 +114,7 @@ export function assertEnvelope(untrustedRequest: AuthorizationRequest, untrusted
   if (!record(envelope.evaluator)) fail("invalid_decision"); exact(envelope.evaluator, ["kind", "engineDigest"]);
   if ((envelope.evaluator.kind !== "local_valet" && envelope.evaluator.kind !== "tvc_attested") || !hex(envelope.evaluator.engineDigest)) fail("invalid_decision");
   if (request.kind === "api.route" || request.kind === "resource.access") buildRouteResourceObligationPlan(envelope.decision);
+  else if ((DELEGATED_EXECUTION_KINDS as readonly string[]).includes(request.kind)) buildDelegatedExecutionObligationPlan(envelope.decision);
   else buildActionObligationPlan(envelope.decision);
   if ((envelope.evaluator.kind === "tvc_attested") !== (envelope.proof !== undefined)) fail("invalid_decision");
   if (envelope.proof !== undefined) {
@@ -126,7 +128,7 @@ export function assertEnvelope(untrustedRequest: AuthorizationRequest, untrusted
 
 function validateActionRequest(request: AuthorizationRequest): void {
   exact(request, ["schemaVersion", "requestId", "idempotencyKey", "kind", "subject", "action", "context", "facts", "resource", "approval"]);
-  if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || !ID.test(request.requestId) || !(["tool.action", "workflow.action", "tool.builtin", "api.route", "resource.access"] as string[]).includes(request.kind) || !record(request.context) || !record(request.facts)) fail("invalid_decision");
+  if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || !ID.test(request.requestId) || !(["tool.action", "workflow.action", "tool.builtin", "api.route", "resource.access", ...DELEGATED_EXECUTION_KINDS] as string[]).includes(request.kind) || !record(request.context) || !record(request.facts)) fail("invalid_decision");
   if (!record(request.subject)) fail("invalid_decision"); exact(request.subject, ["orgId", "principal", "invocation", "actorUserId", "sessionId", "threadId", "workflowExecutionId", "workflowNodeId", "parentSessionId"]);
   if (typeof request.subject.orgId !== "string" || !ID.test(request.subject.orgId) || !record(request.subject.principal) || !record(request.subject.invocation)) fail("invalid_decision");
   exact(request.subject.principal, ["type", "id"]); exact(request.subject.invocation, ["type", "id"]);
