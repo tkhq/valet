@@ -5178,7 +5178,18 @@ export interface ProxyRequestListItem {
   totalTokens: number;
   costUsd: number | null;
   latencyMs: number | null;
-  error: string | null;
+  /** True when the recorder stored a failure. Error content is never listed. */
+  hasError: boolean;
+}
+
+/** `GET /api/proxy/requests` — one bounded cursor page of metadata. */
+export interface ProxyRequestListResponse {
+  requests: ProxyRequestListItem[];
+  /** Cursor for the next older page. Omitted on the final page. */
+  nextCursor?: string;
+  /** The server-applied page size, after validation and capping. */
+  pageSize: number;
+  hasMore: boolean;
 }
 
 /**
@@ -5186,6 +5197,8 @@ export interface ProxyRequestListItem {
  * bodies and the parsed representation.
  */
 export interface ProxyRequestDetail extends ProxyRequestListItem {
+  /** Raw error content is available only through the detail endpoint. */
+  error: string | null;
   requestBody: string;
   responseBody: string | null;
   parsed: unknown;
