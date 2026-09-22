@@ -10,7 +10,7 @@ import { cn } from "~/lib/cn";
 import {
   ConfigForm,
   categoryLabel,
-  emptyScopeDraft,
+  emptyConfigDraft,
   normalizeScopeHostsForSubmit,
   scopeDraftToWire,
   type ConfigDraft,
@@ -33,6 +33,65 @@ const SECURITY_MODELS: readonly { id: string; label: string; note: string }[] = 
 
 function modelLabel(id: string): string {
   return SECURITY_MODELS.find((m) => m.id === id)?.label ?? id;
+}
+
+/** The sidecar values of one credential row, trimmed, with every blank key
+ * dropped. Returns undefined when nothing survives, so a row that carries an
+ * empty map ships no `meta` at all. */
+function metaForSubmit(
+  meta: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (meta === undefined) return undefined;
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(meta)) {
+    const text = value.trim();
+    if (text !== "") clean[key] = text;
+  }
+  return Object.keys(clean).length > 0 ? clean : undefined;
+}
+
+/**
+ * The `securityConfig` object the create request carries. Start review sends
+ * exactly this, and the Launch step shows exactly this, so the payload a
+ * reviewer reads is the payload the server receives.
+ */
+export function buildSecurityConfig(
+  config: ConfigDraft,
+): NonNullable<CreateSessionRequest["securityConfig"]> {
+  const securityConfig: NonNullable<CreateSessionRequest["securityConfig"]> = {
+    focus: config.focus.trim() === "" ? null : config.focus.trim(),
+    invariants: config.invariants.map((v) => v.text.trim()).filter((v) => v !== ""),
+    categories: config.categories,
+  };
+  // The scope override rides only when the user set a non-empty host list.
+  // A source-only plan with no scope authored omits the field so the seed
+  // (or the repo's .valet/security.yml) still wins. Non-live plans with a
+  // manually authored scope still ship it so a future live-persona add
+  // does not lose the user's intent.
+  const wireScope = scopeDraftToWire(config.scope);
+  if (wireScope !== null) {
+    securityConfig.scope = wireScope;
+  }
+  // Drop a credential row only when the user never touched it (label, env,
+  // and reference all blank after trim); a partially filled row still ships
+  // so the server's 400 names exactly what is missing, rather than the
+  // wizard silently dropping it.
+  // The setup page is authoritative after preview. An empty list means the
+  // user removed every repository declaration, and create must not restore them.
+  securityConfig.credentials = config.credentials
+    .filter((c) => c.label.trim() !== "" || c.env.trim() !== "" || c.reference.trim() !== "")
+    .map((c) => {
+      const meta = metaForSubmit(c.meta);
+      return {
+        label: c.label.trim(),
+        env: c.env.trim(),
+        reference: c.reference.trim(),
+        kind: c.kind,
+        ...(c.refShape ? { refShape: c.refShape } : {}),
+        ...(meta ? { meta } : {}),
+      };
+    });
+  return securityConfig;
 }
 
 /** One compact plan line for the review step: `authz-sweep · code-review ·
@@ -131,12 +190,7 @@ export function SecurityNewPage() {
 
   const create = useCreateSession();
   const [model, setModel] = useState(search.model);
-  const [config, setConfig] = useState<ConfigDraft>({
-    focus: "",
-    invariants: [],
-    categories: [],
-    scope: emptyScopeDraft(),
-  });
+  const [config, setConfig] = useState<ConfigDraft>(emptyConfigDraft());
   // v1 Part 09 §Launch checklist. The user MUST affirm authorization before
   // Start review enables. Default off; a client-side gate only, but the
   // server also stamps `authorized_at` on the create as an audit trail.
@@ -153,6 +207,7 @@ export function SecurityNewPage() {
       ...(search.ref ? { ref: search.ref } : {}),
       ...(paths.length > 0 ? { paths } : {}),
       ...(search.includeReport !== undefined ? { includeReport: search.includeReport } : {}),
+      ...(search.teamId !== undefined ? { teamId: search.teamId } : {}),
     },
     search.repo !== "",
   );
@@ -166,8 +221,12 @@ export function SecurityNewPage() {
     const seededScope = previewQ.data.config.authorizedScope;
     setConfig({
       focus: previewQ.data.config.focus ?? "",
-      invariants: previewQ.data.config.invariants,
+      invariants: previewQ.data.config.invariants.map((text) => ({
+        id: crypto.randomUUID(),
+        text,
+      })),
       categories: previewQ.data.config.categories,
+      credentials: previewQ.data.config.credentials.map((c) => ({ ...c, id: crypto.randomUUID() })),
       scope: {
         hosts: seededScope?.hosts ?? [],
         cidrs: seededScope?.cidrs ?? [],
@@ -208,20 +267,7 @@ export function SecurityNewPage() {
     ) {
       return;
     }
-    const securityConfig: CreateSessionRequest["securityConfig"] = {
-      focus: config.focus.trim() === "" ? null : config.focus.trim(),
-      invariants: config.invariants.map((v) => v.trim()).filter((v) => v !== ""),
-      categories: config.categories,
-    };
-    // The scope override rides only when the user set a non-empty host list.
-    // A source-only plan with no scope authored omits the field so the seed
-    // (or the repo's .valet/security.yml) still wins. Non-live plans with a
-    // manually authored scope still ship it so a future live-persona add
-    // does not lose the user's intent.
-    const wireScope = scopeDraftToWire(config.scope);
-    if (wireScope !== null) {
-      securityConfig.scope = wireScope;
-    }
+    const securityConfig = buildSecurityConfig(config);
     const body: CreateSessionRequest = {
       // Host working directory the api creates for the clone (docker bind-mount
       // source in dev), NOT the in-sandbox `/workspace` mount.
@@ -320,7 +366,12 @@ export function SecurityNewPage() {
                     </select>
                     <p className="text-[11px] text-muted">Drives the review and every sub-agent.</p>
                   </div>
-                  <ConfigForm value={config} onChange={setConfig} requireLiveScope={hasLivePersona} />
+                  <ConfigForm
+                    value={config}
+                    onChange={setConfig}
+                    requireLiveScope={hasLivePersona}
+                    credentialWarnings={previewQ.data?.credentialWarnings ?? []}
+                  />
                 </div>
               )}
 
@@ -485,8 +536,27 @@ function ReviewStep({
   authorizationConfirmed: boolean;
   onAuthorizationChange: (next: boolean) => void;
 }) {
-  const invariants = config.invariants.map((v) => v.trim()).filter((v) => v !== "");
+  const [payloadOpen, setPayloadOpen] = useState(false);
+  const [copyNote, setCopyNote] = useState("");
+  const invariants = config.invariants.map((v) => v.text.trim()).filter((v) => v !== "");
   const none = <span className="text-muted">None</span>;
+  // The config object Start review posts, rendered read-only below so a
+  // reviewer can check the declaration against what the server receives.
+  const securityConfig = buildSecurityConfig(config);
+  const declaredCredentials = securityConfig.credentials ?? [];
+  const advancedSet = config.focus.trim() !== "" || invariants.length > 0;
+  const payloadText = JSON.stringify(securityConfig, null, 2);
+  function copyPayload() {
+    const clipboard = navigator.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== "function") {
+      setCopyNote("Copy is not available here. Select the text and copy it.");
+      return;
+    }
+    clipboard.writeText(payloadText).then(
+      () => setCopyNote("Copied the request payload."),
+      () => setCopyNote("Copy failed. Select the text and copy it."),
+    );
+  }
   const scopeHosts = config.scope.hosts.filter((h) => h.trim() !== "");
   const scopeMissing = hasLivePersona && scopeHosts.length === 0;
   const loginMissing = hasLivePersona && config.scope.loginUrl.trim() === "";
@@ -551,12 +621,35 @@ function ReviewStep({
             none
           )}
         </SummaryRow>
+        <SummaryRow label="Credentials">
+          {declaredCredentials.length > 0 ? (
+            <div data-testid="review-credentials">
+              <ul className="flex flex-col gap-0.5">
+                {declaredCredentials.map((c) => (
+                  <li key={c.label} className="font-mono text-[11px] text-ink">
+                    {`${c.label} (${c.kind}) -> ${c.env}`}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-[11px] text-muted">
+                Personas see labels and environment variable names only. Values stay
+                in 1Password until a launcher command runs.
+              </p>
+            </div>
+          ) : (
+            none
+          )}
+        </SummaryRow>
         {config.scope.loginUrl.trim() !== "" && (
           <SummaryRow label="Login URL">
             <span className="font-mono">{config.scope.loginUrl.trim()}</span>
           </SummaryRow>
         )}
       </dl>
+
+      <p className="text-[11px] text-muted" data-testid="launch-advanced-set">
+        {`Focus and invariants set under Advanced: ${advancedSet ? "yes" : "no"}`}
+      </p>
 
       {/* Live-testing warnings (v1 Part 09 §Launch checklist). Missing scope is
           a HARD block (Start disabled); missing login URL is a soft WARN that
@@ -581,18 +674,21 @@ function ReviewStep({
             )}
             {liveKinds.has("dast") && (
               <li data-testid="launch-cred-dast">
-                DAST may ask for admin credentials to test <span className="font-mono">/admin/*</span>{" "}
-                surface.
+                DAST (live web testing) may ask for admin credentials to test the{" "}
+                <span className="font-mono">/admin/*</span> surface.
               </li>
             )}
             {liveKinds.has("fuzz") && (
               <li data-testid="launch-cred-fuzz">
-                Fuzz may ask for test data (payment card, SSN) to fuzz payment / identity flows.
+                Fuzz (malformed input testing) may ask for test data, such as a payment
+                card number, to fuzz payment and identity flows.
               </li>
             )}
             {liveKinds.has("exploit") && (
               <li data-testid="launch-cred-exploit">
-                Exploit chains findings to a non-destructive PoC; READ then RESTORE. It may ask for a bounded blast radius.
+                Exploit (proof of concept for a confirmed finding) reads, then restores.
+                It may ask you for a blast radius (the largest set of records it may
+                change).
               </li>
             )}
           </ul>
@@ -620,6 +716,49 @@ function ReviewStep({
             </li>
           ))}
         </ol>
+      </div>
+
+      {/* The request body itself, read-only. A reviewer who has to sign off on
+          what leaves the browser reads it here instead of the network tab. */}
+      <div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            // The note describes the last copy of a payload that is about to
+            // leave the screen, so it must not survive the collapse.
+            setCopyNote("");
+            setPayloadOpen((open) => !open);
+          }}
+          aria-expanded={payloadOpen}
+        >
+          {payloadOpen ? "Hide request payload" : "Show request payload"}
+        </Button>
+        {payloadOpen && (
+          <div className="mt-1.5 rounded-md border border-line bg-paper p-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] text-muted">
+                Start review sends this object as the securityConfig field of the
+                create request.
+              </p>
+              <Button type="button" variant="secondary" size="sm" onClick={copyPayload}>
+                Copy
+              </Button>
+            </div>
+            <pre
+              className="mt-1.5 max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-ink"
+              data-testid="launch-payload"
+            >
+              {payloadText}
+            </pre>
+            {copyNote !== "" && (
+              <p className="mt-1 text-[11px] text-muted" role="status">
+                {copyNote}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Authorization affirmation (INV-11). Required to enable Start. */}

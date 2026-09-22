@@ -142,7 +142,11 @@ interface SchemaRepair {
   probe:
     | { kind: "column"; table: string; column: string }
     | { kind: "table"; table: string }
-    | { kind: "index"; index: string };
+    | { kind: "index"; index: string }
+    // A table constraint (CHECK, UNIQUE, FOREIGN KEY). Postgres scopes a
+    // constraint name to its table, not to the schema, so the probe needs
+    // both names to identify one.
+    | { kind: "constraint"; table: string; constraint: string };
   sql: string;
   /**
    * A one-shot data statement run in the same transaction, right after
@@ -920,7 +924,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "report_json" text,
       "report_generated_at" bigint,
       "created_at" bigint NOT NULL,
-      "updated_at" bigint NOT NULL
+      "updated_at" bigint NOT NULL,
+      "credentials_json" jsonb
     )`,
   },
   {
@@ -1222,7 +1227,9 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "status" text DEFAULT 'open' NOT NULL,
       "resolution" text,
       "created_at" bigint NOT NULL,
-      "resolved_at" bigint
+      "resolved_at" bigint,
+      "credential_label" text,
+      CONSTRAINT "security_needs_credential_resolution_null" CHECK ("kind" <> 'credential' OR "resolution" IS NULL)
     )`,
   },
   {
@@ -1234,6 +1241,53 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_needs_cell index",
     probe: { kind: "index", index: "security_needs_cell" },
     sql: 'CREATE INDEX IF NOT EXISTS "security_needs_cell" ON "security_needs" ("cell_id")',
+  },
+  {
+    // Declared credential references (Part 12, credentials via 1Password).
+    // Null when the engagement's config declares no credentials. Ephemeral,
+    // Postgres holds only `op://` references here, never a resolved value
+    // (INV-37).
+    describe: "security_engagements.credentials_json column",
+    probe: { kind: "column", table: "security_engagements", column: "credentials_json" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "credentials_json" jsonb',
+  },
+  {
+    // The label of the declared credential a human picked to answer a
+    // cred-typed need (Part 12), null otherwise. The label names an entry in
+    // the engagement's `credentials_json`; the `op://` reference and the
+    // resolved value never reach this column.
+    describe: "security_needs.credential_label column",
+    probe: { kind: "column", table: "security_needs", column: "credential_label" },
+    sql: 'ALTER TABLE "security_needs" ADD COLUMN IF NOT EXISTS "credential_label" text',
+  },
+  {
+    // The CHECK that enforces INV-39: `resolution` stays NULL on a cred-typed
+    // need. It gets its own entry, with a constraint probe, because a column
+    // probe cannot see it: a database that holds the column but lost the
+    // constraint would never regain it.
+    //
+    // Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so the statement runs in
+    // a DO block that swallows `duplicate_object`: `missingSchemaRepairs`
+    // computes the pending list once, and on a database missing the whole
+    // table the CREATE TABLE repair ahead of this one already adds the
+    // constraint inline.
+    //
+    // NOT VALID skips validating existing rows: a deployed database may
+    // already hold a cred-typed need whose `resolution` carries a plaintext
+    // answer from an earlier needs-resolve handler, and a validating ADD
+    // CONSTRAINT would refuse to boot on that row. NOT VALID still enforces
+    // the check on every INSERT and UPDATE from this point forward.
+    describe: "security_needs_credential_resolution_null constraint",
+    probe: {
+      kind: "constraint",
+      table: "security_needs",
+      constraint: "security_needs_credential_resolution_null",
+    },
+    sql: `DO $repair$ BEGIN
+      ALTER TABLE "security_needs" ADD CONSTRAINT "security_needs_credential_resolution_null"
+        CHECK ("kind" <> 'credential' OR "resolution" IS NULL) NOT VALID;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $repair$`,
   },
   {
     // engine_entries.seq — the message-order tiebreaker (TKAI-303). engine_meta
@@ -1365,8 +1419,27 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   },
 ];
 
+/**
+ * The catalog key one probe looks for. Each catalog query below maps its rows
+ * to the same key shape, so a probe and the row that satisfies it agree by
+ * construction. A constraint key carries its table because Postgres scopes a
+ * constraint name to the table, not to the schema.
+ */
+function probeKey(probe: SchemaRepair["probe"]): string {
+  switch (probe.kind) {
+    case "column":
+      return `column:${probe.table}.${probe.column}`;
+    case "table":
+      return `table:${probe.table}`;
+    case "index":
+      return `index:${probe.index}`;
+    case "constraint":
+      return `constraint:${probe.table}.${probe.constraint}`;
+  }
+}
+
 /** The repairs this database still lacks, by catalog probe — one query per
- * probe kind (3 round-trips), not one per repair. Exported for the schema
+ * probe kind (4 round-trips), not one per repair. Exported for the schema
  * tests: steady state must return [] — that is the no-locks contract.
  * The probe lists ride as JSON strings so both drivers (node-postgres,
  * PGlite) bind them identically. */
@@ -1374,10 +1447,12 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   const columnTables = new Set<string>();
   const tableNames: string[] = [];
   const indexNames: string[] = [];
+  const constraintNames: string[] = [];
   for (const { probe } of SCHEMA_REPAIRS) {
     if (probe.kind === "column") columnTables.add(probe.table);
     else if (probe.kind === "table") tableNames.push(probe.table);
-    else indexNames.push(probe.index);
+    else if (probe.kind === "index") indexNames.push(probe.index);
+    else constraintNames.push(probe.constraint);
   }
 
   const present = new Set<string>();
@@ -1407,23 +1482,30 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
     indexNames,
     (row) => `index:${String(row["indexname"])}`,
   );
+  await collect(
+    `SELECT c.relname AS table_name, con.conname AS constraint_name
+     FROM pg_constraint con
+     JOIN pg_class c ON c.oid = con.conrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = current_schema()
+       AND con.conname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+    constraintNames,
+    (row) => `constraint:${String(row["table_name"])}.${String(row["constraint_name"])}`,
+  );
 
-  const pending = SCHEMA_REPAIRS.filter(({ probe: p }) => {
-    const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
-    return !present.has(key);
-  });
-  return tablesBeforeTheirColumns(pending);
+  const pending = SCHEMA_REPAIRS.filter(({ probe }) => !present.has(probeKey(probe)));
+  return tablesBeforeTheirMembers(pending);
 }
 
 /**
- * List order is apply order, and a column repair may sit ahead of the
- * repair that creates its table (the table arrived later than the column
- * entries that were written against it). On a database that has neither,
- * the ALTER would run against a table that does not exist yet and the boot
- * would fail. Hoist each pending table repair ahead of the first pending
- * column repair on that table; everything else keeps its place.
+ * List order is apply order, and a column or constraint repair may sit ahead
+ * of the repair that creates its table (the table arrived later than the
+ * column entries that were written against it). On a database that has
+ * neither, the ALTER would run against a table that does not exist yet and
+ * the boot would fail. Hoist each pending table repair ahead of the first
+ * pending repair on that table; everything else keeps its place.
  */
-function tablesBeforeTheirColumns(pending: SchemaRepair[]): SchemaRepair[] {
+function tablesBeforeTheirMembers(pending: SchemaRepair[]): SchemaRepair[] {
   const creates = new Map<string, SchemaRepair>();
   for (const repair of pending) {
     if (repair.probe.kind === "table") creates.set(repair.probe.table, repair);
@@ -1431,7 +1513,7 @@ function tablesBeforeTheirColumns(pending: SchemaRepair[]): SchemaRepair[] {
   const ordered: SchemaRepair[] = [];
   const placed = new Set<SchemaRepair>();
   for (const repair of pending) {
-    if (repair.probe.kind === "column") {
+    if (repair.probe.kind === "column" || repair.probe.kind === "constraint") {
       const create = creates.get(repair.probe.table);
       if (create && !placed.has(create)) {
         ordered.push(create);

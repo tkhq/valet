@@ -37,6 +37,7 @@ import { findCredentialDeclaration } from "./integration-availability.js";
 import {
   ONEPASSWORD_SERVICE,
   OnePasswordAuthError,
+  type OnePasswordCtx,
   onePasswordMeta,
   type OnePasswordService,
   OnePasswordScope,
@@ -81,6 +82,54 @@ export interface CredentialReadCtx {
 export function onePasswordScopesFor(ownerType: string | undefined, teamId?: string): readonly OnePasswordScope[] {
   if (ownerType === "team" && teamId) return ["team", "org"];
   return ownerType === "user" ? ["org", "personal"] : ["org"];
+}
+
+/** One scope that did not answer a reference: the scope tried, and what it
+ * threw. `error` is an `OnePasswordAuthError` for a 1Password refusal, and
+ * anything else when the machinery around the resolve failed (the database
+ * read behind the token, for one). */
+export interface ScopeResolveAttempt {
+  scope: OnePasswordScope;
+  error: unknown;
+}
+
+/** What `resolveAcrossScopes` answers: the value and the scope that held it,
+ * or every scope that refused, in the order they were tried. */
+export type ScopeResolveOutcome =
+  | { value: string; scope: OnePasswordScope }
+  | { attempts: ScopeResolveAttempt[] };
+
+/**
+ * Resolves `reference` through the first of `scopes` that can answer it.
+ *
+ * This reports what happened and decides no policy: a caller reads the
+ * attempts and picks the error its own reader must act on. The two callers
+ * want different things from the same walk. The sandbox broker separates a
+ * team refusal and an SDK refusal from "nothing resolved"; the create-time
+ * credential preflight turns one attempt into a corrective remedy. Neither
+ * rule belongs here.
+ *
+ * The one rule that does live here is owner precedence: a configured team
+ * scope is authoritative, and only an absent team token lets the next scope
+ * have a turn. A team token that exists and refuses never falls through to
+ * the org token, whatever the reason for the refusal.
+ */
+export async function resolveAcrossScopes(
+  onePassword: Pick<OnePasswordService, "resolveReference">,
+  scopes: readonly OnePasswordScope[],
+  ctx: OnePasswordCtx,
+  reference: string,
+): Promise<ScopeResolveOutcome> {
+  const attempts: ScopeResolveAttempt[] = [];
+  for (const scope of scopes) {
+    try {
+      return { value: await onePassword.resolveReference(scope, ctx, reference), scope };
+    } catch (error) {
+      attempts.push({ scope, error });
+      if (scope === "team" && !(error instanceof OnePasswordAuthError && error.kind === "no_token")) break;
+    }
+  }
+  return { attempts };
 }
 
 /** A read made as a specific user: `orgId`, `userId`, and the scopes the

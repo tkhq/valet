@@ -1,4 +1,9 @@
 import { parse } from "yaml";
+import {
+  validateCredentialDecls,
+  type SecurityCredentialDecl,
+  type SecurityCredentialKind,
+} from "@valet/shared";
 import { isKnownCategory, KNOWN_CATEGORIES } from "./categories.js";
 import { parsePlan, type PlanCell } from "./plan.js";
 import { serializePlan } from "./presets.js";
@@ -41,7 +46,15 @@ export interface SecurityConfig {
    * live testing is authorized — the dispatch prompt says so, and a live
    * persona has no target. */
   scope?: SecurityScope;
+  /** Declared 1Password references available to security persona cells. */
+  credentials?: SecurityConfigCredentialDecl[];
 }
+
+/** The credential vocabulary, re-exported under the names this config module
+ * has always used. A credential declared in the repo config and one declared
+ * in the setup form are the same declaration, held to the same rules. */
+export type { SecurityCredentialKind };
+export type SecurityConfigCredentialDecl = SecurityCredentialDecl;
 
 /**
  * One declared tool a step needs (M-P4a). The mechanism accepts the decl; the
@@ -203,6 +216,14 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
       );
     }
     config.categories = map.categories;
+  }
+
+  if (map.credentials !== undefined) {
+    const checked = validateCredentialDecls(map.credentials);
+    if (!checked.ok) {
+      throw new Error(`.valet/security.yml credentials: ${checked.message} ${CORRECTIVE}`);
+    }
+    config.credentials = checked.decls;
   }
 
   // Authorized live-testing scope (M-P4b). Parse it before tools so a declared

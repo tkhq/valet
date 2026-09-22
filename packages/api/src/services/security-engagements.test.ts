@@ -12,11 +12,22 @@ import {
 } from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { securityCells, securityFiles, securityFindings, type SecurityCellRow } from "../schema/index.js";
+import type { CredentialCommand } from "../engine/credential-commands.js";
+import {
+  securityCells,
+  securityEngagements,
+  securityFiles,
+  securityFindings,
+  securityNeeds,
+  type SecurityCellRow,
+} from "../schema/index.js";
 import {
   buildDispatchPrompt,
   createSecurityEngagementService,
+  CREDENTIAL_NEED_TAKES_A_LABEL,
+  engagementCredentialCommands,
   MAX_REVISIONS_PER_PATH,
+  mergeCredentialCommands,
   STATE_DOC_STALE_MS,
   type SecurityEngagementService,
 } from "./security-engagements.js";
@@ -1554,15 +1565,30 @@ describe("security engagement service", () => {
     "",
   ].join("\n");
 
-  async function makeScopedStarted() {
+  /** `credentials`, when given, declares the engagement's `credentials_json`
+   * (Part 12) so a credential-typed need can be answered with a label from
+   * it. Defaults to none, matching every caller that predates credential
+   * answers. */
+  async function makeScopedStarted(
+    credentials?: { label: string; env: string; reference: string; kind: "headerToken" }[],
+  ) {
     const engagement = await svc.createEngagement({
       sessionId: `s_${Math.random().toString(36).slice(2)}`,
       repoFullName: "acme/api",
       plan: SCOPED_PLAN,
       config: { tools: [{ id: "gitleaks" }] },
+      credentialsJson: credentials,
     });
     return svc.startEngagement(engagement.id, { resolvedSha: SHA });
   }
+
+  /** The one credential declared for the credential-need-answer tests below. */
+  const STAGING_CREDENTIAL = {
+    label: "stagingAdminToken",
+    env: "STAGING_ADMIN_TOKEN",
+    reference: "op://Engineering/staging-admin/token",
+    kind: "headerToken" as const,
+  };
 
   it("reportNeed inserts an open need and listNeeds returns it", async () => {
     const { engagement, cells } = await makeScopedStarted();
@@ -1637,7 +1663,7 @@ describe("security engagement service", () => {
   });
 
   it("resolveEngagementNeeds marks answered and resets ONLY the affected cell to pending (delta re-run)", async () => {
-    const { engagement, cells } = await makeScopedStarted();
+    const { engagement, cells } = await makeScopedStarted([STAGING_CREDENTIAL]);
     // Run cell 1 to completion; cell 2 records a credential need and yields.
     await runCellToCompletion(engagement.id, cells[0]);
     await svc.dispatchCell(engagement.id, { cellId: cells[1].id, spawn });
@@ -1654,12 +1680,15 @@ describe("security engagement service", () => {
     await svc.completeCell(engagement.id, cells[1].id, { settled: true });
     await svc.resolveNeeds(engagement.id);
 
+    // The answer names a declared credential's label (INV-39): a plaintext
+    // `resolution` on a credential need would violate the CHECK constraint.
     const outcome = await svc.resolveEngagementNeeds(engagement.id, [
-      { needId: need.id, resolution: "Token: stg_admin_abc123." },
+      { needId: need.id, credentialLabel: STAGING_CREDENTIAL.label },
     ]);
     expect(outcome.answered).toHaveLength(1);
     expect(outcome.answered[0].status).toBe("answered");
-    expect(outcome.answered[0].resolution).toContain("stg_admin_abc123");
+    expect(outcome.answered[0].credentialLabel).toBe(STAGING_CREDENTIAL.label);
+    expect(outcome.answered[0].resolution).toBeNull();
     // Only cell 2 (the one that recorded the need) reset; cell 1 stays completed.
     expect(outcome.resetCells.map((c) => c.id)).toEqual([cells[1].id]);
     const rows = await db
@@ -1693,6 +1722,52 @@ describe("security engagement service", () => {
     expect(rows[0].status).toBe("pending"); // never dispatched, still pending
   });
 
+  it("resolveEngagementNeeds dismiss on a credential need leaves resolution null (INV-39)", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    const need = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "credential",
+      description: "A staging admin token.",
+    });
+    await svc.resolveNeeds(engagement.id);
+    // A plaintext dismissal note is fine for every other kind (see the test
+    // above), but the CHECK constraint refuses a non-null `resolution` on a
+    // credential need, so dismiss must not attempt to write one.
+    const outcome = await svc.resolveEngagementNeeds(engagement.id, [
+      { needId: need.id, dismiss: true },
+    ]);
+    expect(outcome.answered[0].status).toBe("dismissed");
+    expect(outcome.answered[0].resolution).toBeNull();
+    expect(outcome.answered[0].credentialLabel).toBeNull();
+    expect(outcome.resetCells).toHaveLength(0);
+  });
+
+  it("resolveEngagementNeeds refuses a resolution on a credential need (INV-39)", async () => {
+    const { engagement, cells } = await makeScopedStarted([STAGING_CREDENTIAL]);
+    const need = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "credential",
+      description: "A staging admin token.",
+    });
+    await svc.resolveNeeds(engagement.id);
+    // Alongside a valid label, on its own, and on a dismissal: all three would
+    // drop the submitted text, so all three are refused instead.
+    for (const answer of [
+      { needId: need.id, credentialLabel: STAGING_CREDENTIAL.label, resolution: "hunter2" },
+      { needId: need.id, resolution: "hunter2" },
+      { needId: need.id, resolution: "hunter2", dismiss: true },
+    ]) {
+      await expect(svc.resolveEngagementNeeds(engagement.id, [answer])).rejects.toThrow(
+        CREDENTIAL_NEED_TAKES_A_LABEL,
+      );
+    }
+    // The need is untouched: still waiting on the human, still no resolution.
+    const rows = await db.select().from(securityNeeds).where(eq(securityNeeds.id, need.id));
+    expect(rows[0].status).toBe("needs_human");
+    expect(rows[0].resolution).toBeNull();
+    expect(rows[0].credentialLabel).toBeNull();
+  });
+
   it("resolveEngagementNeeds refuses a need not waiting on a human, and an unknown need", async () => {
     const { engagement, cells } = await makeScopedStarted();
     const need = await svc.reportNeed(engagement.id, {
@@ -1710,7 +1785,7 @@ describe("security engagement service", () => {
   });
 
   it("the delta re-dispatch carries the answered need's resolution into the prompt", async () => {
-    const { engagement, cells } = await makeScopedStarted();
+    const { engagement, cells } = await makeScopedStarted([STAGING_CREDENTIAL]);
     await runCellToCompletion(engagement.id, cells[0]);
     await svc.dispatchCell(engagement.id, { cellId: cells[1].id, spawn });
     const need = await svc.reportNeed(engagement.id, {
@@ -1725,13 +1800,16 @@ describe("security engagement service", () => {
     });
     await svc.completeCell(engagement.id, cells[1].id, { settled: true });
     await svc.resolveNeeds(engagement.id);
+    // The answer names the declared label (INV-39), never the raw op:// value.
     await svc.resolveEngagementNeeds(engagement.id, [
-      { needId: need.id, resolution: "Token: stg_admin_abc123." },
+      { needId: need.id, credentialLabel: STAGING_CREDENTIAL.label },
     ]);
-    // Re-dispatch the reset cell; the prompt carries the resolution block.
+    // Re-dispatch the reset cell; the prompt carries the resolution block,
+    // naming the label, never the reference or a resolved value.
     const { prompt } = await svc.dispatchCell(engagement.id, { cellId: cells[1].id, spawn });
     expect(prompt).toContain("Resolved needs (continue the blocked work)");
-    expect(prompt).toContain("stg_admin_abc123");
+    expect(prompt).toContain(STAGING_CREDENTIAL.label);
+    expect(prompt).not.toContain(STAGING_CREDENTIAL.reference);
     expect(prompt).toContain("A staging admin token.");
   });
 
@@ -2165,6 +2243,169 @@ describe("security engagement service", () => {
     expect(prompt).toContain("Threat categories loaded");
     expect(prompt).toContain("### Authorization");
     expect(prompt).toContain("CWE-639");
+  });
+
+  // ── Declared credentials (Part 12, INV-36/INV-38/INV-40) ───────────────────
+
+  it("buildDispatchPrompt renders each declared credential as a named command, never the reference", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const prompt = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      credentials: [
+        { label: "admin", kind: "headerToken", env: "ADMIN", meta: { scheme: "Bearer" } },
+        { label: "sess", kind: "session", env: "COOKIES" },
+      ],
+    });
+    expect(prompt).toContain("--- Credentials ---");
+    expect(prompt).toContain("admin");
+    expect(prompt).toContain("sess");
+    expect(prompt).toContain("$ADMIN");
+    expect(prompt).toContain("$COOKIES");
+    // One bullet per declared credential.
+    expect(prompt.match(/-> command "/g)).toHaveLength(2);
+    // The persona never sees the reference, only the label-as-command.
+    expect(prompt).not.toContain("op://");
+    // The section rides before the protocol body.
+    expect(prompt.indexOf("--- Credentials ---")).toBeLessThan(prompt.indexOf("PROTOCOL BODY"));
+  });
+
+  it("buildDispatchPrompt adds no Credentials section when none are declared", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const bare = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY");
+    const withNull = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      credentials: null,
+    });
+    const withEmpty = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      credentials: [],
+    });
+    // Absent, null, and empty all stay byte-identical to the no-config call.
+    expect(withNull).toBe(bare);
+    expect(withEmpty).toBe(bare);
+    expect(bare).not.toContain("--- Credentials ---");
+  });
+
+  it("buildDispatchPrompt Credentials section matches its verbatim shape", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const prompt = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      credentials: [{ label: "admin", kind: "headerToken", env: "ADMIN", meta: { scheme: "Bearer" } }],
+    });
+    const section = prompt.slice(
+      prompt.indexOf("--- Credentials ---"),
+      prompt.indexOf("The protocol below"),
+    );
+    expect(section).toMatchInlineSnapshot(`
+      "--- Credentials ---
+
+      Available credentials (resolved at run-time; the value never appears in this transcript):
+      - admin -> command "admin" (usage: run \`sh -c 'curl -H "Authorization: Bearer $ADMIN" "$1"' sh <url>\`; the quoted script expands only after injection)
+
+      Example: \`admin <the command that needs this credential>\`
+
+      The wrapper resolves the credential and injects it into that one command's environment. It is not in this turn's transcript. Do not print the wrapper's output verbatim if it might contain the value.
+      If the target rejects the credential, raise a \`credential\` need naming the label; the human replaces the reference.
+
+      "
+    `);
+  });
+
+  it("dispatchCell carries the engagement's declared credentials into the prompt, never the reference", async () => {
+    const engagement = await makePlanning();
+    await db
+      .update(securityEngagements)
+      .set({
+        credentialsJson: [
+          { label: "admin", kind: "headerToken", env: "ADMIN", reference: "op://Sec/Admin/password" },
+        ],
+      })
+      .where(eq(securityEngagements.id, engagement.id));
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    const { prompt } = await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    expect(prompt).toContain("--- Credentials ---");
+    expect(prompt).toContain("admin");
+    expect(prompt).not.toContain("op://");
+  });
+
+  // ── Credential commands: engagement.credentialsJson -> the child's sandbox
+  // wrapper ──────────────────────────────────────────────────────────────────
+
+  it("engagementCredentialCommands returns [] when the engagement declares no credentials", () => {
+    expect(engagementCredentialCommands(null)).toEqual([]);
+  });
+
+  it("engagementCredentialCommands maps declared credentials to CredentialCommand shape", () => {
+    const credentialsJson = [
+      { label: "stripe", kind: "toolAuth", env: "STRIPE_KEY", reference: "op://vault/item1/field" },
+      { label: "gh-token", kind: "headerToken", env: "GH_TOKEN", reference: "op://vault/item2/field" },
+    ];
+
+    expect(engagementCredentialCommands(credentialsJson)).toEqual([
+      { command: "stripe", env: "STRIPE_KEY", reference: "op://vault/item1/field", launcher: true },
+      { command: "gh-token", env: "GH_TOKEN", reference: "op://vault/item2/field", launcher: true },
+    ]);
+  });
+
+  it("engagementCredentialCommands delivers an mTLS certificate as a secondary environment binding", () => {
+    const credentialsJson = [
+      {
+        label: "partner",
+        kind: "mtls",
+        env: "CLIENT_KEY",
+        reference: "op://vault/partner/key",
+        meta: { certRef: "op://vault/partner/cert" },
+      },
+    ];
+
+    expect(engagementCredentialCommands(credentialsJson)).toEqual([
+      {
+        command: "partner",
+        env: "CLIENT_KEY",
+        reference: "op://vault/partner/key",
+        launcher: true,
+        additionalEnv: [{ env: "CLIENT_KEY_CERT", reference: "op://vault/partner/cert" }],
+      },
+    ]);
+  });
+
+  it("mergeCredentialCommands merges the engagement's declared credentials with the repo's commands", () => {
+    const engagementCommands = engagementCredentialCommands([
+      { label: "stripe", kind: "toolAuth", env: "STRIPE_KEY", reference: "op://vault/item1/field" },
+    ]);
+    const repoCredentialCommands: CredentialCommand[] = [
+      { command: "aws", env: "AWS_SECRET_ACCESS_KEY", credential: "aws" },
+    ];
+
+    expect(mergeCredentialCommands(engagementCommands, repoCredentialCommands)).toEqual([
+      { command: "stripe", env: "STRIPE_KEY", reference: "op://vault/item1/field", launcher: true },
+      { command: "aws", env: "AWS_SECRET_ACCESS_KEY", credential: "aws" },
+    ]);
+  });
+
+  it("dispatchCell refuses when the engagement and repo declare the same credential label", async () => {
+    const engagement = await makePlanning();
+    await db
+      .update(securityEngagements)
+      .set({
+        credentialsJson: [
+          { label: "stripe", kind: "toolAuth", env: "STRIPE_KEY", reference: "op://vault/item1/field" },
+        ],
+      })
+      .where(eq(securityEngagements.id, engagement.id));
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    const repoCredentialCommands: CredentialCommand[] = [
+      { command: "stripe", env: "STRIPE_SECRET", reference: "op://vault/other/field" },
+    ];
+
+    await expect(
+      svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn, repoCredentialCommands }),
+    ).rejects.toThrow(/stripe/);
+
+    // The refused dispatch must not have claimed the cell: a collision
+    // refuses BEFORE the claim, so a fixed config can redispatch cleanly.
+    const [reloaded] = await db.select().from(securityCells).where(eq(securityCells.id, cells[0].id));
+    expect(reloaded.status).toBe("pending");
+    expect(reloaded.attempts).toBe(0);
   });
 
   // ── Re-scan / iterate: carry-forward + diff ────────────────────────────────

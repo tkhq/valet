@@ -1554,6 +1554,7 @@ export class Thread {
     result: { content?: unknown; details?: unknown },
   ): Promise<void> {
     const store = this.session.providers.store;
+    const safeResult = this.session.providers.sanitizeToolOutput?.(this.session.id, result) ?? result;
     const entries = await store.getEntries(this.session.id, this.id);
     for (const e of entries) {
       if (e.type !== "message" || e.role !== "assistant" || !e.parts) continue;
@@ -1563,8 +1564,8 @@ export class Thread {
       if (part && part.type === "tool_call") {
         part.status = "completed";
         const structured =
-          result && typeof result === "object" ? (result as Record<string, unknown>) : {};
-        part.result = { ...structured, text: renderToolResult(result) };
+          safeResult && typeof safeResult === "object" ? (safeResult as Record<string, unknown>) : {};
+        part.result = { ...structured, text: renderToolResult(safeResult) };
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
@@ -4915,11 +4916,22 @@ export class Thread {
 
   private buildTools(): AgentTool[] {
     const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])];
-    return all.map((def) =>
-      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
+    const sanitizer = this.session.providers.sanitizeToolOutput;
+    return all.map((def) => {
+      const guarded: ToolDef = sanitizer
+        ? {
+            ...def,
+            execute: async (args, ctx) => {
+              const result = await def.execute(args, ctx);
+              const safe = sanitizer(this.session.id, result);
+              return safe === result ? result : { text: String(safe) };
+            },
+          }
+        : def;
+      return toAgentTool(guarded, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
-      ),
-    );
+      );
+    });
   }
 
   private buildToolContext(args: {
@@ -5096,10 +5108,13 @@ export class Thread {
             text: ev.delta,
           });
         } else if (ev.type === "toolcall_start" || ev.type === "toolcall_delta") {
-          // Live-only args streaming: forward the raw JSON chunk keyed by
-          // callId so clients can render the tool call before it executes.
+          // A credential-bearing session cannot emit raw argument chunks. A
+          // split credential can cross chunk boundaries before the completed
+          // argument object reaches the sanitizer at toolcall_end.
+          const canStream =
+            this.session.providers.canStreamToolCallArguments?.(this.session.id) ?? true;
           const block = ev.partial.content[ev.contentIndex];
-          if (block?.type === "toolCall") {
+          if (canStream && block?.type === "toolCall") {
             await this.session.emit({
               type: "tool_call_update",
               threadId: this.id,
@@ -5109,12 +5124,17 @@ export class Thread {
             });
           }
         } else if (ev.type === "toolcall_end") {
+          const safeArgs =
+            this.session.providers.sanitizeToolOutput?.(
+              this.session.id,
+              ev.toolCall.arguments,
+            ) ?? ev.toolCall.arguments;
           const part: MessagePart = {
             type: "tool_call",
             callId: ev.toolCall.id,
             toolName: ev.toolCall.name,
             status: "running",
-            args: ev.toolCall.arguments,
+            args: sanitizedToolArgs(safeArgs),
           };
           this.currentToolCalls.set(ev.toolCall.id, part);
           this.currentAssistantParts.push(part);
@@ -5199,16 +5219,21 @@ export class Thread {
         }
         break;
       }
-      case "tool_execution_start":
+      case "tool_execution_start": {
         this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
+        const safeArgs =
+          this.session.providers.sanitizeToolOutput?.(
+            this.session.id,
+            event.args ?? {},
+          ) ?? event.args ?? {};
         await this.fencedEmit(
           {
             type: "tool_start",
             threadId: this.id,
             tool: event.toolName,
             callId: event.toolCallId,
-            args: event.args ?? {},
+            args: sanitizedToolArgs(safeArgs),
           },
           { queueItemId: this.runningItem?.id },
         );
@@ -5218,9 +5243,12 @@ export class Thread {
           { queueItemId: this.runningItem?.id },
         );
         break;
+      }
       case "tool_execution_end": {
         const part = this.currentToolCalls.get(event.toolCallId);
-        const resultText = renderToolResult(event.result);
+        const safeResult =
+          this.session.providers.sanitizeToolOutput?.(this.session.id, event.result) ?? event.result;
+        const resultText = renderToolResult(safeResult);
         if (part && part.type === "tool_call") {
           part.status = event.isError ? "error" : "completed";
           // Persist the *flattened* text alongside the raw structured
@@ -5232,8 +5260,8 @@ export class Thread {
           // Get something readable; clients that want the raw blocks can
           // still inspect `result.content`.
           const structured =
-            event.result && typeof event.result === "object"
-              ? (event.result as Record<string, unknown>)
+            safeResult && typeof safeResult === "object"
+              ? (safeResult as Record<string, unknown>)
               : {};
           part.result = { ...structured, text: resultText };
           const skillFact = this.activeSkillInvocations.get(
@@ -5830,6 +5858,19 @@ function textOf(message: AgentMessage): string {
     text: string;
   }>;
   return parts.map((p) => p.text).join("");
+}
+
+/**
+ * Tool-call arguments after the host sanitizer ran.
+ *
+ * The sanitizer returns the arguments unchanged, or a replacement string
+ * when it refuses them. A string is not an argument object, so it is
+ * carried under one key that every consumer can render.
+ */
+function sanitizedToolArgs(safeArgs: unknown): Record<string, unknown> {
+  // The cast is narrowed by the typeof check on the same line.
+  if (safeArgs && typeof safeArgs === "object") return safeArgs as Record<string, unknown>;
+  return { blocked: String(safeArgs) };
 }
 
 function renderToolResult(result: unknown): string {

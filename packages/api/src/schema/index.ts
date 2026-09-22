@@ -2181,6 +2181,13 @@ export const securityEngagements = pgTable(
     reportGeneratedAt: bigint("report_generated_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    // Declared credential references (Part 12, credentials via 1Password):
+    // the engagement's `SecurityConfig.credentials[]`, each
+    // `{label, kind, env, reference, refShape?, meta?}`. Null when the
+    // config declares no credentials. Ephemeral, it dies with the engagement;
+    // Postgres never carries a resolved value, only `op://` references
+    // (INV-37).
+    credentialsJson: jsonb("credentials_json"),
   },
   (t) => [
     uniqueIndex("security_engagements_session_unique").on(t.sessionId),
@@ -2413,10 +2420,20 @@ export const securityNeeds = pgTable(
     resolution: text("resolution"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     resolvedAt: bigint("resolved_at", { mode: "number" }),
+    // The label of a credential declared in the owning engagement's
+    // `credentials_json` (Part 12), stamped when a cred-typed need is
+    // answered. A label only: never the `op://` reference and never the
+    // resolved value (INV-39). `resolution` stays NULL for a cred-typed need,
+    // and the CHECK constraint below enforces that.
+    credentialLabel: text("credential_label"),
   },
   (t) => [
     index("security_needs_engagement").on(t.engagementId),
     index("security_needs_cell").on(t.cellId),
+    check(
+      "security_needs_credential_resolution_null",
+      sql`${t.kind} <> 'credential' OR ${t.resolution} IS NULL`,
+    ),
   ],
 );
 

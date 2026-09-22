@@ -69,10 +69,15 @@ import {
 } from "@valet/plugin-security";
 import type { PlanCell } from "@valet/plugin-security";
 import { seedSecurityReview } from "../services/security-seed.js";
+import {
+  assertNoSecurityCredentialOutput,
+  clearSecurityCredentialSession,
+} from "../services/security-credential-tripwire.js";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
+import { resolveCreateOwner } from "../lib/request-principal.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { requirePrincipal, requireUser, type AuthUser } from "../middleware/auth.js";
 import { publicUrlFromEnv } from "../channels/host.js";
@@ -96,6 +101,7 @@ import {
   type SecurityNeedRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { isTeamMember } from "../services/teams.js";
 import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
@@ -107,6 +113,8 @@ import {
 } from "../orchestrator/children.js";
 import {
   createSecurityEngagementService,
+  declaredCredentialLabels,
+  CREDENTIAL_NEED_TAKES_A_LABEL,
   type CellProgress,
   type FindingSeverity,
   type FindingStatus,
@@ -224,6 +232,7 @@ function engagementToWire(e: SecurityEngagementRow): SecurityEngagementWire {
     configPersonas: parseJsonStringRecord(e.configPersonas),
     configTools: parseConfigTools(e.configTools),
     authorizedScope: parseAuthorizedScope(e.authorizedScope),
+    credentialLabels: declaredCredentialLabels(e.credentialsJson),
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
   };
@@ -487,6 +496,7 @@ function needToWire(row: SecurityNeedRow): SecurityNeedWire {
     description: row.description,
     status: row.status,
     resolution: row.resolution,
+    credentialLabel: row.credentialLabel,
     createdAt: row.createdAt,
     resolvedAt: row.resolvedAt,
   };
@@ -782,6 +792,27 @@ securityRouter.post("/security/preview", async (c) => {
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
   const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+  // Who would own the review decides which 1Password scopes its credentials
+  // resolve through, so the preview asks the same question create does, and
+  // through the same door: `resolveCreateOwner` refuses a team the caller is
+  // not a member of. Without that check, naming someone else's team here
+  // would resolve references against that team's vault token.
+  const principal = requirePrincipal(c);
+  if (!principal) return c.json({ error: "unauthorized" }, 401);
+  const previewOwner = await resolveCreateOwner({
+    principal,
+    authVia: c.var.authVia,
+    bodyTeamId: body.teamId,
+    userId: user.id,
+    isTeamMember: (teamId) => isTeamMember(db, teamId, user.id),
+  });
+  if (!previewOwner.ok) return c.json({ error: previewOwner.error }, previewOwner.status);
+  const owner = previewOwner.owner;
+
+  // A declared credential is preflighted here too, so the wizard reports a
+  // bad reference while the user can still fix it. The preview REPORTS and
+  // never refuses: it is a read-only page, and blocking it would leave the
+  // user with no way to see the rest of the seeded config. Create is the gate.
   const seeded = await seedSecurityReview({
     owner: parsed.owner,
     repo: parsed.repo,
@@ -791,6 +822,11 @@ securityRouter.post("/security/preview", async (c) => {
     ...(includeReport !== undefined ? { includeReport } : {}),
     tokenDeps,
     orgId: user.orgId,
+    onePassword: c.var.providers.onePassword,
+    userId: user.id,
+    ownerType: owner.type,
+    ...(owner.type === "team" ? { teamId: owner.id } : {}),
+    credentialPreflight: "report",
   });
 
   const personaKeys = seeded.personas ? Object.keys(seeded.personas) : [];
@@ -810,9 +846,11 @@ securityRouter.post("/security/preview", async (c) => {
             }
           : null,
       configTools: seeded.tools && seeded.tools.length > 0 ? seeded.tools : null,
+      credentials: seeded.credentialsJson ?? [],
       hasRepoConfig: seeded.hasRepoConfig,
     },
     planCells: planYamlToWire(seeded.planYaml, [...bundledPersonaIds(), ...personaKeys]),
+    credentialWarnings: seeded.credentialWarnings,
   };
   return c.json(response);
 });
@@ -1593,10 +1631,26 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
   // The spawn seam: the SAME children.ts machinery the task tool uses —
   // limits, agent_sessions row, child_watches row, armed watcher — so the
   // child's settlement signals the runner thread. Never bypass it.
-  const { childSpawner } = c.var.providers;
+  const { childSpawner, engineHost } = c.var.providers;
   // Personas inherit the runner's model, so a capable security default reaches
   // the sessions that do the actual review.
   const model = await runnerModel(c, row);
+
+  // The repo's `.valet/credentials.yaml` commands, resolved the same
+  // best-effort way `EngineHost` resolves them for any repo-bound session.
+  // `dispatchCell` merges these with the engagement's declared credentials
+  // and refuses on a label collision, before spawning the child.
+  const [repoOwner, repoName] = result.engagement.repoFullName.split("/");
+  const repoCredentialCommands =
+    repoOwner && repoName
+      ? await engineHost.resolveRepoCredentialCommandsForTarget(
+          row.orgId,
+          repoOwner,
+          repoName,
+          result.engagement.repoRef || "HEAD",
+        )
+      : [];
+
   const spawn: SpawnCellChild = async (req) => {
     const spawned = await childSpawner(
       {
@@ -1629,6 +1683,7 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
       cellId,
       mode,
       spawn,
+      repoCredentialCommands,
     });
     // Fix 6 — tear down the child the re-dispatch abandoned. A re-dispatch of a
     // yielded/failed cell overwrites the cell's child_session_id with the new
@@ -1696,6 +1751,9 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
       ruling.outcome === "violation"
         ? { outcome: "violation", violation: ruling.violation }
         : { outcome: ruling.outcome, cell: cellToWire(ruling.cell, null) };
+    if (ruling.outcome !== "violation" && cell.childSessionId) {
+      clearSecurityCredentialSession(cell.childSessionId);
+    }
     return c.json(response);
   } catch (err) {
     return serviceError(c, err);
@@ -1717,12 +1775,14 @@ securityRouter.post("/:id/security/cells/:cellId/fail", async (c) => {
     return c.json({ error: "Send { reason } naming why the cell failed." }, 400);
   }
 
+  const childSessionId = result.cells.find((cell) => cell.id === cellId)?.childSessionId;
   try {
     const failed = await security.failCell(result.engagement.id, cellId, body.reason);
     const response: SecurityFailCellResponse = {
       cell: cellToWire(failed.cell, null),
       reason: failed.reason,
     };
+    if (childSessionId) clearSecurityCredentialSession(childSessionId);
     return c.json(response);
   } catch (err) {
     return serviceError(c, err);
@@ -1881,6 +1941,7 @@ securityRouter.post("/:id/security/files", async (c) => {
   }
 
   try {
+    assertNoSecurityCredentialOutput(sessionId, body.content);
     // The service enforces the write claim (the path prefix IS the claim)
     // and the state.yml validation; its messages are corrective — relay
     // them verbatim.
@@ -1966,6 +2027,11 @@ securityRouter.post("/:id/security/findings", async (c) => {
   }
 
   try {
+    assertNoSecurityCredentialOutput(sessionId, {
+      title: body.title,
+      file: body.file,
+      body: body.body,
+    });
     const reported = await security.reportFinding(engagement.id, {
       cellId: cell.id,
       // The set membership above proved the narrow type.
@@ -2418,7 +2484,16 @@ securityRouter.post("/:id/security/findings/:findingId/comments", async (c) => {
  * re-run (pivot-coordinator + needs loop, M-P4c, spec §Pivot-coordinator).
  * HUMAN action: `resolveHumanSession(.., "administer")` refuses the internal
  * token (the runner and personas never answer their own needs) and gates on
- * `canAdministerSession`. Takes `{ answers: [{ needId, resolution, dismiss? }] }`.
+ * `canAdministerSession`. Takes `{ answers: [{ needId, resolution, dismiss? }] }`
+ * for most kinds, or `{ answers: [{ needId, credentialLabel, dismiss? }] }` for a
+ * `kind: "credential"` need (Part 12, INV-39): the CHECK constraint on
+ * `security_needs` refuses a non-null `resolution` on that kind, so a
+ * credential answer names a label already declared on the engagement instead.
+ * A `resolution` sent on a credential need answers 400: the service refuses it
+ * rather than drop it, so a caller who put a secret in the free-text field
+ * learns the value went nowhere.
+ * This route validates only the request shape; the service enforces which
+ * field a given need's kind requires.
  * The service marks each answered and resets ONLY the cell that recorded it to
  * pending — a delta re-run, not a whole-engagement re-run. The runner picks the
  * reset cell up and re-dispatches it; the answer rides into its dispatch prompt.
@@ -2434,24 +2509,37 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
 
   const body = await readJsonBody(c);
   if (!Array.isArray(body.answers) || body.answers.length === 0) {
-    return c.json({ error: "Send { answers: [{ needId, resolution }] } with at least one answer." }, 400);
+    return c.json(
+      { error: "Send { answers: [{ needId, resolution }] } with at least one answer." },
+      400,
+    );
   }
-  const answers: { needId: string; resolution: string; dismiss?: boolean }[] = [];
+  const answers: { needId: string; resolution?: string; credentialLabel?: string; dismiss?: boolean }[] =
+    [];
   for (const raw of body.answers) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      return c.json({ error: "Each answer is { needId, resolution, dismiss? }." }, 400);
+      return c.json(
+        { error: "Each answer is { needId, resolution, dismiss? } or { needId, credentialLabel, dismiss? }." },
+        400,
+      );
     }
     const rec = raw as Record<string, unknown>;
     if (typeof rec.needId !== "string" || rec.needId === "") {
       return c.json({ error: "Each answer needs a needId." }, 400);
     }
     const dismiss = rec.dismiss === true;
-    if (!dismiss && (typeof rec.resolution !== "string" || rec.resolution.trim() === "")) {
-      return c.json({ error: `Answer for ${rec.needId} needs a resolution, or set dismiss: true.` }, 400);
+    const hasResolution = typeof rec.resolution === "string" && rec.resolution.trim() !== "";
+    const hasCredentialLabel = typeof rec.credentialLabel === "string" && rec.credentialLabel.trim() !== "";
+    if (!dismiss && !hasResolution && !hasCredentialLabel) {
+      return c.json(
+        { error: `Answer for ${rec.needId} needs a resolution or a credentialLabel, or set dismiss: true.` },
+        400,
+      );
     }
     answers.push({
       needId: rec.needId,
-      resolution: typeof rec.resolution === "string" ? rec.resolution : "",
+      ...(typeof rec.resolution === "string" ? { resolution: rec.resolution } : {}),
+      ...(typeof rec.credentialLabel === "string" ? { credentialLabel: rec.credentialLabel } : {}),
       dismiss,
     });
   }
@@ -2467,6 +2555,9 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.startsWith("No need")) return c.json({ error: message }, 404);
+    // A resolution on a credential need is a bad request, not a state
+    // conflict: the caller sent the wrong field (INV-39).
+    if (message === CREDENTIAL_NEED_TAKES_A_LABEL) return c.json({ error: message }, 400);
     return c.json({ error: message }, 409);
   }
 });

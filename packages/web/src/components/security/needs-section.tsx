@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { SecurityNeedWire } from "@valet/api/wire";
-import { Button, Textarea } from "~/components/primitives";
+import { Button, Label, Textarea } from "~/components/primitives";
 import { apiErrorText, useResolveNeeds } from "~/api/security";
 import { cn } from "~/lib/cn";
 
@@ -20,10 +20,15 @@ export function NeedsSection({
   sessionId,
   needs,
   canAdminister,
+  credentialLabels,
 }: {
   sessionId: string;
   needs: SecurityNeedWire[];
   canAdminister: boolean;
+  /** Labels of the 1Password credentials declared on this engagement (Part
+   * 12), from `GetSessionSecurityResponse.engagement.credentialLabels`. A
+   * `kind: "credential"` need offers these as its answer choices. */
+  credentialLabels: string[];
 }) {
   if (needs.length === 0) return null;
   const needsHuman = needs.filter((n) => n.status === "needs_human");
@@ -47,6 +52,7 @@ export function NeedsSection({
               sessionId={sessionId}
               need={need}
               canAdminister={canAdminister}
+              credentialLabels={credentialLabels}
             />
           ))}
         </ul>
@@ -69,12 +75,17 @@ export function NeedsSection({
 
       {settled.length > 0 && (
         <ul className="mt-2 space-y-1.5">
-          {settled.map((need) => (
-            <li key={need.id} className="px-2.5 py-1 text-[11px] text-muted">
-              <span className="capitalize">{need.status}</span>: {need.description}
-              {need.resolution && <span className="block">{need.resolution}</span>}
-            </li>
-          ))}
+          {settled.map((need) => {
+            // A credential need's answer lives in `credentialLabel` (a declared
+            // label), never `resolution` (Part 12, INV-39).
+            const note = need.kind === "credential" ? need.credentialLabel : need.resolution;
+            return (
+              <li key={need.id} className="px-2.5 py-1 text-[11px] text-muted">
+                <span className="capitalize">{need.status}</span>: {need.description}
+                {note && <span className="block">{note}</span>}
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>
@@ -85,41 +96,89 @@ function NeedsHumanItem({
   sessionId,
   need,
   canAdminister,
+  credentialLabels,
 }: {
   sessionId: string;
   need: SecurityNeedWire;
   canAdminister: boolean;
+  credentialLabels: string[];
 }) {
   const [answer, setAnswer] = useState("");
+  const [label, setLabel] = useState("");
   const resolve = useResolveNeeds(sessionId);
+  const isCredential = need.kind === "credential";
+  const canSubmit = isCredential ? label.trim() !== "" : answer.trim() !== "";
 
   return (
     <li className="rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-ink">
       <div className="font-medium">{need.description}</div>
       <div className="text-muted">
-        [{need.kind}] — blocks its cell until you answer.
+        Kind: {need.kind}. This need blocks its cell until you answer.
       </div>
       {canAdminister && (
         <div className="mt-1.5 space-y-1.5">
-          <Textarea
-            rows={2}
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            placeholder={
-              need.kind === "decision"
-                ? "Your decision…"
-                : "The credential, scope, or dependency the persona needs…"
-            }
-            className="text-base md:text-[11px]"
-          />
+          {isCredential ? (
+            credentialLabels.length === 0 ? (
+              <p className="text-muted">
+                No credentials are declared for this review. Cancel the review. Add a
+                credential under Advanced. Start the review again.
+              </p>
+            ) : (
+              <div className="grid gap-1">
+                <p className="text-muted">
+                  Pick the credential this cell should use. The cell resumes with that
+                  credential available through its launcher command.
+                </p>
+                <Label htmlFor={`credential-label-${need.id}`} className="text-[11px]">
+                  Credential label
+                </Label>
+                <select
+                  id={`credential-label-${need.id}`}
+                  aria-label="Credential label"
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                  className="h-8 rounded border border-line bg-paper px-2 text-[11px] text-ink"
+                >
+                  <option value="">Choose a credential…</option>
+                  {credentialLabels.map((l) => (
+                    <option key={l} value={l}>
+                      {l}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )
+          ) : (
+            <Textarea
+              rows={2}
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+              placeholder={
+                need.kind === "decision"
+                  ? "Your decision…"
+                  : "The credential, scope, or dependency the persona needs…"
+              }
+              className="text-base md:text-[11px]"
+            />
+          )}
           <div className="flex items-center gap-2">
             <Button
               size="sm"
-              disabled={answer.trim() === "" || resolve.isPending}
+              disabled={!canSubmit || resolve.isPending}
               onClick={() =>
-                resolve.mutate([{ needId: need.id, resolution: answer }], {
-                  onSuccess: () => setAnswer(""),
-                })
+                resolve.mutate(
+                  [
+                    isCredential
+                      ? { needId: need.id, credentialLabel: label }
+                      : { needId: need.id, resolution: answer },
+                  ],
+                  {
+                    onSuccess: () => {
+                      setAnswer("");
+                      setLabel("");
+                    },
+                  },
+                )
               }
             >
               Resolve &amp; continue
@@ -133,7 +192,9 @@ function NeedsHumanItem({
               )}
               onClick={() =>
                 resolve.mutate([
-                  { needId: need.id, resolution: answer, dismiss: true },
+                  isCredential
+                    ? { needId: need.id, dismiss: true }
+                    : { needId: need.id, resolution: answer, dismiss: true },
                 ])
               }
             >
