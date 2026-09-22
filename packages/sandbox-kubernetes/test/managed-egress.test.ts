@@ -151,6 +151,24 @@ describe("Kubernetes managed egress topology", () => {
     expect(JSON.stringify(resources.workloadTrustSecret)).not.toContain("PRIVATE KEY");
   });
 
+  it("uses new immutable Secret names for a restarted material epoch", () => {
+    const selector = deriveKubernetesManagedEgressWorkloadSelector("restart-session");
+    const first = buildKubernetesManagedEgressResources(config, request, selector, material);
+    const second = buildKubernetesManagedEgressResources(config, request, selector, {
+      ...material,
+      caCert: `${material.caCert}\nrotated`,
+    });
+
+    expect(second.identity.proxyPodName).toBe(first.identity.proxyPodName);
+    expect(second.identity.materialEpoch).not.toBe(first.identity.materialEpoch);
+    expect(second.identity.proxySecretName).not.toBe(first.identity.proxySecretName);
+    expect(second.identity.proxyConfigSecretName).not.toBe(first.identity.proxyConfigSecretName);
+    expect(second.identity.workloadTrustSecretName).not.toBe(first.identity.workloadTrustSecretName);
+    expect(second.proxySecret).toMatchObject({ immutable: true });
+    expect(second.proxyConfigSecret).toMatchObject({ immutable: true });
+    expect(second.workloadTrustSecret).toMatchObject({ immutable: true });
+  });
+
   it("requires one workload match and exact ready resources with enforced policy", () => {
     const { resources } = build();
     const observation = {
@@ -158,6 +176,7 @@ describe("Kubernetes managed egress topology", () => {
       proxyPodNames: [resources.identity.proxyPodName],
       readyProxyPodNames: [resources.identity.proxyPodName],
       listeningProxyPodNames: [resources.identity.proxyPodName],
+      proxyPodMaterialEpochs: { [resources.identity.proxyPodName]: resources.identity.materialEpoch },
       secretNames: [resources.identity.proxySecretName, resources.identity.proxyConfigSecretName, resources.identity.workloadTrustSecretName],
       serviceNames: [resources.identity.proxyServiceName],
       proxyServiceClusterIps: ["10.96.12.34", "2001:db8::34"],
@@ -172,6 +191,7 @@ describe("Kubernetes managed egress topology", () => {
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, workloadPodNames: [] })).toMatchObject({ ready: false });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, workloadPodNames: ["a", "b"] })).toMatchObject({ ready: false });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, networkPolicyEnforcement: "unknown" })).toMatchObject({ ready: false });
+    expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, proxyPodMaterialEpochs: { [resources.identity.proxyPodName]: "stale" } })).toMatchObject({ ready: false });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, proxyServiceClusterIps: [] })).toMatchObject({ ready: false });
     expect(evaluateKubernetesManagedEgressReadiness(resources.identity, { ...observation, networkPolicyNames: [resources.identity.workloadPolicyName] })).toMatchObject({ ready: false });
   });

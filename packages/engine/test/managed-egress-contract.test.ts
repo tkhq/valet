@@ -23,6 +23,8 @@ describe("managed egress provider contract", () => {
     const valid: unknown = request;
     validateManagedEgressRequest(valid);
     expect(valid.identity.proxyId).toBe("p");
+    expect(() => validateManagedEgressRequest({ ...request, proxyToken: "🔐".repeat(8) })).not.toThrow();
+    expect(() => validateManagedEgressRequest({ ...request, proxyToken: "🔐".repeat(1025) })).toThrow(ManagedEgressPrerequisiteError);
   });
 
   it("rejects credentials and unknown fields in persisted metadata", () => {

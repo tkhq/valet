@@ -71,6 +71,9 @@ describe("Docker managed egress topology", () => {
     expect(plan.connectProxyOutboundArgs).toEqual(["network", "connect", plan.outboundNetwork, plan.proxyContainer]);
     expect(plan.proxyRunArgs.join(" ")).not.toContain(request.proxyToken);
     expect(plan.proxyRunArgs.join(" ")).not.toContain("host-gateway");
+    expect(plan.proxyRunArgs).toEqual(expect.arrayContaining([
+      "--user", "65532:65532", "--cpus", "0.25", "--memory", "128m", "--pids-limit", "128",
+    ]));
     expect(plan.configVolume).not.toBe(plan.tokenVolume);
   });
 

@@ -5,7 +5,7 @@ Status: implementation checkpoint; inactive
 
 ## Boundary
 
-Managed egress is disabled by default. This checkpoint does not publish or evaluate `egress.connect`. It does not claim live enforcement.
+Managed egress is disabled by default. This checkpoint does not publish or evaluate `egress.connect`. It does not claim live enforcement. The Helm chart exposes no activation value until the API wires a production Kubernetes runtime; an `enabled: true` value cannot be a silent no-op.
 
 The engine contract separates four states:
 
@@ -51,9 +51,13 @@ The plan uses one proxy pod per workload policy domain. The proxy does not share
 
 A workload NetworkPolicy selects egress only. It preserves existing workload ingress. It allows only the proxy listener and explicit Valet control-plane CIDRs and ports. It gives the workload no DNS rule and no direct destination route. IPv4 and IPv6 CIDRs are explicit.
 
-A second NetworkPolicy lets the proxy receive only workload listener traffic. It lets the proxy reach selected cluster DNS pods, callback CIDRs, and configured upstream CIDRs. The proxy pod uses a fixed non-root UID and GID, `RuntimeDefault` seccomp, resource limits, no host network, no service account token, no privilege, a read-only root filesystem, and no capabilities. Only the proxy mounts the immutable mode-0400 token Secret.
+A second NetworkPolicy lets the proxy receive only workload listener traffic. It lets the proxy reach selected cluster DNS pods, callback CIDRs, and configured upstream CIDRs. The proxy pod uses a fixed non-root UID and GID, `RuntimeDefault` seccomp, resource limits, no host network, no service account token, no privilege, a read-only root filesystem, and no capabilities. Only the proxy mounts the immutable token and private-configuration Secrets. Kubernetes projects those source Secrets with mode `0440`. The init container copies the token and CA key to the proxy-only runtime volume with mode `0400`. It copies the public certificate and configuration with mode `0444`. The workload mounts only its public trust Secret with mode `0444`.
 
-Readiness requires exactly one workload selector match. It also requires the exact proxy pod, listeners, Secrets, Service, and both NetworkPolicies. The provider applies the rendered resources before it creates the workload. It registers the callback only after material delivery. It reports effective state only after a fresh observation. The provider uses the server-assigned Service IPs as workload proxy endpoints only after readiness. The workload does not need external DNS. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
+Each CA rotation gives the immutable material Secrets new names derived from the public CA fingerprint. The stable proxy pod carries that material epoch and must be replaced before readiness can succeed. The runtime removes the prior epoch pod and Secrets without removing either NetworkPolicy. The epoch does not contain a token hash or private material.
+
+Readiness requires exactly one workload selector match. It also requires the exact proxy pod, current material epoch, listeners, Secrets, Service, and both NetworkPolicies. The provider applies the rendered resources before it creates the workload. It registers the callback only after material delivery. It retries transient proxy unreadiness for a bounded interval. It reports effective state only after a fresh observation. The provider uses the server-assigned Service IPs as workload proxy endpoints only after readiness. The workload does not need external DNS. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
+
+Create rollback and terminal destroy delete the Sandbox CR first. The provider confirms that the CR and selected workload pods are absent before it removes policies, proxy resources, or Secrets. If workload removal is not confirmed, policies remain and the provider returns a typed cleanup diagnostic. The provider retains managed cleanup state so reconcile or a repeated destroy can retry.
 
 ### Docker
 

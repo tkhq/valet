@@ -83,8 +83,9 @@ export function validateManagedEgressRequest(request: unknown): asserts request 
       throw new ManagedEgressPrerequisiteError("identity", `Managed egress ${name} is invalid. Use 1 to 128 safe ASCII characters.`);
     }
   }
-  if (typeof request.proxyToken !== "string" || request.proxyToken.length < 32 || request.proxyToken.length > 4096 || /[\r\n]/.test(request.proxyToken)) {
-    throw new ManagedEgressPrerequisiteError("identity", "Managed egress proxy token is invalid. Mint a token with at least 32 characters and no line breaks.");
+  const tokenBytes = typeof request.proxyToken === "string" ? new TextEncoder().encode(request.proxyToken).byteLength : 0;
+  if (typeof request.proxyToken !== "string" || tokenBytes < 32 || tokenBytes > 4096 || /[\r\n]/.test(request.proxyToken)) {
+    throw new ManagedEgressPrerequisiteError("identity", "Managed egress proxy token is invalid. Mint a token with 32 to 4096 UTF-8 bytes and no line breaks.");
   }
 }
 

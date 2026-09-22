@@ -27,6 +27,7 @@ export interface KubernetesManagedEgressMaterial {
 }
 
 export interface KubernetesManagedEgressResourceIdentity {
+  materialEpoch: string;
   proxyPodName: string;
   proxySecretName: string;
   proxyConfigSecretName: string;
@@ -38,8 +39,14 @@ export interface KubernetesManagedEgressResourceIdentity {
 }
 
 export interface KubernetesManagedEgressRuntime {
+  /**
+   * Converges one material epoch. If the stable proxy pod exists with a
+   * different epoch, the runtime must replace that pod and remove the old
+   * epoch Secrets without removing either NetworkPolicy.
+   */
   apply(resources: KubernetesManagedEgressResources): Promise<void>;
   observe(selector: KubernetesManagedEgressWorkloadSelector, identity: KubernetesManagedEgressResourceIdentity): Promise<KubernetesManagedEgressObservation>;
+  /** Deletes proxy resources and policies. The provider calls this only after the workload is confirmed absent. */
   delete(identity: KubernetesManagedEgressResourceIdentity): Promise<void>;
 }
 
@@ -76,6 +83,7 @@ export interface KubernetesManagedEgressObservation {
   proxyPodNames: string[];
   readyProxyPodNames: string[];
   listeningProxyPodNames: string[];
+  proxyPodMaterialEpochs: Record<string, string>;
   secretNames: string[];
   serviceNames: string[];
   proxyServiceClusterIps: string[];
@@ -99,8 +107,9 @@ export function evaluateKubernetesManagedEgressReadiness(
   }
   if (!exactNames(observation.proxyPodNames, [identity.proxyPodName]) ||
       !exactNames(observation.readyProxyPodNames, [identity.proxyPodName]) ||
-      !exactNames(observation.listeningProxyPodNames, [identity.proxyPodName])) {
-    return { ready: false, reason: "The exact managed proxy pod must be ready and listening." };
+      !exactNames(observation.listeningProxyPodNames, [identity.proxyPodName]) ||
+      observation.proxyPodMaterialEpochs[identity.proxyPodName] !== identity.materialEpoch) {
+    return { ready: false, reason: "The exact managed proxy pod must run the current material epoch and be ready and listening." };
   }
   if (!exactNames(observation.secretNames, [identity.proxySecretName, identity.proxyConfigSecretName, identity.workloadTrustSecretName]) ||
       !exactNames(observation.serviceNames, [identity.proxyServiceName]) ||
@@ -204,20 +213,26 @@ export function buildKubernetesManagedEgressResources(
   validateManagedEgressRequest(request);
   validateWorkloadSelector(workloadSelector);
   const resourceName = name(request.identity.proxyId);
+  // The epoch is a fingerprint of the public CA certificate, not of the token
+  // or private key. A fresh per-provision CA gives immutable Secrets new names
+  // without persisting a credential hash.
+  const materialEpoch = createHash("sha256").update(material.caCert).digest("hex").slice(0, 24);
   const proxySelector = { "valet.dev/managed-egress-proxy": resourceName };
+  const materialLabels = { "valet.dev/managed-egress-owner": resourceName, "valet.dev/managed-egress-epoch": materialEpoch };
   const cidrPeers = (cidrs: string[]) => cidrs.map((cidr) => ({ ipBlock: { cidr } }));
   const identity = {
+    materialEpoch,
     proxyPodName: resourceName,
-    proxySecretName: `${resourceName}-token`,
-    proxyConfigSecretName: `${resourceName}-config`,
-    workloadTrustSecretName: `${resourceName}-trust`,
+    proxySecretName: `${resourceName}-token-${materialEpoch}`,
+    proxyConfigSecretName: `${resourceName}-config-${materialEpoch}`,
+    workloadTrustSecretName: `${resourceName}-trust-${materialEpoch}`,
     proxyServiceName: resourceName,
     workloadPolicyName: `${resourceName}-workload`,
     proxyPolicyName: `${resourceName}-proxy`,
     listenerPort: config.listenerPort,
   };
   const proxySecret = {
-    apiVersion: "v1", kind: "Secret", metadata: { name: identity.proxySecretName, namespace: config.namespace },
+    apiVersion: "v1", kind: "Secret", metadata: { name: identity.proxySecretName, namespace: config.namespace, labels: materialLabels },
     immutable: true, stringData: { token: request.proxyToken },
   };
   const renderedConfig = renderHematiteManagedEgressConfig(config, request.identity, {
@@ -226,15 +241,19 @@ export function buildKubernetesManagedEgressResources(
     caKey: "/runtime/certs/ca.key",
   });
   const proxyConfigSecret = {
-    apiVersion: "v1", kind: "Secret", metadata: { name: identity.proxyConfigSecretName, namespace: config.namespace },
+    apiVersion: "v1", kind: "Secret", metadata: { name: identity.proxyConfigSecretName, namespace: config.namespace, labels: materialLabels },
     immutable: true, stringData: { "hematite.yaml": renderedConfig, "ca.crt": material.caCert, "ca.key": material.caKey },
   };
   const workloadTrustSecret = {
-    apiVersion: "v1", kind: "Secret", metadata: { name: identity.workloadTrustSecretName, namespace: config.namespace },
+    apiVersion: "v1", kind: "Secret", metadata: { name: identity.workloadTrustSecretName, namespace: config.namespace, labels: materialLabels },
     immutable: true, stringData: { "ca.crt": material.caCert },
   };
   const proxyPod = {
-    apiVersion: "v1", kind: "Pod", metadata: { name: identity.proxyPodName, namespace: config.namespace, labels: proxySelector },
+    apiVersion: "v1", kind: "Pod", metadata: {
+      name: identity.proxyPodName, namespace: config.namespace,
+      labels: { ...proxySelector, ...materialLabels },
+      annotations: { "valet.dev/managed-egress-material-epoch": materialEpoch },
+    },
     spec: {
       hostUsers: false, hostNetwork: false, automountServiceAccountToken: false,
       securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: "RuntimeDefault" } },

@@ -207,6 +207,7 @@ export function buildDockerManagedEgressPlan(config: DockerManagedEgressConfig, 
     "run", "-d", "--name", proxyContainer,
     "--network", internalNetwork,
     "--network-alias", "valet-egress-proxy",
+    "--user", "65532:65532", "--cpus", "0.25", "--memory", "128m", "--pids-limit", "128",
     "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
     "--env", "SSL_CERT_FILE=/etc/hematite/certs/ca.crt",
     "--mount", `type=volume,src=${tokenVolume},dst=/run/valet-egress,readonly`,
@@ -295,7 +296,7 @@ function bootstrapArgs(plan: DockerManagedEgressPlan, volume: string, destinatio
     "run", "--rm", "-i", "--network", "none", "--entrypoint", "sh",
     "--mount", `type=volume,src=${volume},dst=${mountPath}`,
     plan.proxyArtifact,
-    "-c", `umask 077; mkdir -p ${parent}; cat > ${destination}; chmod ${mode} ${destination}`,
+    "-c", `umask 077; mkdir -p ${parent}; cat > ${destination}; chown 65532:65532 ${destination}; chmod ${mode} ${destination}`,
   ];
 }
 
