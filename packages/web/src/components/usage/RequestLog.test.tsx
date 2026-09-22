@@ -22,4 +22,14 @@ describe("proxy request pagination", () => {
     expect(previous).toHaveBeenCalledOnce();
     expect(next).toHaveBeenCalledOnce();
   });
+
+  it("keeps page controls when a later page has no results", () => {
+    const previous = vi.fn();
+    const next = vi.fn();
+    render(<RequestLog items={[]} pageNumber={2} pageSize={25} hasPreviousPage hasNextPage={false} onPreviousPage={previous} onNextPage={next} />);
+    expect(screen.getByText("No requests recorded on this page.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(previous).toHaveBeenCalledOnce();
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });

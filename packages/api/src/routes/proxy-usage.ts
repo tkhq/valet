@@ -79,6 +79,21 @@ function parseWindowMs(window: string | undefined): number {
   }
 }
 
+interface RequestCursor {
+  createdAt: number;
+  id: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRequestCursor(value: unknown): value is RequestCursor {
+  return isRecord(value) && typeof value.createdAt === "number" &&
+    Number.isSafeInteger(value.createdAt) && typeof value.id === "string" &&
+    value.id.length > 0;
+}
+
 interface AggRow {
   requests: string | number;
   input_tokens: string | number;
@@ -313,7 +328,10 @@ proxyUsageRouter.get("/requests", async (c) => {
   const filterFrom = c.req.query("from");
   const filterTo = c.req.query("to");
   const cursor = c.req.query("cursor");
-  const limit = Math.min(parseInt(c.req.query("limit") ?? "50", 10) || 50, 200);
+  const parsedLimit = Number.parseInt(c.req.query("limit") ?? "50", 10);
+  const limit = Number.isFinite(parsedLimit)
+    ? Math.min(Math.max(parsedLimit, 1), 200)
+    : 50;
 
   // Build WHERE conditions
   const conditions = [];
@@ -336,23 +354,25 @@ proxyUsageRouter.get("/requests", async (c) => {
     conditions.push(lte(llmProxyRequests.createdAt, parseInt(filterTo, 10)));
   }
 
-  // Cursor pagination: cursor is base64-encoded JSON `{createdAt, id}`
+  // Cursor pagination: cursor is base64-encoded JSON `{createdAt, id}`.
+  // Reject malformed shapes before they reach a SQL bind parameter.
   if (cursor) {
     try {
-      const { createdAt: cursorCreatedAt, id: cursorId } = JSON.parse(
-        Buffer.from(cursor, "base64").toString("utf8"),
-      ) as { createdAt: number; id: string };
+      const decoded: unknown = JSON.parse(Buffer.from(cursor, "base64").toString("utf8"));
+      if (!isRequestCursor(decoded)) {
+        return c.json({ error: "Invalid cursor. Reload the request log." }, 400);
+      }
       conditions.push(
         or(
-          lt(llmProxyRequests.createdAt, cursorCreatedAt),
+          lt(llmProxyRequests.createdAt, decoded.createdAt),
           and(
-            eq(llmProxyRequests.createdAt, cursorCreatedAt),
-            lt(llmProxyRequests.id, cursorId),
+            eq(llmProxyRequests.createdAt, decoded.createdAt),
+            lt(llmProxyRequests.id, decoded.id),
           ),
         ),
       );
     } catch {
-      // Ignore malformed cursor — start from the beginning.
+      return c.json({ error: "Invalid cursor. Reload the request log." }, 400);
     }
   }
 

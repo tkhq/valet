@@ -32,7 +32,7 @@ export function RequestLog({
   onNextPage,
   isLoading,
 }: RequestLogProps) {
-  if (items.length === 0 && !isLoading) {
+  if (items.length === 0 && !isLoading && pageNumber === 1) {
     return <p className="text-sm text-muted">No requests recorded.</p>;
   }
 
@@ -51,6 +51,11 @@ export function RequestLog({
             </tr>
           </thead>
           <tbody>
+            {items.length === 0 && !isLoading && (
+              <tr>
+                <td colSpan={6} className="px-3 py-3 text-center text-muted">No requests recorded on this page.</td>
+              </tr>
+            )}
             {items.map((item) => (
               <tr key={item.id} className="h-11 border-b border-line last:border-0 sm:h-auto hover:bg-ink-wash">
                 <td className="px-3 py-2 text-muted whitespace-nowrap">

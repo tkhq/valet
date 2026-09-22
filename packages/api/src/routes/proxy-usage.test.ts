@@ -143,6 +143,31 @@ describe("GET /api/proxy/requests — cursor pagination", () => {
     expect(secondBody.hasMore).toBe(false);
     expect(secondBody.nextCursor).toBeUndefined();
   });
+
+  it("clamps non-positive limits to the smallest valid page size", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(llmProxyRequests).values(makeRow({ id: "req-limit" }));
+
+    for (const limit of ["-1", "0"]) {
+      const res = await fetch(api.baseUrl + "/api/proxy/requests?limit=" + limit);
+      const body = (await res.json()) as ProxyRequestListResponse;
+      expect(res.status).toBe(200);
+      expect(body.pageSize).toBe(1);
+      expect(body.hasMore).toBe(false);
+      expect(body.requests).toHaveLength(1);
+    }
+  });
+
+  it("rejects decoded cursors with invalid field types", async () => {
+    api = await bootTestApi();
+    const cursor = Buffer.from(JSON.stringify({ createdAt: "not-a-time", id: 42 })).toString("base64");
+
+    const res = await fetch(api.baseUrl + "/api/proxy/requests?cursor=" + encodeURIComponent(cursor));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Invalid cursor. Reload the request log.");
+    expect(body.error).not.toContain("Failed query");
+  });
 });
 
 describe("GET /api/proxy/requests/:id — gating", () => {
