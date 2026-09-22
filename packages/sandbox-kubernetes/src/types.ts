@@ -129,6 +129,7 @@ export interface VolumeMount {
   subPath?: string;
   name: string;
   mountPath: string;
+  readOnly?: boolean;
 }
 
 /** `corev1.Volume` subset — only the secret-backed volume shape the
@@ -138,6 +139,8 @@ export interface SecretVolumeSource {
   secretName: string;
   /** When true, a missing Secret does not block pod scheduling. */
   optional?: boolean;
+  /** File mode applied to projected Secret keys. */
+  defaultMode?: number;
 }
 
 export interface Volume {

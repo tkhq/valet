@@ -36,11 +36,13 @@ const config = {
   tunnelListenerPort: 8080,
   allowlistDomains: ["api.example.com"],
   allowlistCidrs: [],
-  caCert: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-  caKey: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
   callbackPort: 443,
   controlPlaneCidrs: ["10.2.0.20/32", "2001:db8:2::20/128"],
   controlPlanePorts: [443],
+};
+const material = {
+  caCert: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+  caKey: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
 };
 const providerConfig = {
   namespace: config.namespace,
@@ -50,7 +52,7 @@ const providerConfig = {
 
 function build(sessionKey = "wf:run/with.callback-identity-mismatch") {
   const selector = deriveKubernetesManagedEgressWorkloadSelector(sessionKey);
-  return { selector, resources: buildKubernetesManagedEgressResources(config, request, selector) };
+  return { selector, resources: buildKubernetesManagedEgressResources(config, request, selector, material) };
 }
 
 describe("Kubernetes managed egress topology", () => {
@@ -145,6 +147,8 @@ describe("Kubernetes managed egress topology", () => {
     expect(configJson).toContain("- name: allowlist");
     expect(configJson).toContain(request.identity.sessionId);
     expect(configJson).not.toContain(request.proxyToken);
+    expect(JSON.stringify(resources.workloadTrustSecret)).toContain("BEGIN CERTIFICATE");
+    expect(JSON.stringify(resources.workloadTrustSecret)).not.toContain("PRIVATE KEY");
   });
 
   it("requires one workload match and exact ready resources with enforced policy", () => {
@@ -154,7 +158,7 @@ describe("Kubernetes managed egress topology", () => {
       proxyPodNames: [resources.identity.proxyPodName],
       readyProxyPodNames: [resources.identity.proxyPodName],
       listeningProxyPodNames: [resources.identity.proxyPodName],
-      secretNames: [resources.identity.proxySecretName, resources.identity.proxyConfigSecretName],
+      secretNames: [resources.identity.proxySecretName, resources.identity.proxyConfigSecretName, resources.identity.workloadTrustSecretName],
       serviceNames: [resources.identity.proxyServiceName],
       proxyServiceClusterIps: ["10.96.12.34", "2001:db8::34"],
       networkPolicyNames: [resources.identity.workloadPolicyName, resources.identity.proxyPolicyName],
@@ -174,11 +178,11 @@ describe("Kubernetes managed egress topology", () => {
 
   it("fails closed on partial or malformed network configuration", () => {
     const selector = deriveKubernetesManagedEgressWorkloadSelector("session-key");
-    expect(() => buildKubernetesManagedEgressResources({ ...config, callbackCidrs: [] }, request, selector)).toThrow(/explicit callback/);
-    expect(() => buildKubernetesManagedEgressResources({ ...config, callbackCidrs: ["not-a-cidr"] }, request, selector)).toThrow(/CIDR/);
-    expect(() => buildKubernetesManagedEgressResources({ ...config, listenerPort: 0 }, request, selector)).toThrow(/port/);
-    expect(() => buildKubernetesManagedEgressResources({ ...config, dnsPodSelector: {} }, request, selector)).toThrow(/DNS selectors/);
-    expect(() => buildKubernetesManagedEgressResources({ ...config, dnsPodSelector: { "bad key": "dns" } }, request, selector)).toThrow(/label/);
-    expect(() => buildKubernetesManagedEgressResources({ ...config, dnsPodSelector: { app: "x".repeat(64) } }, request, selector)).toThrow(/label/);
+    expect(() => buildKubernetesManagedEgressResources({ ...config, callbackCidrs: [] }, request, selector, material)).toThrow(/explicit callback/);
+    expect(() => buildKubernetesManagedEgressResources({ ...config, callbackCidrs: ["not-a-cidr"] }, request, selector, material)).toThrow(/CIDR/);
+    expect(() => buildKubernetesManagedEgressResources({ ...config, listenerPort: 0 }, request, selector, material)).toThrow(/port/);
+    expect(() => buildKubernetesManagedEgressResources({ ...config, dnsPodSelector: {} }, request, selector, material)).toThrow(/DNS selectors/);
+    expect(() => buildKubernetesManagedEgressResources({ ...config, dnsPodSelector: { "bad key": "dns" } }, request, selector, material)).toThrow(/label/);
+    expect(() => buildKubernetesManagedEgressResources({ ...config, dnsPodSelector: { app: "x".repeat(64) } }, request, selector, material)).toThrow(/label/);
   });
 });

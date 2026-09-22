@@ -401,7 +401,7 @@ describe("Kubernetes managed egress provider lifecycle", () => {
         return {
           workloadPodNames: ["workload-pod"], proxyPodNames: [identity.proxyPodName],
           readyProxyPodNames: [identity.proxyPodName], listeningProxyPodNames: [identity.proxyPodName],
-          secretNames: [identity.proxySecretName, identity.proxyConfigSecretName],
+          secretNames: [identity.proxySecretName, identity.proxyConfigSecretName, identity.workloadTrustSecretName],
           serviceNames: [identity.proxyServiceName], proxyServiceClusterIps: ["10.96.0.10"],
           networkPolicyNames: [identity.workloadPolicyName, identity.proxyPolicyName],
           networkPolicyEnforcement: "enforced",
@@ -414,13 +414,16 @@ describe("Kubernetes managed egress provider lifecycle", () => {
       callbackUrl: "https://valet.example/v1/authorize", callbackCidrs: ["10.1.0.1/32"], upstreamCidrs: ["0.0.0.0/0"],
       dnsNamespaceSelector: { name: "dns" }, dnsPodSelector: { app: "dns" }, listenerPort: 3128, httpsListenerPort: 8443,
       tunnelListenerPort: 8080, allowlistDomains: ["api.example.com"], allowlistCidrs: [],
-      caCert: "-----BEGIN CERTIFICATE-----\ntest", caKey: "-----BEGIN PRIVATE KEY-----\ntest", callbackPort: 443,
+      callbackPort: 443,
       controlPlaneCidrs: ["10.2.0.1/32"], controlPlanePorts: [443],
     };
     let registered = false;
     const provider = new KubernetesSandboxProvider({
       objectsApi: new FakeObjectsApi(), podsApi: new FakePodsApi(), execApi: fakePodExecApi,
-      livenessApi: new FakeLivenessApi(), managedEgress: { config, runtime },
+      livenessApi: new FakeLivenessApi(), managedEgress: {
+        config, runtime,
+        caMaterial: async () => ({ caCert: "-----BEGIN CERTIFICATE-----\ntest", caKey: "-----BEGIN PRIVATE KEY-----\ntest" }),
+      },
     }, providerCfg);
     const sandbox = await provider.create({
       workspace: "managed-session",

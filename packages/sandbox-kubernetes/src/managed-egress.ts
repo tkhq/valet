@@ -16,17 +16,21 @@ export interface KubernetesManagedEgressConfig {
   tunnelListenerPort: number;
   allowlistDomains: string[];
   allowlistCidrs: string[];
-  caCert: string;
-  caKey: string;
   callbackPort: number;
   controlPlaneCidrs: string[];
   controlPlanePorts: number[];
+}
+
+export interface KubernetesManagedEgressMaterial {
+  caCert: string;
+  caKey: string;
 }
 
 export interface KubernetesManagedEgressResourceIdentity {
   proxyPodName: string;
   proxySecretName: string;
   proxyConfigSecretName: string;
+  workloadTrustSecretName: string;
   proxyServiceName: string;
   workloadPolicyName: string;
   proxyPolicyName: string;
@@ -43,6 +47,7 @@ export interface KubernetesManagedEgressResources {
   identity: KubernetesManagedEgressResourceIdentity;
   proxySecret: Record<string, unknown>;
   proxyConfigSecret: Record<string, unknown>;
+  workloadTrustSecret: Record<string, unknown>;
   proxyPod: Record<string, unknown>;
   proxyService: Record<string, unknown>;
   workloadPolicy: Record<string, unknown>;
@@ -97,7 +102,7 @@ export function evaluateKubernetesManagedEgressReadiness(
       !exactNames(observation.listeningProxyPodNames, [identity.proxyPodName])) {
     return { ready: false, reason: "The exact managed proxy pod must be ready and listening." };
   }
-  if (!exactNames(observation.secretNames, [identity.proxySecretName, identity.proxyConfigSecretName]) ||
+  if (!exactNames(observation.secretNames, [identity.proxySecretName, identity.proxyConfigSecretName, identity.workloadTrustSecretName]) ||
       !exactNames(observation.serviceNames, [identity.proxyServiceName]) ||
       !exactNames(observation.networkPolicyNames, [identity.workloadPolicyName, identity.proxyPolicyName])) {
     return { ready: false, reason: "The exact managed proxy resources and policies must exist." };
@@ -174,7 +179,6 @@ export function validateKubernetesManagedEgressConfig(config: KubernetesManagedE
   const listenerPorts = [config.listenerPort, config.httpsListenerPort, config.tunnelListenerPort];
   if (![...listenerPorts, config.callbackPort, ...config.controlPlanePorts].every(validPort) || new Set(listenerPorts).size !== listenerPorts.length) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress port configuration is invalid.");
   if (config.allowlistDomains.length === 0 && config.allowlistCidrs.length === 0) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress requires a non-empty Hematite allowlist.");
-  if (!config.caCert.includes("BEGIN CERTIFICATE") || !config.caKey.includes("PRIVATE KEY")) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress requires PEM CA certificate and key material.");
   if (Object.keys(config.dnsNamespaceSelector).length === 0 || Object.keys(config.dnsPodSelector).length === 0) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress DNS selectors must be explicit and non-empty.");
   if (!validSelector(config.dnsNamespaceSelector) || !validSelector(config.dnsPodSelector)) throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress DNS selectors must use valid Kubernetes label keys and values.");
 }
@@ -193,8 +197,10 @@ export function buildKubernetesManagedEgressResources(
   config: KubernetesManagedEgressConfig,
   request: ManagedEgressRequest,
   workloadSelector: KubernetesManagedEgressWorkloadSelector,
+  material: KubernetesManagedEgressMaterial,
 ): KubernetesManagedEgressResources {
   validateKubernetesManagedEgressConfig(config);
+  if (!material.caCert.includes("BEGIN CERTIFICATE") || !material.caKey.includes("PRIVATE KEY")) throw new ManagedEgressPrerequisiteError("configuration", "Managed egress requires PEM CA certificate and key material.");
   validateManagedEgressRequest(request);
   validateWorkloadSelector(workloadSelector);
   const resourceName = name(request.identity.proxyId);
@@ -204,6 +210,7 @@ export function buildKubernetesManagedEgressResources(
     proxyPodName: resourceName,
     proxySecretName: `${resourceName}-token`,
     proxyConfigSecretName: `${resourceName}-config`,
+    workloadTrustSecretName: `${resourceName}-trust`,
     proxyServiceName: resourceName,
     workloadPolicyName: `${resourceName}-workload`,
     proxyPolicyName: `${resourceName}-proxy`,
@@ -220,7 +227,11 @@ export function buildKubernetesManagedEgressResources(
   });
   const proxyConfigSecret = {
     apiVersion: "v1", kind: "Secret", metadata: { name: identity.proxyConfigSecretName, namespace: config.namespace },
-    immutable: true, stringData: { "hematite.yaml": renderedConfig, "ca.crt": config.caCert, "ca.key": config.caKey },
+    immutable: true, stringData: { "hematite.yaml": renderedConfig, "ca.crt": material.caCert, "ca.key": material.caKey },
+  };
+  const workloadTrustSecret = {
+    apiVersion: "v1", kind: "Secret", metadata: { name: identity.workloadTrustSecretName, namespace: config.namespace },
+    immutable: true, stringData: { "ca.crt": material.caCert },
   };
   const proxyPod = {
     apiVersion: "v1", kind: "Pod", metadata: { name: identity.proxyPodName, namespace: config.namespace, labels: proxySelector },
@@ -283,5 +294,5 @@ export function buildKubernetesManagedEgressResources(
       { to: cidrPeers(config.upstreamCidrs) },
     ] },
   };
-  return { identity, proxySecret, proxyConfigSecret, proxyPod, proxyService, workloadPolicy, proxyPolicy };
+  return { identity, proxySecret, proxyConfigSecret, workloadTrustSecret, proxyPod, proxyService, workloadPolicy, proxyPolicy };
 }

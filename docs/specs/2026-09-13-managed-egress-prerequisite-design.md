@@ -41,7 +41,7 @@ The `engine_sessions.managed_egress` column stores a closed JSON shape. It store
 
 A restart reconstructs the managed request from this metadata. It mints a new process-epoch callback token and re-observes the full boundary before it reports `effective=true`. The old token is not registered after restart. Missing proxy material or an incomplete observation returns typed unavailability with an operator diagnostic. The provider must not restore the workload with unmanaged egress.
 
-Each sandbox has an ephemeral CA. Only the proxy receives the private key. Workload provisioning receives only the public trust anchor. Proxy replacement generates a new CA.
+Each sandbox has an ephemeral CA. The host generates it in a temporary directory and removes the files after reading them. Only the proxy receives the private key. Docker uses a public-only trust volume for the workload. Kubernetes uses a separate public-only trust Secret. Proxy replacement generates a new CA.
 
 ## Forced topology plans
 

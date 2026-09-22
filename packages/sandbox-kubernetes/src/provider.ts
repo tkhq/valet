@@ -134,6 +134,7 @@ import {
   evaluateKubernetesManagedEgressReadiness,
   validateKubernetesManagedEgressConfig,
   type KubernetesManagedEgressConfig,
+  type KubernetesManagedEgressMaterial,
   type KubernetesManagedEgressResourceIdentity,
   type KubernetesManagedEgressRuntime,
   type KubernetesManagedEgressWorkloadSelector,
@@ -774,6 +775,7 @@ export interface KubernetesSandboxProviderDeps {
   managedEgress?: {
     config: KubernetesManagedEgressConfig;
     runtime: KubernetesManagedEgressRuntime;
+    caMaterial: (request: NonNullable<SandboxCreateOpts["managedEgress"]>) => Promise<KubernetesManagedEgressMaterial>;
   };
 }
 
@@ -873,9 +875,21 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       ? deriveKubernetesManagedEgressWorkloadSelector(opts.workspace)
       : undefined;
     const managedResources = opts.managedEgress && managedSelector && this.deps.managedEgress
-      ? buildKubernetesManagedEgressResources(this.deps.managedEgress.config, opts.managedEgress, managedSelector)
+      ? buildKubernetesManagedEgressResources(
+          this.deps.managedEgress.config,
+          opts.managedEgress,
+          managedSelector,
+          await this.deps.managedEgress.caMaterial(opts.managedEgress),
+        )
       : undefined;
     if (managedResources && this.deps.managedEgress) {
+      const workload = manifest.spec.podTemplate.spec.containers.find((container) => container.name === SANDBOX_CONTAINER_NAME);
+      if (!workload) throw new ManagedEgressPrerequisiteError("configuration", "The Kubernetes workload container is missing. Repair the sandbox manifest before retrying.");
+      workload.volumeMounts = [...(workload.volumeMounts ?? []), { name: "managed-egress-trust", mountPath: "/etc/valet-egress", readOnly: true }];
+      workload.env = [...(workload.env ?? []).filter((entry) => entry.name !== "SSL_CERT_FILE"), { name: "SSL_CERT_FILE", value: "/etc/valet-egress/ca.crt" }];
+      manifest.spec.podTemplate.spec.volumes = [...(manifest.spec.podTemplate.spec.volumes ?? []), {
+        name: "managed-egress-trust", secret: { secretName: managedResources.identity.workloadTrustSecretName, defaultMode: 0o444 },
+      }];
       await this.deps.managedEgress.runtime.apply(managedResources);
       opts.managedEgressLifecycle?.registerCallbackBinding();
     }
@@ -1127,7 +1141,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           identity: opts.managedEgress.identity,
           proxyArtifact: this.deps.managedEgress.config.proxyArtifact,
           topology: {
-            proxyResources: [managedResources.identity.proxyPodName, managedResources.identity.proxySecretName, managedResources.identity.proxyConfigSecretName, managedResources.identity.proxyServiceName],
+            proxyResources: [managedResources.identity.proxyPodName, managedResources.identity.proxySecretName, managedResources.identity.proxyConfigSecretName, managedResources.identity.workloadTrustSecretName, managedResources.identity.proxyServiceName],
             policyResources: [managedResources.identity.workloadPolicyName, managedResources.identity.proxyPolicyName],
             workloadSelector: { ...managedSelector.matchLabels },
             callbackBindingId: managedResources.identity.proxyPodName,

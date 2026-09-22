@@ -183,6 +183,7 @@ export {
   evaluateKubernetesManagedEgressReadiness,
   validateKubernetesManagedEgressConfig,
   type KubernetesManagedEgressConfig,
+  type KubernetesManagedEgressMaterial,
   type KubernetesManagedEgressObservation,
   type KubernetesManagedEgressReadiness,
   type KubernetesManagedEgressResourceIdentity,
