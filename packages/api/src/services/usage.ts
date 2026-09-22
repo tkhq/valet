@@ -486,6 +486,8 @@ export async function getUsageSessions(
 
 // ── CSV export ───────────────────────────────────────────────────────────────
 
+const USAGE_EXPORT_MAX_ROWS = 100_000;
+
 const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced";
 
 function csvEscape(v: unknown): string {
@@ -496,12 +498,15 @@ function csvEscape(v: unknown): string {
   return formulaPrefix || /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** One CSV row per billable turn for the window/scope, capped at 100k rows.
+/** One CSV row per billable turn for the window/scope.
  * A plain member's team export blanks `user_id`: per-member attribution
  * follows the breakdown's byUser rule (org scope, or a team scope whose
  * caller administers the team), and the CSV must not let a plain team
  * member reconstruct it with one GROUP BY. */
-export async function getUsageExportCsv(db: AppDb, opts: UsagePeriodOpts & { scope: UsageScope }): Promise<string> {
+export async function getUsageExportCsv(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): Promise<{ ok: true; csv: string } | { ok: false; error: { code: "export_too_large"; message: string } }> {
   const period = periodFromOpts(opts);
   const withholdUserId = opts.scope.scope === "team" && !opts.scope.byMember;
   interface Row {
@@ -514,7 +519,17 @@ export async function getUsageExportCsv(db: AppDb, opts: UsagePeriodOpts & { sco
            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_total, priced
     FROM cost_entries
     WHERE ${scopeWhere("", period, opts.scope)}
-    ORDER BY created_at DESC LIMIT 100000`)) as { rows: Row[] };
+    ORDER BY created_at DESC LIMIT ${USAGE_EXPORT_MAX_ROWS + 1}`)) as { rows: Row[] };
+
+  if (result.rows.length > USAGE_EXPORT_MAX_ROWS) {
+    return {
+      ok: false,
+      error: {
+        code: "export_too_large",
+        message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+      },
+    };
+  }
 
   const lines = result.rows.map((r) =>
     [
@@ -523,7 +538,7 @@ export async function getUsageExportCsv(db: AppDb, opts: UsagePeriodOpts & { sco
       r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
     ].map(csvEscape).join(","),
   );
-  return `${CSV_HEADER}\n${lines.join("\n")}\n`;
+  return { ok: true, csv: `${CSV_HEADER}\n${lines.join("\n")}\n` };
 }
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────

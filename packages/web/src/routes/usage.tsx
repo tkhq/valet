@@ -18,7 +18,7 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
@@ -28,6 +28,7 @@ import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { downloadTextFile } from "~/lib/download";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -35,9 +36,6 @@ export const Route = createFileRoute("/usage")({
 
 const WINDOWS = ["24h", "7d", "30d"] as const;
 type Window = (typeof WINDOWS)[number];
-
-const TODAY_UTC = new Date().toISOString().slice(0, 10);
-const CURRENT_MONTH_UTC = TODAY_UTC.slice(0, 7);
 
 function usageErrorText(error: unknown): string {
   if (typeof error === "object" && error !== null && "payload" in error) {
@@ -245,6 +243,8 @@ export function UsagePage() {
   const [month, setMonth] = useState("");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
+  const [exportError, setExportError] = useState<unknown>();
+  const [exporting, setExporting] = useState(false);
   const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
   // Keep only cursor history, not every loaded row. Each page remains bounded
   // by the server's explicit page size.
@@ -269,6 +269,8 @@ export function UsagePage() {
   const personalWorkspace = ws?.kind === "personal";
   const teamId = ws?.kind === "team" ? ws.team.id : undefined;
   const scope: UsageScopeName = teamId !== undefined ? "team" : personalScope;
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const currentMonthUtc = todayUtc.slice(0, 7);
 
   const breakdownQ = useUsageBreakdown(period, scope, teamId, { enabled: scopeKnown });
   // Proxy traffic is personal; every consumer of these two queries renders
@@ -329,6 +331,23 @@ export function UsagePage() {
     setPeriod({ kind: "custom", start: customStart, end: customEnd });
   }
 
+  async function handleCsvDownload(event: MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault();
+    if (exporting) return;
+    setExportError(undefined);
+    setExporting(true);
+    try {
+      const csv = await api.usageExportCsv(period, scope, teamId);
+      const scopeLabel = scope === "team" ? `team-${teamId}` : scope;
+      const filenamePeriod = periodLabel.replaceAll(" to ", "_to_");
+      downloadTextFile(`valet-usage-${scopeLabel}-${filenamePeriod}.csv`, csv, "text/csv;charset=utf-8");
+    } catch (error) {
+      setExportError(error);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10 space-y-10">
@@ -381,7 +400,7 @@ export function UsagePage() {
             <input
               type="month"
               aria-label="Calendar month"
-              max={CURRENT_MONTH_UTC}
+              max={currentMonthUtc}
               value={month}
               onChange={(event) => handleMonthChange(event.target.value)}
               aria-current={period.kind === "month" ? "date" : undefined}
@@ -397,7 +416,7 @@ export function UsagePage() {
             <input
               type="date"
               aria-label="Custom start date"
-              max={TODAY_UTC}
+              max={todayUtc}
               value={customStart}
               onChange={(event) => setCustomStart(event.target.value)}
               className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
@@ -410,7 +429,7 @@ export function UsagePage() {
               type="date"
               aria-label="Custom end date"
               min={customStart}
-              max={TODAY_UTC}
+              max={todayUtc}
               value={customEnd}
               onChange={(event) => setCustomEnd(event.target.value)}
               className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
@@ -461,13 +480,18 @@ export function UsagePage() {
             <a
               href={csvHref}
               download
+              onClick={handleCsvDownload}
+              aria-disabled={exporting}
               className="inline-flex w-full items-center justify-center sm:ml-auto sm:w-auto min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 border-line text-muted hover:text-ink hover:border-ink"
               aria-label={`Download CSV (${periodLabel}, ${scope})`}
             >
-              Download CSV ({periodLabel}, {scope})
+              {exporting ? "Preparing CSV…" : `Download CSV (${periodLabel}, ${scope})`}
             </a>
           )}
         </div>
+        {exportError !== undefined && (
+          <p className="text-sm text-danger-600">{usageErrorText(exportError)}</p>
+        )}
 
         {/* Totals + chart + by-use-case + by-model. A disabled query (scope
             still resolving) reports isLoading=false, so gate on both. */}

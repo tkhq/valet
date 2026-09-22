@@ -379,9 +379,15 @@ vi.mock("~/components/workspace-clause", () => ({
         : { kind: "team", team: { id: workspaceTeamId, name: "Team X", memberCount: 2 } },
 }));
 
+let usageExportError: Error | undefined;
+
 // Mock api client — usageExportCsvUrl is a pure URL builder.
 vi.mock("~/api/client", () => ({
   api: {
+    usageExportCsv: async () => {
+      if (usageExportError) throw usageExportError;
+      return "csv";
+    },
     usageExportCsvUrl: (period: UsagePeriodSelection, scope: string, teamId?: string) => {
       const query = period.kind === "lookback"
         ? `window=${period.window}`
@@ -392,6 +398,8 @@ vi.mock("~/api/client", () => ({
     },
   },
 }));
+
+vi.mock("~/lib/download", () => ({ downloadTextFile: vi.fn() }));
 
 import { UsagePage } from "./usage";
 
@@ -412,6 +420,7 @@ beforeEach(() => {
   };
   workspaceTeamId = undefined;
   workspaceResolved = true;
+  usageExportError = undefined;
   breakdownCalls = [];
   lastProxyRequestsOpts = undefined;
   lastProxySettingsOpts = undefined;
@@ -965,6 +974,37 @@ describe("UsagePage custom period controls", () => {
     render(<UsagePage />);
     expect(screen.getByText("Choose an end date on or after the start date.")).toBeTruthy();
     expect(screen.queryByText(/GET \/usage\/breakdown/)).toBeNull();
+  });
+
+  it("shows an oversized export error instead of downloading a partial CSV", async () => {
+    usageExportError = Object.assign(new Error("GET /usage/export.csv → 422"), {
+      payload: {
+        error: {
+          code: "export_too_large",
+          message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+        },
+      },
+    });
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("link", { name: "Download CSV (7d, me)" }));
+    expect(await screen.findByText(
+      "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+    )).toBeTruthy();
+  });
+
+  it("refreshes picker limits when the page renders after UTC midnight", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-12-31T23:59:00Z"));
+    const view = render(<UsagePage />);
+    expect(screen.getByLabelText("Calendar month").getAttribute("max")).toBe("2026-12");
+    expect(screen.getByLabelText("Custom end date").getAttribute("max")).toBe("2026-12-31");
+
+    vi.setSystemTime(new Date("2027-01-01T00:01:00Z"));
+    view.rerender(<UsagePage />);
+    expect(screen.getByLabelText("Calendar month").getAttribute("max")).toBe("2027-01");
+    expect(screen.getByLabelText("Custom end date").getAttribute("max")).toBe("2027-01-01");
+    view.unmount();
+    vi.useRealTimers();
   });
 
   it("clears inactive controls and marks the active period", () => {

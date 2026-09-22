@@ -374,6 +374,31 @@ describe("GET /api/usage/export.csv", () => {
     expect(rows.some((r) => r.includes("session"))).toBe(true);
     for (const model of formulaModels) expect(text).toContain(`,"'${model}",`);
   });
+
+  it("rejects exports over 100,000 rows without returning a partial CSV", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({
+      id: "s-csv-overflow", userId: "local-user", orgId: "local-org", workspace: "/w",
+      status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await api.providers.db.execute(sql`
+      INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
+      SELECT 'e-csv-overflow-' || i, 's-csv-overflow', 'th', 'message', 'assistant', 'claude',
+             ${USAGE}::text, ${COST}::text, ${now}
+      FROM generate_series(1, 100001) AS i
+    `);
+
+    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d`);
+    expect(res.status).toBe(422);
+    expect(res.headers.get("content-disposition")).toBeNull();
+    expect(await res.json()).toEqual({
+      error: {
+        code: "export_too_large",
+        message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
+      },
+    });
+  }, 30_000);
 });
 
 describe("GET /api/usage/summary", () => {
