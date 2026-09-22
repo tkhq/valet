@@ -859,12 +859,12 @@ function makeDynamicPlugin(
 }
 
 describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
-  it("routes discovery and credential probes through the host authorization seam", async () => {
-    let rawReads = 0, wrappedReads = 0;
+  it("reuses one authorized provider for discovery and its credential probe", async () => {
+    let providers = 0, reads = 0;
     const dynamic = { ...makeDynamicPlugin("notion", async ({ credentials }) => { await credentials.get(); return []; }), requiresCredential: true };
     const [listTool] = pluginCatalogTools({ plugins: [dynamic] });
-    await listTool.execute({}, makeCtx({ credentials: { get: async () => { rawReads++; return { accessToken: "secret" }; }, request: async () => ({ accessToken: "secret" }) }, credentialProviderForAction: (provider, binding) => ({ ...provider, get: async () => { wrappedReads++; expect(binding.operation).toBe("resolve"); throw new Error("denied"); } }) }));
-    expect({ rawReads, wrappedReads }).toEqual({ rawReads: 0, wrappedReads: 2 });
+    await listTool.execute({}, makeCtx({ credentialProviderForAction: (provider, binding) => { providers++; return { ...provider, get: async () => { reads++; expect(binding.operation).toBe("resolve"); return { accessToken: "secret" }; } }; } }));
+    expect({ providers, reads }).toEqual({ providers: 1, reads: 2 });
   });
   it("list_tools merges resolveActions results with static actions", async () => {
     const { plugin: staticPlugin } = makeMockPlugin();

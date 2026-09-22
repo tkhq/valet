@@ -742,6 +742,7 @@ async function resolveDynamic(
   catalog: Catalog,
   plugin: ActionPlugin,
   ctx: ToolContext,
+  credentials = catalogCredentials(ctx, plugin),
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
   const cached = catalog.resolved.get(plugin.service);
@@ -751,9 +752,7 @@ async function resolveDynamic(
   // resolveActions is guaranteed present on every entry of dynamicPlugins.
   const resolveActions = plugin.resolveActions;
   if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
-  const actions = await resolveActions({
-    credentials: catalogCredentials(ctx, plugin),
-  });
+  const actions = await resolveActions({ credentials });
   const built = buildEntries(plugin.service, plugin, actions);
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
   catalog.resolved.set(plugin.service, result);
@@ -834,6 +833,14 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
       if (query.hasInput) entries = entries.filter((e) => matchesQuery(e.action));
 
       const warnings: Array<{ service: string; reason: string }> = [];
+      const credentialProviders = new Map<ActionPlugin, CredentialProvider>();
+      const credentialsFor = (plugin: ActionPlugin): CredentialProvider => {
+        const existing = credentialProviders.get(plugin);
+        if (existing) return existing;
+        const provider = catalogCredentials(ctx, plugin);
+        credentialProviders.set(plugin, provider);
+        return provider;
+      };
 
       // Merge in dynamic (resolveActions-backed) plugins whose service
       // passes the filter. Discovery failures become warnings, not throws.
@@ -842,7 +849,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         if (a.service && plugin.service !== a.service) continue;
         dynamicServicesConsidered.add(plugin.service);
         try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx, credentialsFor(plugin));
           const dynEntries =
             query.hasInput
               ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
@@ -872,7 +879,7 @@ function makeListTool(catalog: Catalog, pinnedNames: ReadonlyMap<string, string>
         let cred: Awaited<ReturnType<typeof ctx.credentials.get>>;
         let probeReason: string | undefined;
         try {
-          cred = await catalogCredentials(ctx, plugin).get(credService);
+          cred = await credentialsFor(plugin).get(credService);
         } catch (err) {
           // A resolver may throw instead of returning null (e.g. a
           // GitHubAuthError when the org has no installation). Treat that

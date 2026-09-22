@@ -1,11 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Credential, CredentialProvider, PolicyDecision, Principal } from "@valet/engine";
-import {
-  adaptCredentialUse,
-  buildDelegatedExecutionObligationPlan,
-  decisionDigestOf,
-  type PolicyDecisionEnvelope,
-} from "@valet/engine/authorization";
+import { adaptCredentialUse, buildDelegatedExecutionObligationPlan, decisionDigestOf, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
 import { canonicalDecisionId, type CanonicalAuthorizationService } from "./canonical-authorization-service.js";
@@ -23,19 +18,12 @@ export class CredentialUseDeniedError extends Error {
 type AuthorizationService = Pick<CanonicalAuthorizationService, "authorize">;
 type PersistedResult = { authorized: true; found: boolean };
 export interface CredentialUseBinding {
-  organizationId: string;
-  actorUserId: string;
-  principal: Principal;
-  owner: Principal;
-  service: string;
-  credentialClass: string;
-  actionId: string;
+  organizationId: string; actorUserId: string;
+  principal: Principal; owner: Principal;
+  service: string; credentialClass: string; actionId: string;
   operation: "plugin" | "workflow" | "repository" | "internal" | "inject" | "resolve";
-  sessionId?: string;
-  childSessionId?: string;
-  workflowExecutionId?: string;
-  resource?: { type: string; id?: string };
-  invocationId: string;
+  sessionId?: string; childSessionId?: string; workflowExecutionId?: string;
+  resource?: { type: string; id?: string }; invocationId: string;
 }
 
 function parseResult(value: unknown): PersistedResult {
@@ -54,16 +42,11 @@ function executionDecision(envelope: PolicyDecisionEnvelope, decisionId: string,
       obligations: envelope.decision.obligations,
       redactions: envelope.decision.redactions,
       ...(envelope.decision.approvalRequirement ? { approvalRequirement: envelope.decision.approvalRequirement } : {}),
-      requestId: envelope.requestId,
-      requestSubjectDigest: envelope.requestSubjectDigest,
-      inputDigest: envelope.inputDigest,
-      policyDigest: envelope.policyDigest,
-      sourceBundleDigest: envelope.sourceBundleDigest,
-      evaluatorKind: envelope.evaluator.kind,
-      engineDigest: envelope.evaluator.engineDigest,
-      decisionDigest: decisionDigestOf(envelope.decision),
-      executionInputDigest,
-      decisionId,
+      requestId: envelope.requestId, requestSubjectDigest: envelope.requestSubjectDigest,
+      inputDigest: envelope.inputDigest, policyDigest: envelope.policyDigest,
+      sourceBundleDigest: envelope.sourceBundleDigest, evaluatorKind: envelope.evaluator.kind,
+      engineDigest: envelope.evaluator.engineDigest, decisionDigest: decisionDigestOf(envelope.decision),
+      executionInputDigest, decisionId,
     },
   };
 }
@@ -91,13 +74,9 @@ export async function authorizeCredentialUseOperation<T>(
   const now = deps.now ?? Date.now;
   const id = operationId(deps.binding, service);
   const adapted = adaptCredentialUse({
-    schemaVersion: 1,
-    organizationId: deps.binding.organizationId,
-    actorUserId: deps.binding.actorUserId,
-    principal: deps.binding.principal,
-    requestId: id,
-    operationId: id,
-    evaluationTimeMs: now(),
+    schemaVersion: 1, organizationId: deps.binding.organizationId,
+    actorUserId: deps.binding.actorUserId, principal: deps.binding.principal,
+    requestId: id, operationId: id, evaluationTimeMs: now(),
     ...(deps.binding.sessionId ? { sessionId: deps.binding.sessionId } : {}),
     service,
     credentialClass: deps.binding.credentialClass,
