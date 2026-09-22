@@ -8,7 +8,9 @@ import { pluginStore } from "./plugin-store.js";
 const COLLECTION = "linked-drive-files";
 const THREADS = "linked-drive-threads";
 const ID = /^[a-zA-Z0-9_-]+$/;
-const DENIED = "This Google action is outside this thread's allowed file scope. Post the contract's direct Drive or Docs link in the Slack thread.";
+const SLACK_THREAD = /^slack:[CG][A-Z0-9]+:\d+\.\d+$/;
+const SITE_THREAD = /^web:[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const DENIED = "This Google action is outside this thread's allowed file scope. Post the contract's direct Drive or Docs link in this conversation, on the site or in Slack.";
 const TARGETS: Readonly<Record<string, string>> = {
   "drive.get_document_info": "fileId",
   "drive.download_file": "fileId",
@@ -41,7 +43,25 @@ export function linkedDriveFileId(value: string): string | null {
   }
 }
 
-/** Bind scope only after the existing Slack routing has authorized this team assistant. */
+/** Direct file ids written in a person's own message. Folder URLs and bare ids do not count. */
+export function linkedDriveFileIds(text: string): string[] {
+  const ids = new Set<string>();
+  // Attachment and unfurl text is not part of `text`, so it never grants access.
+  for (const match of text.matchAll(/https:\/\/[^\s<>|"']+/g)) {
+    const id = linkedDriveFileId(match[0]);
+    if (id) ids.add(id);
+  }
+  return [...ids];
+}
+
+function grantKey(scope: { sessionId: string; threadKey: string }, fileId: string): string {
+  // Slack thread keys are unique per conversation. Site keys such as `web:default`
+  // repeat across assistants, so the session id keeps those grants apart.
+  if (SLACK_THREAD.test(scope.threadKey)) return JSON.stringify([scope.threadKey, fileId]);
+  return JSON.stringify([scope.sessionId, scope.threadKey, fileId]);
+}
+
+/** Bind a team assistant thread after Slack routing, or after an authorized site prompt. */
 export async function bindLinkedDriveThread(db: AppDb, args: {
   orgId: string;
   owner: Principal;
@@ -49,9 +69,43 @@ export async function bindLinkedDriveThread(db: AppDb, args: {
   threadId: string;
   threadKey: string;
 }): Promise<void> {
-  if (args.owner.type !== "team" || !/^slack:[CG][A-Z0-9]+:\d+\.\d+$/.test(args.threadKey)) return;
+  if (args.owner.type !== "team") return;
+  if (!SLACK_THREAD.test(args.threadKey) && !SITE_THREAD.test(args.threadKey)) return;
   await pluginStore(db, "valet").org(args.orgId).put(THREADS,
     JSON.stringify([args.owner.id, args.sessionId, args.threadId]), { threadKey: args.threadKey });
+}
+
+/**
+ * Record links the member typed in the site chat. Call this before the prompt
+ * is queued. Skill expansion is not scanned: pass the typed text.
+ * A Slack-looking key is recorded only when Slack routing already bound that thread.
+ */
+export async function recordLinkedDrivePrompt(db: AppDb, args: {
+  orgId: string;
+  owner: Principal;
+  sessionId: string;
+  threadId: string;
+  threadKey: string;
+  purpose: string | undefined;
+  text: string;
+}): Promise<void> {
+  if (args.owner.type !== "team" || args.purpose !== "orchestrator") return;
+  const fileIds = linkedDriveFileIds(args.text);
+  if (fileIds.length === 0) return;
+  const store = pluginStore(db, "valet").org(args.orgId);
+  if (SITE_THREAD.test(args.threadKey)) {
+    await bindLinkedDriveThread(db, args);
+    for (const fileId of fileIds) {
+      await store.put(COLLECTION, grantKey(args, fileId), { source: "site" });
+    }
+    return;
+  }
+  if (!SLACK_THREAD.test(args.threadKey)) return;
+  const binding = await store.get<unknown>(THREADS, JSON.stringify([args.owner.id, args.sessionId, args.threadId]));
+  if (!record(binding?.doc) || binding.doc.threadKey !== args.threadKey) return;
+  for (const fileId of fileIds) {
+    await store.put(COLLECTION, grantKey(args, fileId), { source: "site" });
+  }
 }
 
 export class GoogleWorkspaceLinkScope {
@@ -71,19 +125,13 @@ export class GoogleWorkspaceLinkScope {
     const threadTs = event.thread_ts ?? event.ts;
     if (typeof threadTs !== "string" || !/^\d+\.\d+$/.test(threadTs)) return;
     const threadKey = `slack:${event.channel}:${threadTs}`;
-    const ids = new Set<string>();
-    // Stop at Slack's label separator; text in an unfurl or attachment never grants access.
-    for (const match of event.text.matchAll(/https:\/\/[^\s<>|"']+/g)) {
-      const id = linkedDriveFileId(match[0]);
-      if (id) ids.add(id);
-    }
     const store = pluginStore(this.deps.db, "valet").org(orgId);
-    for (const fileId of ids) {
+    for (const fileId of linkedDriveFileIds(event.text)) {
       await store.put(COLLECTION, JSON.stringify([threadKey, fileId]), { messageTs: event.ts });
     }
   }
 
-  private async threadKey(ctx: PluginActionContext, teamId: string): Promise<string | null> {
+  private async threadScope(ctx: PluginActionContext, teamId: string): Promise<{ sessionId: string; threadKey: string } | null> {
     let sessionId = ctx.sessionId;
     let threadId = ctx.threadId;
     if (ctx.sessionPurpose === "workflow") {
@@ -108,7 +156,8 @@ export class GoogleWorkspaceLinkScope {
     const binding = await pluginStore(this.deps.db, "valet").org(ctx.orgId)
       .get<unknown>(THREADS, JSON.stringify([teamId, sessionId, threadId]));
     // A caller-created thread with a Slack-looking key must not acquire the channel's grants.
-    return record(binding?.doc) && binding.doc.threadKey === thread.key ? thread.key : null;
+    if (!record(binding?.doc) || binding.doc.threadKey !== thread.key) return null;
+    return { sessionId, threadKey: thread.key };
   }
 
   wrapPlugins(plugins: ValetPlugin[]): ValetPlugin[] {
@@ -128,9 +177,9 @@ export class GoogleWorkspaceLinkScope {
             const fileId = ID.test(target) ? target : linkedDriveFileId(target);
             if (!fileId) return { success: false, error: DENIED };
             try {
-              const threadKey = await this.threadKey(ctx, ctx.owner.id);
-              const grant = threadKey && await pluginStore(this.deps.db, "valet").org(ctx.orgId)
-                .get(COLLECTION, JSON.stringify([threadKey, fileId]));
+              const scope = await this.threadScope(ctx, ctx.owner.id);
+              const grant = scope && await pluginStore(this.deps.db, "valet").org(ctx.orgId)
+                .get(COLLECTION, grantKey(scope, fileId));
               if (!grant) return { success: false, error: DENIED };
             } catch {
               return { success: false, error: "Drive file scope is unavailable. Retry this action after the service recovers." };
