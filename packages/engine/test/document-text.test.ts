@@ -12,7 +12,8 @@ const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]
 describe("document text helpers", () => {
   it("normalizes MIME parameters and case before routing", () => {
     expect(normalizeDocumentMime("Application/PDF; charset=binary")).toBe("application/pdf");
-    expect(isPdfDocument({ mimeType: "Application/PDF; charset=binary" })).toBe(true);
+    expect(isPdfDocument({ mimeType: "Application/PDF; charset=binary", data: pdfBytes })).toBe(true);
+    expect(isPdfDocument({ mimeType: "application/pdf", data: new TextEncoder().encode("<html>") })).toBe(false);
   });
 
   it("identifies a PDF header for a generic MIME type", () => {
@@ -128,6 +129,19 @@ describe("document text helpers", () => {
       extractDocument: async () => ({ markdown: "# NDA" }),
     });
     expect(result).toEqual({ ok: true, content: "# NDA" });
+  });
+
+  it("limits extracted document output", async () => {
+    const result = await extractDownloadedPdf({
+      data: pdfBytes,
+      name: "large.pdf",
+      extractDocument: async () => ({ markdown: "x".repeat(1_000_001) }),
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "large.pdf has more extracted text than this action can return. Ask for a smaller PDF or specific pages.",
+    });
   });
 
   it("names a missing extractor", async () => {

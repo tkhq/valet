@@ -122,10 +122,12 @@ not grow a private PDF extractor branch.
 `readResponseBytes` reads a response stream only up to its byte cap. It
 checks each chunk when Content-Length is absent, invalid, or stale. It starts
 cancellation without waiting when a source does not settle cancellation.
-`readResponseText` decodes the same bounded bytes as UTF-8. Generic streams
-are inspected through the `%PDF-` prefix before they are buffered. A non-PDF
+`readResponseText` decodes the same bounded bytes as UTF-8. A PDF always
+requires the `%PDF-` signature before extraction. Generic streams are
+inspected through the `%PDF-` prefix before they are buffered. A non-PDF
 stream is cancelled after the prefix. The PDF cap is 25 MB, the same budget
-the Slack transport uses for a document.
+the Slack transport uses for a document. Extracted text is limited to
+1,000,000 characters before an action returns it.
 
 Callers:
 
@@ -136,9 +138,10 @@ Callers:
   byte stream uses the 25 MB cap unless the caller sets `maxSizeBytes`. A
   generic stream is extracted only when its bytes start with `%PDF-`. Text
   stays at 1 MB.
-- `github.read_repo_file`. It requests raw Contents API media for every PDF,
-  because GitHub omits inline bytes from PDFs over 1 MB. It reads the raw
-  stream with the 25 MB cap before it extracts text.
+- `github.read_repo_file`. It requests raw Contents API media for a PDF or a
+  Contents response without inline bytes. It pins that request to the metadata
+  SHA when available. The raw stream must have the PDF signature and stay
+  within the 25 MB cap before extraction.
 
 A new downloader calls the same function. Adding a format other than PDF
 is still one branch, and that branch is `extractDocumentText`.

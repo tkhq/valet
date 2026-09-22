@@ -287,6 +287,7 @@ export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 export {
   MAX_PDF_DOCUMENT_BYTES,
+  MAX_EXTRACTED_DOCUMENT_CHARS,
   normalizeDocumentMime,
   isTextDocumentMime,
   isPdfDocument,

@@ -789,6 +789,21 @@ describe('slack actions', () => {
     });
   });
 
+  it('fetch_file rejects a declared PDF without a PDF signature', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('<html>sign in</html>', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+    let extracted = false;
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/login.pdf' },
+      pluginCtx({ extractDocument: async () => { extracted = true; return { markdown: 'must not extract' }; } }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(extracted).toBe(false);
+  });
+
   it('fetch_file normalizes PDF MIME parameters and case', async () => {
     const bytes = new TextEncoder().encode('%PDF-1.4 ...');
     fetchMock.mockResolvedValueOnce(

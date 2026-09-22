@@ -3,6 +3,9 @@
 /** Matches the channel transport's document budget. */
 export const MAX_PDF_DOCUMENT_BYTES = 25 * 1024 * 1024;
 
+/** Avoid returning unbounded extractor output to an action result. */
+export const MAX_EXTRACTED_DOCUMENT_CHARS = 1_000_000;
+
 const TEXT_APPLICATION_MIMES = new Set([
   "application/json",
   "application/xml",
@@ -39,10 +42,9 @@ function hasPdfHeader(data: Uint8Array): boolean {
   );
 }
 
-/** A declared PDF is a PDF. A generic type needs the `%PDF-` header. */
+/** A PDF must start with the `%PDF-` signature, regardless of its MIME type. */
 export function isPdfDocument(input: { mimeType?: string; data?: Uint8Array }): boolean {
-  const mime = normalizeDocumentMime(input.mimeType);
-  return mime === "application/pdf" || ((mime === "" || mime === "application/octet-stream") && input.data !== undefined && hasPdfHeader(input.data));
+  return input.data !== undefined && hasPdfHeader(input.data);
 }
 
 export type BoundedResponseBytes =
@@ -205,6 +207,12 @@ export async function extractDownloadedPdf(input: {
       return {
         ok: false,
         error: `${name} has no text layer. It is probably a scan or an image-only PDF. Ask the user for a text version, or for the specific figures you need.`,
+      };
+    }
+    if (extracted.markdown.length > MAX_EXTRACTED_DOCUMENT_CHARS) {
+      return {
+        ok: false,
+        error: `${name} has more extracted text than this action can return. Ask for a smaller PDF or specific pages.`,
       };
     }
     return { ok: true, content: extracted.markdown };

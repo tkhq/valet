@@ -542,6 +542,25 @@ describe('drive actions', () => {
     expect(result).toMatchObject({ success: true, data: { content: '# PDF' } });
   });
 
+  it('download_file rejects declared PDF media without a PDF signature', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'login.pdf', mimeType: 'application/pdf' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('<html>sign in</html>', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+    let extracted = false;
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => { extracted = true; return { markdown: 'must not extract' }; } }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('Cannot download binary file');
+    expect(extracted).toBe(false);
+  });
+
   it('download_file sniffs a generic PDF after its bounded download', async () => {
     const bytes = new TextEncoder().encode('%PDF-1.4');
     fetchMock.mockResolvedValueOnce(

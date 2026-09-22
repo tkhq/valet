@@ -2,8 +2,12 @@ import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import {
   extractDownloadedPdf,
+  isPdfDocument,
+  isTextDocumentMime,
   MAX_PDF_DOCUMENT_BYTES,
-  readResponseBytes,
+  normalizeDocumentMime,
+  readPdfCandidateResponse,
+  readResponseText,
   type ActionPlugin,
   type PluginAction,
   type PluginActionContext,
@@ -2249,16 +2253,25 @@ const readRepoFile = action(Type.Object({
         return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
       }
       const name = typeof data.path === "string" ? data.path : args.path;
-      if (name.toLowerCase().endsWith(".pdf")) {
-        // GitHub omits content for files over 1 MB. Request raw media rather
-        // than treating its empty metadata field as a successful PDF read.
+      const raw = data.content ?? "";
+      const bytes =
+        data.encoding === "base64"
+          ? Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0))
+          : new TextEncoder().encode(raw);
+      const inlinePdf = isPdfDocument({ data: bytes });
+      const needsRaw = name.toLowerCase().endsWith(".pdf") || inlinePdf || data.encoding === "none";
+
+      if (needsRaw) {
+        // Pin the raw request to the metadata blob. Without the SHA, a branch
+        // can change between the Contents metadata request and the raw read.
+        const rawRef = typeof data.sha === "string" ? data.sha : args.ref;
         const rawResponse = await octokit.request(
           "GET /repos/{owner}/{repo}/contents/{path}",
           {
             owner: args.owner,
             repo: args.repo,
             path: args.path,
-            ref: args.ref,
+            ref: rawRef,
             mediaType: { format: "raw" },
             request: { parseSuccessResponseBody: false },
           },
@@ -2266,38 +2279,56 @@ const readRepoFile = action(Type.Object({
         if (!(rawResponse.data instanceof ReadableStream)) {
           return { success: false, error: `Could not download ${name}. Try again.` };
         }
-        // Octokit exposes the raw response stream when parsing is disabled.
         const headers = new Headers();
         for (const [header, value] of Object.entries(rawResponse.headers)) headers.set(header, String(value));
-        const downloaded = await readResponseBytes(
-          new Response(rawResponse.data as ReadableStream<Uint8Array>, { headers }),
-          MAX_PDF_DOCUMENT_BYTES,
-        );
-        if (!downloaded.ok) {
-          return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
+        const response = new Response(rawResponse.data as ReadableStream<Uint8Array>, { headers });
+        const rawMime = normalizeDocumentMime(headers.get("content-type") ?? undefined);
+        const namedOrInlinePdf = name.toLowerCase().endsWith(".pdf") || inlinePdf;
+        const generic = rawMime === "" || rawMime === "application/octet-stream";
+        const expectsPdf = namedOrInlinePdf || rawMime === "application/pdf" || generic;
+
+        if (expectsPdf) {
+          const downloaded = await readPdfCandidateResponse(response, MAX_PDF_DOCUMENT_BYTES);
+          if (downloaded.kind === "oversize") {
+            return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
+          }
+          if (downloaded.kind !== "pdf") {
+            if (generic && !namedOrInlinePdf) {
+              return { success: false, error: `Cannot read binary file ${name}. Only text files and PDFs are supported.` };
+            }
+            return { success: false, error: `Cannot read ${name} as a PDF. The downloaded file does not have a PDF signature.` };
+          }
+          const read = await extractDownloadedPdf({
+            data: downloaded.data,
+            name,
+            extractDocument: ctx.extractDocument,
+          });
+          if (!read.ok) return { success: false, error: read.error };
+          return {
+            success: true,
+            data: {
+              path: data.path,
+              repo: `${args.owner}/${args.repo}`,
+              ref: rawRef,
+              size: data.size,
+              content: read.content,
+            },
+          };
         }
-        const read = await extractDownloadedPdf({
-          data: downloaded.data,
-          name,
-          extractDocument: ctx.extractDocument,
-        });
-        if (!read.ok) return { success: false, error: read.error };
-        return {
-          success: true,
-          data: {
-            path: data.path,
-            repo: `${args.owner}/${args.repo}`,
-            ref: args.ref,
-            size: data.size,
-            content: read.content,
-          },
-        };
+
+        if (isTextDocumentMime(rawMime)) {
+          const downloaded = await readResponseText(response, 1_048_576);
+          if (!downloaded.ok) {
+            return { success: false, error: `File is ${downloaded.size} bytes, exceeds max 1048576 bytes.` };
+          }
+          return {
+            success: true,
+            data: { path: data.path, repo: `${args.owner}/${args.repo}`, ref: rawRef, size: data.size, content: downloaded.text },
+          };
+        }
+        return { success: false, error: `Cannot read binary file ${name}. Only text files and PDFs are supported.` };
       }
-      const raw = data.content ?? "";
-      const bytes =
-        data.encoding === "base64"
-          ? Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0))
-          : new TextEncoder().encode(raw);
+
       const content = new TextDecoder().decode(bytes);
       return {
         success: true,
