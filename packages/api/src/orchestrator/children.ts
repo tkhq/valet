@@ -426,25 +426,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
     const decisionId = canonicalDecisionId(orgId, adapted.request.idempotencyKey);
     const executionInputDigest = createHash("sha256").update(adapted.canonicalBytes).digest("hex");
-    const policyDecision = executionDecision(authorization, decisionId, executionInputDigest);
-    const reserved = await reserveCanonicalExecution<DelegationReplay>(deps.db, policyDecision, executionInputDigest, parseDelegationReplay, Date.now, async (tx) => {
-      const [envelopes, sessions, watches, claims] = await Promise.all([
-        tx.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, childSessionId)), tx.select().from(agentSessions).where(eq(agentSessions.id, childSessionId)),
-        tx.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)), tx.select().from(securityCells).where(eq(securityCells.childSessionId, childSessionId)),
-      ]);
-      const edge = envelopes[0], session = sessions[0], watch = watches[0], claim = claims[0];
-      const securityDispatch = ctx.parentOperationId?.startsWith("security-dispatch:") === true;
-      const claimMatches = claims.length === 1 && claim.status === "running" && claim.childSessionId === childSessionId && ctx.parentOperationId === `security-dispatch:${claim.engagementId}:${claim.id}:${claim.attempts}`;
-      const claimIsConsistent = securityDispatch ? claimMatches : claims.length === 0;
-      if (envelopes.length === 0 && sessions.length === 0 && watches.length === 0 && claimIsConsistent) return { kind: "absent" };
-      if (envelopes.length === 1 && sessions.length === 1 && watches.length === 1 && claimIsConsistent && edge.orgId === orgId && edge.parentSessionId === ctx.parentSessionId && edge.decisionId === decisionId && edge.envelope.parentThreadId === ctx.parentThreadId && session.orgId === orgId && session.ownerType === ctx.owner.type && session.ownerId === ctx.owner.id && watch.parentSessionId === ctx.parentSessionId && watch.parentThreadId === ctx.parentThreadId && watch.actorUserId === ctx.actorUserId && watch.orgId === orgId && typeof watch.queueItemId === "string") return { kind: "completed", result: { childSessionId, queueItemId: watch.queueItemId } };
-      return { kind: "ambiguous", error: "delegation_recovery_ambiguous: inspect the child session, envelope, watch, and security claim before retrying." };
-    });
-    if (reserved.kind === "completed") return reserved.result;
-    if (reserved.kind === "failed") throw new Error(reserved.error);
-    if (reserved.kind === "indeterminate") throw new Error(reserved.error);
-    const executionAttemptId = reserved.attemptId;
-
+    const policyDecision = executionDecision(authorization, decisionId, executionInputDigest), workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
     const delegationEnvelope: DelegationEnvelopeV1 = {
       schemaVersion: 1,
       organizationId: orgId,
@@ -463,6 +445,39 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       engineDigest: authorization.evaluator.engineDigest,
     };
     assertOneLevelDelegationEnvelope(delegationEnvelope);
+    const reserved = await reserveCanonicalExecution<DelegationReplay>(deps.db, policyDecision, executionInputDigest, parseDelegationReplay, Date.now, async (tx) => {
+      const [envelopes, sessions, watches, claims, repositories, engineResult, queueResult] = await Promise.all([
+        tx.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, childSessionId)),
+        tx.select().from(agentSessions).where(eq(agentSessions.id, childSessionId)),
+        tx.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)),
+        tx.select().from(securityCells).where(eq(securityCells.childSessionId, childSessionId)),
+        tx.select().from(sessionRepos).where(eq(sessionRepos.sessionId, childSessionId)),
+        tx.execute(sql`SELECT id, owner_type, owner_id, user_id, org_id, workspace, purpose, parent_session_id, parent_thread_id FROM engine_sessions WHERE id = ${childSessionId}`),
+        tx.execute(sql`SELECT id, session_id, content, role FROM engine_queue_items WHERE session_id = ${childSessionId}`),
+      ]);
+      const engineRows = (engineResult as { rows: { id: string; owner_type: string; owner_id: string; user_id: string; org_id: string; workspace: string; purpose: string; parent_session_id: string | null; parent_thread_id: string | null }[] }).rows, queueRows = (queueResult as { rows: { id: string; session_id: string; content: string; role: string | null }[] }).rows;
+      const edge = envelopes[0], session = sessions[0], watch = watches[0], claim = claims[0], engine = engineRows[0];
+      const queue = queueRows.find((row) => row.id === watch?.queueItemId);
+      const repositoryMatches = binding
+        ? repositories.length === 1 && repositories[0].host === (binding.host ?? "github") && repositories[0].fullName === binding.fullName && repositories[0].cloneUrl === binding.cloneUrl && repositories[0].ref === (binding.ref ?? null) && repositories[0].auth === (binding.auth ?? "auto") && repositories[0].position === 0 && repositories[0].targetDir === (computeTargetDirs([binding])[0] ?? null)
+        : repositories.length === 0;
+      const securityDispatch = ctx.parentOperationId?.startsWith("security-dispatch:") === true;
+      const claimMatches = claims.length === 1 && claim.status === "running" && claim.childSessionId === childSessionId && ctx.parentOperationId === `security-dispatch:${claim.engagementId}:${claim.id}:${claim.attempts}`;
+      const claimIsConsistent = securityDispatch ? claimMatches : claims.length === 0;
+      if (envelopes.length === 0 && sessions.length === 0 && watches.length === 0 && repositories.length === 0 && engineRows.length === 0 && queueRows.length === 0 && claimIsConsistent) return { kind: "absent" };
+      if (envelopes.length === 1 && sessions.length === 1 && watches.length === 1 && engineRows.length === 1 && claimIsConsistent && repositoryMatches
+        && edge.orgId === orgId && edge.parentSessionId === ctx.parentSessionId && edge.decisionId === decisionId && canonicalAuthorizationJson(edge.envelope) === canonicalAuthorizationJson(delegationEnvelope)
+        && session.orgId === orgId && session.userId === ctx.actorUserId && session.workspace === workspace && session.ownerType === ctx.owner.type && session.ownerId === ctx.owner.id
+        && watch.parentSessionId === ctx.parentSessionId && watch.parentThreadId === ctx.parentThreadId && watch.actorUserId === ctx.actorUserId && watch.orgId === orgId
+        && engine.org_id === orgId && engine.user_id === ctx.actorUserId && engine.workspace === workspace && engine.purpose === "child" && engine.owner_type === ctx.owner.type && engine.owner_id === ctx.owner.id && engine.parent_session_id === ctx.parentSessionId && engine.parent_thread_id === ctx.parentThreadId
+        && queue?.session_id === childSessionId && queue.content === JSON.stringify(req.prompt) && queue.role === (req.role ?? null)) return { kind: "completed", result: { childSessionId, queueItemId: watch.queueItemId } };
+      return { kind: "ambiguous", error: "delegation_recovery_ambiguous: inspect the child session, envelope, watch, queue item, repository, and security claim before retrying." };
+    });
+    if (reserved.kind === "completed") return reserved.result;
+    if (reserved.kind === "failed") throw new Error(reserved.error);
+    if (reserved.kind === "indeterminate") throw new Error(reserved.error);
+    const executionAttemptId = reserved.attemptId;
+
     // Reservation is immediately before this first authoritative side effect.
     await deps.db.insert(delegationEnvelopes).values({ childSessionId, orgId, parentSessionId: ctx.parentSessionId, envelope: delegationEnvelope, decisionId, createdAt: Date.now() });
 
@@ -484,7 +499,6 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     }
 
 
-    const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
     await mkdir(workspace, { recursive: true });
 
     if (binding) {

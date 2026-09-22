@@ -283,8 +283,14 @@ describe("buildChildSpawner", () => {
     await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null });
     const replay = await buildChildSpawner(deps, new ChildWatcher(deps))({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context);
     expect(replay).toEqual(result);
-    await api.providers.db.update(securityCells).set({ attempts: 2 });
+    const [edge] = await api.providers.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
+    await api.providers.db.delete(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
+    await api.providers.db.insert(delegationEnvelopes).values({ ...edge!, envelope: { ...edge!.envelope, actorUserId: "other-user" } });
     await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null });
+    await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
+    await api.providers.db.delete(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, result.childSessionId));
+    await api.providers.db.insert(delegationEnvelopes).values(edge!);
+    await api.providers.db.update(securityCells).set({ attempts: 2 });
     await expect(spawner({ prompt: "do the thing", title: "The Thing", sessionId: result.childSessionId }, context)).rejects.toThrow("delegation_recovery_ambiguous");
     await api.providers.db.update(securityCells).set({ attempts: 1 });
     await api.providers.db.delete(childWatches).where(eq(childWatches.childSessionId, result.childSessionId));
