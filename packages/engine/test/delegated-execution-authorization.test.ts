@@ -46,6 +46,7 @@ describe("delegated execution adapters", () => {
   it("registers every planned context without duplicates", () => {
     expect(new Set(DELEGATED_EXECUTION_REGISTRY_V1.map((entry) => `${entry.kind}:${entry.actionId}`)).size).toBe(DELEGATED_EXECUTION_REGISTRY_V1.length);
     expect(new Set(DELEGATED_EXECUTION_REGISTRY_V1.map((entry) => entry.kind))).toEqual(new Set(["delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate", "egress.connect"]));
+    expect(DELEGATED_EXECUTION_REGISTRY_V1.every((entry) => !entry.approvalSupported)).toBe(true);
   });
 
   it("omits prompt, message, command, environment, and secret content", () => {

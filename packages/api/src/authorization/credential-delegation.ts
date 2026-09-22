@@ -18,7 +18,7 @@ type GrantResult = { id: string };
 export class CredentialDelegationDeniedError extends Error {
   readonly code: "credential_delegation_denied" | "credential_delegation_approval_required";
   constructor(code: CredentialDelegationDeniedError["code"]) {
-    super(code === "credential_delegation_denied" ? "Repository credential delegation was denied." : "Repository credential delegation requires approval.");
+    super(code === "credential_delegation_denied" ? "Repository credential delegation was denied." : "Human approval is not yet supported for credential delegation. Change the policy to allow or deny.");
     this.name = "CredentialDelegationDeniedError";
     this.code = code;
   }

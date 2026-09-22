@@ -465,6 +465,8 @@ make e2e
 - Authorize credential use and delegation before secret resolution.
 - Authorize normalized egress destinations and return typed network obligations.
 - Keep sandbox, credential broker, and egress proxy enforcement in their existing boundaries.
+- Follow-up: add a durable approval channel for delegated-execution kinds. Provider wrappers currently execute outside the interactive decision-gate channel, so these kinds support only allow or deny.
+- Follow-up: require plugin execution receipts or provider idempotency. A started plugin attempt without a receipt remains indeterminate because an external side effect is not observable after a crash.
 
 **Acceptance checks**
 

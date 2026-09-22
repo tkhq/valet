@@ -99,7 +99,7 @@ export function withSandboxCapabilityAuthorization(inner: SandboxProvider, deps:
       const envelope = await deps.authorization.authorize(adapted.request);
       const plan = buildDelegatedExecutionObligationPlan(envelope.decision);
       if (envelope.decision.effect === "deny") throw new SandboxCapabilityDeniedError("sandbox_capability_denied", "Policy denied this sandbox capability. Change the sandbox settings or policy and retry.");
-      if (envelope.decision.effect === "require_approval") throw new SandboxCapabilityDeniedError("sandbox_capability_approval_unsupported", "Sandbox capability approval is not available at this boundary. Change the policy to allow or deny.");
+      if (envelope.decision.effect === "require_approval") throw new SandboxCapabilityDeniedError("sandbox_capability_approval_unsupported", "Human approval is not yet supported for sandbox capabilities. Change the policy to allow or deny.");
       const capabilityObligation = envelope.decision.obligations.some((obligation) => obligation.type === "sandbox_capabilities")
         ? plan.sandboxCapabilities
         : undefined;

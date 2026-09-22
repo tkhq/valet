@@ -21,6 +21,7 @@ const MATCHER_OPS = new Set(["eq", "neq", "regex", "in", "not_in", "gt", "gte", 
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
 const ROUTE_ACTIONS = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[1])), ROUTE_SERVICES = new Set(Object.values(API_ROUTE_DESCRIPTOR_SEEDS_V1).map((entry) => entry[0])), RESOURCE_ACTIONS = new Set(RESOURCE_ACCESS_REGISTRY.map((entry) => entry.actionId));
 const DELEGATED_KINDS: ReadonlySet<string> = new Set(DELEGATED_EXECUTION_REGISTRY_V1.map((entry) => entry.kind));
+const DELEGATED_APPROVAL_KINDS: ReadonlySet<string> = new Set(DELEGATED_EXECUTION_REGISTRY_V1.filter((entry) => entry.approvalSupported).map((entry) => entry.kind));
 const DELEGATED_ACTIONS = new Map(DELEGATED_EXECUTION_REGISTRY_V1.map((entry) => [`${entry.kind}:${entry.actionId}`, entry]));
 const POLICY_PATH = "policies/current-action-policy.rego";
 const DATA_PATH = "data/current-action-policy.json";
@@ -260,7 +261,7 @@ function validateSnapshot(snapshot: CurrentPolicySourceSnapshotV1): void {
     if (row.authorizationKind === "api.route" && (row.paramMatchers.length || row.riskLevel !== undefined || (row.actionId !== undefined ? !ROUTE_ACTIONS.has(row.actionId) : row.service === undefined || !ROUTE_SERVICES.has(row.service)))) fail("unknown_route_descriptor", `Rule ${row.id} does not target a registered route action or service.`);
     if (row.authorizationKind === "resource.access" && (row.paramMatchers.length || row.actionId === undefined || !RESOURCE_ACTIONS.has(row.actionId))) fail("unknown_resource_descriptor", `Rule ${row.id} does not target a registered resource operation.`);
     if (row.authorizationKind !== undefined && DELEGATED_KINDS.has(row.authorizationKind) && (row.riskLevel !== undefined || row.actionId === undefined || !DELEGATED_ACTIONS.has(`${row.authorizationKind}:${row.actionId}`))) fail("unknown_delegated_descriptor", `Rule ${row.id} does not target a registered delegated execution operation.`);
-    if (row.authorizationKind !== undefined && DELEGATED_KINDS.has(row.authorizationKind) && row.mode === "require_approval") fail("unsupported_approval", `Rule ${row.id} targets a context without durable approval replay.`);
+    if (row.authorizationKind !== undefined && DELEGATED_KINDS.has(row.authorizationKind) && !DELEGATED_APPROVAL_KINDS.has(row.authorizationKind) && row.mode === "require_approval") fail("unsupported_approval", `Human approval is not yet supported for ${row.authorizationKind}; choose allow or deny.`);
     validateMode(row.id, row.mode);
     if ("appliesIn" in row) validatePolicySemantics(row);
     const valueComplexity = validateMatchers(row.id, row.paramMatchers);

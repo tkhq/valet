@@ -51,7 +51,9 @@ describe("credential use provider authorization", () => {
     const authorize = vi.fn(async (request) => envelope(request.requestId, effect));
     const provider = withCredentialUseAuthorization(inner, { db: pg.appDb, authorization: { authorize }, binding: binding(), now: () => 1 });
 
-    await expect(provider.get()).rejects.toBeInstanceOf(CredentialUseDeniedError);
+    const error = await provider.get().catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(CredentialUseDeniedError);
+    if (effect === "require_approval") expect(String(error)).toContain("require approval on the action instead");
     expect(get).not.toHaveBeenCalled();
     expect(JSON.stringify(authorize.mock.calls)).not.toContain("SECRET-CANARY");
   });

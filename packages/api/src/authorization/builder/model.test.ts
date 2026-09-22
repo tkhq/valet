@@ -150,7 +150,7 @@ describe("policy draft validation", () => {
   it("models approval defaults and reports rule matcher complexity once", () => {
     const value = draft(), rule = value.rules[0], tool: PolicyDraftV1 = { ...value, rules: [{ ...rule, effect: "require_approval", approval: undefined }] };
     const credential: PolicyDraftV1 = { ...value, rules: [{ ...rule, context: "credential.use", target: { "action.id": "credential.resolve" }, matcherGroups: [], appliesIn: undefined, effect: "require_approval", approval: { tier: "human", replay: "once" } }] };
-    expect(validatePolicyDraft(tool)).toEqual([]); expect(validatePolicyDraft(credential)).toEqual([]);
+    expect(validatePolicyDraft(tool)).toEqual([]); expect(validatePolicyDraft(credential).map(issue => issue.code)).toContain("unsupported_approval");
     const groups = Array.from({ length: 2 }, (_, group) => ({ id: "g" + group, mode: "all" as const, matchers: Array.from({ length: 9 }, (_, row) => ({ id: "m" + group + "-" + row, field: "parameters.x", operator: "eq" as const, value: row })) }));
     expect(validatePolicyDraft({ ...value, rules: [{ ...rule, matcherGroups: groups }] }).filter(issue => issue.code === "complexity_limit" && issue.path.includes("matcherGroups"))).toHaveLength(1);
     expect(POLICY_CONTEXTS["tool.action"]).toMatchObject({ publishable: true, humanApproval: true, obligations: [] });
@@ -158,6 +158,11 @@ describe("policy draft validation", () => {
     expect(POLICY_CONTEXTS["resource.access"]).toMatchObject({ publishable: true, obligations: [] });
     expect(POLICY_CONTEXTS["egress.connect"]).toMatchObject({ publishable: false, humanApproval: false });
     expect(Object.values(POLICY_CONTEXTS).filter(context => context.publishable)).toHaveLength(9);
+  });
+
+  it.each(["delegation.create", "agent.signal", "sandbox.capability", "credential.use", "credential.delegate"] as const)("rejects unsupported %s approval with a specific issue", (context) => {
+    const value = draft(), rule = { ...value.rules[0], context, target: { "action.id": POLICY_CONTEXTS[context].targets[0].actionId }, matcherGroups: [], appliesIn: undefined, effect: "require_approval" as const, approval: { tier: "human", replay: "once" as const } };
+    expect(validatePolicyDraft({ ...value, rules: [rule] })).toContainEqual(expect.objectContaining({ code: "unsupported_approval", message: `Human approval is not yet supported for ${context}; choose allow or deny.` }));
   });
 
   it("binds route drafts to exact approval-capable descriptors", () => {

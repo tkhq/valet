@@ -34,10 +34,10 @@ const descriptors = (
 ): readonly DelegatedExecutionDescriptorV1[] => actions.map((actionId) => Object.freeze({ schemaVersion: 1, kind, service, actionId, riskLevel, approvalSupported }));
 
 export const DELEGATED_EXECUTION_REGISTRY_V1 = Object.freeze([
-  ...descriptors("delegation.create", "delegation", "high", true, DELEGATION_ACTIONS),
+  ...descriptors("delegation.create", "delegation", "high", false, DELEGATION_ACTIONS),
   ...descriptors("agent.signal", "agent", "medium", false, AGENT_SIGNAL_ACTIONS),
-  ...descriptors("sandbox.capability", "sandbox", "high", true, SANDBOX_CAPABILITY_ACTIONS),
-  ...descriptors("credential.use", "credential", "high", true, CREDENTIAL_ACTIONS.filter((id) => id !== "credential.delegate")),
+  ...descriptors("sandbox.capability", "sandbox", "high", false, SANDBOX_CAPABILITY_ACTIONS),
+  ...descriptors("credential.use", "credential", "high", false, CREDENTIAL_ACTIONS.filter((id) => id !== "credential.delegate")),
   ...descriptors("credential.delegate", "credential", "critical", false, ["credential.delegate"]),
   ...descriptors("egress.connect", "egress", "high", false, EGRESS_ACTIONS),
 ]);

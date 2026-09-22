@@ -118,7 +118,7 @@ export async function authorizeCredentialUseOperation<T>(
     throw new CredentialUseDeniedError("credential_use_denied", "Policy denied this credential use. Change the credential policy or action and retry.");
   }
   if (envelope.decision.effect === "require_approval") {
-    throw new CredentialUseDeniedError("credential_use_approval_required", "This credential use requires approval. Approve the action and retry.");
+    throw new CredentialUseDeniedError("credential_use_approval_required", "Human approval is not yet supported for credential use. Change the credential policy to allow or deny. For plugin actions, require approval on the action instead.");
   }
   if (plan.credentialOwner && (plan.credentialOwner.ownerType !== deps.binding.owner.type || plan.credentialOwner.ownerId !== deps.binding.owner.id)) {
     throw new CredentialUseDeniedError("credential_use_denied", "Policy restricted this credential to a different owner. Select an allowed credential and retry.");

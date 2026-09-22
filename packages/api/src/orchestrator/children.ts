@@ -255,7 +255,7 @@ export class DelegationEnvelopeIntegrityError extends Error {
 class DelegationPolicyDeniedError extends Error {
   readonly code: "authorization_denied" | "authorization_approval_unsupported";
   constructor(code: DelegationPolicyDeniedError["code"]) {
-    super(code === "authorization_denied" ? "Policy denied child delegation." : "Delegation approval is unsupported at this boundary.");
+    super(code === "authorization_denied" ? "Policy denied child delegation." : "Human approval is not yet supported for delegated execution. Change the policy to allow or deny.");
     this.name = "DelegationPolicyDeniedError";
     this.code = code;
   }
