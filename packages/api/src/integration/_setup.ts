@@ -191,6 +191,13 @@ export interface BootTestApiOpts {
    * when `imageBuilder` is unset), and the content-sync reader. Point it at
    * `startGithubFixture()`'s `url`. */
   githubApiUrl?: string;
+  /** Host name a sandbox uses to reach this API. The harness joins it with
+   * its own port and forwards the result as `EngineHostOpts.sandboxApiUrl`,
+   * the `VALET_API_URL` and credential-helper base inside the sandbox. A
+   * test on a real docker sandbox sets `host.docker.internal`, the name
+   * `resolveSandboxApiUrl` gives the docker backend. Unset by default, so
+   * `EngineHost` keeps its local dev default. */
+  sandboxApiHost?: string;
 }
 
 /** Pre-allocates a port for the app to bind. `EngineHost` needs its
@@ -355,6 +362,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     onePassword,
     db,
     apiBaseUrl,
+    ...(opts.sandboxApiHost ? { sandboxApiUrl: `http://${opts.sandboxApiHost}:${port}` } : {}),
     sandboxTokenMaster: "test-key",
     plugins,
     actionPluginByService,
