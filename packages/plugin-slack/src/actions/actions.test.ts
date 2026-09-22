@@ -772,6 +772,44 @@ describe('slack actions', () => {
     });
   });
 
+  it('fetch_file normalizes PDF MIME parameters and case', async () => {
+    const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    fetchMock.mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'Content-Type': 'Application/PDF; charset=binary' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/report.pdf' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '## Report' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: '## Report', mimetype: 'application/pdf' } });
+  });
+
+  it('fetch_file bounds an unknown-length generic stream before PDF routing', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(20 * 1024 * 1024));
+        controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/unknown' },
+      pluginCtx({ extractDocument: async () => ({ markdown: 'must not extract' }) }),
+    );
+
+    expect(result).toMatchObject({ success: true, data: { mimetype: 'application/octet-stream' } });
+    expect(cancelled).toBe(true);
+  });
+
   it('fetch_file says why a scanned PDF has no text', async () => {
     const bytes = new TextEncoder().encode('%PDF-1.4 ...');
     fetchMock.mockResolvedValueOnce(

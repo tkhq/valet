@@ -418,8 +418,80 @@ describe('drive actions', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       success: false,
-      error: 'Cannot download binary file (image/png). Only text-based and Google Workspace files are supported.',
+      error: 'Cannot download binary file (image/png). Only text, PDF, and Google Workspace files are supported.',
     });
+  });
+
+  it('download_file reads a PDF through the shared extractor', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: '2000000' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { status: 200 }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => ({ markdown: '# Mutual NDA' }) }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [mediaUrl] = fetchMock.mock.calls[1] as [string];
+    expect(mediaUrl).toContain('/files/f1?');
+    expect(mediaUrl).toContain('alt=media');
+    expect(result).toEqual({
+      success: true,
+      data: { name: 'NDA.pdf', mimeType: 'application/pdf', content: '# Mutual NDA' },
+    });
+  });
+
+  it('download_file bounds media when metadata is stale', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(20 * 1024 * 1024));
+        controller.enqueue(new Uint8Array(6 * 1024 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(body, { status: 200 }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('exceeds max');
+    expect(cancelled).toBe(true);
+  });
+
+  it('download_file says when a PDF has no text layer', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'scan.pdf', mimeType: 'application/pdf', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]), { status: 200 }));
+
+    const result = await action('drive.download_file').execute(
+      { fileId: 'f1' },
+      pluginCtx({ extractDocument: async () => null }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('no text layer');
+  });
+
+  it('download_file names a missing extractor instead of rejecting the PDF as binary', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'NDA.pdf', mimeType: 'application/pdf', size: '100' }),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]), { status: 200 }));
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF text extraction is not available');
   });
 
   it('create_from_template copies the template and applies replacements', async () => {

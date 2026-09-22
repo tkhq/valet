@@ -285,5 +285,15 @@ export {
 } from "./thread.js";
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
+export {
+  MAX_PDF_DOCUMENT_BYTES,
+  normalizeDocumentMime,
+  isTextDocumentMime,
+  isPdfDocument,
+  readResponseBytes,
+  extractDownloadedPdf,
+  type BoundedResponseBytes,
+  type DocumentExtractor,
+} from "./document-text.js";
 export { formatTranscriptText } from "./transcript-formatter.js";
 export { nestedKubernetesDecision, NESTED_KUBERNETES_IDENTITY, NESTED_KUBERNETES_UNSUPPORTED } from "./sandbox/nested-kubernetes.js";

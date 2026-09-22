@@ -41,7 +41,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 - `github.get_repository` — get repo details by owner/name
 - `github.create_repository` — create a new repository
 - `github.fork_repository` — fork a repository
-- `github.read_repo_file` — read a file from a repository
+- `github.read_repo_file` — read a file from a repository. A PDF comes back as extracted text.
 
 ### Issues
 - `github.list_issues` — list issues for a repo

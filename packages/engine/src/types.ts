@@ -738,6 +738,9 @@ export interface ToolContext {
    * Returns `null` when the document holds no extractable text (a scanned
    * page), and throws when extraction is unavailable. Absent on hosts that
    * wire no extractor — callers must degrade, not fail.
+   *
+   * A plugin that has downloaded bytes calls `readDownloadedDocument`. It
+   * does not grow a private PDF branch.
    */
   extractDocument?: (doc: {
     data: Uint8Array;

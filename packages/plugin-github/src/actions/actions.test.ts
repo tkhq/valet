@@ -610,6 +610,59 @@ describe("github.read_repo_file", () => {
     expect(result.error).toContain("Correct the path");
     expect(result.error).toContain("read access to that repository");
   });
+
+  it("reads a PDF through the shared extractor", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        body: { type: "file", encoding: "base64", path, size: bytes.length, content: bytes.toString("base64") },
+      }),
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/nda.pdf" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# NDA" }) },
+    );
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(isRecord(result.data) ? result.data.content : undefined).toBe("# NDA");
+  });
+
+  it("requests raw content for a PDF larger than the Contents API limit", async () => {
+    const bytes = new Uint8Array(1_048_577);
+    bytes.set(Buffer.from("%PDF-1.4"));
+    useFixture({
+      readFile: (_owner, _repo, path, accept) =>
+        accept?.includes(".raw")
+          ? { body: bytes, headers: { "Content-Type": "application/pdf" } }
+          : { body: { type: "file", encoding: "none", path, size: bytes.length, content: "" } },
+    });
+
+    const result = await findAction("github.read_repo_file").execute(
+      { owner: "acme", repo: "handbook", path: "legal/large.pdf" },
+      { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# Large PDF" }) },
+    );
+
+    expect(result).toMatchObject({ success: true, data: { content: "# Large PDF" } });
+    expect(fixture?.calls).toHaveLength(2);
+    expect(fixture?.calls[1].acceptHeader).toContain(".raw");
+  });
+
+  it("names a missing extractor instead of returning PDF bytes as text", async () => {
+    const bytes = Buffer.from("%PDF-1.4 fixture");
+    useFixture({
+      readFile: (_owner, _repo, path) => ({
+        body: { type: "file", encoding: "base64", path, size: bytes.length, content: bytes.toString("base64") },
+      }),
+    });
+
+    const result = await read("legal/nda.pdf");
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toContain("PDF text extraction is not available");
+  });
 });
 
 describe("github.create_review", () => {

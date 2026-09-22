@@ -58,7 +58,7 @@ Same pattern as the Docs port (see `2026-04-23-google-workspace-docs-port-design
 - **Upload endpoint:** `https://www.googleapis.com/upload/drive/v3` for file creation with content
 - **`create_document`** is the most complex tool: creates a Doc via Docs API, optionally inserts markdown content via batchUpdate, then moves to target folder via Drive API. This combines Docs + Drive APIs in one action.
 - **`create_from_template`** copies a template doc then does find-and-replace on placeholders. Two API calls chained.
-- **`download_file`** replaces our `read_file` but is simpler: exports Google Workspace files as text, downloads regular files as text, rejects binary files. No PDF extraction.
+- **`download_file`** replaces our `read_file` but is simpler: exports Google Workspace files as text, downloads regular text files, rejects unsupported binary files, and extracts PDF text. PDF media is read with a byte cap before extraction. It uses `extractDownloadedPdf`. See `docs/specs/2026-09-17-channel-document-attachments-design.md`.
 
 ## Files Changed
 

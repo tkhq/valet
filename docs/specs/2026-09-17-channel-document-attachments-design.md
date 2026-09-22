@@ -113,6 +113,31 @@ metadata-only fallback:
 The metadata-only fallback stays for formats the api cannot read, with its
 note corrected to name PDFs as fetchable.
 
+## Shared document read
+
+`extractDownloadedPdf` (`packages/engine/src/document-text.ts`) is the one
+place that sends downloaded PDF bytes to `extractDocument`. A plugin does
+not grow a private PDF extractor branch.
+
+`readResponseBytes` reads a response stream only up to its byte cap. It
+checks each chunk when Content-Length is absent, invalid, or stale. A
+declared PDF is routed to the extractor. A generic type
+(`application/octet-stream`) is a PDF only when its bytes start with
+`%PDF-`. The PDF cap is 25 MB, the same budget the Slack transport uses
+for a document.
+
+Callers:
+
+- `slack.fetch_file`
+- `drive.download_file`. A PDF uses the 25 MB cap unless the caller sets
+  `maxSizeBytes`. Text stays at 1 MB.
+- `github.read_repo_file`. It requests raw Contents API media for every PDF,
+  because GitHub omits inline bytes from PDFs over 1 MB. It reads the raw
+  stream with the 25 MB cap before it extracts text.
+
+A new downloader calls the same function. Adding a format other than PDF
+is still one branch, and that branch is `extractDocumentText`.
+
 ## Tests
 
 - `packages/api/src/services/channel-file-ingest.test.ts`: a real one-page
@@ -125,6 +150,14 @@ note corrected to name PDFs as fetchable.
 - `packages/plugin-slack/src/actions/actions.test.ts`: `fetch_file` returns
   extracted text, reports a scan, reports a missing extractor, and keeps the
   metadata answer for a zip.
+- `packages/engine/test/document-text.test.ts`: the shared reader normalizes
+  MIME types, identifies generic PDF bytes, and stops an unknown-length
+  response at its byte cap.
+- `packages/plugin-google-workspace`: `drive.download_file` returns extracted
+  PDF text, rejects an image, and stops a media stream that exceeds stale
+  metadata.
+- `packages/plugin-github`: `github.read_repo_file` requests raw content for
+  a PDF larger than the Contents API inline limit and returns extracted text.
 
 ## Not covered
 

@@ -1,9 +1,14 @@
 import { Type } from 'typebox';
 import type { Static, TSchema } from 'typebox';
-import type {
-  PluginAction,
-  PluginActionContext,
-  PluginActionResult,
+import {
+  extractDownloadedPdf,
+  isPdfDocument,
+  isTextDocumentMime,
+  MAX_PDF_DOCUMENT_BYTES,
+  readResponseBytes,
+  type PluginAction,
+  type PluginActionContext,
+  type PluginActionResult,
 } from '@valet/engine';
 import { insertMarkdown } from './docs-markdown.js';
 
@@ -68,25 +73,6 @@ async function driveError(res: Response): Promise<{ success: false; error: strin
 
 function isGoogleWorkspaceMimeType(mimeType: string): boolean {
   return mimeType.startsWith('application/vnd.google-apps.');
-}
-
-function isTextMimeType(mimeType: string): boolean {
-  if (mimeType.startsWith('text/')) return true;
-  const textTypes = [
-    'application/json',
-    'application/xml',
-    'application/javascript',
-    'application/typescript',
-    'application/x-yaml',
-    'application/x-sh',
-    'application/sql',
-    'application/graphql',
-    'application/xhtml+xml',
-    'application/ld+json',
-    'application/manifest+json',
-    'application/vnd.google-apps.script+json',
-  ];
-  return textTypes.includes(mimeType);
 }
 
 function getExportMimeType(googleMimeType: string): string | null {
@@ -919,21 +905,20 @@ const deleteFileAction = action(
 const downloadFile = action(
   Type.Object({
     fileId: Type.String({ description: 'File ID' }),
-    maxSizeBytes: Type.Optional(Type.Integer({ description: 'Max bytes to download (default: 1MB)' })),
+    maxSizeBytes: Type.Optional(Type.Integer({ description: 'Max bytes to download. Default: 1MB for text, 25MB for a PDF.' })),
   }),
 )({
   id: 'drive.download_file',
   name: 'Download File',
   description:
     'Downloads text content of a file. Exports Google Workspace files to text format. ' +
-    'Rejects binary files.',
+    'Reads a PDF through the shared document reader. Rejects other binary files.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const token = await getAccessToken(ctx);
     if (!token) return { success: false, error: 'Missing access token' };
     try {
       const { fileId, maxSizeBytes } = args;
-      const maxBytes = maxSizeBytes || 1_048_576; // 1MB default
 
       // Get metadata to check type and size
       const metaQs = new URLSearchParams({
@@ -943,6 +928,10 @@ const downloadFile = action(
       const metaRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${metaQs}`, token);
       if (!metaRes.ok) return driveError(metaRes);
       const meta = (await metaRes.json()) as DriveFile;
+      const pdf = isPdfDocument({ mimeType: meta.mimeType });
+      // A PDF uses the shared document cap unless the caller sets its own.
+      // Text exports stay at 1MB.
+      const maxBytes = maxSizeBytes || (pdf ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
 
       // Google Workspace files: export as text
       if (isGoogleWorkspaceMimeType(meta.mimeType)) {
@@ -973,16 +962,13 @@ const downloadFile = action(
         };
       }
 
-      // Regular text files: download content
-      if (!isTextMimeType(meta.mimeType)) {
-        return {
-          success: false,
-          error: `Cannot download binary file (${meta.mimeType}). Only text-based and Google Workspace files are supported.`,
-        };
+      const binaryError = `Cannot download binary file (${meta.mimeType}). Only text, PDF, and Google Workspace files are supported.`;
+      if (!isTextDocumentMime(meta.mimeType) && !pdf) {
+        return { success: false, error: binaryError };
       }
 
-      const fileSize = meta.size ? parseInt(meta.size) : 0;
-      if (fileSize > maxBytes) {
+      const fileSize = meta.size ? parseInt(meta.size, 10) : 0;
+      if (Number.isFinite(fileSize) && fileSize > maxBytes) {
         return {
           success: false,
           error: `File is ${fileSize} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
@@ -992,6 +978,27 @@ const downloadFile = action(
       const dlQs = new URLSearchParams({ alt: 'media', supportsAllDrives: 'true' });
       const dlRes = await driveFetch(`/files/${encodeURIComponent(fileId)}?${dlQs}`, token);
       if (!dlRes.ok) return driveError(dlRes);
+
+      if (pdf) {
+        const downloaded = await readResponseBytes(dlRes, maxBytes);
+        if (!downloaded.ok) {
+          return {
+            success: false,
+            error: `File is ${downloaded.size} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
+          };
+        }
+        const read = await extractDownloadedPdf({
+          data: downloaded.data,
+          name: meta.name,
+          extractDocument: ctx.extractDocument,
+        });
+        if (!read.ok) return { success: false, error: read.error };
+        return {
+          success: true,
+          data: { name: meta.name, mimeType: meta.mimeType, content: read.content },
+        };
+      }
+
       const content = await dlRes.text();
       return {
         success: true,

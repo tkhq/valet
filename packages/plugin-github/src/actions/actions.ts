@@ -1,10 +1,13 @@
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import type {
-  ActionPlugin,
-  PluginAction,
-  PluginActionContext,
-  PluginActionResult,
+import {
+  extractDownloadedPdf,
+  MAX_PDF_DOCUMENT_BYTES,
+  readResponseBytes,
+  type ActionPlugin,
+  type PluginAction,
+  type PluginActionContext,
+  type PluginActionResult,
 } from "@valet/engine";
 import { Octokit } from "octokit";
 import { parseJobLog } from "./parse-job-log.js";
@@ -2233,7 +2236,7 @@ const readRepoFile = action(Type.Object({
   }))({
   id: "github.read_repo_file",
   name: "Read Repository File",
-  description: "Read a file from a GitHub repository without cloning it",
+  description: "Read a file from a GitHub repository without cloning it. A PDF comes back as extracted text.",
   riskLevel: "low",
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
@@ -2245,13 +2248,57 @@ const readRepoFile = action(Type.Object({
       if (Array.isArray(data) || data.type !== "file") {
         return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
       }
+      const name = typeof data.path === "string" ? data.path : args.path;
+      if (name.toLowerCase().endsWith(".pdf")) {
+        // GitHub omits content for files over 1 MB. Request raw media rather
+        // than treating its empty metadata field as a successful PDF read.
+        const rawResponse = await octokit.request(
+          "GET /repos/{owner}/{repo}/contents/{path}",
+          {
+            owner: args.owner,
+            repo: args.repo,
+            path: args.path,
+            ref: args.ref,
+            mediaType: { format: "raw" },
+            request: { parseSuccessResponseBody: false },
+          },
+        );
+        if (!(rawResponse.data instanceof ReadableStream)) {
+          return { success: false, error: `Could not download ${name}. Try again.` };
+        }
+        // Octokit exposes the raw response stream when parsing is disabled.
+        const headers = new Headers();
+        for (const [header, value] of Object.entries(rawResponse.headers)) headers.set(header, String(value));
+        const downloaded = await readResponseBytes(
+          new Response(rawResponse.data as ReadableStream<Uint8Array>, { headers }),
+          MAX_PDF_DOCUMENT_BYTES,
+        );
+        if (!downloaded.ok) {
+          return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
+        }
+        const read = await extractDownloadedPdf({
+          data: downloaded.data,
+          name,
+          extractDocument: ctx.extractDocument,
+        });
+        if (!read.ok) return { success: false, error: read.error };
+        return {
+          success: true,
+          data: {
+            path: data.path,
+            repo: `${args.owner}/${args.repo}`,
+            ref: args.ref,
+            size: data.size,
+            content: read.content,
+          },
+        };
+      }
       const raw = data.content ?? "";
-      const content =
+      const bytes =
         data.encoding === "base64"
-          ? new TextDecoder().decode(
-              Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0)),
-            )
-          : raw;
+          ? Uint8Array.from(atob(raw.replace(/\n/g, "")), (c) => c.charCodeAt(0))
+          : new TextEncoder().encode(raw);
+      const content = new TextDecoder().decode(bytes);
       return {
         success: true,
         data: {

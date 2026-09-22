@@ -27,7 +27,7 @@ You have full access to Google Drive through the Google Workspace integration. D
 - **`drive.move_file`** — Move a file or folder to a different folder.
 - **`drive.rename_file`** — Rename a file or folder.
 - **`drive.delete_file`** — Permanently delete a file (cannot be undone).
-- **`drive.download_file`** — Download text content of a file. Auto-exports Google Workspace files (Docs to text, Sheets to CSV). Rejects binary files.
+- **`drive.download_file`** — Download text content of a file. Auto-exports Google Workspace files (Docs to text, Sheets to CSV). Reads a PDF as text. Rejects other binary files.
 - **`drive.create_from_template`** — Copy a template document and optionally replace placeholder text (e.g. `{{name}}` to `Alice`).
 
 ## Common Patterns
@@ -182,5 +182,5 @@ Your organization may have a Drive Labels guard enabled. When active, only files
 - **Search broadly**: `search_files` searches both file names and content. It's the best starting point.
 - **Use document-specific search**: `list_documents` and `search_documents` are faster when you know you need a Google Doc.
 - **Browse folders**: `list_folder_contents` shows folders first, then files — good for navigation.
-- **Binary files are rejected**: `download_file` only works with text-based and Google Workspace files.
+- **PDFs are read as text**: `download_file` returns the text of a PDF. It still rejects other binary files, such as images and zip archives.
 - **Delete is permanent**: `delete_file` cannot be undone. Confirm with the user before deleting.
