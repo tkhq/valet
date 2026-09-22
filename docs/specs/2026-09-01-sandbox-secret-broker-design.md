@@ -197,9 +197,21 @@ the body, and the body carries the message the API composed.
 `valet-secrets` exists only where the `credential-scripts` prep step runs, which
 is where a session has a `SpecProvider`. The coding prompt is composed per
 build (`codingSystemPrompt({ secretsCli })`): a build with a `SpecProvider`
-is told how to use the command, and a build without one (a workflow session
-node) is told it has no secrets command and must ask. Orchestrators run no
-prep either and carry their own rule (below).
+is told how to use the command, and a build without one (an unbound build on
+a non-isolated provider) is told it has no secrets command and must ask.
+Orchestrators run no prep and carry their own rule (below).
+
+Workflow session nodes run prep on isolated providers since 2026-09-22, so
+they have the command. A workflow session has no `agent_sessions` row. The
+broker reads its owner from the workflow run (`workflows/session-owner.ts`)
+and applies the owner rule of decision 8 to it. A team-owned run gets the team
+and org scopes. A user-owned run reaches the personal scope when the token
+holder is the run owner. That is true for every run of a user-owned workflow,
+because an unattended start mints its token for the owner. So a scheduled,
+event or webhook run of your own workflow can resolve personal items. This is
+an accepted risk: the same run's tool nodes and a user-owned orchestrator's
+children already reach that scope. A run that cannot be read gets the org
+scope alone.
 
 The orchestrator needs its own rule, and one sentence inside the Delegation
 section was not enough. Asked for a 1Password value, it ran `op read` — the

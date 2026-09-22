@@ -16,12 +16,13 @@
  * is always recoverable. From `runId` it loads the `WorkflowRun` row (for
  * `owner`/`params.workflowId`) and then the parent `workflow_definitions`
  * row (for `orgId` — `workflow_runs` doesn't carry its own `orgId` column,
- * decision 17). `actorUserId` has no natural value for a team/org-owned
- * run (there's no "acting user" — the run was started by a principal, not a
- * live user session), so it's synthesized as `owner.id` for a user owner or
- * `{ownerType}:{ownerId}` otherwise; `CreateSessionOptions.userId` is only
- * used by the engine for bookkeeping/defaults, never for auth, so this
- * placeholder is safe.
+ * decision 17). `actorUserId` is the run's recorded actor, the member who
+ * clicked Run. An unattended start (schedule, event, webhook) records none,
+ * so it is synthesized: `owner.id` for a user owner, `{ownerType}:{ownerId}`
+ * otherwise. It also becomes the principal of the session's sandbox token.
+ * The sandbox-facing routes that authorize git and secrets read the run's
+ * owner instead (`workflows/session-owner.ts`), so a member who clicked Run
+ * never lends a team-owned run their credentials.
  *
  * Every method (not just `createSession`) re-resolves this context via
  * `EngineHost.workflowSessionFor`, which is itself idempotent (cache hit
@@ -210,11 +211,11 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
 }
 
 /**
- * A workflow run's owner is a `Principal` (user/team/org), never a live
- * user session — there's no "acting user" to attribute engine bookkeeping
- * to. `CreateSessionOptions.userId`/`actorUserId` is only used by the
- * engine for bookkeeping/defaults, never for auth, so `owner.id` (user) or
- * `{ownerType}:{ownerId}` (team/org) is a safe placeholder. Shared between
+ * The actor of an unattended run. Its owner is a `Principal`
+ * (user/team/org), and no member clicked Run, so `owner.id` (user) or
+ * `{ownerType}:{ownerId}` (team/org) stands in for one. The sandbox-facing
+ * credential routes do not trust this value for a workflow session; they
+ * read the run's owner (`workflows/session-owner.ts`). Shared between
  * `resolveRunContext` and `promptOrchestrator` so both derive the same
  * value from a `Principal` the same way.
  */

@@ -32,7 +32,6 @@ import {
   type PluginStore,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
-import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import {
@@ -59,9 +58,9 @@ import {
 } from "../services/github-tokens.js";
 import {
   githubTokenArgsForOwner,
-  isUsableGithubRow,
   primaryRepoBinding,
   resolveSessionGitHubToken,
+  usableTeamGithubRow,
 } from "../services/session-github-token.js";
 import {
   repoCredentialCommands,
@@ -1860,22 +1859,15 @@ export class EngineHost {
           // workflow tool node reads it (`plugins/action-invoker.ts`); the
           // App installation is the fallback behind it. `github` declares no
           // org credential, so the policy stops at the team row and the
-          // org-scoped 1Password lookup. An unhealthy row is skipped, not
-          // surfaced: the App answer below still names the corrective step.
-          let teamRow: StoredCredential | null = null;
-          try {
-            teamRow = await resolveTeamCredentialRead(
-              { credentials, onePassword },
-              { orgId, teamId: owner.id, userId, scopes },
-              "github",
-              orgFallbackPolicy(this.opts.plugins, "github"),
-            );
-          } catch (err) {
-            // A delegation whose member left the team is skipped like an
-            // unhealthy row: the App answer below still names the fix.
-            if (!(err instanceof CredentialReferenceBrokenError)) throw err;
-          }
-          if (isUsableGithubRow(teamRow)) return teamRow;
+          // org-scoped 1Password lookup. The sandbox git credential route
+          // reads a team-owned workflow sandbox's row through the same
+          // helper, so git and these tools agree.
+          const teamRow = await usableTeamGithubRow(
+            { credentials, onePassword },
+            { orgId, teamId: owner.id, userId, scopes },
+            orgFallbackPolicy(this.opts.plugins, "github"),
+          );
+          if (teamRow) return teamRow;
         }
         const binding = await primaryRepoBinding(db, sessionId);
         const resolved = await resolveSessionGitHubToken(
@@ -1997,7 +1989,9 @@ export class EngineHost {
   private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<ResolvedRepoPrebuildFlags> {
     const primary = meta.repos?.[0];
     const resolved = await resolveRepoResources(this.opts.db, meta.orgId, primary, () => this.resolveRepoYamlFlags(sessionId, meta));
-    if (resolved.outcome !== "error" && this.opts.db) {
+    // Only a repository declares the flag. With no primary binding there is
+    // nothing to persist, and a workflow session has no row to write.
+    if (primary && resolved.outcome !== "error" && this.opts.db) {
       await this.opts.db.update(agentSessions)
         .set({ kubernetes: resolved.kubernetes === true })
         .where(eq(agentSessions.id, sessionId));
@@ -3858,19 +3852,23 @@ export class EngineHost {
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
-    // Workspace prep for the session's sandbox (credential helper, `gh`
-    // shim, `valet-secrets`, git identity). Until 2026-09-22 this build
-    // wired no `specProvider`, so a workflow sandbox never ran prep: the
-    // `github.*` tools worked through `credentialResolver`, but an ad-hoc
-    // `git push` had no credential helper and failed anonymously. A
-    // workflow session has no `agent_sessions` row and no repo bindings,
-    // so the meta is assembled from the build opts the way `buildChild`
-    // does; `loadSessionMeta` then supplies the git identity for a
-    // user-owned run and leaves it unset (generic identity) for a team or
-    // org owner, whose `actorUserId` names no user.
+    // Workspace prep for the session's sandbox: the git credential helper,
+    // the `gh` shim, `valet-secrets` and a git identity. Until 2026-09-22
+    // this build wired no `specProvider`, so a workflow sandbox never ran
+    // prep. The `github.*` tools worked through `credentialResolver`, but
+    // `git push` had no credential helper and failed anonymously.
+    //
+    // A workflow session has no `agent_sessions` row and no repo bindings,
+    // so the meta is assembled from the build opts, as `buildChildSession`
+    // does. The identity follows the OWNER, like credential resolution
+    // (`workflow_runs.actor_user_id` is display and audit only): a
+    // user-owned run commits as that user, and a team- or org-owned run
+    // commits under the generic identity even when a member clicked Run.
+    // `loadSessionMeta` finds no user for `team:{id}`/`org:{id}`, so prep
+    // falls back to the generic name and email.
     const metaSource = {
       id: sessionId,
-      userId: opts.actorUserId,
+      userId: opts.owner.type === "user" ? opts.owner.id : `${opts.owner.type}:${opts.owner.id}`,
       orgId: opts.orgId,
       workspace: opts.workspace,
       profile: "headless" as const,
