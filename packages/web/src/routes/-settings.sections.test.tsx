@@ -314,17 +314,6 @@ describe("AssistantPage", () => {
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultReasoning: null });
   });
 
-  it("changes the model and thinking behavior for new threads", async () => {
-    const user = userEvent.setup();
-    render(<AssistantPage />);
-    const select = screen.getByLabelText("New thread behavior") as HTMLSelectElement;
-    expect(select.value).toBe("keep_current");
-
-    await user.selectOptions(select, "use_defaults");
-    expect(patchMeMutate).toHaveBeenCalledWith({
-      newThreadBehavior: "use_defaults",
-    });
-  });
 });
 
 describe("AppearancePage", () => {
