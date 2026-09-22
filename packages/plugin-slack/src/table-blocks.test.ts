@@ -82,6 +82,27 @@ describe('tablesToTableBlocks', () => {
     expect(blocks?.[4]).toEqual({ type: 'markdown', text: '- tail' });
   });
 
+  it('keeps indented code before a table intact', () => {
+    const source = '    const x = 1;\n\n| A |\n|-|\n| b |';
+    expect(tablesToTableBlocks(source, 50)?.[0]).toEqual({ type: 'markdown', text: '    const x = 1;' });
+  });
+
+  it.each([
+    ['a body cell', '| a |\n|-|\n| ' + '!['.repeat(300) + ']()'.repeat(300) + ' |'],
+    ['a header cell', '| ' + '!['.repeat(300) + ']()'.repeat(300) + ' |\n|-|\n| b |'],
+  ])('keeps the Markdown block when %s exceeds the parse budget', (_name, source) => {
+    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+  });
+
+  it('renders a cell that lists many linked entries within the parse budget', () => {
+    const entries = Array.from({ length: 12 }, (_, i) => `[tkhq/mono#${8200 + i}](https://github.com/tkhq/mono/pull/${8200 + i})`);
+    const source = `| PR | Related |\n|-|-|\n| a | ${entries.join('<br>')} |`;
+    const blocks = tablesToTableBlocks(source, 50);
+    expect(blocks?.[0]).toMatchObject({ type: 'table' });
+    const related = (blocks?.[0] as { rows: { elements: { elements: unknown[] }[] }[][] }).rows[1][1];
+    expect(related.elements[0].elements).toHaveLength(23);
+  });
+
   it('leaves tables inside code fences as Markdown', () => {
     const source = '```\n| a |\n|-|\n| 1 |\n```\n\n| b |\n|-|\n| 2 |';
     const blocks = tablesToTableBlocks(source, 50);

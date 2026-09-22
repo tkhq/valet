@@ -423,6 +423,12 @@ Header cells are plain text. An empty cell holds a single space, because Slack
 rejects an empty rich text cell and drops the whole message. Every column wraps,
 and the delimiter row sets column alignment.
 
+Each cell line is parsed as CommonMark under the same synchronous work budget as
+optional autolinking: 12,000 characters and 256 punctuation characters per line.
+A cell over that budget keeps its whole table in the Markdown block. Prose
+segments keep their leading indentation, so an indented code block before a
+table still renders as code.
+
 Slack limits a table block to 100 rows and 20 columns, and limits the cells of one
 message to 10,000 characters in total. A table outside these limits, a header-only
 table, or a result that needs more blocks than the caller's budget keeps the single

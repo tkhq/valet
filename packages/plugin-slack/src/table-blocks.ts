@@ -15,6 +15,7 @@
 
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { splitMarkdownTables, type MarkdownTable } from './table-format.js';
+import { withinMarkdownParseBudget } from './transport/format.js';
 
 /** Slack rejects a table block with more rows than this, header included. */
 export const SLACK_TABLE_ROW_LIMIT = 100;
@@ -106,7 +107,13 @@ function cellLines(cell: string): string[] {
   return cell.split(LINE_BREAK).map((line) => line.trim());
 }
 
-function richTextCell(cell: string): { block: Block; characters: number } {
+/** Each cell is parsed as CommonMark, so each cell must fit the parse budget. */
+function withinCellBudget(cell: string): boolean {
+  return cellLines(cell).every(withinMarkdownParseBudget);
+}
+
+function richTextCell(cell: string): { block: Block; characters: number } | undefined {
+  if (!withinCellBudget(cell)) return undefined;
   const elements: RichTextElement[] = [];
   for (const line of cellLines(cell)) {
     if (elements.length) elements.push({ type: 'text', text: '\n' });
@@ -121,7 +128,8 @@ function richTextCell(cell: string): { block: Block; characters: number } {
   };
 }
 
-function headerCell(header: string | undefined, column: number): { block: Block; characters: number } {
+function headerCell(header: string | undefined, column: number): { block: Block; characters: number } | undefined {
+  if (header !== undefined && !withinCellBudget(header)) return undefined;
   const text = header === undefined ? '' : cellLines(header)
     .map((line) => plainText(fromMarkdown(line)))
     .join(' ')
@@ -137,13 +145,16 @@ function tableBlock(table: MarkdownTable): { block: Block; characters: number } 
   const width = Math.max(headers.length, ...rows.map((row) => row.length));
   if (width > SLACK_TABLE_COLUMN_LIMIT) return undefined;
   let characters = 0;
-  const collect = (cell: { block: Block; characters: number }): Block => {
+  const collect = (cell: { block: Block; characters: number } | undefined): Block | undefined => {
+    if (!cell) return undefined;
     characters += cell.characters;
     return cell.block;
   };
   const columns = Array.from({ length: width }, (_, column) => column);
   const header = columns.map((column) => collect(headerCell(headers[column], column)));
   const body = rows.map((row) => columns.map((column) => collect(richTextCell(row[column] ?? ''))));
+  // A cell over the parse budget keeps the whole table in its Markdown block.
+  if ([header, ...body].some((row) => row.some((cell) => cell === undefined))) return undefined;
   return {
     block: {
       type: 'table',
@@ -166,8 +177,12 @@ export function tablesToTableBlocks(text: string, maxBlocks: number): Block[] | 
   let tables = 0;
   for (const segment of splitMarkdownTables(text)) {
     if (segment.type === 'text') {
-      const prose = segment.lines.join('\n').replace(/^\s*\n|\n\s*$/g, '').trim();
-      if (prose) blocks.push({ type: 'markdown', text: prose });
+      // Drop only blank edge lines: leading spaces on the first line can be
+      // an indented code block.
+      const lines = [...segment.lines];
+      while (lines.length && !lines[0].trim()) lines.shift();
+      while (lines.length && !lines.at(-1)!.trim()) lines.pop();
+      if (lines.length) blocks.push({ type: 'markdown', text: lines.join('\n') });
       continue;
     }
     const table = tableBlock(segment.table);

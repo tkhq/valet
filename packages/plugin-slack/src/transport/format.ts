@@ -78,7 +78,15 @@ const GITHUB_REFERENCE = /\[[^\]]*\]\([^\n]*?\)|(?:&lt;|<)[^>\n]*>|https?:\/\/[^
  * Preserve complex input verbatim; explicit links still render in Slack.
  */
 function withinAutolinkBudget(text: string): boolean {
-  if (text.length > 12_000 || !text.includes("#")) return false;
+  return text.includes("#") && withinMarkdownParseBudget(text);
+}
+
+/** The synchronous CommonMark work budget: at most 12,000 characters and 256
+ * ASCII punctuation, tab, or line-break characters. Every optional parse of
+ * untrusted text checks this first so nested link syntax cannot block the
+ * event loop for seconds. */
+export function withinMarkdownParseBudget(text: string): boolean {
+  if (text.length > 12_000) return false;
   let punctuation = 0;
   for (let index = 0; index < text.length; index += 1) {
     const code = text.charCodeAt(index);
