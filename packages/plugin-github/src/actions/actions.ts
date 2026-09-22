@@ -2247,7 +2247,7 @@ const readRepoFile = action(Type.Object({
     try {
       const { data } = await octokit.request(
         "GET /repos/{owner}/{repo}/contents/{path}",
-        { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref },
+        { owner: args.owner, repo: args.repo, path: args.path, ref: args.ref, request: { signal: ctx.signal } },
       );
       if (Array.isArray(data) || data.type !== "file") {
         return { success: false, error: wrongPathKindError(contentsKind(data), "file") };
@@ -2274,7 +2274,7 @@ const readRepoFile = action(Type.Object({
                 repo: args.repo,
                 file_sha: blobSha,
                 mediaType: { format: "raw" },
-                request: { parseSuccessResponseBody: false },
+                request: { parseSuccessResponseBody: false, signal: ctx.signal },
               },
             )
           : await octokit.request(
@@ -2322,7 +2322,7 @@ const readRepoFile = action(Type.Object({
             data: {
               path: data.path,
               repo: `${args.owner}/${args.repo}`,
-              ref: rawRef,
+              ref: args.ref,
               size: data.size,
               content: read.content,
             },
@@ -2336,7 +2336,7 @@ const readRepoFile = action(Type.Object({
           }
           return {
             success: true,
-            data: { path: data.path, repo: `${args.owner}/${args.repo}`, ref: rawRef, size: data.size, content: downloaded.text },
+            data: { path: data.path, repo: `${args.owner}/${args.repo}`, ref: args.ref, size: data.size, content: downloaded.text },
           };
         }
         return { success: false, error: `Cannot read binary file ${name}. Only text files and PDFs are supported.` };

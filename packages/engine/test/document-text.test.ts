@@ -144,6 +144,19 @@ describe("document text helpers", () => {
     expect(result).toEqual({ ok: true, content: "# NDA" });
   });
 
+  it("does not start extraction when the action signal already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("action timed out"));
+    let extracted = false;
+
+    await expect(extractDownloadedPdf({
+      data: pdfBytes,
+      extractDocument: async () => { extracted = true; return { markdown: "must not extract" }; },
+      signal: controller.signal,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("action timed out") });
+    expect(extracted).toBe(false);
+  });
+
   it("limits extracted document output", async () => {
     const result = await extractDownloadedPdf({
       data: pdfBytes,

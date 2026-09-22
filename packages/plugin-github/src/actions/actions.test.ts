@@ -659,11 +659,11 @@ describe("github.read_repo_file", () => {
     });
 
     const result = await findAction("github.read_repo_file").execute(
-      { owner: "acme", repo: "handbook", path: "legal/nda" },
+      { owner: "acme", repo: "handbook", path: "legal/nda", ref: "main" },
       { ...fakeActionContext("test-token"), extractDocument: async () => ({ markdown: "# NDA" }) },
     );
 
-    expect(result).toMatchObject({ success: true, data: { content: "# NDA", ref: "pdf-sha" } });
+    expect(result).toMatchObject({ success: true, data: { content: "# NDA", ref: "main" } });
   });
 
   it("rejects a declared PDF without a PDF signature", async () => {

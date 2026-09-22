@@ -70,7 +70,7 @@ function abortError(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("The action was aborted.", "AbortError");
 }
 
-async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): Promise<ReadableStreamReadResult<Uint8Array>> {
+async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): Promise<{ done: boolean; value?: Uint8Array }> {
   if (!signal) return reader.read();
   if (signal.aborted) {
     cancelReader(reader);
@@ -106,9 +106,10 @@ export function discardResponseBody(response: Response): void {
   }
 }
 
-async function withSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+async function withSignal<T>(start: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw abortError(signal);
+  const promise = start();
   if (!signal) return promise;
-  if (signal.aborted) throw abortError(signal);
   return new Promise((resolve, reject) => {
     const abort = () => reject(abortError(signal));
     signal.addEventListener("abort", abort, { once: true });
@@ -257,7 +258,7 @@ export async function extractDownloadedPdf(input: {
   }
   try {
     const extracted = await withSignal(
-      input.extractDocument({ data: input.data, mimeType: "application/pdf", name }),
+      () => input.extractDocument!({ data: input.data, mimeType: "application/pdf", name }),
       input.signal,
     );
     if (!extracted) {
