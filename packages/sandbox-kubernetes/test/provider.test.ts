@@ -540,7 +540,7 @@ describe("Kubernetes managed egress provider lifecycle", () => {
         revokeCallbackBinding: () => { registered = false; calls.push("revoke"); },
       },
     });
-    expect(calls.slice(0, 3)).toEqual(["apply", "register", "observe"]);
+    expect(calls.slice(0, 3)).toEqual(["apply", "observe", "register"]);
     await expect(provider.status(sandbox.id)).resolves.toMatchObject({ managedEgress: { effective: true } });
     await provider.destroy(sandbox.id);
     expect(registered).toBe(false);

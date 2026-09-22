@@ -1,9 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
+import { requestSubjectDigest } from "@valet/engine/authorization";
 import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgressAuthorizationRouter, parseAuthorizationRequestV1, type AuthorizationRequestV1 } from "./managed-egress-authorization.js";
 
 const identity = { orgId: "org-1", sessionId: "session-1", workloadId: "workload-1", proxyId: "proxy-1", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION };
 const token = "t".repeat(48);
+const activation = {
+  effective: {
+    requested: true as const, configured: true as const, ready: true as const, effective: true as const,
+    identity, proxyArtifact: "hematite@sha256:test",
+    topology: { proxyResources: ["proxy-1"], policyResources: ["policy-1"], workloadSelector: { session: "session-1" }, callbackBindingId: "proxy-1" },
+  },
+  policyIdentity: { actorUserId: "server-user", principal: { type: "user" as const, id: "server-user" } },
+};
 const request: AuthorizationRequestV1 = {
   version: "1", request_id: "request-1", service: "egress", action: "connect",
   subject: { session_id: "session-1", workload_id: "workload-1" },
@@ -52,6 +61,28 @@ describe("managed egress callback", () => {
     expect(await response.json()).toMatchObject({ version: "1", request_id: "request-1", decision: "deny", reason_code: "unsupported_prerequisite" });
     expect((await post(request, "x".repeat(48))).status).toBe(401);
     expect((await post({ ...request, subject: { ...request.subject, session_id: "caller-choice" } })).status).toBe(401);
+  });
+
+  it("uses the canonical evaluator with server-bound identity after observing the boundary", async () => {
+    const authorize = vi.fn(async (canonicalRequest: Parameters<import("../authorization/canonical-authorization-service.js").CanonicalAuthorizationService["authorize"]>[0]) => ({
+      schemaVersion: 1 as const,
+      requestId: canonicalRequest.requestId,
+      requestSubjectDigest: requestSubjectDigest(canonicalRequest),
+      inputDigest: "a".repeat(64), policyDigest: "b".repeat(64), sourceBundleDigest: "c".repeat(64),
+      evaluator: { kind: "local_valet" as const, engineDigest: "d".repeat(64) },
+      decision: { effect: "allow" as const, reasonCode: "organization_policy", matchedRuleIds: ["egress-rule"], obligations: [], redactions: [] },
+      decisionDigest: "e".repeat(64), obligationDigest: "f".repeat(64), evaluatedAtMs: 100,
+    }));
+    registry = new ManagedEgressBindingRegistry({ authorization: { authorize }, now: () => 100 });
+    registry.register(identity, token, undefined, 90, activation);
+
+    const response = await post({ ...request, destination: { ...request.destination, host: "EXAMPLE.com." } });
+
+    expect(await response.json()).toMatchObject({ decision: "allow", reason_code: "policy_allow" });
+    expect(authorize).toHaveBeenCalledTimes(1);
+    const canonicalRequest = authorize.mock.calls[0][0];
+    expect(canonicalRequest.subject).toMatchObject({ orgId: "org-1", actorUserId: "server-user", principal: { type: "user", id: "server-user" }, sessionId: "session-1" });
+    expect(canonicalRequest.action.parameters).toEqual({ destination: { scheme: "https", protocol: "tcp", host: "example.com", port: 443, destinationClass: "external" } });
   });
 
   it("validates method, media type, framing, and bearer length before reading", async () => {
@@ -159,8 +190,8 @@ describe("managed egress callback", () => {
       Promise.resolve().then(() => registry.prune(now + 10)),
     ]);
     expect(registry.bindingCount).toBe(0);
-    expect(registry.authorize(token, request, now + 10)).toBeNull();
-    expect(registry.authorize(replacement, request, now + 10)).toBeNull();
+    expect(await registry.authorize(token, request, now + 10)).toBeNull();
+    expect(await registry.authorize(replacement, request, now + 10)).toBeNull();
 
     const registrations = await Promise.allSettled([
       Promise.resolve().then(() => registry.register({ ...identity, proxyId: "proxy-2" }, replacement, undefined, now + 10)),

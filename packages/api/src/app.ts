@@ -170,7 +170,7 @@ export function createApp(
   app.route(
     "",
     managedEgressAuthorizationRouter(
-      opts.managedEgressBindings ?? providers.managedEgressBindings ?? new ManagedEgressBindingRegistry(),
+      opts.managedEgressBindings ?? providers.managedEgressBindings ?? new ManagedEgressBindingRegistry({ authorization: providers.canonicalAuthorizationService }),
     ),
   );
 

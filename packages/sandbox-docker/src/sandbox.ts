@@ -1109,7 +1109,6 @@ export class DockerSandboxProvider implements SandboxProvider {
         }
         await this.managedRuntime.run(managedPlan.proxyRunArgs);
         await this.managedRuntime.run(managedPlan.connectProxyOutboundArgs);
-        opts.managedEgressLifecycle?.registerCallbackBinding();
         await awaitDockerManagedEgress(managedPlan, managedConfig, this.managedRuntime);
       } catch (error) {
         opts.managedEgressLifecycle?.revokeCallbackBinding();
@@ -1196,25 +1195,33 @@ export class DockerSandboxProvider implements SandboxProvider {
         await this.destroy(id);
         throw new ManagedEgressPrerequisiteError("network_isolation", "The Docker workload network boundary does not match. Re-provision the sandbox.");
       }
-      this.managedSandboxes.set(id, {
-        plan: managedPlan,
-        config: managedConfig,
-        revoke: opts.managedEgressLifecycle?.revokeCallbackBinding ?? (() => {}),
-        effective: {
-          requested: true,
-          configured: true,
-          ready: true,
-          effective: true,
-          identity: opts.managedEgress.identity,
-          proxyArtifact: managedConfig.proxyArtifact,
-          topology: {
-            proxyResources: [managedPlan.proxyContainer, managedPlan.tokenVolume, managedPlan.configVolume, managedPlan.trustVolume],
-            policyResources: [managedPlan.internalNetwork, managedPlan.outboundNetwork],
-            workloadSelector: { "docker.container": containerName },
-            callbackBindingId: managedPlan.proxyContainer,
-          },
+      const effective: ManagedEgressEffectiveState = {
+        requested: true,
+        configured: true,
+        ready: true,
+        effective: true,
+        identity: opts.managedEgress.identity,
+        proxyArtifact: managedConfig.proxyArtifact,
+        topology: {
+          proxyResources: [managedPlan.proxyContainer, managedPlan.tokenVolume, managedPlan.configVolume, managedPlan.trustVolume],
+          policyResources: [managedPlan.internalNetwork, managedPlan.outboundNetwork],
+          workloadSelector: { "docker.container": containerName },
+          callbackBindingId: managedPlan.proxyContainer,
         },
-      });
+      };
+      try {
+        opts.managedEgressLifecycle?.registerCallbackBinding(effective);
+        this.managedSandboxes.set(id, {
+          plan: managedPlan,
+          config: managedConfig,
+          revoke: opts.managedEgressLifecycle?.revokeCallbackBinding ?? (() => {}),
+          effective,
+        });
+      } catch (error) {
+        await rollbackManaged();
+        await this.destroy(id);
+        throw error;
+      }
     }
     return sb;
   }

@@ -1,11 +1,11 @@
 # Managed Egress Prerequisite
 
 Date: 2026-09-13
-Status: implementation checkpoint; inactive
+Status: implemented; canonical callback activation
 
 ## Boundary
 
-Managed egress is disabled by default. This checkpoint does not publish or evaluate `egress.connect`. It does not claim live enforcement. The Helm chart exposes no activation value until the API wires a production Kubernetes runtime; an `enabled: true` value cannot be a silent no-op.
+Managed egress is disabled by default. If a sandbox requests managed egress, the provider must observe the forced boundary before it registers the callback. The callback evaluates `egress.connect` only for that effective binding. The Helm chart exposes no activation value until the API wires a production Kubernetes runtime; an `enabled: true` value cannot be a silent no-op.
 
 The engine contract separates four states:
 
@@ -31,9 +31,11 @@ Hematite sends one `POST /v1/authorize` request. The request has a closed 4 KiB 
 
 The callback rejects extra fields. It does not accept method, path, query, headers, body, SNI, resolved IP, client address, token, credentials, or raw request data. A per-proxy bearer token selects one server-side binding of organization, session, workload, proxy, and contract version. The workload does not receive this token.
 
-This checkpoint always returns `deny` with reason `unsupported_prerequisite`. It marks all callback responses as private and non-cacheable. The callback reads at most 4 KiB and cancels slow or oversized streams at a fixed deadline. It rejects ambiguous HTTP framing before it parses JSON.
+A callback without an effective boundary or canonical evaluator returns `deny` with reason `unsupported_prerequisite`. An effective callback uses the single `CanonicalAuthorizationService`. The server binding supplies organization, actor, principal, session, workload, proxy, and topology identity. Callback claims cannot replace this identity. The canonical request stores only the normalized scheme, protocol, host, port, and server-derived destination class. The service persists its decision before the callback returns `allow` or `deny`.
 
-Repeated request IDs receive the same bounded denial. Token rotation clears replay state. Expiry and revocation remove the binding before token reuse. Global and per-organization limits reject registry overload. An API restart removes all in-memory bindings and fails closed.
+The callback marks all responses as private and non-cacheable. It reads at most 4 KiB and cancels slow or oversized streams at a fixed deadline. It rejects ambiguous HTTP framing before it parses JSON.
+
+Repeated request IDs with the same input receive the same bounded response. Reuse with different input fails authentication. Token rotation clears replay state. Expiry and revocation remove the binding before token reuse. Global and per-organization limits reject registry overload. An API restart removes all in-memory bindings and fails closed.
 
 ## Durable lifecycle state
 
@@ -55,7 +57,7 @@ A second NetworkPolicy lets the proxy receive only workload listener traffic. It
 
 Each CA rotation gives the immutable material Secrets new names derived from the public CA fingerprint. The stable proxy pod carries that material epoch and must be replaced before readiness can succeed. The runtime removes the prior epoch pod and Secrets without removing either NetworkPolicy. The epoch does not contain a token hash or private material.
 
-Readiness requires exactly one workload selector match. It also requires the exact proxy pod, current material epoch, listeners, Secrets, Service, and both NetworkPolicies. The provider applies the rendered resources before it creates the workload. It registers the callback only after material delivery. It retries transient proxy unreadiness for up to 60 seconds so a first image pull can complete. It reports effective state only after a fresh observation. The provider uses the server-assigned Service IPs as workload proxy endpoints only after readiness. The workload does not need external DNS. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
+Readiness requires exactly one workload selector match. It also requires the exact proxy pod, current material epoch, listeners, Secrets, Service, and both NetworkPolicies. The provider applies the rendered resources before it creates the workload. It registers the callback only after a fresh observation produces the effective state. It retries transient proxy unreadiness for up to 60 seconds so a first image pull can complete. The provider uses the server-assigned Service IPs as workload proxy endpoints only after readiness. The workload does not need external DNS. The cluster must report NetworkPolicy enforcement. Unknown or unsupported CNI enforcement fails closed.
 
 Create rollback and re-provision cleanup suspend the Sandbox CR. The provider confirms that no selected workload pod remains before it removes policies, proxy resources, or Secrets. Suspension retains the Sandbox CR and workspace PVC. Only terminal session deletion deletes the Sandbox CR and cascades the workspace PVC. Terminal deletion confirms that both the CR and selected workload pods are absent before it removes managed egress resources. If workload removal is not confirmed, policies remain and the provider returns a typed cleanup diagnostic. The provider retains managed cleanup state so re-provision or a repeated destroy can retry.
 
@@ -69,8 +71,6 @@ Valet renders the strict Hematite v1 file with an ordered required allowlist and
 
 Explicit proxy variables are client configuration. They are not the security boundary. The isolated network attachment is the boundary.
 
-## Activation requirements
+## Activation invariants
 
-A later change can activate the provider only after it implements atomic apply, readiness observation, restart adoption, replace, hibernate, cleanup, and deterministic orphan recovery for every planned resource. Cleanup failure must keep the sandbox ineffective and report an error. A restart must not downgrade a requested sandbox to unmanaged.
-
-PR12 must rebase on this checkpoint and connect policy delegation and credentials atomically. Until then, Valet must not publish `egress.connect`, add policy defaults, or return an allow from this callback.
+Cleanup failure keeps the sandbox ineffective and reports an error. A restart cannot downgrade a requested sandbox to unmanaged. Callback registration requires the observed effective state and server-bound policy identity. Revocation occurs when observation, cleanup, replacement, or teardown loses that boundary. The policy bundle keeps `egress.connect` denied by default. Only an explicit published allow rule can permit the canonical destination.

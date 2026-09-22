@@ -16,7 +16,7 @@ export interface ManagedEgressRequest {
 }
 
 export interface ManagedEgressLifecycle {
-  registerCallbackBinding(): void;
+  registerCallbackBinding(effective: ManagedEgressEffectiveState): void;
   revokeCallbackBinding(): void;
 }
 

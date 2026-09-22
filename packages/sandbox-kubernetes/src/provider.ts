@@ -902,7 +902,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     try {
     if (managedResources && this.deps.managedEgress) {
       await this.deps.managedEgress.runtime.apply(managedResources);
-      opts.managedEgressLifecycle?.registerCallbackBinding();
     }
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
@@ -1137,21 +1136,23 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     sandbox.resourceOverrides = resourceOverrides;
     if (managedResources && managedSelector && opts.managedEgress && this.deps.managedEgress) {
       await this.waitManagedEgressReady(managedSelector, managedResources.identity);
+      const effective: ManagedEgressEffectiveState = {
+        requested: true, configured: true, ready: true, effective: true,
+        identity: opts.managedEgress.identity,
+        proxyArtifact: this.deps.managedEgress.config.proxyArtifact,
+        topology: {
+          proxyResources: [managedResources.identity.proxyPodName, managedResources.identity.proxySecretName, managedResources.identity.proxyConfigSecretName, managedResources.identity.workloadTrustSecretName, managedResources.identity.proxyServiceName],
+          policyResources: [managedResources.identity.workloadPolicyName, managedResources.identity.proxyPolicyName],
+          workloadSelector: { ...managedSelector.matchLabels },
+          callbackBindingId: managedResources.identity.proxyPodName,
+        },
+      };
+      opts.managedEgressLifecycle?.registerCallbackBinding(effective);
       this.managedSandboxes.set(name, {
         identity: managedResources.identity,
         selector: managedSelector,
         revoke: opts.managedEgressLifecycle?.revokeCallbackBinding ?? (() => {}),
-        effective: {
-          requested: true, configured: true, ready: true, effective: true,
-          identity: opts.managedEgress.identity,
-          proxyArtifact: this.deps.managedEgress.config.proxyArtifact,
-          topology: {
-            proxyResources: [managedResources.identity.proxyPodName, managedResources.identity.proxySecretName, managedResources.identity.proxyConfigSecretName, managedResources.identity.workloadTrustSecretName, managedResources.identity.proxyServiceName],
-            policyResources: [managedResources.identity.workloadPolicyName, managedResources.identity.proxyPolicyName],
-            workloadSelector: { ...managedSelector.matchLabels },
-            callbackBindingId: managedResources.identity.proxyPodName,
-          },
-        },
+        effective,
       });
     }
     return sandbox;

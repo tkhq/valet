@@ -151,7 +151,7 @@ import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } fro
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
-import type { ManagedEgressBindingRegistry } from "../routes/managed-egress-authorization.js";
+import type { ManagedEgressBindingRegistry, ManagedEgressPolicyIdentity } from "../routes/managed-egress-authorization.js";
 
 
 /**
@@ -537,7 +537,7 @@ const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function managedEgressRestoreOptions(
   persisted: SessionData["managedEgress"],
-  expected: { sessionId: string; orgId: string },
+  expected: { sessionId: string; orgId: string; policyIdentity: ManagedEgressPolicyIdentity },
   registry: ManagedEgressBindingRegistry | undefined,
 ): Pick<SandboxCreateOpts, "managedEgress" | "managedEgressLifecycle"> | undefined {
   if (!persisted) return undefined;
@@ -559,9 +559,12 @@ export function managedEgressRestoreOptions(
   return {
     managedEgress: { requested: true, identity: { ...identity }, proxyToken },
     managedEgressLifecycle: {
-      registerCallbackBinding() {
+      registerCallbackBinding(effective) {
         if (registered) return;
-        registry.register(identity, proxyToken);
+        registry.register(identity, proxyToken, undefined, Date.now(), {
+          effective,
+          policyIdentity: expected.policyIdentity,
+        });
         registered = true;
       },
       revokeCallbackBinding() {
@@ -1051,7 +1054,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId, orgId: meta.orgId },
+      { sessionId, orgId: meta.orgId, policyIdentity: { actorUserId: meta.userId, principal } },
       this.opts.managedEgressBindings,
     );
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
@@ -2583,7 +2586,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId, orgId: meta.orgId },
+      { sessionId, orgId: meta.orgId, policyIdentity: { actorUserId: meta.actorUserId, principal } },
       this.opts.managedEgressBindings,
     );
     // Same row read as the profile: a team assistant from before team-owner
@@ -3612,7 +3615,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId: childSessionId, orgId: opts.orgId },
+      { sessionId: childSessionId, orgId: opts.orgId, policyIdentity: { actorUserId: opts.actorUserId, principal: opts.owner } },
       this.opts.managedEgressBindings,
     );
     // A first child build has no app row yet, so the mode the spawner is
@@ -3854,7 +3857,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const managedEgress = managedEgressRestoreOptions(
       existing?.managedEgress,
-      { sessionId, orgId: opts.orgId },
+      { sessionId, orgId: opts.orgId, policyIdentity: { actorUserId: opts.actorUserId, principal: opts.owner } },
       this.opts.managedEgressBindings,
     );
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);

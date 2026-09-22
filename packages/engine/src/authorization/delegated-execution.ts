@@ -132,7 +132,7 @@ export function assertEgressBoundaryAvailable(): never {
 export interface EgressConnectAdapterInputV1 extends CommonInput {
   readonly sessionId: string;
   readonly operation: "connect" | "redirect" | "listen" | "tunnel";
-  readonly destination: { readonly scheme: "http" | "https" | "ws" | "wss" | "tcp"; readonly protocol: "http" | "https" | "ws" | "wss" | "tcp"; readonly host: string; readonly port: number; readonly destinationClass: string; readonly service?: string; readonly action?: string };
+  readonly destination: { readonly scheme: "http" | "https" | "ws" | "wss" | "tcp" | "connect"; readonly protocol: "http" | "https" | "ws" | "wss" | "tcp"; readonly host: string; readonly port: number; readonly destinationClass: string; readonly service?: string; readonly action?: string };
 }
 
 export interface DelegatedExecutionAdapterOutputV1 { readonly schemaVersion: 1; readonly request: AuthorizationRequest; readonly canonicalBytes: string; readonly requestSubjectDigest: string }
@@ -182,12 +182,15 @@ export function adaptCredentialDelegate(input: CredentialDelegateAdapterInputV1)
 }
 
 export function adaptEgressConnect(input: EgressConnectAdapterInputV1): DelegatedExecutionAdapterOutputV1 {
-  common(input); validId(input.sessionId); normalizeEgressDestination(input.destination);
-  return assertEgressBoundaryAvailable();
+  common(input); validId(input.sessionId);
+  return output(input, "egress.connect", `egress.${input.operation}`, "egress", "high", {
+    destination: normalizeEgressDestination(input.destination),
+  });
 }
 
 export function normalizeEgressDestination(value: EgressConnectAdapterInputV1["destination"]): JsonObject {
-  if (!["http", "https", "ws", "wss", "tcp"].includes(value.scheme) || value.protocol !== value.scheme && !(value.scheme === "http" && value.protocol === "http") || !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) fail("invalid_destination");
+  const compatibleProtocol = value.protocol === value.scheme || value.protocol === "tcp" && ["http", "https", "connect"].includes(value.scheme);
+  if (!["http", "https", "ws", "wss", "tcp", "connect"].includes(value.scheme) || !compatibleProtocol || !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) fail("invalid_destination");
   const host = value.host.toLowerCase().replace(/\.$/, "");
   if (!HOST.test(host) || host.includes("..") || host.startsWith("xn--") || host.split(".").some((label) => label.startsWith("xn--")) || /^[0-9.]+$/.test(host) || host.includes(":") || host === "localhost") fail("invalid_destination");
   validId(value.destinationClass); if (value.service !== undefined) validId(value.service); if (value.action !== undefined && !ACTION.test(value.action)) fail("invalid_destination");
