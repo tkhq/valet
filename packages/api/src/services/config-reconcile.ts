@@ -663,27 +663,43 @@ async function reconcileLlmProvidersPass(
       }
     }
 
-    if (envKey) {
-      if (!credentials) {
-        throw new InstanceConfigError(
-          `llmProviders entry ${JSON.stringify(declaredName)} declares apiKeyEnv, but the credential store is unavailable. Configure the credential store before reconciliation.`,
-        );
-      }
-      const rows = await listLlmProviders(db, orgId);
-      const provider = isKnownProviderKind(kind)
-        ? rows.find((row) => row.kind === kind)
-        : rows.find((row) => row.kind === "openai_compatible" && row.name === declaredName);
-      if (!provider) {
-        throw new InstanceConfigError(
-          `llmProviders entry ${JSON.stringify(declaredName)} could not resolve its provider row. Check the provider name and restart.`,
-        );
-      }
-      await credentials.save(credentialOwner, `llm:${provider.id}`, {
-        type: "api_key",
-        apiKey: envKey,
-        metadata: { last4: envKey.slice(-4), source: "instance_config_env" },
-      });
+    if (provDecl.apiKeyEnv === undefined) continue;
+
+    const rows = await listLlmProviders(db, orgId);
+    const provider = isKnownProviderKind(kind)
+      ? rows.find((row) => row.kind === kind)
+      : rows.find((row) => row.kind === "openai_compatible" && row.name === declaredName);
+    if (!provider) {
+      throw new InstanceConfigError(
+        `llmProviders entry ${JSON.stringify(declaredName)} could not resolve its provider row. Check the provider name and restart.`,
+      );
     }
+
+    const service = `llm:${provider.id}`;
+    if (!envKey) {
+      console.warn(
+        `[config-reconcile] llm provider ${JSON.stringify(declaredName)} is disabled because ` +
+          `${provDecl.apiKeyEnv} is not set or is blank. Set that env var and restart to enable the provider.`,
+      );
+    }
+    if (!credentials) {
+      throw new InstanceConfigError(
+        `llmProviders entry ${JSON.stringify(declaredName)} declares apiKeyEnv, but the credential store is unavailable. Configure the credential store before reconciliation.`,
+      );
+    }
+    if (!envKey) {
+      const stored = await credentials.get(credentialOwner, service);
+      if (stored?.metadata?.source === "instance_config_env") {
+        await credentials.delete(credentialOwner, service);
+      }
+      continue;
+    }
+
+    await credentials.save(credentialOwner, service, {
+      type: "api_key",
+      apiKey: envKey,
+      metadata: { last4: envKey.slice(-4), source: "instance_config_env" },
+    });
   }
 }
 

@@ -778,7 +778,7 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
     });
   });
 
-  it("keeps an apiKeyEnv provider disabled when the env secret is absent", async () => {
+  it("revokes an instance-config key and blocks wire resolution when apiKeyEnv becomes blank", async () => {
     const credentials = new InMemoryCredentialStore();
     const cfg: InstanceConfig = {
       version: 1,
@@ -792,17 +792,81 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
     };
 
     const org = await ensureOrg(db);
+    const owner = { type: "org" as const, id: org.id };
     const providerId = configProviderId("agents-dev-kserve");
-    await credentials.save({ type: "org", id: org.id }, `llm:${providerId}`, {
+    const service = `llm:${providerId}`;
+    await reconcileInstanceConfig(
+      { db, credentials, env: { VALET_KSERVE_API_KEY: "stale-secret" } },
+      cfg,
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await reconcileInstanceConfig(
+        { db, credentials, env: { VALET_KSERVE_API_KEY: "   " } },
+        cfg,
+      );
+
+      const [provider] = await db.select().from(llmProviders).where(eq(llmProviders.id, providerId));
+      expect(provider?.enabled).toBe(false);
+      expect(await credentials.get(owner, service)).toBeNull();
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('llm provider "agents-dev-kserve"');
+      expect(lines[0]).toContain("VALET_KSERVE_API_KEY");
+      expect(lines[0]).not.toContain("stale-secret");
+
+      const get = vi.spyOn(credentials, "get");
+      await expect(
+        resolveModelSpec(db, credentials, org.id, `${providerId}/qwen-coder`),
+      ).rejects.toThrow("provider agents-dev-kserve is disabled");
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("preserves a manually managed key when a declared apiKeyEnv is absent", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [{
+        kind: "openai_compatible",
+        name: "agents-dev-kserve",
+        baseUrl: "http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1",
+        apiKeyEnv: "VALET_KSERVE_API_KEY",
+        models: [{ id: "qwen-coder", name: "Agents Dev Qwen Coder" }],
+      }],
+    };
+
+    const org = await ensureOrg(db);
+    const owner = { type: "org" as const, id: org.id };
+    const providerId = configProviderId("agents-dev-kserve");
+    const service = `llm:${providerId}`;
+    await credentials.save(owner, service, {
       type: "api_key",
-      apiKey: "stale-secret",
+      apiKey: "manual-secret",
+      metadata: { source: "settings" },
     });
 
-    await reconcileInstanceConfig({ db, credentials, env: {} }, cfg);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await reconcileInstanceConfig({ db, credentials, env: {} }, cfg);
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('llm provider "agents-dev-kserve"');
+      expect(lines[0]).toContain("VALET_KSERVE_API_KEY");
+      expect(lines[0]).not.toContain("manual-secret");
+    } finally {
+      warn.mockRestore();
+    }
 
     const [provider] = await db.select().from(llmProviders).where(eq(llmProviders.id, providerId));
     expect(provider?.enabled).toBe(false);
-    expect(await credentials.get({ type: "org", id: org.id }, `llm:${providerId}`)).not.toBeNull();
+    expect(await credentials.get(owner, service)).toMatchObject({
+      apiKey: "manual-secret",
+      metadata: { source: "settings" },
+    });
     const catalog = await buildOrgCatalog(db, credentials, org.id);
     expect(catalog.find((entry) => entry.id === `${providerId}/qwen-coder`)).toMatchObject({
       active: false,

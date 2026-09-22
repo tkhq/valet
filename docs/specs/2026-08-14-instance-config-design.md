@@ -376,8 +376,9 @@ The current validator and reconciler still reject a declared config team whose n
 Provider shape stays non-secret: `kind`, `name`, `baseUrl`, `models`,
 `enabled`, and optional `apiKeyEnv`. The file names an env var, not its value.
 At boot, Valet copies that value into the encrypted org credential store.
-A declared `apiKeyEnv` with no value makes the provider disabled. This rule
-also disables a provider that still has an older stored key.
+A declared `apiKeyEnv` with no value makes the provider disabled. Valet warns
+with the provider and env names. It removes an older key only when instance
+config created it. Valet keeps manually managed credentials.
 
 If `apiKeyEnv` is absent, Valet does not manage the key. An admin can connect
 the key in Organization → Models. The custom provider stays inactive until a
@@ -406,6 +407,19 @@ preferences, this section's original reason for existing, were removed
 - The section only asserts; it never deletes a provider row. (Deletion
   has service-level guards — the org default model's provider refuses to
   delete — and stays in the UI.)
+
+#### Upgrade note
+
+Existing `openai_compatible` entries must declare `baseUrl`; validation now
+rejects entries that omit it. Use this rollout order:
+
+1. Add `baseUrl` to old custom-provider entries before the code upgrade.
+2. Deploy the Valet code that accepts `apiKeyEnv`.
+3. Add `apiKeyEnv` and the KServe provider to Flux `api.instanceConfig`.
+
+Do not add `apiKeyEnv` before step 2 because older Valet versions reject that
+unknown key. Infra owns agents-dev activation through Flux. Valet and infra
+coordinate only through the contract below.
 
 #### agents-dev KServe contract (TKAI-251)
 
@@ -437,8 +451,9 @@ Infra PR #65 supplies this contract:
 - **API-key env:** `VALET_KSERVE_API_KEY` is optional in infra. When infra
   enables bearer authentication, set `apiKeyEnv: VALET_KSERVE_API_KEY` and
   import the Kubernetes Secret into the Valet API pod. Do not put its value in
-  `valet.yaml`. A missing or blank declared env var disables the provider.
-  If infra does not enable authentication, omit `apiKeyEnv`; the existing
+  `valet.yaml`. A missing or blank declared env var disables the provider and
+  removes only the key that instance config created. If infra does not enable
+  authentication, omit `apiKeyEnv`; the existing
   custom-provider flow still requires an admin-managed credential before it
   activates.
 - **Model id:** `VALET_KSERVE_MODEL_ID=qwen2.5-coder-7b-instruct` maps to
