@@ -62,8 +62,7 @@ describe("canonical policy builder", () => {
       target: { value: "credential.use" },
     });
     expect(screen.getByLabelText("Registered target").tagName).toBe("SELECT");
-    fireEvent.change(screen.getByLabelText("Effect"), { target: { value: "require_approval" } });
-    expect((screen.getByLabelText("Approval tier") as HTMLSelectElement).value).toBe("human");
+    expect(screen.queryByRole("option", { name: "require_approval" })).toBeNull();
     expect(container.textContent).not.toContain("do-not-render");
     expect(screen.queryByLabelText(/ownerId|secret/i)).toBeNull();
     expect(log).not.toHaveBeenCalled();
@@ -106,7 +105,7 @@ describe("canonical policy builder", () => {
     expect(screen.queryByDisplayValue("gmail.send")).toBeNull();
     fireEvent.change(screen.getByLabelText("Authorization context"), { target: { value: "egress.connect" } });
     expect((screen.getByLabelText("Registered target") as HTMLSelectElement).value).toBe("egress.connect");
-    expect(screen.getByRole("alert").textContent).toContain("not available");
+    expect(screen.queryByRole("alert")).toBeNull();
     fireEvent.change(screen.getByLabelText("Authorization context"), { target: { value: "tool.action" } });
     const operator = screen.getByLabelText("Condition 1 operator"), value = screen.getByLabelText("Condition 1 value") as HTMLInputElement;
     fireEvent.change(operator, { target: { value: "in" } }); fireEvent.change(value, { target: { value: '["safe",{"nested":true}]' } }); expect(value.value).toContain("nested");
