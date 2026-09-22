@@ -291,8 +291,10 @@ export {
   isTextDocumentMime,
   isPdfDocument,
   readResponseBytes,
+  readResponseText,
   extractDownloadedPdf,
   type BoundedResponseBytes,
+  type BoundedResponseText,
   type DocumentExtractor,
 } from "./document-text.js";
 export { formatTranscriptText } from "./transcript-formatter.js";

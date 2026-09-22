@@ -408,6 +408,45 @@ describe('drive actions', () => {
     });
   });
 
+  it('download_file bounds a text media response before decoding it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'note.txt', mimeType: 'text/plain' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('', { status: 200, headers: { 'Content-Length': '4' } }),
+    );
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1', maxSizeBytes: 3 }, pluginCtx());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'File is 4 bytes, exceeds max 3 bytes. Increase maxSizeBytes.',
+    });
+  });
+
+  it('download_file bounds a Workspace export before decoding it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'f1', name: 'Doc', mimeType: 'application/vnd.google-apps.document' }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response('', { status: 200, headers: { 'Content-Length': '4' } }),
+    );
+
+    const result = await action('drive.download_file').execute({ fileId: 'f1', maxSizeBytes: 3 }, pluginCtx());
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Exported content is 4 bytes, exceeds max 3 bytes. Increase maxSizeBytes.',
+    });
+  });
+
+  it('download_file rejects a zero byte limit before it fetches metadata', async () => {
+    const result = await action('drive.download_file').execute({ fileId: 'f1', maxSizeBytes: 0 }, pluginCtx());
+
+    expect(result).toEqual({ success: false, error: 'maxSizeBytes must be at least 1.' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('download_file rejects binary files', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, { id: 'f1', name: 'image.png', mimeType: 'image/png', size: '100' }),

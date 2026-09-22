@@ -19,6 +19,14 @@ describe("document text helpers", () => {
     expect(isPdfDocument({ mimeType: "application/octet-stream", data: new Uint8Array() })).toBe(false);
   });
 
+  it("rejects an oversized declared response with no body", async () => {
+    const result = await readResponseBytes(
+      new Response(null, { headers: { "content-length": "4" } }),
+      3,
+    );
+    expect(result).toEqual({ ok: false, size: 4 });
+  });
+
   it("cancels an oversized declared response and releases its reader", async () => {
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({
@@ -60,6 +68,21 @@ describe("document text helpers", () => {
       },
       cancel() {
         return Promise.reject(new Error("connection reset"));
+      },
+    });
+
+    await expect(readResponseBytes(new Response(body), 3)).resolves.toEqual({ ok: false, size: 4 });
+    expect(body.locked).toBe(false);
+  });
+
+  it("returns before a cancellation promise settles", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        controller.enqueue(new Uint8Array([3, 4]));
+      },
+      cancel() {
+        return new Promise<void>(() => {});
       },
     });
 

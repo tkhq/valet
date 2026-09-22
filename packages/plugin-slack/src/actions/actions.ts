@@ -7,6 +7,7 @@ import {
   MAX_PDF_DOCUMENT_BYTES,
   normalizeDocumentMime,
   readResponseBytes,
+  readResponseText,
   type ActionPlugin,
   type Credential,
   type PluginAction,
@@ -724,11 +725,11 @@ const fetchFile = action(Type.Object({
 
     // Text files — return content directly. The type list lives in the engine.
     if (isTextDocumentMime(contentType)) {
-      const text = await res.text();
-      if (text.length > MAX_TEXT_SIZE) {
-        return { success: false, error: `File too large for text extraction (${Math.round(text.length / 1024)}KB). Max 1MB.` };
+      const downloaded = await readResponseText(res, MAX_TEXT_SIZE);
+      if (!downloaded.ok) {
+        return { success: false, error: `File too large for text extraction (${Math.round(downloaded.size / 1024)}KB). Max 1MB.` };
       }
-      return { success: true, data: { content: text, mimetype: contentType } };
+      return { success: true, data: { content: downloaded.text, mimetype: contentType } };
     }
 
     // A generic byte stream is read only up to the PDF cap. This lets us sniff
@@ -737,9 +738,7 @@ const fetchFile = action(Type.Object({
       const filename = parsedUrl.pathname.split('/').pop() || 'document.pdf';
       const downloaded = await readResponseBytes(res, MAX_PDF_FETCH);
       if (!downloaded.ok) {
-        if (contentType === 'application/pdf') {
-          return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
-        }
+        return { success: false, error: `PDF too large (${Math.round(downloaded.size / 1024 / 1024)}MB). Max 25MB.` };
       } else if (isPdfDocument({ mimeType: contentType, data: downloaded.data })) {
         const read = await extractDownloadedPdf({
           data: downloaded.data,

@@ -49,35 +49,45 @@ export type BoundedResponseBytes =
   | { ok: true; data: Uint8Array }
   | { ok: false; size: number };
 
+export type BoundedResponseText =
+  | { ok: true; text: string }
+  | { ok: false; size: number };
+
+/** Start cancellation without waiting for a peer that never settles it. */
+function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  void reader.cancel().catch(() => {});
+}
+
 /**
  * Read a response body without accumulating more than `maxBytes`. A declared
  * size avoids a read. An unknown or false size is checked for every chunk.
  */
 export async function readResponseBytes(response: Response, maxBytes: number): Promise<BoundedResponseBytes> {
-  if (!response.body) return { ok: true, data: new Uint8Array() };
-  const reader = response.body.getReader();
-  const cancel = async () => {
-    try {
-      await reader.cancel();
-    } catch {
-      // The result remains a bounded-size failure when cancellation fails.
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    const reader = response.body?.getReader();
+    if (reader) {
+      try {
+        cancelReader(reader);
+      } finally {
+        reader.releaseLock();
+      }
     }
-  };
+    return { ok: false, size: declared };
+  }
+  if (!response.body) return { ok: true, data: new Uint8Array() };
+
+  const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
-    const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      await cancel();
-      return { ok: false, size: declared };
-    }
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!value) continue;
       size += value.byteLength;
       if (size > maxBytes) {
-        await cancel();
+        cancelReader(reader);
         return { ok: false, size };
       }
       chunks.push(value);
@@ -93,6 +103,12 @@ export async function readResponseBytes(response: Response, maxBytes: number): P
     offset += chunk.byteLength;
   }
   return { ok: true, data };
+}
+
+/** Decode a bounded UTF-8 response. The cap applies to bytes, not characters. */
+export async function readResponseText(response: Response, maxBytes: number): Promise<BoundedResponseText> {
+  const result = await readResponseBytes(response, maxBytes);
+  return result.ok ? { ok: true, text: new TextDecoder().decode(result.data) } : result;
 }
 
 export type DocumentExtractor = (doc: {

@@ -717,6 +717,23 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { content: 'hello world', mimetype: 'text/plain' } });
   });
 
+  it('fetch_file bounds application text before decoding it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': String(1_048_577) },
+      }),
+    );
+
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/data.json' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('File too large for text extraction');
+  });
+
   it('fetch_file rejects non-slack URLs without calling fetch', async () => {
     const result = await action('slack.fetch_file').execute(
       { url: 'https://example.com/file.png' },
@@ -806,7 +823,8 @@ describe('slack actions', () => {
       pluginCtx({ extractDocument: async () => ({ markdown: 'must not extract' }) }),
     );
 
-    expect(result).toMatchObject({ success: true, data: { mimetype: 'application/octet-stream' } });
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain('PDF too large');
     expect(cancelled).toBe(true);
   });
 

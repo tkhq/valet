@@ -7,6 +7,7 @@ import {
   MAX_PDF_DOCUMENT_BYTES,
   normalizeDocumentMime,
   readResponseBytes,
+  readResponseText,
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
@@ -906,7 +907,7 @@ const deleteFileAction = action(
 const downloadFile = action(
   Type.Object({
     fileId: Type.String({ description: 'File ID' }),
-    maxSizeBytes: Type.Optional(Type.Integer({ description: 'Max bytes to download. Default: 1MB for text, 25MB for a PDF.' })),
+    maxSizeBytes: Type.Optional(Type.Integer({ minimum: 1, description: 'Max bytes to download. Must be at least 1. Default: 1MB for text, 25MB for a PDF.' })),
   }),
 )({
   id: 'drive.download_file',
@@ -920,6 +921,9 @@ const downloadFile = action(
     if (!token) return { success: false, error: 'Missing access token' };
     try {
       const { fileId, maxSizeBytes } = args;
+      if (maxSizeBytes !== undefined && maxSizeBytes < 1) {
+        return { success: false, error: 'maxSizeBytes must be at least 1.' };
+      }
 
       // Get metadata to check type and size
       const metaQs = new URLSearchParams({
@@ -934,7 +938,7 @@ const downloadFile = action(
       const generic = mimeType === 'application/octet-stream';
       // A declared PDF or generic byte stream uses the document cap. The
       // generic stream is accepted only after its bytes identify a PDF.
-      const maxBytes = maxSizeBytes || (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
+      const maxBytes = maxSizeBytes ?? (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
 
       // Google Workspace files: export as text
       if (isGoogleWorkspaceMimeType(meta.mimeType)) {
@@ -951,17 +955,16 @@ const downloadFile = action(
           token,
         );
         if (!exportRes.ok) return driveError(exportRes);
-        const text = await exportRes.text();
-        const textBytes = new TextEncoder().encode(text).length;
-        if (textBytes > maxBytes) {
+        const downloaded = await readResponseText(exportRes, maxBytes);
+        if (!downloaded.ok) {
           return {
             success: false,
-            error: `Exported content is ${textBytes} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
+            error: `Exported content is ${downloaded.size} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
           };
         }
         return {
           success: true,
-          data: { name: meta.name, mimeType: meta.mimeType, exportedAs: exportMime, content: text },
+          data: { name: meta.name, mimeType: meta.mimeType, exportedAs: exportMime, content: downloaded.text },
         };
       }
 
@@ -1005,10 +1008,16 @@ const downloadFile = action(
         };
       }
 
-      const content = await dlRes.text();
+      const downloaded = await readResponseText(dlRes, maxBytes);
+      if (!downloaded.ok) {
+        return {
+          success: false,
+          error: `File is ${downloaded.size} bytes, exceeds max ${maxBytes} bytes. Increase maxSizeBytes.`,
+        };
+      }
       return {
         success: true,
-        data: { name: meta.name, mimeType: meta.mimeType, content },
+        data: { name: meta.name, mimeType: meta.mimeType, content: downloaded.text },
       };
     } catch (error) {
       return { success: false, error: String(error) };
