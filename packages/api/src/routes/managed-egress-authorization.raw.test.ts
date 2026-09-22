@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { RunningServer } from "../server-adapter.js";
-import { nodeServerAdapter } from "../server-adapter.node.js";
+import { NODE_HEADERS_TIMEOUT_MS, nodeServerAdapter } from "../server-adapter.node.js";
 import { MANAGED_EGRESS_MAX_BODY_BYTES, ManagedEgressBindingRegistry, managedEgressAuthorizationRouter } from "./managed-egress-authorization.js";
 
 const token = "t".repeat(48);
@@ -51,6 +51,24 @@ afterEach(async () => {
 });
 
 describe("managed egress raw HTTP framing", () => {
+  it("cuts off a connection that dribbles incomplete headers", async () => {
+    const socket = await openSocket();
+    const startedAt = Date.now();
+    const result = response(socket);
+    socket.write(`POST /v1/authorize HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nX-Dribble: `);
+    const dribble = setInterval(() => {
+      if (socket.writable) socket.write("a");
+    }, 100);
+    try {
+      const raw = await result;
+      expect(raw).toContain("400 Bad Request");
+      expect(Date.now() - startedAt).toBeLessThan(NODE_HEADERS_TIMEOUT_MS + 1_000);
+    } finally {
+      clearInterval(dribble);
+      socket.destroy();
+    }
+  });
+
   it("rejects CL+TE smuggling with privacy headers", async () => {
     const socket = await openSocket();
     const result = response(socket);

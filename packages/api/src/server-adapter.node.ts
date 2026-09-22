@@ -11,6 +11,11 @@ import type { Hono } from "hono";
 import type { AppEnv } from "./env.js";
 import type { RunningServer, ServeOptions, ServerAdapter, WebSocketBinding } from "./server-adapter.js";
 
+/** Absolute request-ingress bounds. Activity does not extend either deadline. */
+export const NODE_HEADERS_TIMEOUT_MS = 2_000;
+export const NODE_REQUEST_TIMEOUT_MS = 60_000;
+const NODE_CONNECTIONS_CHECKING_INTERVAL_MS = 100;
+
 export const nodeServerAdapter: ServerAdapter = {
   runtime: "node",
 
@@ -30,7 +35,16 @@ export const nodeServerAdapter: ServerAdapter = {
         // throughput optimisation, and correctness for in-process SDKs is
         // worth more than it. See `onepassword.live-server.test.ts`, which
         // fails without this line.
-        const server = serve({ fetch: app.fetch, port: opts.port, overrideGlobalObjects: false }, (info) => {
+        const server = serve({
+          fetch: app.fetch,
+          port: opts.port,
+          overrideGlobalObjects: false,
+          serverOptions: {
+            headersTimeout: NODE_HEADERS_TIMEOUT_MS,
+            requestTimeout: NODE_REQUEST_TIMEOUT_MS,
+            connectionsCheckingInterval: NODE_CONNECTIONS_CHECKING_INTERVAL_MS,
+          },
+        }, (info) => {
           boundPort = info.port;
           opts.onListen?.(info.port);
         });
