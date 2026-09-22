@@ -8,6 +8,7 @@ export {
   type BuildDockerRunArgsOpts,
   type DockerSandboxCreateOpts,
   type DockerSandboxOptions,
+  type DockerManagedEgressProviderOptions,
 } from "./sandbox.js";
 export {
   HEMATITE_COMPATIBLE_CONFIG_CONTRACT,
@@ -17,6 +18,7 @@ export {
   cleanupDockerManagedEgress,
   dockerManagedEgressCliRuntime,
   initializeDockerManagedEgressVolumes,
+  observeDockerManagedEgress,
   renderHematiteConfig,
   validateDockerManagedEgressConfig,
   type DockerManagedEgressConfig,

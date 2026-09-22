@@ -38,6 +38,7 @@ export type DockerResourceKind = "container" | "network" | "volume";
 
 export interface DockerManagedEgressRuntime {
   inspect(kind: DockerResourceKind, name: string): Promise<Record<string, string> | null>;
+  containerNetworks(name: string): Promise<string[]>;
   /** Runs one Docker command. Missing resources on delete or disconnect must be treated as success. */
   run(args: string[], stdin?: string): Promise<void>;
 }
@@ -76,6 +77,16 @@ function labelsRecord(value: unknown): value is Record<string, string> {
 /** Docker CLI adapter. It never places stdin content in argv, environment, or errors. */
 export function dockerManagedEgressCliRuntime(): DockerManagedEgressRuntime {
   return {
+    async containerNetworks(name) {
+      const result = await dockerCommand(["container", "inspect", "--format", "{{json .NetworkSettings.Networks}}", name]);
+      if (result.exitCode !== 0) {
+        if (missingDockerResource(result.stderr)) return [];
+        throw new Error(`docker container inspect failed. Check the Docker daemon before retrying. ${result.stderr.trim()}`);
+      }
+      const parsed: unknown = JSON.parse(result.stdout);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("docker container inspect returned invalid networks. Check the Docker daemon before retrying.");
+      return Object.keys(parsed);
+    },
     async inspect(kind, name) {
       const result = await dockerCommand([kind, "inspect", "--format", "{{json .Config.Labels}}", name]);
       if (result.exitCode !== 0 && kind !== "container") {
@@ -111,18 +122,22 @@ export interface DockerManagedEgressPlan {
   proxyContainer: string;
   tokenVolume: string;
   configVolume: string;
+  trustVolume: string;
   labels: {
     internalNetwork: Record<string, string>;
     outboundNetwork: Record<string, string>;
     proxy: Record<string, string>;
     tokenVolume: Record<string, string>;
     configVolume: Record<string, string>;
+    trustVolume: Record<string, string>;
   };
   createInternalNetworkArgs: string[];
   createOutboundNetworkArgs: string[];
   createTokenVolumeArgs: string[];
   createConfigVolumeArgs: string[];
+  createTrustVolumeArgs: string[];
   workloadNetworkArgs: string[];
+  workloadTrustArgs: string[];
   proxyRunArgs: string[];
   connectProxyOutboundArgs: string[];
 }
@@ -179,12 +194,14 @@ export function buildDockerManagedEgressPlan(config: DockerManagedEgressConfig, 
   const proxyContainer = resourceName("valet-egress-proxy", request.identity.proxyId);
   const tokenVolume = resourceName("valet-egress-token", request.identity.proxyId);
   const configVolume = resourceName("valet-egress-config", request.identity.proxyId);
+  const trustVolume = resourceName("valet-egress-trust", request.identity.proxyId);
   const labels = {
     internalNetwork: managedLabels(owner, "internal-network"),
     outboundNetwork: managedLabels(owner, "outbound-network"),
     proxy: managedLabels(owner, "proxy"),
     tokenVolume: managedLabels(owner, "token-volume"),
     configVolume: managedLabels(owner, "config-volume"),
+    trustVolume: managedLabels(owner, "trust-volume"),
   };
   const proxyRunArgs = [
     "run", "-d", "--name", proxyContainer,
@@ -207,12 +224,15 @@ export function buildDockerManagedEgressPlan(config: DockerManagedEgressConfig, 
     proxyContainer,
     tokenVolume,
     configVolume,
+    trustVolume,
     labels,
     createInternalNetworkArgs: ["network", "create", "--internal", ...labelArgs(labels.internalNetwork), internalNetwork],
     createOutboundNetworkArgs: ["network", "create", ...labelArgs(labels.outboundNetwork), outboundNetwork],
     createTokenVolumeArgs: ["volume", "create", ...labelArgs(labels.tokenVolume), tokenVolume],
     createConfigVolumeArgs: ["volume", "create", ...labelArgs(labels.configVolume), configVolume],
+    createTrustVolumeArgs: ["volume", "create", ...labelArgs(labels.trustVolume), trustVolume],
     workloadNetworkArgs: ["--network", internalNetwork],
+    workloadTrustArgs: ["--env", "SSL_CERT_FILE=/etc/valet-egress/ca.crt", "--mount", `type=volume,src=${trustVolume},dst=/etc/valet-egress,readonly`],
     proxyRunArgs,
     connectProxyOutboundArgs: ["network", "connect", outboundNetwork, proxyContainer],
   };
@@ -246,6 +266,7 @@ export async function applyDockerManagedEgressInfrastructure(
     { kind: "network", name: plan.outboundNetwork, labels: plan.labels.outboundNetwork, create: plan.createOutboundNetworkArgs, remove: ["network", "rm", plan.outboundNetwork] },
     { kind: "volume", name: plan.tokenVolume, labels: plan.labels.tokenVolume, create: plan.createTokenVolumeArgs, remove: ["volume", "rm", "-f", plan.tokenVolume] },
     { kind: "volume", name: plan.configVolume, labels: plan.labels.configVolume, create: plan.createConfigVolumeArgs, remove: ["volume", "rm", "-f", plan.configVolume] },
+    { kind: "volume", name: plan.trustVolume, labels: plan.labels.trustVolume, create: plan.createTrustVolumeArgs, remove: ["volume", "rm", "-f", plan.trustVolume] },
   ];
   const created: typeof resources = [];
   try {
@@ -269,15 +290,49 @@ export async function applyDockerManagedEgressInfrastructure(
 
 function bootstrapArgs(plan: DockerManagedEgressPlan, volume: string, destination: string, mode: "0400" | "0444"): string[] {
   const parent = destination.slice(0, destination.lastIndexOf("/"));
+  const mountPath = volume === plan.tokenVolume ? "/run/valet-egress" : volume === plan.trustVolume ? "/etc/valet-egress" : "/etc/hematite";
   return [
     "run", "--rm", "-i", "--network", "none", "--entrypoint", "sh",
-    "--mount", `type=volume,src=${volume},dst=${volume === plan.tokenVolume ? "/run/valet-egress" : "/etc/hematite"}`,
+    "--mount", `type=volume,src=${volume},dst=${mountPath}`,
     plan.proxyArtifact,
     "-c", `umask 077; mkdir -p ${parent}; cat > ${destination}; chmod ${mode} ${destination}`,
   ];
 }
 
 /** Writes sensitive material through stdin. No material enters argv, environment, labels, or inspect metadata. */
+export async function observeDockerManagedEgress(
+  plan: DockerManagedEgressPlan,
+  config: DockerManagedEgressConfig,
+  runtime: DockerManagedEgressRuntime,
+): Promise<void> {
+  await assertOwnedOrMissing(runtime, "network", plan.internalNetwork, plan.labels.internalNetwork).then((found) => {
+    if (!found) throw new ManagedEgressPrerequisiteError("network_isolation", "The managed internal network is missing. Re-provision the Docker boundary.");
+  });
+  await assertOwnedOrMissing(runtime, "network", plan.outboundNetwork, plan.labels.outboundNetwork).then((found) => {
+    if (!found) throw new ManagedEgressPrerequisiteError("network_isolation", "The managed outbound network is missing. Re-provision the Docker boundary.");
+  });
+  for (const [kind, volume, labels] of [
+    ["token", plan.tokenVolume, plan.labels.tokenVolume],
+    ["configuration", plan.configVolume, plan.labels.configVolume],
+    ["trust anchor", plan.trustVolume, plan.labels.trustVolume],
+  ] as const) {
+    if (!await assertOwnedOrMissing(runtime, "volume", volume, labels)) {
+      throw new ManagedEgressPrerequisiteError("configuration", `The managed ${kind} volume is missing. Re-provision the Docker boundary.`);
+    }
+  }
+  if (!await assertOwnedOrMissing(runtime, "container", plan.proxyContainer, plan.labels.proxy)) {
+    throw new ManagedEgressPrerequisiteError("network_isolation", "The managed proxy container is missing. Re-provision the Docker boundary.");
+  }
+  const networks = await runtime.containerNetworks(plan.proxyContainer);
+  if (networks.length !== 2 || !networks.includes(plan.internalNetwork) || !networks.includes(plan.outboundNetwork)) {
+    throw new ManagedEgressPrerequisiteError("network_isolation", "The managed proxy network boundary does not match. Re-provision the Docker boundary.");
+  }
+  for (const port of [config.listenerPort, config.httpsListenerPort, config.tunnelListenerPort]) {
+    const listener = `:${port.toString(16).toUpperCase().padStart(4, "0")} [^ ]+ 0A `;
+    await runtime.run(["exec", plan.proxyContainer, "sh", "-c", `grep -Eqi '${listener}' /proc/net/tcp /proc/net/tcp6`]);
+  }
+}
+
 export async function initializeDockerManagedEgressVolumes(
   plan: DockerManagedEgressPlan,
   material: DockerManagedEgressMaterial,
@@ -287,6 +342,7 @@ export async function initializeDockerManagedEgressVolumes(
   await runtime.run(bootstrapArgs(plan, plan.configVolume, "/etc/hematite/hematite.yaml", "0444"), material.config);
   await runtime.run(bootstrapArgs(plan, plan.configVolume, "/etc/hematite/certs/ca.crt", "0444"), material.caCert);
   await runtime.run(bootstrapArgs(plan, plan.configVolume, "/etc/hematite/certs/ca.key", "0400"), material.caKey);
+  await runtime.run(bootstrapArgs(plan, plan.trustVolume, "/etc/valet-egress/ca.crt", "0444"), material.caCert);
 }
 
 /** Disconnects the workload before ordered, ownership-checked, idempotent resource removal. */
@@ -300,11 +356,16 @@ export async function cleanupDockerManagedEgress(
   const proxyExists = await assertOwnedOrMissing(runtime, "container", plan.proxyContainer, plan.labels.proxy);
   const tokenExists = await assertOwnedOrMissing(runtime, "volume", plan.tokenVolume, plan.labels.tokenVolume);
   const configExists = await assertOwnedOrMissing(runtime, "volume", plan.configVolume, plan.labels.configVolume);
+  const trustExists = await assertOwnedOrMissing(runtime, "volume", plan.trustVolume, plan.labels.trustVolume);
 
-  if (internalExists) await runtime.run(["network", "disconnect", "-f", plan.internalNetwork, workloadContainer]);
+  if (internalExists) {
+    await runtime.run(["network", "disconnect", "-f", plan.internalNetwork, workloadContainer]);
+    await runtime.run(["rm", "-f", workloadContainer]);
+  }
   if (proxyExists) await runtime.run(["rm", "-f", plan.proxyContainer]);
   if (tokenExists) await runtime.run(["volume", "rm", "-f", plan.tokenVolume]);
   if (configExists) await runtime.run(["volume", "rm", "-f", plan.configVolume]);
+  if (trustExists) await runtime.run(["volume", "rm", "-f", plan.trustVolume]);
   if (outboundExists) await runtime.run(["network", "rm", plan.outboundNetwork]);
   if (internalExists) await runtime.run(["network", "rm", plan.internalNetwork]);
 }

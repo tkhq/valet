@@ -14,7 +14,7 @@ The engine contract separates four states:
 3. `ready` means the provider observed the proxy listener, token mount, callback binding, and forced network resources.
 4. `effective` persists the exact identity and artifact that hold the boundary.
 
-A provider must reject a request before side effects unless all four states can converge. The local provider is always unsupported. Docker and Kubernetes remain unsupported in this checkpoint because their lifecycle code does not yet apply and observe the topology plans. This is deliberate. Operator configuration can request and provision resources only. It cannot assert callback or network readiness.
+A provider must reject a request before side effects unless all four states can converge. The local provider is always unsupported. Kubernetes remains unsupported until its lifecycle applies and observes the topology plan. Docker reports support only when it has a pinned proxy artifact and CA material source. Operator configuration cannot assert callback or network readiness.
 
 ## Hematite contract
 
@@ -57,9 +57,9 @@ Readiness requires exactly one workload selector match. It also requires the exa
 
 ### Docker
 
-The plan creates an internal workload network and a distinct outbound network. The workload attaches only to the internal network. A separate proxy container attaches to both networks. It has no host-gateway mapping. Only the proxy mounts the token and configuration volumes.
+The plan creates an internal workload network and a distinct outbound network. The workload attaches only to the internal network. A separate proxy container attaches to both networks. It has no host-gateway mapping. Only the proxy mounts the token and configuration volumes. A separate trust volume gives the workload only the public CA certificate.
 
-Each managed Docker resource has an exact server-derived ownership label. Restart adoption rejects name collisions with unmanaged resources. Partial setup removes only resources created by that attempt. Terminal cleanup disconnects the workload first. It then removes the proxy, token and configuration volumes, outbound network, and internal network. Missing resources are successful no-ops.
+Each managed Docker resource has an exact server-derived ownership label. Restart adoption rejects name collisions with unmanaged resources. Partial setup removes only resources created by that attempt. Terminal cleanup disconnects and removes the workload first. It then removes the proxy, token, configuration, and trust volumes. It removes the outbound network and then the internal network. Missing resources are successful no-ops.
 
 Valet renders the strict Hematite v1 file with an ordered required allowlist and external authorization. The file sets `dns.passthrough` to an empty list. Bootstrap writes the token and CA key through stdin with mode `0400`. Token, CA, and configuration values do not enter Docker argv, environment, or labels. The proxy exposes each configured HTTP, HTTPS, and tunnel listener without publishing a host port.
 

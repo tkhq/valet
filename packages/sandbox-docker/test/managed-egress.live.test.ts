@@ -6,12 +6,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
 import { MANAGED_EGRESS_CONTRACT_VERSION } from "@valet/engine";
+import { DockerSandboxProvider } from "../src/sandbox.js";
 import {
   applyDockerManagedEgressInfrastructure,
   buildDockerManagedEgressPlan,
   cleanupDockerManagedEgress,
   dockerManagedEgressCliRuntime,
   initializeDockerManagedEgressVolumes,
+  observeDockerManagedEgress,
   renderHematiteConfig,
 } from "../src/managed-egress.js";
 
@@ -49,7 +51,7 @@ async function removeBestEffort(args: string[]): Promise<void> {
 afterAll(async () => {
   await removeBestEffort(["rm", "-f", workload, plan.proxyContainer]);
   await removeBestEffort(["network", "rm", plan.outboundNetwork, plan.internalNetwork, unmanaged]);
-  await removeBestEffort(["volume", "rm", "-f", plan.tokenVolume, plan.configVolume]);
+  await removeBestEffort(["volume", "rm", "-f", plan.tokenVolume, plan.configVolume, plan.trustVolume]);
 });
 
 live("Docker managed egress live lifecycle", () => {
@@ -133,6 +135,7 @@ live("Docker managed egress live lifecycle", () => {
       await runtime.run(localPlan.proxyRunArgs);
       await runtime.run(localPlan.connectProxyOutboundArgs);
       await new Promise((resolve) => setTimeout(resolve, 1_000));
+      await observeDockerManagedEgress(localPlan, runtimeConfig, runtime);
 
       const proxyIpResult = await docker("docker", ["inspect", "--format", `{{with index .NetworkSettings.Networks "${localPlan.internalNetwork}"}}{{.IPAddress}}{{end}}`, localPlan.proxyContainer]);
       await docker("docker", ["pull", "curlimages/curl:8.12.1"]);
@@ -158,4 +161,54 @@ live("Docker managed egress live lifecycle", () => {
       await rm(certDir, { recursive: true, force: true });
     }
   }, 120_000);
+
+  (localImageId ? it : it.skip)("runs the provider apply, observe, and ordered destroy lifecycle", async () => {
+    if (!localImageId) throw new Error("Set HEMATITE_LOCAL_IMAGE_ID to the exact-source local image ID.");
+    const registry = `valet-egress-registry-${suffix}`;
+    const certDir = await mkdtemp(join(tmpdir(), "valet-provider-ca-"));
+    const workspace = await mkdtemp(join(tmpdir(), "valet-provider-workspace-"));
+    let provider: DockerSandboxProvider | undefined;
+    let sandboxId: string | undefined;
+    try {
+      await docker("docker", ["pull", "registry:2"]);
+      await docker("docker", ["run", "-d", "--name", registry, "-p", "127.0.0.1::5000", "registry:2"]);
+      const portResult = await docker("docker", ["inspect", "--format", "{{(index (index .NetworkSettings.Ports \"5000/tcp\") 0).HostPort}}", registry]);
+      const repository = `127.0.0.1:${portResult.stdout.trim()}/hematite`;
+      await docker("docker", ["tag", localImageId, `${repository}:acceptance`]);
+      await docker("docker", ["push", `${repository}:acceptance`]);
+      const digestResult = await docker("docker", ["image", "inspect", "--format", "{{index .RepoDigests 0}}", `${repository}:acceptance`]);
+      await docker("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", "/CN=ValetProviderCA", "-addext", "basicConstraints=critical,CA:TRUE", "-keyout", join(certDir, "ca.key"), "-out", join(certDir, "ca.crt")]);
+      let registered = false;
+      provider = new DockerSandboxProvider({
+        config: { ...config, proxyArtifact: digestResult.stdout.trim() },
+        caMaterial: async () => ({
+          caCert: await readFile(join(certDir, "ca.crt"), "utf8"),
+          caKey: await readFile(join(certDir, "ca.key"), "utf8"),
+        }),
+      });
+      const sandbox = await provider.create({
+        workspace,
+        image: "alpine:3.20",
+        managedEgress: { ...request, identity: { ...request.identity, proxyId: `provider-${suffix}` } },
+        managedEgressLifecycle: {
+          registerCallbackBinding: () => { registered = true; },
+          revokeCallbackBinding: () => { registered = false; },
+        },
+      });
+      sandboxId = sandbox.id;
+      expect(registered).toBe(true);
+      const status = await provider.status(sandbox.id);
+      expect(status.managedEgress?.effective).toBe(true);
+      expect(status.managedEgress?.topology.workloadSelector).toHaveProperty("docker.container");
+      await provider.destroy(sandbox.id);
+      sandboxId = undefined;
+      expect(registered).toBe(false);
+      await expect(provider.status(sandbox.id)).resolves.toMatchObject({ state: "released" });
+    } finally {
+      if (provider && sandboxId) await provider.destroy(sandboxId).catch(() => undefined);
+      await removeBestEffort(["rm", "-f", registry]);
+      await rm(certDir, { recursive: true, force: true });
+      await rm(workspace, { recursive: true, force: true });
+    }
+  }, 180_000);
 });

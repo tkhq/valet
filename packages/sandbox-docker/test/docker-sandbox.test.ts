@@ -384,7 +384,7 @@ describeDocker("DockerSandbox", () => {
         supported: false,
         configured: false,
         ready: false,
-        reason: "The forced Docker topology is defined but lifecycle activation is not connected.",
+        reason: "Managed egress is disabled. Configure the Docker provider with a pinned proxy artifact to enable it.",
       },
     });
   });

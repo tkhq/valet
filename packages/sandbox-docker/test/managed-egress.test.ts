@@ -5,6 +5,7 @@ import {
   buildDockerManagedEgressPlan,
   cleanupDockerManagedEgress,
   initializeDockerManagedEgressVolumes,
+  observeDockerManagedEgress,
   renderHematiteConfig,
   type DockerManagedEgressRuntime,
   type DockerResourceKind,
@@ -25,6 +26,12 @@ class FakeRuntime implements DockerManagedEgressRuntime {
   readonly commands: Array<{ args: string[]; stdin?: string }> = [];
   readonly resources = new Map<string, Record<string, string>>();
   failWhenCreating?: string;
+
+  async containerNetworks(name: string): Promise<string[]> {
+    return this.commands
+      .filter((entry) => entry.args[0] === "network" && entry.args[1] === "connect" && entry.args.at(-1) === name)
+      .map((entry) => entry.args[2] ?? "");
+  }
 
   key(kind: DockerResourceKind, name: string): string {
     return `${kind}:${name}`;
@@ -101,9 +108,11 @@ describe("Docker managed egress topology", () => {
     await cleanupDockerManagedEgress(plan, "workload-container", runtime);
     expect(runtime.commands.map((entry) => entry.args)).toEqual([
       ["network", "disconnect", "-f", plan.internalNetwork, "workload-container"],
+      ["rm", "-f", "workload-container"],
       ["rm", "-f", plan.proxyContainer],
       ["volume", "rm", "-f", plan.tokenVolume],
       ["volume", "rm", "-f", plan.configVolume],
+      ["volume", "rm", "-f", plan.trustVolume],
       ["network", "rm", plan.outboundNetwork],
       ["network", "rm", plan.internalNetwork],
     ]);
@@ -118,6 +127,21 @@ describe("Docker managed egress topology", () => {
     runtime.resources.set(runtime.key("network", plan.internalNetwork), { "valet.dev/managed-egress-owner": "other" });
     await expect(cleanupDockerManagedEgress(plan, "workload", runtime)).rejects.toThrow(/not owned/);
     expect(runtime.commands).toEqual([]);
+  });
+
+  it("observes every owned resource, both proxy networks, and all listeners", async () => {
+    const plan = buildDockerManagedEgressPlan(config, request);
+    const runtime = new FakeRuntime();
+    await applyDockerManagedEgressInfrastructure(plan, runtime);
+    runtime.resources.set(runtime.key("container", plan.proxyContainer), plan.labels.proxy);
+    runtime.commands.push(
+      { args: ["network", "connect", plan.internalNetwork, plan.proxyContainer] },
+      { args: plan.connectProxyOutboundArgs },
+    );
+    await observeDockerManagedEgress(plan, config, runtime);
+    expect(runtime.commands.filter((entry) => entry.args[0] === "exec")).toHaveLength(3);
+    runtime.resources.delete(runtime.key("volume", plan.trustVolume));
+    await expect(observeDockerManagedEgress(plan, config, runtime)).rejects.toThrow(/trust anchor volume is missing/);
   });
 
   it("renders strict Hematite v1 configuration with no DNS passthrough", () => {
@@ -152,6 +176,7 @@ describe("Docker managed egress topology", () => {
       material.config,
       material.caCert,
       material.caKey,
+      material.caCert,
     ]);
     expect(argv).toContain("chmod 0400 /run/valet-egress/token");
     expect(argv).toContain("chmod 0400 /etc/hematite/certs/ca.key");
