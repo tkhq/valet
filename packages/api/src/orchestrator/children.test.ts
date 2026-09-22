@@ -2239,6 +2239,8 @@ describe("buildChildSender", () => {
       queueItemId: "qi-done",
     });
 
+    await db.insert(sessionRepos).values({ sessionId: "child-again", host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git", auth: "auto", position: 0 });
+
     // The user dismissed the settled child; a re-open must resurface it.
     await db
       .update(childWatches)
@@ -2250,7 +2252,7 @@ describe("buildChildSender", () => {
     // (and the settlement signal) must stay with the spawning thread.
     const res = await sender(
       { childSessionId: "child-again", message: "one more thing: add tests" },
-      { parentSessionId: "parent-again", parentThreadId: "th-elsewhere", actorUserId: "local-user" },
+      { parentSessionId: "parent-again", parentThreadId: "th-elsewhere", actorUserId: "local-user", parentOperationId: "send-operation" },
     );
     expect(res).not.toBeNull();
 
@@ -2259,6 +2261,8 @@ describe("buildChildSender", () => {
     expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
     expect(rows[0]?.dismissedAt).toBeNull();
     expect(rows[0]?.parentThreadId).toBe(parentThread.id);
+    const [grant] = await db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, "child-again"));
+    expect(grant).toMatchObject({ parentOperationId: "send-operation", revokedAt: null });
 
     await engineStore.settleUnclaimed("child-again", childThread.id, res?.queueItemId ?? "", { outcome: "completed" });
     await waitFor(async () => {
@@ -2268,8 +2272,28 @@ describe("buildChildSender", () => {
     await new Promise((r) => setTimeout(r, 100));
     const signals = settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-again"));
     expect(signals).toHaveLength(1);
+    expect((await db.select().from(credentialDelegations).where(eq(credentialDelegations.childSessionId, "child-again")))[0]?.revokedAt).not.toBeNull();
     expect(signals[0]?.dispatchId).toBe(`child-again:settled:child-again:${res?.queueItemId}`);
     expect(signals[0]?.threadId).toBe(parentThread.id);
+  });
+
+  it("denies settled-child repository re-delegation before wake", async () => {
+    api = await bootTestApi();
+    mockDelegationDecision(api, (request) => request.kind === "credential.delegate" ? "deny" : "allow");
+    const deps = childrenDeps(api);
+    const { db, engineHost } = api.providers;
+    await seedChild(api, { childId: "child-redelegate-denied", parentId: "parent-redelegate-denied", settled: true, queueItemId: "qi-done" });
+    await db.insert(sessionRepos).values({ sessionId: "child-redelegate-denied", host: "github", fullName: "acme/widgets", cloneUrl: "https://github.com/acme/widgets.git", auth: "auto", position: 0 });
+    const wake = vi.spyOn(engineHost, "sessionFor");
+
+    await expect(buildChildSender(deps, new ChildWatcher(deps))(
+      { childSessionId: "child-redelegate-denied", message: "wake" },
+      { parentSessionId: "parent-redelegate-denied", parentThreadId: "elsewhere", actorUserId: "local-user", parentOperationId: "send-denied" },
+    )).rejects.toThrow("Repository credential delegation was denied.");
+
+    expect(wake).not.toHaveBeenCalled();
+    expect(await db.select().from(credentialDelegations)).toHaveLength(0);
+    expect((await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-redelegate-denied")))[0]?.settled).toBe(true);
   });
 
   it("self-heals a steer whose sender died before the re-point: the watch follows the successor", async () => {

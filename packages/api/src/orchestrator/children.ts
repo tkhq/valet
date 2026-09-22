@@ -51,7 +51,7 @@ import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATO
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
 import { canonicalDecisionId } from "../authorization/canonical-authorization-service.js";
 import { completeCanonicalExecution, reserveCanonicalExecution } from "../authorization/canonical-execution-lifecycle.js";
-import { authorizeRepositoryCredentialDelegation, revokeChildCredentialDelegations } from "../authorization/credential-delegation.js";
+import { authorizeRepositoryCredentialDelegation, CredentialDelegationInvalidError, revokeChildCredentialDelegations } from "../authorization/credential-delegation.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
 const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
@@ -1270,7 +1270,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
   const send = async (
     req: { childSessionId: string; message: string; interrupt?: boolean },
-    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; parentOperationId?: string },
   ): Promise<{ queueItemId: string } | null> => {
     const watchRows = await deps.db
       .select()
@@ -1317,6 +1317,21 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // still-running child changes no counts and pays nothing.
     if (watchRow.settled) {
       await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId, deps.orgSessionCeiling);
+      const repositories = await deps.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, req.childSessionId));
+      const parentOperationId = ctx.parentOperationId;
+      const authorization = deps.canonicalAuthorizationService;
+      if (repositories.length > 0 && (!parentOperationId || !authorization)) throw new CredentialDelegationInvalidError();
+      if (child.ownerType !== "user" && child.ownerType !== "team" && child.ownerType !== "org") throw new CredentialDelegationInvalidError();
+      for (const repository of repositories) {
+        if (!parentOperationId || !authorization) throw new CredentialDelegationInvalidError();
+        await authorizeRepositoryCredentialDelegation({
+          db: deps.db, authorization, orgId: watchRow.orgId,
+          actorUserId: ctx.actorUserId, owner: { type: child.ownerType, id: child.ownerId },
+          parentSessionId: ctx.parentSessionId, parentThreadId: watchRow.parentThreadId,
+          parentOperationId, childSessionId: req.childSessionId,
+          binding: { host: repository.host, fullName: repository.fullName, cloneUrl: repository.cloneUrl, ref: repository.ref ?? undefined, auth: repository.auth },
+        });
+      }
     }
 
     const childData = await deps.engineStore.getSession(req.childSessionId);

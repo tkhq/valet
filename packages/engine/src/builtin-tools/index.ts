@@ -540,7 +540,7 @@ export const childSendTool = defineTool({
         message: args.message,
         ...(args.interrupt !== undefined ? { interrupt: args.interrupt } : {}),
       },
-      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
+      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId, ...(ctx.queueItemId ? { parentOperationId: ctx.queueItemId } : {}) },
     );
     if (result === null) {
       return {

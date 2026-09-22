@@ -2734,7 +2734,7 @@ export type ChildStatusReader = (
  */
 export type ChildSender = (
   req: { childSessionId: string; message: string; interrupt?: boolean },
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; parentOperationId?: string },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**
