@@ -62,7 +62,7 @@ import {
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import { recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
+import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -731,15 +731,13 @@ export async function submitSessionPrompt(
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
-    const now = Date.now();
-    await db
-      .update(agentSessions)
-      .set({ updatedAt: now, lastActivityAt: now })
-      .where(eq(agentSessions.id, row.id));
-    await recordThreadActivityBestEffort(() => recordActivity(now));
+    const activityAt = Date.now();
+    await recordSessionActivity(db, row.id, activityAt);
+    await recordThreadActivityBestEffort(() => recordActivity(activityAt));
     return {
       messageId: receipt.queueItemId || null,
       threadId: receipt.threadId,
+      activityAt,
     };
   }
 
@@ -873,16 +871,17 @@ export async function submitSessionPrompt(
     throw err;
   }
 
-  await db
-    .update(agentSessions)
-    .set({ updatedAt: activityAt, lastActivityAt: activityAt })
-    .where(eq(agentSessions.id, row.id));
+  // Session recency is completion time. `activityAt` marks request start and
+  // can be older than a later submission that already finished.
+  const sessionTouchedAt = Date.now();
+  await recordSessionActivity(db, row.id, sessionTouchedAt);
   await recordThreadActivityBestEffort(() => recordActivity(activityAt));
 
   return {
     // Commands take no queue item; "" would read as a real (broken) id.
     messageId: receipt.queueItemId || null,
     threadId: receipt.threadId,
+    activityAt,
   };
 }
 

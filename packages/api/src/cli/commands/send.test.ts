@@ -76,7 +76,7 @@ function stubDeps(events: WireEvent[], overrides: Partial<SendClient> = {}): {
     },
     sendPrompt: (id, body) => {
       sent.push({ id, body });
-      return Promise.resolve({ messageId: "q1", threadId: "t1" });
+      return Promise.resolve({ messageId: "q1", threadId: "t1", activityAt: 1 });
     },
     ...overrides,
   };

@@ -473,21 +473,21 @@ export function useMarkAllNotificationsRead() {
 export function useSendPrompt(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
-    { messageId: string | null; threadId: string },
+    import("@valet/api/wire").SendPromptResponse,
     Error,
     import("@valet/api/wire").SendPromptRequest
   >({
     mutationFn: (body) =>
       api.sendPrompt(sessionId, body),
-    // Update the sender now. Socket events update other viewers; a later
-    // thread-list fetch reconciles this local estimate to the persisted value.
+    // Update the sender now with the timestamp that the server persisted.
+    // Socket events update other viewers; a later thread-list fetch reconciles
+    // this cache with the persisted value.
     onSuccess: (data, { text }) => {
-      const activityAt = Date.now();
       qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
         ...current,
         threads: current.threads.map((thread) =>
           thread.id === data.threadId
-            ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, activityAt) }
+            ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) }
             : thread,
         ),
       }));

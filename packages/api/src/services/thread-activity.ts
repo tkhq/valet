@@ -1,7 +1,7 @@
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { EngineEvent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { sessionThreads } from "../schema/index.js";
+import { agentSessions, sessionThreads } from "../schema/index.js";
 
 type ThreadActivityEvent = Extract<EngineEvent, { type: "thread_user_activity" }>;
 
@@ -12,6 +12,17 @@ export async function recordThreadActivityBestEffort(record: () => Promise<void>
   } catch (err) {
     console.error("Thread activity recording failed after prompt acceptance:", err);
   }
+}
+
+/** Persist a session touch without allowing a delayed submission to regress recency. */
+export async function recordSessionActivity(db: AppDb, sessionId: string, activityAt: number): Promise<void> {
+  await db
+    .update(agentSessions)
+    .set({
+      updatedAt: sql`GREATEST(${agentSessions.updatedAt}, ${activityAt})`,
+      lastActivityAt: sql`GREATEST(COALESCE(${agentSessions.lastActivityAt}, ${activityAt}), ${activityAt})`,
+    })
+    .where(eq(agentSessions.id, sessionId));
 }
 
 /** Persist and publish one server-derived user activity timestamp. */
@@ -41,6 +52,8 @@ export async function recordThreadUserActivity(
     })
     .returning({ lastUserActivityAt: sessionThreads.lastUserActivityAt });
 
+  // This uses the same process-local live fan-out as every engine event.
+  // Reconnect replay reads this durable event from Postgres on another API pod.
   await input.emit({
     type: "thread_user_activity",
     threadId: input.threadId,

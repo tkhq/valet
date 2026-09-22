@@ -13,7 +13,7 @@ describe("useSendPrompt", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("updates the sender's submitted thread activity before a socket event arrives", async () => {
-    vi.spyOn(api, "sendPrompt").mockResolvedValue({ messageId: "message-1", threadId: "older" });
+    vi.spyOn(api, "sendPrompt").mockResolvedValue({ messageId: "message-1", threadId: "older", activityAt: 3_000 });
     const client = new QueryClient();
     client.setQueryData<ListThreadsResponse>(qk.threads(sessionId), {
       threads: [
@@ -29,7 +29,7 @@ describe("useSendPrompt", () => {
     await act(() => result.current.mutateAsync({ text: "Move this thread" }));
 
     const threads = client.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads;
-    expect(threads?.find((thread) => thread.id === "older")?.lastUserActivityAt).toBeGreaterThan(2_000);
+    expect(threads?.find((thread) => thread.id === "older")?.lastUserActivityAt).toBe(3_000);
     expect(threads?.find((thread) => thread.id === "newer")?.lastUserActivityAt).toBe(2_000);
   });
 });

@@ -1336,6 +1336,8 @@ export interface SendPromptResponse {
    */
   messageId: string | null;
   threadId: string;
+  /** Server time when this accepted user action occurred, in epoch milliseconds. */
+  activityAt: number;
 }
 
 // ── REST: decision gates ──────────────────────────────────────────────────
