@@ -4,6 +4,7 @@
  * Harness: shared PGlite AppDb + migrations, mirroring skill-sources.test.ts.
  */
 import { randomUUID } from "node:crypto";
+import { InMemoryCredentialStore } from "@valet/engine";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { eq, and, like } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
@@ -21,6 +22,8 @@ import {
 } from "./config-reconcile.js";
 import { InstanceConfigError, type InstanceConfig } from "../config/instance-config.js";
 import { findDefaultAssistant } from "../assistants/service.js";
+import { buildOrgCatalog } from "./model-catalog.js";
+import { resolveModelSpec } from "./model-resolution.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -711,6 +714,100 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.name).toBe("my-llm");
     expect(rows[0]!.baseUrl).toBe("https://api.example.com/v1");
+  });
+
+  it("constructs an active OpenAI-compatible provider from config and apiKeyEnv", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [
+        {
+          kind: "openai_compatible",
+          name: "agents-dev-kserve",
+          baseUrl: "http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1",
+          apiKeyEnv: "VALET_KSERVE_API_KEY",
+          models: [{ id: "qwen2.5-coder-7b-instruct", name: "Qwen 2.5 Coder 7B Instruct" }],
+        },
+      ],
+    };
+
+    await reconcileInstanceConfig(
+      { db, credentials, env: { VALET_KSERVE_API_KEY: "kserve-secret" } },
+      cfg,
+    );
+
+    const org = await ensureOrg(db);
+    const providerId = configProviderId("agents-dev-kserve");
+    const [provider] = await db.select().from(llmProviders).where(eq(llmProviders.id, providerId));
+    expect(provider).toMatchObject({
+      id: providerId,
+      kind: "openai_compatible",
+      baseUrl: "http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1",
+      enabled: true,
+    });
+    expect(await credentials.get({ type: "org", id: org.id }, `llm:${providerId}`)).toMatchObject({
+      type: "api_key",
+      apiKey: "kserve-secret",
+      metadata: { last4: "cret", source: "instance_config_env" },
+    });
+
+    const catalog = await buildOrgCatalog(db, credentials, org.id);
+    expect(catalog).toContainEqual(expect.objectContaining({
+      id: `${providerId}/qwen2.5-coder-7b-instruct`,
+      name: "Qwen 2.5 Coder 7B Instruct",
+      active: true,
+      resolvable: true,
+    }));
+
+    const resolved = await resolveModelSpec(
+      db,
+      credentials,
+      org.id,
+      `${providerId}/qwen2.5-coder-7b-instruct`,
+    );
+    expect(resolved).toMatchObject({
+      apiKey: "kserve-secret",
+      canonicalId: `${providerId}/qwen2.5-coder-7b-instruct`,
+      model: {
+        id: "qwen2.5-coder-7b-instruct",
+        name: "Qwen 2.5 Coder 7B Instruct",
+        api: "openai-completions",
+        provider: providerId,
+        baseUrl: "http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1",
+      },
+    });
+  });
+
+  it("keeps an apiKeyEnv provider disabled when the env secret is absent", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const cfg: InstanceConfig = {
+      version: 1,
+      llmProviders: [{
+        kind: "openai_compatible",
+        name: "agents-dev-kserve",
+        baseUrl: "http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1",
+        apiKeyEnv: "VALET_KSERVE_API_KEY",
+        models: [{ id: "qwen-coder", name: "Agents Dev Qwen Coder" }],
+      }],
+    };
+
+    const org = await ensureOrg(db);
+    const providerId = configProviderId("agents-dev-kserve");
+    await credentials.save({ type: "org", id: org.id }, `llm:${providerId}`, {
+      type: "api_key",
+      apiKey: "stale-secret",
+    });
+
+    await reconcileInstanceConfig({ db, credentials, env: {} }, cfg);
+
+    const [provider] = await db.select().from(llmProviders).where(eq(llmProviders.id, providerId));
+    expect(provider?.enabled).toBe(false);
+    expect(await credentials.get({ type: "org", id: org.id }, `llm:${providerId}`)).not.toBeNull();
+    const catalog = await buildOrgCatalog(db, credentials, org.id);
+    expect(catalog.find((entry) => entry.id === `${providerId}/qwen-coder`)).toMatchObject({
+      active: false,
+      resolvable: true,
+    });
   });
 
   it("second run on openai_compatible provider with same name is a no-op", async () => {

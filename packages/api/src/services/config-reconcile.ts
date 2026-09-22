@@ -11,6 +11,7 @@
  * logic can upsert safely.
  */
 import { createHash, randomUUID } from "node:crypto";
+import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import { and, eq, isNull, like, lte, notLike, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -60,6 +61,10 @@ export interface ReconcileDeps {
    */
   configPath?: string;
   sourceService?: SourceService;
+  /** Credential store used when an llmProviders entry names apiKeyEnv. */
+  credentials?: CredentialStore;
+  /** Process environment. Defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -582,16 +587,27 @@ async function reconcileTeamsPass(
 // LLM providers pass
 // ---------------------------------------------------------------------------
 
-async function reconcileLlmProvidersPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
+async function reconcileLlmProvidersPass(
+  db: AppDb,
+  cfg: InstanceConfig,
+  credentials: CredentialStore | undefined,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
   if (!cfg.llmProviders) return;
 
   const org = await ensureOrg(db);
   const orgId = org.id;
+  const credentialOwner: CredentialOwner = { type: "org", id: orgId };
 
   for (const provDecl of cfg.llmProviders) {
     const kind = provDecl.kind as LlmProviderKind;
     const declaredName = provDecl.name ?? kind;
-    const declaredEnabled = provDecl.enabled ?? true;
+    const envKey = provDecl.apiKeyEnv === undefined ? undefined : env[provDecl.apiKeyEnv]?.trim();
+    // A provider that explicitly requires an environment key stays disabled
+    // when that key is absent. This prevents a stale stored key from making a
+    // deployment-configured endpoint active after its Secret is removed.
+    const declaredEnabled = (provDecl.enabled ?? true) &&
+      (provDecl.apiKeyEnv === undefined || Boolean(envKey));
     const declaredModels = provDecl.models?.map((m) => ({ id: m.id, name: m.name ?? m.id }));
 
     if (isKnownProviderKind(kind)) {
@@ -645,6 +661,28 @@ async function reconcileLlmProvidersPass(db: AppDb, cfg: InstanceConfig): Promis
           createdAt: now,
         }).onConflictDoNothing();
       }
+    }
+
+    if (envKey) {
+      if (!credentials) {
+        throw new InstanceConfigError(
+          `llmProviders entry ${JSON.stringify(declaredName)} declares apiKeyEnv, but the credential store is unavailable. Configure the credential store before reconciliation.`,
+        );
+      }
+      const rows = await listLlmProviders(db, orgId);
+      const provider = isKnownProviderKind(kind)
+        ? rows.find((row) => row.kind === kind)
+        : rows.find((row) => row.kind === "openai_compatible" && row.name === declaredName);
+      if (!provider) {
+        throw new InstanceConfigError(
+          `llmProviders entry ${JSON.stringify(declaredName)} could not resolve its provider row. Check the provider name and restart.`,
+        );
+      }
+      await credentials.save(credentialOwner, `llm:${provider.id}`, {
+        type: "api_key",
+        apiKey: envKey,
+        metadata: { last4: envKey.slice(-4), source: "instance_config_env" },
+      });
     }
   }
 }
@@ -932,7 +970,7 @@ async function reconcileToolPoliciesPass(db: AppDb, cfg: InstanceConfig): Promis
  * Structured as sequential passes so later tasks can append more passes here.
  */
 export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: InstanceConfig): Promise<void> {
-  const { db, configPath, sourceService } = deps;
+  const { db, configPath, sourceService, credentials, env = process.env } = deps;
 
   // Pass 1: org + members + invites
   await reconcileOrgPass(db, cfg, configPath, sourceService);
@@ -941,7 +979,7 @@ export async function reconcileInstanceConfig(deps: ReconcileDeps, cfg: Instance
   await reconcileTeamsPass(db, cfg, configPath);
 
   // Pass 3: llmProviders
-  await reconcileLlmProvidersPass(db, cfg);
+  await reconcileLlmProvidersPass(db, cfg, credentials, env);
 
   // Pass 4: skillSources
   await reconcileSkillSourcesPass(db, cfg);
