@@ -262,7 +262,7 @@ const reqItem: ProxyRequestListItem = {
   totalTokens: 150,
   costUsd: 0.0012,
   latencyMs: 800,
-  error: null,
+  hasError: false,
 };
 
 const mockRequests = { items: [reqItem], nextCursor: undefined, pageSize: 25, hasMore: false };

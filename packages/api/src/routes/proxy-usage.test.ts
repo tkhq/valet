@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProxyRequests, orgMembers, orgs, users } from "../schema/index.js";
-import type { ProxyUsageSummary, ProxyRequestListItem, ProxyRequestDetail, ProxyRequestListResponse, ProxyDayBucket } from "../wire/types.js";
+import type { ProxyUsageSummary, ProxyRequestDetail, ProxyRequestListResponse, ProxyDayBucket } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -93,6 +93,29 @@ describe("GET /api/proxy/requests — personal scope", () => {
     expect(ids).not.toContain("req-user2");
     expect(body.pageSize).toBe(50);
     expect(body.hasMore).toBe(false);
+  });
+});
+
+describe("GET /api/proxy/requests — safe failure metadata", () => {
+  it("returns a failure indicator without error or response content", async () => {
+    api = await bootTestApi();
+    const secret = "proxy-response-secret";
+    await api.providers.db.insert(llmProxyRequests).values(
+      makeRow({
+        id: "req-failure",
+        statusCode: 500,
+        error: "Upstream failure: " + secret,
+        responseBody: '{"error":"' + secret + '"}',
+      }),
+    );
+
+    const res = await fetch(api.baseUrl + "/api/proxy/requests");
+    const body = (await res.json()) as ProxyRequestListResponse;
+    const item = body.requests.find((row) => row.id === "req-failure");
+    expect(item).toMatchObject({ id: "req-failure", statusCode: 500, hasError: true });
+    expect(JSON.stringify(body)).not.toContain(secret);
+    expect(item).not.toHaveProperty("error");
+    expect(item).not.toHaveProperty("responseBody");
   });
 });
 

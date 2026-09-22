@@ -10,7 +10,7 @@ describe("proxy request pagination", () => {
       id: "request-1", createdAt: 1, orgId: "org-1", userId: null, teamId: "team-platform",
       apiKeyId: "shared-key", providerKind: "openai", model: "gpt-4o-mini", harness: "codex",
       endpoint: "/v1/responses", stream: false, statusCode: 200, inputTokens: 1, outputTokens: 1,
-      cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 2, costUsd: 0.01, latencyMs: 1, error: null,
+      cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 2, costUsd: 0.01, latencyMs: 1, hasError: false,
     };
     const previous = vi.fn();
     const next = vi.fn();

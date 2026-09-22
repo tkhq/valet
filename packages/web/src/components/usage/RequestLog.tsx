@@ -16,8 +16,8 @@ interface RequestLogProps {
   isLoading?: boolean;
 }
 
-function statusBadge(code: number, error: string | null) {
-  if (error) return <span className="inline-block rounded px-1.5 py-0.5 text-xs bg-danger-100 text-danger-700">error</span>;
+function statusBadge(code: number, hasError: boolean) {
+  if (hasError) return <span className="inline-block rounded px-1.5 py-0.5 text-xs bg-danger-100 text-danger-700">error</span>;
   if (code >= 200 && code < 300) return <span className="inline-block rounded px-1.5 py-0.5 text-xs bg-green-100 text-green-700">{code}</span>;
   return <span className="inline-block rounded px-1.5 py-0.5 text-xs bg-amber-100 text-amber-700">{code}</span>;
 }
@@ -66,7 +66,7 @@ export function RequestLog({
                 <td className="px-3 py-2 text-right tabular-nums text-muted">
                   {item.costUsd != null ? `$${item.costUsd.toFixed(4)}` : "—"}
                 </td>
-                <td className="px-3 py-2">{statusBadge(item.statusCode, item.error)}</td>
+                <td className="px-3 py-2">{statusBadge(item.statusCode, item.hasError)}</td>
               </tr>
             ))}
           </tbody>

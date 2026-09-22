@@ -260,8 +260,8 @@ type ListRow = Pick<
   | "providerKind" | "model" | "harness" | "endpoint"
   | "stream" | "statusCode"
   | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "totalTokens"
-  | "costUsd" | "latencyMs" | "error"
->;
+  | "costUsd" | "latencyMs"
+> & { hasError: boolean };
 
 /** Columns the list endpoint returns (all except request/response/parsed). */
 function rowToListItem(row: ListRow): ProxyRequestListItem {
@@ -285,13 +285,14 @@ function rowToListItem(row: ListRow): ProxyRequestListItem {
     totalTokens: row.totalTokens,
     costUsd: row.costUsd ?? null,
     latencyMs: row.latencyMs ?? null,
-    error: row.error ?? null,
+    hasError: row.hasError,
   };
 }
 
 function rowToDetail(row: typeof llmProxyRequests.$inferSelect): ProxyRequestDetail {
   return {
-    ...rowToListItem(row),
+    ...rowToListItem({ ...row, hasError: row.error !== null }),
+    error: row.error ?? null,
     requestBody: row.requestBody,
     responseBody: row.responseBody ?? null,
     parsed: row.parsed ?? null,
@@ -378,7 +379,7 @@ proxyUsageRouter.get("/requests", async (c) => {
       totalTokens: llmProxyRequests.totalTokens,
       costUsd: llmProxyRequests.costUsd,
       latencyMs: llmProxyRequests.latencyMs,
-      error: llmProxyRequests.error,
+      hasError: sql<boolean>`${llmProxyRequests.error} IS NOT NULL`,
     })
     .from(llmProxyRequests)
     .where(and(...conditions))

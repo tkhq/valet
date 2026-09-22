@@ -253,7 +253,7 @@ New route in `packages/web/src/routes/` (proposed `usage.tsx`, or a tab under se
 
 - **Time-series** — spend (USD) and tokens over the selected window, stacked by model.
 - **Breakdown tables** — by model and by harness. Each row shows requests, tokens, and cost.
-- **Request log** — a cursor-paginated metadata table. It has an explicit page size and Previous/Next navigation. It does not show owner identifiers, prompts, responses, or raw request bodies.
+- **Request log** — a cursor-paginated metadata table. It has an explicit page size and Previous/Next navigation. It does not show owner identifiers, prompts, responses, raw request bodies, or raw failure text. A failure row has only a status and failure indicator.
 - **Content safety** — prompt and response bodies remain stored for the internal analysis pipeline. The usage page does not fetch or render them.
 
 ### 9. Onboarding panel
