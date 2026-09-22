@@ -65,6 +65,8 @@ export interface SessionData {
   purpose: SessionPurpose;
   status: SessionStatus;
   sandboxId?: string;
+  /** Requested and last observed topology metadata. This state never contains credentials or CA keys. */
+  managedEgress?: import("./sandbox/managed-egress.js").ManagedEgressPersistedState;
   snapshotId?: string;
   parentSessionId?: string;
   parentThreadId?: string;

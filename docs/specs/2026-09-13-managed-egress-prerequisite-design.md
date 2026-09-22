@@ -35,6 +35,14 @@ This checkpoint always returns `deny` with reason `unsupported_prerequisite`. It
 
 Repeated request IDs receive the same bounded denial. Token rotation clears replay state. Expiry and revocation remove the binding before token reuse. Global and per-organization limits reject registry overload. An API restart removes all in-memory bindings and fails closed.
 
+## Durable lifecycle state
+
+The `engine_sessions.managed_egress` column stores a closed JSON shape. It stores the requested identity and the last observed artifact, proxy resources, policy resources, workload selector, and callback binding identity. It does not store callback tokens, token hashes, CA private keys, or other credentials. Invalid or unknown fields fail closed and require re-provision.
+
+A restart reconstructs the managed request from this metadata. It mints a new process-epoch callback token and re-observes the full boundary before it reports `effective=true`. The old token is not registered after restart. Missing proxy material or an incomplete observation returns typed unavailability with an operator diagnostic. The provider must not restore the workload with unmanaged egress.
+
+Each sandbox has an ephemeral CA. Only the proxy receives the private key. Workload provisioning receives only the public trust anchor. Proxy replacement generates a new CA.
+
 ## Forced topology plans
 
 ### Kubernetes

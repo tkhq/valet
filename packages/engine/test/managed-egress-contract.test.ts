@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MANAGED_EGRESS_CONTRACT_VERSION, ManagedEgressPrerequisiteError, SandboxAttachment, validateManagedEgressRequest, type SandboxProvider } from "../src/index.js";
+import { MANAGED_EGRESS_CONTRACT_VERSION, ManagedEgressPrerequisiteError, SandboxAttachment, parseManagedEgressPersistedState, validateManagedEgressRequest, type SandboxProvider } from "../src/index.js";
 
 const request = { requested: true as const, proxyToken: "t".repeat(48), identity: { orgId: "o", sessionId: "s", workloadId: "w", proxyId: "p", contractVersion: MANAGED_EGRESS_CONTRACT_VERSION } };
 function provider(ready: boolean): SandboxProvider {
@@ -23,6 +23,13 @@ describe("managed egress provider contract", () => {
     const valid: unknown = request;
     validateManagedEgressRequest(valid);
     expect(valid.identity.proxyId).toBe("p");
+  });
+
+  it("rejects credentials and unknown fields in persisted metadata", () => {
+    const persisted = { requested: { identity: request.identity } };
+    expect(parseManagedEgressPersistedState(persisted)).toEqual(persisted);
+    expect(() => parseManagedEgressPersistedState({ ...persisted, proxyToken: request.proxyToken })).toThrow(ManagedEgressPrerequisiteError);
+    expect(() => parseManagedEgressPersistedState({ requested: { ...persisted.requested, privateKey: "secret" } })).toThrow(ManagedEgressPrerequisiteError);
   });
 
   it("rejects before attachment side effects unless capability is fully ready", () => {

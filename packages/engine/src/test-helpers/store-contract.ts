@@ -90,6 +90,36 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(list.map((s) => s.id)).toEqual(["a"]);
     });
 
+    it("saveSession round-trips managed-egress topology without credentials", async () => {
+      const identity = {
+        orgId: "o1",
+        sessionId: "sess-1",
+        workloadId: "workload-1",
+        proxyId: "proxy-1",
+        contractVersion: "hematite-external-authorization-v1" as const,
+      };
+      const managedEgress: NonNullable<SessionData["managedEgress"]> = {
+        requested: { identity },
+        effective: {
+          requested: true,
+          configured: true,
+          ready: true,
+          effective: true,
+          identity,
+          proxyArtifact: "registry.example/hematite@sha256:" + "a".repeat(64),
+          topology: {
+            proxyResources: ["proxy:proxy-1"],
+            policyResources: ["policy:proxy-1"],
+            workloadSelector: { "valet.dev/session": "sess-1" },
+            callbackBindingId: "binding-1",
+          },
+        },
+      };
+      await store.saveSession(newSession({ managedEgress }));
+      expect((await store.getSession("sess-1"))?.managedEgress).toEqual(managedEgress);
+      expect(JSON.stringify(await store.getSession("sess-1"))).not.toMatch(/proxyToken|privateKey/);
+    });
+
     it("saveSession round-trips the reasoning level", async () => {
       // The session-default reasoning level is a persisted column, not a
       // derived value: a restart must return the level the user chose.

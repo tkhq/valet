@@ -221,6 +221,10 @@ export class SandboxAttachment {
     return this._sandbox?.id;
   }
 
+  managedEgressRequest(): SandboxCreateOpts["managedEgress"] {
+    return this.createOpts.managedEgress;
+  }
+
   /**
    * Peek the current raw `Sandbox` handle WITHOUT provisioning — `null`
    * unless the attachment is currently `ready`. Unlike `ensureReady`, this

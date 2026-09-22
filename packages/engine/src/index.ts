@@ -127,11 +127,14 @@ export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
 export {
   MANAGED_EGRESS_CONTRACT_VERSION,
   ManagedEgressPrerequisiteError,
+  parseManagedEgressPersistedState,
   validateManagedEgressRequest,
   type ManagedEgressCapability,
   type ManagedEgressEffectiveState,
   type ManagedEgressIdentity,
+  type ManagedEgressPersistedState,
   type ManagedEgressRequest,
+  type ManagedEgressTopologyIdentity,
 } from "./sandbox/managed-egress.js";
 export {
   HEMATITE_COMPATIBLE_CONFIG_CONTRACT,

@@ -522,6 +522,7 @@ export interface SessionRow {
   purpose: string;
   status: string;
   sandboxId: string | null;
+  managedEgress: string | null;
   snapshotId: string | null;
   parentSessionId: string | null;
   parentThreadId: string | null;
@@ -544,6 +545,7 @@ export function rawToSessionRow(raw: Record<string, unknown>): SessionRow {
     purpose: asString(raw.purpose, "purpose"),
     status: asString(raw.status, "status"),
     sandboxId: asStringOrNull(raw.sandbox_id, "sandbox_id"),
+    managedEgress: asStringOrNull(raw.managed_egress, "managed_egress"),
     snapshotId: asStringOrNull(raw.snapshot_id, "snapshot_id"),
     parentSessionId: asStringOrNull(raw.parent_session_id, "parent_session_id"),
     parentThreadId: asStringOrNull(raw.parent_thread_id, "parent_thread_id"),

@@ -241,6 +241,8 @@ export class Session {
    * `toData()`/save after a generic restore.
    */
   private parentThreadId: string | undefined;
+  /** Last durable managed-egress observation. Credentials are never part of this value. */
+  private managedEgressState: SessionData["managedEgress"] = undefined;
   /** Indexed copies of options.roles / options.skills for fast lookup. */
   readonly roles = new Map<string, RoleSpec>();
   readonly skills = new Map<string, SkillSource>();
@@ -490,6 +492,7 @@ export class Session {
     if (options.owner === undefined) session.principal = data.owner;
     if (options.parentSessionId === undefined) session.parentSessionId = data.parentSessionId;
     if (options.parentThreadId === undefined) session.parentThreadId = data.parentThreadId;
+    session.managedEgressState = data.managedEgress;
     // Preserve the persisted start-ref across generic restores (hosts don't
     // round-trip it through options) so the next `toData()` save can't stomp
     // it back to undefined — and so `setStartRef`'s single-shot guard sees it.
@@ -1442,6 +1445,16 @@ export class Session {
   }
 
   async toData(): Promise<SessionData> {
+    const request = this.attachment.managedEgressRequest();
+    const persistedEffective = this.managedEgressState?.effective;
+    const sameManagedIdentity =
+      request && persistedEffective && JSON.stringify(request.identity) === JSON.stringify(persistedEffective.identity);
+    const managedEgress = request
+      ? {
+          requested: { identity: { ...request.identity } },
+          ...(sameManagedIdentity ? { effective: persistedEffective } : {}),
+        }
+      : undefined;
     return {
       id: this.id,
       owner: this.principal,
@@ -1451,6 +1464,7 @@ export class Session {
       purpose: this.options.purpose ?? "interactive",
       status: "running",
       sandboxId: this.attachment.sandboxId,
+      ...(managedEgress ? { managedEgress } : {}),
       parentSessionId: this.parentSessionId,
       parentThreadId: this.parentThreadId,
       // The canonical spec, not the wire id — `modelSpec` differs from

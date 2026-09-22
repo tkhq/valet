@@ -15,6 +15,13 @@ export interface ManagedEgressRequest {
   proxyToken: string;
 }
 
+export interface ManagedEgressTopologyIdentity {
+  proxyResources: string[];
+  policyResources: string[];
+  workloadSelector: Record<string, string>;
+  callbackBindingId: string;
+}
+
 export interface ManagedEgressEffectiveState {
   requested: true;
   configured: true;
@@ -22,6 +29,13 @@ export interface ManagedEgressEffectiveState {
   effective: true;
   identity: ManagedEgressIdentity;
   proxyArtifact: string;
+  topology: ManagedEgressTopologyIdentity;
+}
+
+/** Durable metadata. Process-epoch tokens and CA private keys are never part of this state. */
+export interface ManagedEgressPersistedState {
+  requested: { identity: ManagedEgressIdentity };
+  effective?: ManagedEgressEffectiveState;
 }
 
 export interface ManagedEgressCapability {
@@ -67,4 +81,105 @@ export function validateManagedEgressRequest(request: unknown): asserts request 
   if (typeof request.proxyToken !== "string" || request.proxyToken.length < 32 || request.proxyToken.length > 4096 || /[\r\n]/.test(request.proxyToken)) {
     throw new ManagedEgressPrerequisiteError("identity", "Managed egress proxy token is invalid. Mint a token with at least 32 characters and no line breaks.");
   }
+}
+
+function persistedError(): ManagedEgressPrerequisiteError {
+  return new ManagedEgressPrerequisiteError(
+    "identity",
+    "Persisted managed egress metadata is invalid. Re-provision the managed boundary.",
+  );
+}
+
+function parseIdentityField(value: unknown): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 128 || !/^[\x21-\x7e]+$/.test(value) || /["\\]/.test(value)) {
+    throw persistedError();
+  }
+  return value;
+}
+
+function parseIdentity(value: unknown): ManagedEgressIdentity {
+  if (!record(value) || !exactKeys(value, ["orgId", "sessionId", "workloadId", "proxyId", "contractVersion"])) {
+    throw persistedError();
+  }
+  if (value.contractVersion !== MANAGED_EGRESS_CONTRACT_VERSION) throw persistedError();
+  const orgId = parseIdentityField(value.orgId);
+  const sessionId = parseIdentityField(value.sessionId);
+  const workloadId = parseIdentityField(value.workloadId);
+  const proxyId = parseIdentityField(value.proxyId);
+  return {
+    orgId,
+    sessionId,
+    workloadId,
+    proxyId,
+    contractVersion: MANAGED_EGRESS_CONTRACT_VERSION,
+  };
+}
+
+function parseStringList(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) throw persistedError();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || item.length < 1 || item.length > 256) throw persistedError();
+    result.push(item);
+  }
+  return result;
+}
+
+function parseTopology(value: unknown): ManagedEgressTopologyIdentity {
+  if (!record(value) || !exactKeys(value, ["proxyResources", "policyResources", "workloadSelector", "callbackBindingId"])) {
+    throw persistedError();
+  }
+  if (!record(value.workloadSelector) || Object.keys(value.workloadSelector).length < 1 || Object.keys(value.workloadSelector).length > 16) {
+    throw persistedError();
+  }
+  const workloadSelector: Record<string, string> = {};
+  for (const [key, selectorValue] of Object.entries(value.workloadSelector)) {
+    if (key.length < 1 || key.length > 253 || typeof selectorValue !== "string" || selectorValue.length < 1 || selectorValue.length > 253) {
+      throw persistedError();
+    }
+    workloadSelector[key] = selectorValue;
+  }
+  if (typeof value.callbackBindingId !== "string" || value.callbackBindingId.length < 1 || value.callbackBindingId.length > 256) {
+    throw persistedError();
+  }
+  return {
+    proxyResources: parseStringList(value.proxyResources),
+    policyResources: parseStringList(value.policyResources),
+    workloadSelector,
+    callbackBindingId: value.callbackBindingId,
+  };
+}
+
+/** Parse the closed durable shape. Reject fields that could smuggle credentials or private keys. */
+export function parseManagedEgressPersistedState(value: unknown): ManagedEgressPersistedState {
+  if (!record(value) || !exactKeys(value, value.effective === undefined ? ["requested"] : ["requested", "effective"])) {
+    throw persistedError();
+  }
+  if (!record(value.requested) || !exactKeys(value.requested, ["identity"])) throw persistedError();
+  const requested = { identity: parseIdentity(value.requested.identity) };
+  if (value.effective === undefined) return { requested };
+  const effective = value.effective;
+  if (!record(effective) || !exactKeys(effective, ["requested", "configured", "ready", "effective", "identity", "proxyArtifact", "topology"])) {
+    throw persistedError();
+  }
+  if (effective.requested !== true || effective.configured !== true || effective.ready !== true || effective.effective !== true) {
+    throw persistedError();
+  }
+  if (typeof effective.proxyArtifact !== "string" || effective.proxyArtifact.length < 1 || effective.proxyArtifact.length > 512) {
+    throw persistedError();
+  }
+  const effectiveIdentity = parseIdentity(effective.identity);
+  if (JSON.stringify(requested.identity) !== JSON.stringify(effectiveIdentity)) throw persistedError();
+  return {
+    requested,
+    effective: {
+      requested: true,
+      configured: true,
+      ready: true,
+      effective: true,
+      identity: effectiveIdentity,
+      proxyArtifact: effective.proxyArtifact,
+      topology: parseTopology(effective.topology),
+    },
+  };
 }

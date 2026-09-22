@@ -1370,6 +1370,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "reasoning" text',
   },
   {
+    // Durable managed-egress identity and last observed topology. The closed
+    // shape excludes tokens and CA private keys.
+    describe: "engine_sessions.managed_egress column",
+    probe: { kind: "column", table: "engine_sessions", column: "managed_egress" },
+    sql: 'ALTER TABLE "engine_sessions" ADD COLUMN IF NOT EXISTS "managed_egress" text',
+  },
+  {
     // Persisted session-default reasoning level (model selector overhaul).
     // An ENGINE table: the same rule as engine_entries.seq above applies —
     // additive columns arrive through this repair, and ENGINE_SCHEMA_VERSION
