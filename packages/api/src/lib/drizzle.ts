@@ -226,6 +226,40 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "delegation envelope immutability function", probe: { kind: "function", function: "reject_delegation_envelope_update" }, sql: "CREATE FUNCTION reject_delegation_envelope_update() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'delegation_envelopes rows are immutable'; END; $$ LANGUAGE plpgsql" },
   { describe: "delegation envelope immutability trigger", probe: { kind: "trigger", trigger: "delegation_envelopes_immutable" }, sql: "CREATE TRIGGER delegation_envelopes_immutable BEFORE UPDATE ON delegation_envelopes FOR EACH ROW EXECUTE FUNCTION reject_delegation_envelope_update()" },
   {
+    describe: "legacy delegation envelope backfill",
+    probe: { kind: "index", index: "delegation_envelopes_legacy_backfill" },
+    sql: `CREATE INDEX "delegation_envelopes_legacy_backfill" ON "delegation_envelopes" ("created_at") WHERE "decision_id" LIKE 'legacy-watch:%'`,
+    backfill: `WITH candidates AS (
+      SELECT w.*, c.owner_type, c.owner_id, c.user_id AS child_user_id, c.org_id AS child_org_id,
+        c.parent_session_id AS child_parent_id, c.parent_thread_id AS child_parent_thread_id,
+        p.org_id AS parent_org_id, p.parent_session_id AS parent_parent_id, t.session_id AS thread_session_id
+      FROM child_watches w LEFT JOIN engine_sessions c ON c.id = w.child_session_id
+      LEFT JOIN engine_sessions p ON p.id = w.parent_session_id LEFT JOIN engine_threads t ON t.id = w.parent_thread_id
+      LEFT JOIN delegation_envelopes e ON e.child_session_id = w.child_session_id
+      WHERE NOT w.settled AND e.child_session_id IS NULL
+    ), valid AS (
+      SELECT * FROM candidates WHERE child_org_id = org_id AND parent_org_id = org_id
+        AND child_parent_id = parent_session_id AND child_parent_thread_id = parent_thread_id
+        AND thread_session_id = parent_session_id AND child_user_id = actor_user_id
+        AND parent_parent_id IS NULL AND owner_type IN ('user','team','org') AND owner_id <> ''
+    ), inserted AS (
+      INSERT INTO delegation_envelopes (child_session_id,org_id,parent_session_id,envelope,decision_id,created_at)
+      SELECT child_session_id,org_id,parent_session_id,jsonb_build_object(
+        'schemaVersion',1,'organizationId',org_id,'parentSessionId',parent_session_id,'parentThreadId',parent_thread_id,
+        'childSessionId',child_session_id,'actorUserId',actor_user_id,'owner',jsonb_build_object('type',owner_type,'id',owner_id),
+        'depth',1,'parentRootCapable',true,'constraints',jsonb_build_object('legacyBackfill',true),
+        'capabilities',jsonb_build_array('agent.signal'),'policyDigest','legacy-watch-backfill-v1',
+        'sourceBundleDigest','legacy-watch-backfill-v1','evaluatorKind','local_valet','engineDigest','legacy-watch-backfill-v1'),
+        'legacy-watch:' || md5(child_session_id),created_at FROM valid ON CONFLICT DO NOTHING RETURNING child_session_id
+    ), diagnosed AS (
+      INSERT INTO event_drop_log (id,org_id,reason,conversation_key,detail,created_at)
+      SELECT 'delegation-integrity:' || md5(child_session_id),org_id,'delegation_integrity',queue_item_id,
+        'legacy_delegation_envelope_invalid: unsettled child watch does not match a root-to-child engine edge',created_at
+      FROM candidates WHERE child_session_id NOT IN (SELECT child_session_id FROM valid)
+      ON CONFLICT DO NOTHING RETURNING id
+    ) SELECT child_session_id FROM inserted UNION ALL SELECT id FROM diagnosed`,
+  },
+  {
     describe: "credential delegations table",
     probe: { kind: "table", table: "credential_delegations" },
     sql: `CREATE TABLE IF NOT EXISTS "credential_delegations" (

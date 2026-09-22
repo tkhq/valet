@@ -442,6 +442,7 @@ export const delegationEnvelopes = pgTable("delegation_envelopes", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (t) => [
   index("delegation_envelopes_parent").on(t.orgId, t.parentSessionId),
+  index("delegation_envelopes_legacy_backfill").on(t.createdAt).where(sql`${t.decisionId} LIKE 'legacy-watch:%'`),
 ]);
 
 export const credentialDelegations = pgTable("credential_delegations", {

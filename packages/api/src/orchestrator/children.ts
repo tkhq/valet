@@ -36,7 +36,7 @@ import {
 } from "@valet/engine";
 import { adaptAgentSignal, adaptDelegationCreate, assertOneLevelDelegationEnvelope, buildDelegatedExecutionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, type DelegationEnvelopeV1, type ModelTier, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches, delegationEnvelopes, sessionRepos, type ChildWatchRow } from "../schema/index.js";
+import { agentSessions, childWatches, delegationEnvelopes, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -244,6 +244,14 @@ export class NestedDelegationUnsupportedError extends Error {
   }
 }
 
+export class DelegationEnvelopeIntegrityError extends Error {
+  readonly code = "delegation_envelope_integrity";
+  constructor(readonly reason: "missing" | "invalid", readonly childSessionId: string) {
+    super(`Delegation envelope is ${reason} for child ${childSessionId}. Repair the delegation edge before rearming its watch.`);
+    this.name = "DelegationEnvelopeIntegrityError";
+  }
+}
+
 class DelegationPolicyDeniedError extends Error {
   readonly code: "authorization_denied" | "authorization_approval_unsupported";
   constructor(code: DelegationPolicyDeniedError["code"]) {
@@ -290,17 +298,18 @@ async function authorizeAgentSignal(deps: ChildrenDeps, input: { parentSessionId
   if (!deps.canonicalAuthorizationService) throw new Error("Canonical agent signal authorization is not wired.");
   const parent = await deps.engineStore.getSession(input.parentSessionId);
   const identity = parent ?? input.fallback;
-  if (!identity) throw new DelegationPolicyDeniedError("authorization_denied");
   const [edgeRows, parentRows] = await Promise.all([
     deps.db.select().from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, input.childSessionId)).limit(1),
     deps.db.select({ envelope: delegationEnvelopes.envelope }).from(delegationEnvelopes).where(eq(delegationEnvelopes.childSessionId, input.parentSessionId)).limit(1),
   ]);
   const edge = edgeRows[0];
+  if (!edge) throw new DelegationEnvelopeIntegrityError("missing", input.childSessionId);
+  if (!identity) throw new DelegationEnvelopeIntegrityError("invalid", input.childSessionId);
   try {
-    if (!edge || edge.orgId !== identity.orgId || edge.parentSessionId !== input.parentSessionId || edge.envelope.parentThreadId !== input.parentThreadId || edge.envelope.childSessionId !== input.childSessionId) throw new Error("invalid delegation edge");
+    if (edge.orgId !== identity.orgId || edge.parentSessionId !== input.parentSessionId || edge.envelope.parentThreadId !== input.parentThreadId || edge.envelope.childSessionId !== input.childSessionId) throw new Error("invalid delegation edge");
     assertOneLevelDelegationEnvelope(edge.envelope, parentRows[0]?.envelope);
   } catch {
-    throw new DelegationPolicyDeniedError("authorization_denied");
+    throw new DelegationEnvelopeIntegrityError("invalid", input.childSessionId);
   }
   const actorUserId = input.actorUserId ?? identity.userId;
   const adapted = adaptAgentSignal({ schemaVersion: 1, organizationId: identity.orgId, actorUserId, principal: identity.owner, requestId: `signal:${randomUUID()}`, operationId: `${input.operation}:${randomUUID()}`, evaluationTimeMs: Date.now(), parentSessionId: input.parentSessionId, parentThreadId: input.parentThreadId, childSessionId: input.childSessionId, operation: input.operation, relationship: "parent_child" });
@@ -616,9 +625,11 @@ interface ArmArgs {
  */
 export type WatcherErrorClassification =
   | { kind: "retryable"; pendingCap: boolean }
+  | { kind: "integrity"; error: DelegationEnvelopeIntegrityError }
   | { kind: "permanent"; alreadyLogged: boolean };
 
 export function classifyWatcherError(err: unknown): WatcherErrorClassification {
+  if (err instanceof DelegationEnvelopeIntegrityError) return { kind: "integrity", error: err };
   if (err instanceof DelegationPolicyDeniedError) return { kind: "permanent", alreadyLogged: false };
   if (err instanceof SignalEdgeDeniedError) {
     // Always self-logged with reason 'edge_denied' inside `authorizeEdge`.
@@ -683,6 +694,13 @@ export class ChildWatcher {
       await this.attempt(watch);
     } catch (err) {
       const classification = classifyWatcherError(err);
+
+      if (classification.kind === "integrity") {
+        const id = `delegation-integrity:${createHash("md5").update(watch.childSessionId).digest("hex")}`;
+        await this.deps.db.insert(eventDropLog).values({ id, orgId: watch.orgId, reason: "delegation_integrity", conversationKey: watch.queueItemId, detail: `${classification.error.code}:${classification.error.reason}`, createdAt: Date.now() }).onConflictDoNothing();
+        console.error(`ChildWatcher: ${watch.childSessionId} has an invalid delegation envelope; leaving its watch unsettled:`, err);
+        return;
+      }
 
       if (classification.kind === "retryable") {
         if (classification.pendingCap) {

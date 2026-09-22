@@ -30,6 +30,7 @@ import {
   buildChildStatusReader,
   ChildWatcher,
   ChildLimitError,
+  DelegationEnvelopeIntegrityError,
   NestedDelegationUnsupportedError,
   classifyWatcherError,
   resolveChildSettlement,
@@ -1512,6 +1513,11 @@ describe("classifyWatcherError", () => {
       kind: "retryable",
       pendingCap: false,
     });
+  });
+
+  it("keeps delegation envelope integrity failures unsettled for repair", () => {
+    const error = new DelegationEnvelopeIntegrityError("missing", "child-1");
+    expect(classifyWatcherError(error)).toEqual({ kind: "integrity", error });
   });
 
   it("classifies SignalEdgeDeniedError as permanent, alreadyLogged: true", () => {
