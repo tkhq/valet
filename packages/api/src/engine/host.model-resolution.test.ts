@@ -199,7 +199,8 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       const row = await makeCustom([{ id: "m1", name: "M1" }]);
       await saveKey(row.id, "k");
       const resolved = await resolveModelSpec(db, credentials, orgId, `${row.id}/m1`);
-      expect(resolved?.model.contextWindow).toBe(0);
+      expect(resolved?.model.contextWindow).toBe(128_000);
+      expect(resolved?.model.reportedContextWindow).toBeNull();
       expect(resolved?.model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     });
 

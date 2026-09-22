@@ -63,6 +63,9 @@ import { TIER_SET, resolveTier } from "./model-tiers.js";
  * (`services/openrouter.ts`) governs catalog/picker visibility only. */
 type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
 
+/** Conservative operational budget when a provider omits its limit. */
+const UNKNOWN_CONTEXT_WINDOW_BUDGET = 128_000;
+
 function isKnownKindNamespace(ns: string): ns is KnownKind {
   return ns === "anthropic" || ns === "openai" || ns === "google" || ns === "openrouter";
 }
@@ -122,7 +125,7 @@ function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonica
 function synthesizeOpenrouterModel(row: LlmProviderRow, modelId: string): Model<"openai-completions"> | null {
   const entry = row.models.find((m) => m.id === modelId);
   if (!entry) return null;
-  return {
+  const model: Model<"openai-completions"> = {
     id: entry.id,
     name: entry.name,
     api: "openai-completions",
@@ -133,9 +136,10 @@ function synthesizeOpenrouterModel(row: LlmProviderRow, modelId: string): Model<
     cost: entry.pricing
       ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
       : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: entry.contextWindow ?? 0,
+    contextWindow: entry.contextWindow ?? UNKNOWN_CONTEXT_WINDOW_BUDGET,
     maxTokens: 8192,
   };
+  return Object.assign(model, { reportedContextWindow: entry.contextWindow ?? null });
 }
 
 /** Synthesize a `Model<"openai-completions">` for a custom provider's model
@@ -145,7 +149,7 @@ function synthesizeOpenrouterModel(row: LlmProviderRow, modelId: string): Model<
 function synthesizeCustomModel(row: LlmProviderRow, modelId: string): Model<"openai-completions"> | null {
   const entry = row.models.find((m) => m.id === modelId);
   if (!entry) return null;
-  return {
+  const model: Model<"openai-completions"> = {
     id: entry.id,
     name: entry.name,
     api: "openai-completions",
@@ -156,9 +160,10 @@ function synthesizeCustomModel(row: LlmProviderRow, modelId: string): Model<"ope
     cost: entry.pricing
       ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
       : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: entry.contextWindow ?? 0,
+    contextWindow: entry.contextWindow ?? UNKNOWN_CONTEXT_WINDOW_BUDGET,
     maxTokens: 8192,
   };
+  return Object.assign(model, { reportedContextWindow: entry.contextWindow ?? null });
 }
 
 /**

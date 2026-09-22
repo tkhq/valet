@@ -21,6 +21,22 @@ describe("ContextUsageIndicator", () => {
     expect(screen.getByTestId("context-usage").textContent).toContain("25%");
   });
 
+  it("clamps estimates above the published limit to 100 percent", () => {
+    render(
+      <TooltipProvider>
+        <ContextUsageIndicator
+          context={{
+            model: "openai/gpt-test",
+            estimatedTokens: 125_000,
+            contextWindow: 100_000,
+            compactionOccurred: false,
+          }}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getByTestId("context-usage").textContent).toContain("100%");
+  });
+
   it("does not invent a percentage for an unknown limit", () => {
     render(
       <TooltipProvider>

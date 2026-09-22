@@ -511,6 +511,15 @@ tokens in use, the context-window limit, used and remaining percentages, and
 the latest compaction counts. It also states that live occupancy is separate
 from cumulative usage and billed cost.
 
-A synthesized model uses `0` when its provider does not publish a context
-limit. The engine and web UI treat `0` as unknown. They show the estimated token
-count and an unknown limit, but they do not calculate a percentage.
+A synthesized model uses a 128,000-token operational budget when its
+provider does not publish a context limit. This budget keeps input spilling,
+overflow detection, and compaction active. The resolved model also records a
+null reported limit. Engine events, the wire state, `/status`, and the web UI
+use the reported limit. They show an unknown limit and do not invent a
+percentage.
+
+The engine publishes `context_state` as an ephemeral event because clients can
+re-derive it. In-turn events use the submission fence and include the queue item
+ID. Each thread caches its last derived snapshot. The WebSocket handshake reads
+only this cache, skips threads without a snapshot, and isolates each thread's
+seed failure.

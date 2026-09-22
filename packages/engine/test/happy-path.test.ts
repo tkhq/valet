@@ -27,7 +27,7 @@ describe("engine: single-thread happy path", () => {
     const faux = registerFauxProvider({ provider: "happy1" });
     faux.setResponses([fauxAssistantMessage("hello, world")]);
 
-    const { engine, store, events } = makeEngine();
+    const { engine, store, bus, events } = makeEngine();
     const session = await engine.createSession({
       userId: "u1",
       orgId: "o1",
@@ -67,6 +67,13 @@ describe("engine: single-thread happy path", () => {
     expect(contextStates.length).toBeGreaterThanOrEqual(2);
     expect(contextStates.at(-1)?.state.estimatedTokens).toBeGreaterThan(0);
     expect(contextStates.at(-1)?.state.contextWindow).toBe(128_000);
+    expect(
+      events
+        .filter((event) => event.event.type === "context_state")
+        .every((event) => event.queueItemId === receipt.queueItemId),
+    ).toBe(true);
+    const durable = await bus.read(session.id);
+    expect(durable.events.some((event) => event.event.type === "context_state")).toBe(false);
 
     // Session persisted in store
     expect(await store.getSession(session.id)).not.toBeNull();

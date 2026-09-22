@@ -354,6 +354,16 @@ function concreteModelId(model: PiModel): string {
   return `${model.provider}/${model.id}`;
 }
 
+/** Keep the provider's public limit separate from its internal safety budget. */
+function publicContextWindow(model: PiModel): number | null {
+  const reported = Reflect.get(model, "reportedContextWindow");
+  if (reported === null) return null;
+  if (typeof reported === "number" && reported > 0) return reported;
+  return typeof model.contextWindow === "number" && model.contextWindow > 0
+    ? model.contextWindow
+    : null;
+}
+
 /**
  * One Thread per (session, key). Owns its own pi-agent-core Agent instance,
  * its own queue, its own active leaf in the DAG, and its own GateManager.
@@ -505,6 +515,8 @@ export class Thread {
    * every turn.
    */
   private consecutiveCompactionFailures = 0;
+  /** Last derived context snapshot. WebSocket handshakes read this without hydrating transcripts. */
+  private contextStateSnapshot: ThreadContextState | undefined;
   /** Latest checkpoint on the active transcript path, for live context status. */
   private latestCompaction: { tokensBefore: number; tokensAfter: number } | undefined;
   /**
@@ -2575,30 +2587,50 @@ export class Thread {
       (message): message is Message =>
         message.role === "user" || message.role === "assistant" || message.role === "toolResult",
     );
-    const estimatedTokens = estimateLiveContextTokens(
-      this.modelSystemPrompt(this.agent.state.systemPrompt, model),
-      messages,
-    );
-    const contextWindow =
-      limitKnown && typeof model.contextWindow === "number" && model.contextWindow > 0
-        ? model.contextWindow
-        : null;
-    return {
+    const state: ThreadContextState = {
       model: modelName,
-      estimatedTokens,
-      contextWindow,
+      estimatedTokens: estimateLiveContextTokens(
+        this.modelSystemPrompt(this.agent.state.systemPrompt, model),
+        messages,
+      ),
+      contextWindow: limitKnown ? publicContextWindow(model) : null,
       compactionOccurred: this.latestCompaction !== undefined,
       ...(this.latestCompaction ? { latestCompaction: { ...this.latestCompaction } } : {}),
     };
+    this.contextStateSnapshot = state;
+    return {
+      ...state,
+      ...(state.latestCompaction
+        ? { latestCompaction: { ...state.latestCompaction } }
+        : {}),
+    };
+  }
+
+  /** Cheap reconnect seed. Null means no activity has derived a snapshot yet. */
+  cachedContextState(): ThreadContextState | null {
+    const state = this.contextStateSnapshot;
+    return state
+      ? {
+          ...state,
+          ...(state.latestCompaction
+            ? { latestCompaction: { ...state.latestCompaction } }
+            : {}),
+        }
+      : null;
   }
 
   /** Emit a fresh occupancy estimate after transcript-affecting activity. */
   private async emitContextState(): Promise<void> {
-    await this.session.emit({
+    const event: EngineEvent = {
       type: "context_state",
       threadId: this.id,
       state: await this.currentContextState(),
-    });
+    };
+    if (this.runningItem) {
+      await this.fencedEmit(event, { queueItemId: this.runningItem.id });
+    } else {
+      await this.session.emit(event);
+    }
   }
 
   async currentQueueState(): Promise<QueueState> {
@@ -4520,6 +4552,10 @@ export class Thread {
     // the un-mutated `entries`.
     let effectiveEntries: readonly SessionEntry[] = entries;
     const prunePlan = planPrune({ entries, cfg, protectedTools });
+    const finishWithoutSummary = async (): Promise<CompactionOutcome> => {
+      if (prunePlan.willCommit) await this.emitContextState();
+      return prunePlan.willCommit ? "pruned" : "noop";
+    };
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
       applyPrune(mutable, prunePlan);
@@ -4546,11 +4582,11 @@ export class Thread {
       // "pruned" is progress; "noop" means the trigger fired but nothing was
       // reclaimable (context dominated by system overhead the budget math
       // cannot see) — left unhandled that repeats silently every turn.
-      return prunePlan.willCommit ? "pruned" : "noop";
+      return finishWithoutSummary();
     }
 
     const head = entries.slice(0, cut.cutIndex);
-    if (head.length === 0) return prunePlan.willCommit ? "pruned" : "noop";
+    if (head.length === 0) return finishWithoutSummary();
 
     // Fail-safe: `fallbackToFloor` means selectCutPoint could not fit even the
     // last turn within the tail budget and kept it anyway. If that forced tail
@@ -4602,7 +4638,7 @@ export class Thread {
       // the breaker counts it instead of compacting again on the next turn.
       // This is not a coverage gap: a gap means live history would be lost,
       // and there is no live history here.
-      return prunePlan.willCommit ? "pruned" : "noop";
+      return finishWithoutSummary();
     }
 
     // Step 3: summarize.

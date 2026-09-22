@@ -1752,8 +1752,8 @@ export interface EventStream {
   ): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
   /** Live fan-out. Durable events are delivered AFTER their append commits, in offset order per session. */
   subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe;
-  /** Live-only fan-out (for example text deltas and cache hints): no append or offset. */
-  publishEphemeral(event: BusEvent): void;
+  /** Live-only fan-out with optional attempt fencing: no append or offset. */
+  publishEphemeral(event: BusEvent, fence?: WriteFence): Promise<void>;
   /** Delete durable events whose queueItemId is in the list. Returns deleted count. */
   prune(sessionId: string, queueItemIds: string[]): Promise<number>;
   /** Drop the session's entire log (called from deleteSession paths / tests). */
@@ -2243,7 +2243,10 @@ export interface SkillInvokeOptions {
  * absent (bare Anthropic back-compat, where wire id and spec coincide).
  */
 export interface ResolvedModel {
-  model: Model<any>;
+  model: Model<any> & {
+    /** Provider limit. Null means unknown. contextWindow can hold a conservative operational budget. */
+    reportedContextWindow?: number | null;
+  };
   apiKey?: string;
   canonicalId?: string;
 }

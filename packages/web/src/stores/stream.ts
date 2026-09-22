@@ -719,6 +719,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // still advances lastOffset via `next`.
       return next;
     }
+
+    default:
+      // Older clients can receive a newer wire event at runtime. Preserve
+      // live state instead of replacing the session slice with undefined.
+      return next;
   }
 }
 

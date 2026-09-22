@@ -23,7 +23,10 @@ export function ContextUsageIndicator({
     );
   }
 
-  const percent = Math.round((context.estimatedTokens / context.contextWindow) * 100);
+  const percent = Math.min(
+    100,
+    Math.max(0, Math.round((context.estimatedTokens / context.contextWindow) * 100)),
+  );
   return (
     <Tooltip
       content={`${detail} Limit: ${formatTokens(context.contextWindow)} tokens. ${Math.max(0, 100 - percent)}% remains.`}

@@ -216,7 +216,18 @@ export class PgEventStream implements EventStream {
     return () => this.subs.delete(sub);
   }
 
-  publishEphemeral(event: BusEvent): void {
+  async publishEphemeral(event: BusEvent, fence?: WriteFence): Promise<void> {
+    if (fence) {
+      const result = await this.db.query(
+        "SELECT attempt_id FROM engine_queue_items WHERE id = $1",
+        [fence.itemId],
+      );
+      const raw = result.rows[0];
+      const attemptId = raw && typeof raw.attempt_id === "string" ? raw.attempt_id : undefined;
+      if (!raw || attemptId !== fence.attemptId) {
+        throw new StaleAttemptError(fence.itemId, fence.attemptId, attemptId);
+      }
+    }
     const delivered: DeliveredBusEvent = { ...event };
     for (const sub of this.subs) {
       if (matches(sub.filter, delivered)) sub.callback(delivered);

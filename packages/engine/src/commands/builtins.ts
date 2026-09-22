@@ -115,7 +115,10 @@ async function statusCommand(session: Session, thread: Thread): Promise<BuiltinR
       "- Used and remaining percentages: unavailable because the model limit is unknown",
     );
   } else {
-    const usedPercent = Math.round((context.estimatedTokens / context.contextWindow) * 100);
+    const usedPercent = Math.min(
+      100,
+      Math.max(0, Math.round((context.estimatedTokens / context.contextWindow) * 100)),
+    );
     const remainingTokens = Math.max(0, context.contextWindow - context.estimatedTokens);
     const remainingPercent = Math.max(0, 100 - usedPercent);
     lines.push(
