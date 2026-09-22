@@ -491,3 +491,26 @@ It does not admit a second queue item. The original submission settles only
 after this continuation ends. A stale fenced prompt append stops the
 continuation before another model call. A child watcher therefore cannot report
 `child.settled` at the compaction boundary.
+
+## Amendment (TKAI-524): live context status
+
+Each thread exposes one live context estimate from the engine's existing
+`estimateLiveContextTokens` path. The estimate uses provider-reported usage as
+its latest anchor. It estimates messages and tool results added after that
+anchor. This value describes current context occupancy only. It does not use
+cumulative usage or billing records.
+
+The engine emits `context_state` after a user prompt enters the agent loop,
+after assistant messages, after tool results, and after compaction. The API
+maps this event to `context.state` and seeds the same state during the WebSocket
+handshake. The web store keys the value by thread. The chat view shows the
+estimated percentage above the composer.
+
+`/status` reads the same thread state. It reports the active model, estimated
+tokens in use, the context-window limit, used and remaining percentages, and
+the latest compaction counts. It also states that live occupancy is separate
+from cumulative usage and billed cost.
+
+A synthesized model uses `0` when its provider does not publish a context
+limit. The engine and web UI treat `0` as unknown. They show the estimated token
+count and an unknown limit, but they do not calculate a percentage.

@@ -61,6 +61,12 @@ describe("engine: single-thread happy path", () => {
     expect(types).toContain("thread_start");
     expect(types).toContain("text_delta");
     expect(types).toContain("turn_end");
+    const contextStates = events
+      .map((event) => event.event)
+      .filter((event) => event.type === "context_state");
+    expect(contextStates.length).toBeGreaterThanOrEqual(2);
+    expect(contextStates.at(-1)?.state.estimatedTokens).toBeGreaterThan(0);
+    expect(contextStates.at(-1)?.state.contextWindow).toBe(128_000);
 
     // Session persisted in store
     expect(await store.getSession(session.id)).not.toBeNull();
@@ -97,6 +103,12 @@ describe("engine: single-thread happy path", () => {
     // tool_start and tool_end events landed
     const tools = events.map((e) => e.event).filter((e) => e.type === "tool_start" || e.type === "tool_end");
     expect(tools.map((t) => t.type)).toEqual(["tool_start", "tool_end"]);
+    const contextStateCount = events.filter(
+      (event) => event.event.type === "context_state",
+    ).length;
+    // User input, the tool-call response, the tool result, and the final
+    // response each refresh the live occupancy estimate.
+    expect(contextStateCount).toBeGreaterThanOrEqual(4);
 
     // The persisted assistant entry has the tool_call part with COMPLETED
     // status + the result. Regression guard: an earlier bug persisted the

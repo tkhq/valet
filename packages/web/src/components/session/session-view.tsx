@@ -16,6 +16,7 @@ import {
   useThreadLiveStatus,
   useErrorForThread,
   useCompactingForThread,
+  useContextForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
 import {
@@ -28,6 +29,7 @@ import { MessageList } from "~/components/session/message-list";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
+import { ContextUsageIndicator } from "~/components/session/context-usage-indicator";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
@@ -161,6 +163,7 @@ export function SessionView({
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
+  const threadContext = useContextForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
   // the same two signals the composer's Stop/Escape affordance uses: the
@@ -268,6 +271,9 @@ export function SessionView({
             viewerId={me.data?.id}
             onReply={enableReplies ? setReplyTarget : undefined}
           />
+          <div className="flex justify-end border-t border-[--border] px-4 py-1.5">
+            <ContextUsageIndicator context={threadContext} />
+          </div>
           {compacting && (
             <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
               Compacting context…

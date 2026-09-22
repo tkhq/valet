@@ -284,6 +284,9 @@ export function registerWsRoutes(
                     queueItemId: null,
                     model: null,
                   });
+              const context = await thread.currentContextState();
+              if (lifecycle.closed) return;
+              send(ws, { type: "context.state", threadId: thread.id, context });
             }
 
             // Periodic keepalive.

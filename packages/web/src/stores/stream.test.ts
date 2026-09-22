@@ -1730,3 +1730,29 @@ describe("queueBusy", () => {
     expect(queueBusy({ ...base, status: "paused" })).toBe(false);
   });
 });
+
+describe("live context state", () => {
+  it("stores updates per thread without mixing them with usage totals", () => {
+    useStreamStore.getState().ingest(SESSION, {
+      seq: 1,
+      ts: 1,
+      type: "context.state",
+      threadId: THREAD,
+      context: {
+        model: "openai/gpt-test",
+        estimatedTokens: 25_000,
+        contextWindow: 100_000,
+        compactionOccurred: true,
+        latestCompaction: { tokensBefore: 80_000, tokensAfter: 12_000 },
+      },
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].contextByThread[THREAD]).toEqual({
+      model: "openai/gpt-test",
+      estimatedTokens: 25_000,
+      contextWindow: 100_000,
+      compactionOccurred: true,
+      latestCompaction: { tokensBefore: 80_000, tokensAfter: 12_000 },
+    });
+  });
+});

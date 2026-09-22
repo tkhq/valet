@@ -1539,6 +1539,17 @@ export interface ActiveModelState {
   model: string;
 }
 
+/** Live estimate of one thread's current model context. This is occupancy,
+ * not cumulative token usage or billing data. */
+export interface ThreadContextState {
+  model: string;
+  estimatedTokens: number;
+  /** Null when the active model does not publish a context-window limit. */
+  contextWindow: number | null;
+  compactionOccurred: boolean;
+  latestCompaction?: { tokensBefore: number; tokensAfter: number };
+}
+
 export type ModelStateEvent =
   | {
       type: "model_state";
@@ -1605,6 +1616,7 @@ export type EngineEvent =
   | { type: "thread_start"; threadId: string; parentThreadId?: string }
   | { type: "queue_state"; threadId: string; state: QueueState }
   | ModelStateEvent
+  | { type: "context_state"; threadId: string; state: ThreadContextState }
   | { type: "compaction_start" | "compaction_end"; threadId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
   | { type: "status"; threadId: string; status: EngineEventStatus }

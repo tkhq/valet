@@ -133,7 +133,7 @@ function synthesizeOpenrouterModel(row: LlmProviderRow, modelId: string): Model<
     cost: entry.pricing
       ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
       : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: entry.contextWindow ?? 128_000,
+    contextWindow: entry.contextWindow ?? 0,
     maxTokens: 8192,
   };
 }
@@ -156,7 +156,7 @@ function synthesizeCustomModel(row: LlmProviderRow, modelId: string): Model<"ope
     cost: entry.pricing
       ? { input: entry.pricing.input, output: entry.pricing.output, cacheRead: 0, cacheWrite: 0 }
       : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: entry.contextWindow ?? 128_000,
+    contextWindow: entry.contextWindow ?? 0,
     maxTokens: 8192,
   };
 }

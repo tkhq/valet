@@ -129,6 +129,7 @@ import type {
   SubmissionOutcome,
   SubmissionResult,
   SuspendedTurnState,
+  ThreadContextState,
   ThreadData,
   ToolContext,
   ToolDef,
@@ -504,6 +505,8 @@ export class Thread {
    * every turn.
    */
   private consecutiveCompactionFailures = 0;
+  /** Latest checkpoint on the active transcript path, for live context status. */
+  private latestCompaction: { tokensBefore: number; tokensAfter: number } | undefined;
   /**
    * Content hashes from the model's file reads, backing the
    * read-before-write staleness gate (TKAI-318). In-memory only: after a
@@ -2101,6 +2104,12 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.replaceActiveSkillInvocations(entries);
+    const checkpoint = findMostRecentCompaction(
+      walkTranscriptDag(entries, this.activeLeafEntryId),
+    );
+    this.latestCompaction = checkpoint
+      ? { tokensBefore: checkpoint.tokenCountBefore, tokensAfter: checkpoint.tokenCountAfter }
+      : undefined;
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
@@ -2253,6 +2262,7 @@ export class Thread {
         // permanently escalated.
         scope: isAgentSwitch ? "turn" : "thread",
       });
+      await this.emitContextState();
     }
     return { fromModel: before, toModel: after };
   }
@@ -2529,6 +2539,68 @@ export class Thread {
    * rows. Same derivation as the `queue_state` event, without emitting.
    * Used by the `/status` and `/clear` built-ins.
    */
+  async currentContextState(): Promise<ThreadContextState> {
+    await this.ensureTranscript();
+    const configuredSpec =
+      this.modelOverride ?? this.session.options.modelSpec ?? this.session.options.model.id;
+    let model = this.agent.state.model;
+    let modelName = concreteModelId(model);
+    let limitKnown = true;
+    if (
+      !this.runningItem &&
+      configuredSpec !== (this.session.options.modelSpec ?? this.session.options.model.id)
+    ) {
+      try {
+        const resolved = this.session.options.resolveModel
+          ? await this.session.options.resolveModel(configuredSpec)
+          : resolveModelId(configuredSpec);
+        if (resolved) {
+          model = "model" in resolved ? resolved.model : resolved;
+          modelName = concreteModelId(model);
+        } else {
+          modelName = configuredSpec;
+          limitKnown = false;
+        }
+      } catch (error) {
+        if (error instanceof NoCredentialsError) {
+          model = error.model;
+          modelName = concreteModelId(model);
+        } else {
+          modelName = configuredSpec;
+          limitKnown = false;
+        }
+      }
+    }
+    const messages = this.agent.state.messages.filter(
+      (message): message is Message =>
+        message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+    );
+    const estimatedTokens = estimateLiveContextTokens(
+      this.modelSystemPrompt(this.agent.state.systemPrompt, model),
+      messages,
+    );
+    const contextWindow =
+      limitKnown && typeof model.contextWindow === "number" && model.contextWindow > 0
+        ? model.contextWindow
+        : null;
+    return {
+      model: modelName,
+      estimatedTokens,
+      contextWindow,
+      compactionOccurred: this.latestCompaction !== undefined,
+      ...(this.latestCompaction ? { latestCompaction: { ...this.latestCompaction } } : {}),
+    };
+  }
+
+  /** Emit a fresh occupancy estimate after transcript-affecting activity. */
+  private async emitContextState(): Promise<void> {
+    await this.session.emit({
+      type: "context_state",
+      threadId: this.id,
+      state: await this.currentContextState(),
+    });
+  }
+
   async currentQueueState(): Promise<QueueState> {
     const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
     return deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
@@ -4713,6 +4785,10 @@ export class Thread {
       });
       // Fenced under the current turn's attempt (compaction is always in-turn).
       await this.appendEntry(compactionEntry, this.fence);
+      this.latestCompaction = {
+        tokensBefore: compactionEntry.tokenCountBefore,
+        tokensAfter: compactionEntry.tokenCountAfter,
+      };
       // A persisted summary closes the failure circuit breaker — any mode's
       // success proves the summarizer works again (manual /compact included).
       this.consecutiveCompactionFailures = 0;
@@ -4740,10 +4816,16 @@ export class Thread {
       // drop is not counted as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
     } finally {
-      await session.emit(
-        { type: "compaction_end", threadId: this.id },
-        { queueItemId: this.runningItem?.id },
-      );
+      // The context refresh must not break the compaction lifecycle pair.
+      // A failed refresh can propagate, but clients always receive the end.
+      try {
+        await this.emitContextState();
+      } finally {
+        await session.emit(
+          { type: "compaction_end", threadId: this.id },
+          { queueItemId: this.runningItem?.id },
+        );
+      }
     }
 
     // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each
@@ -5044,6 +5126,7 @@ export class Thread {
           { type: "status", threadId: this.id, status: "thinking" },
           { queueItemId: this.runningItem?.id },
         );
+        await this.emitContextState();
         break;
       case "message_start": {
         if (event.message.role === "assistant") {
@@ -5196,6 +5279,7 @@ export class Thread {
             },
             { queueItemId: this.runningItem?.id },
           );
+          await this.emitContextState();
         }
         break;
       }
@@ -5264,6 +5348,7 @@ export class Thread {
           },
           { queueItemId: this.runningItem?.id },
         );
+        await this.emitContextState();
         break;
       }
       case "turn_end": {
