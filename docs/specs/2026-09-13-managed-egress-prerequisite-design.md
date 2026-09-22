@@ -47,7 +47,9 @@ Readiness requires exactly one workload selector match. It also requires the exa
 
 ### Docker
 
-The plan creates an internal workload network and a distinct outbound network. The workload attaches only to the internal network. A separate proxy container attaches to both networks. It has no host-gateway mapping. Only the proxy mounts the token volume. Cleanup removes the proxy, token volume, outbound network, and internal network.
+The plan creates an internal workload network and a distinct outbound network. The workload attaches only to the internal network. A separate proxy container attaches to both networks. It has no host-gateway mapping. Only the proxy mounts the token and configuration volumes.
+
+Each managed Docker resource has an exact server-derived ownership label. Restart adoption rejects name collisions with unmanaged resources. Partial setup removes only resources created by that attempt. Terminal cleanup disconnects the workload first. It then removes the proxy, token and configuration volumes, outbound network, and internal network. Missing resources are successful no-ops.
 
 Explicit proxy variables are client configuration. They are not the security boundary. The isolated network attachment is the boundary.
 
