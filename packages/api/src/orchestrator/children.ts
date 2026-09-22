@@ -337,7 +337,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       parentThreadId: string;
       actorUserId: string;
       owner: Principal;
-      parentQueueItemId?: string;
+      parentOperationId?: string;
       origin?: ChannelOrigin;
     },
   ): Promise<SpawnChildResult> => {
@@ -399,7 +399,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     if (authorization.decision.effect === "deny") throw new DelegationPolicyDeniedError("authorization_denied");
     if (authorization.decision.effect === "require_approval") throw new DelegationPolicyDeniedError("authorization_approval_unsupported");
     if (binding) {
-      if (!ctx.parentQueueItemId) {
+      if (!ctx.parentOperationId) {
         throw new Error("Repository delegation requires a stable parent queue item identity.");
       }
       await authorizeRepositoryCredentialDelegation({
@@ -410,7 +410,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         owner: ctx.owner,
         parentSessionId: ctx.parentSessionId,
         parentThreadId: ctx.parentThreadId,
-        parentQueueItemId: ctx.parentQueueItemId,
+        parentOperationId: ctx.parentOperationId,
         childSessionId,
         binding,
       });

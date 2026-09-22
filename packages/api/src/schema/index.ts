@@ -449,7 +449,7 @@ export const credentialDelegations = pgTable("credential_delegations", {
   orgId: text("org_id").notNull(),
   parentSessionId: text("parent_session_id").notNull(),
   parentThreadId: text("parent_thread_id").notNull(),
-  parentQueueItemId: text("parent_queue_item_id").notNull(),
+  parentOperationId: text("parent_queue_item_id").notNull(),
   childSessionId: text("child_session_id").notNull(),
   childWatchId: text("child_watch_id"),
   ownerType: text("owner_type").notNull(),

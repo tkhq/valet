@@ -19,6 +19,7 @@ import {
   MAX_REVISIONS_PER_PATH,
   STATE_DOC_STALE_MS,
   type SecurityEngagementService,
+  type SpawnCellChild,
 } from "./security-engagements.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -98,12 +99,14 @@ describe("security engagement service", () => {
   let db: AppDb;
   let svc: SecurityEngagementService;
   let spawnCount: number;
-  const spawn = async () => ({ childSessionId: `child_${++spawnCount}` });
+  let spawnRequests: Parameters<SpawnCellChild>[0][];
+  const spawn: SpawnCellChild = async (request) => { spawnRequests.push(request); return { childSessionId: `child_${++spawnCount}` }; };
 
   beforeEach(async () => {
     ({ appDb: db } = await freshTestPgDb());
     svc = createSecurityEngagementService({ db });
     spawnCount = 0;
+    spawnRequests = [];
   });
 
   async function makePlanning() {
@@ -305,6 +308,7 @@ describe("security engagement service", () => {
     expect(cell.attempts).toBe(1);
     expect(cell.childSessionId).toBe("child_1");
     expect(cell.dispatchedAt).not.toBeNull();
+    expect(spawnRequests[0].parentOperationId).toBe(`security-dispatch:${engagement.id}:${cell.id}:1`);
   });
 
   it("dispatchCell refuses while another cell is running", async () => {
@@ -333,6 +337,7 @@ describe("security engagement service", () => {
     expect(cell.mode).toBe("resume");
     expect(cell.status).toBe("running");
     expect(cell.childSessionId).toBe("child_2");
+    expect(spawnRequests.at(-1)?.parentOperationId).toBe(`security-dispatch:${engagement.id}:${cell.id}:2`);
   });
 
   it("re-dispatching a failed cell increments attempts", async () => {

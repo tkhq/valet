@@ -77,14 +77,26 @@ function parseGrant(value: unknown): GrantResult {
 
 export async function authorizeRepositoryCredentialDelegation(input: {
   db: AppDb; authorization: CanonicalAuthorizationService; orgId: string; actorUserId: string; owner: Principal;
-  parentSessionId: string; parentThreadId: string; parentQueueItemId: string; childSessionId: string; binding: RepoBinding; now?: number;
+  parentSessionId: string; parentThreadId: string; parentOperationId: string; childSessionId: string; binding: RepoBinding; now?: number;
 }): Promise<void> {
   const now = input.now ?? Date.now();
   const repo = splitRepo(input.binding);
   if (repo.host !== "github") throw new CredentialDelegationDeniedError("credential_delegation_denied");
+  const existing = (await input.db.select().from(credentialDelegations).where(and(
+    eq(credentialDelegations.childSessionId, input.childSessionId),
+    eq(credentialDelegations.repoHost, repo.host),
+    eq(credentialDelegations.repoOwner, repo.owner),
+    eq(credentialDelegations.repoName, repo.repo),
+    isNull(credentialDelegations.revokedAt),
+  )).limit(1))[0];
+  if (existing && (existing.parentSessionId !== input.parentSessionId
+    || existing.parentThreadId !== input.parentThreadId
+    || existing.parentOperationId !== input.parentOperationId)) {
+    throw new CredentialDelegationInvalidError();
+  }
   const provenance = await provenanceFor(input.db, input.orgId, input.owner, repo.owner, input.binding.auth);
   if (!provenance) throw new CredentialDelegationDeniedError("credential_delegation_denied");
-  const operationId = opaqueId(`${input.childSessionId}:${repo.host}:${repo.owner}/${repo.repo}`);
+  const operationId = opaqueId(`${input.parentSessionId}:${input.parentThreadId}:${input.parentOperationId}:${input.childSessionId}:${repo.host}:${repo.owner}/${repo.repo}`);
   const adapted = adaptCredentialDelegate({ schemaVersion: 1, organizationId: input.orgId, actorUserId: input.actorUserId, principal: input.owner,
     requestId: `credential-delegation:${operationId}`, operationId,
     evaluationTimeMs: now, service: "github", credentialClass: "repository_transport", owner: input.owner,
@@ -101,7 +113,7 @@ export async function authorizeRepositoryCredentialDelegation(input: {
   if (reserved.kind !== "execute") throw new Error(reserved.error);
   const id = randomUUID();
   await input.db.insert(credentialDelegations).values({ id, orgId: input.orgId, parentSessionId: input.parentSessionId,
-    parentThreadId: input.parentThreadId, parentQueueItemId: input.parentQueueItemId, childSessionId: input.childSessionId, childWatchId: input.childSessionId,
+    parentThreadId: input.parentThreadId, parentOperationId: input.parentOperationId, childSessionId: input.childSessionId, childWatchId: input.childSessionId,
     ownerType: input.owner.type, ownerId: input.owner.id, repoHost: repo.host, repoOwner: repo.owner, repoName: repo.repo,
     credentialKind: provenance.kind, credentialId: provenance.id, credentialVersion: provenance.version, operations: [...OPERATIONS],
     issuedAt: now, expiresAt: now + DAY_MS, decisionId, decisionEvidence: { requestId: authorization.requestId,

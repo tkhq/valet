@@ -805,7 +805,7 @@ A policy decision does not replace query scoping. List queries must still limit 
 
 TKAI-433 work maps allowed parent, child, orchestrator, workflow, and signal edges into `agent.signal`, `delegation.create`, and `tool.builtin` requests. A child receives an explicit authority set derived from the parent request. It does not inherit ambient authority by copying host context.
 
-The `task`, `child_read`, `child_send`, and cross-orchestrator signal paths each submit a request. The request binds parent, child, actor, owner, org, target session, requested model tier, sandbox profile, and repository scope where relevant. Cross-org edges deny by default. Hop limits remain an execution safeguard and also appear as facts.
+The `task`, `child_read`, `child_send`, and cross-orchestrator signal paths each submit a request. The request binds parent, child, actor, owner, org, target session, requested model tier, sandbox profile, and repository scope where relevant. Repository credential delegation also binds the parent session, thread, and durable operation identity. Security dispatches derive that identity from the engagement, cell, and dispatch attempt. Cross-org edges deny by default. Hop limits remain an execution safeguard and also appear as facts.
 
 ### Built-ins, sandbox, credentials, and egress
 

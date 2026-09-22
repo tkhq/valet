@@ -118,7 +118,11 @@ async function seedChildState(now: number): Promise<void> {
   });
 }
 
-async function createGrant(now: number, owner: Principal = { type: "user", id: "local-user" }): Promise<void> {
+async function createGrant(
+  now: number,
+  owner: Principal = { type: "user", id: "local-user" },
+  parentOperationId = "parent-queue-item",
+): Promise<void> {
   await authorizeRepositoryCredentialDelegation({
     db: api!.providers.db,
     authorization: api!.providers.canonicalAuthorizationService,
@@ -127,7 +131,7 @@ async function createGrant(now: number, owner: Principal = { type: "user", id: "
     owner,
     parentSessionId: "parent-credential-delegation",
     parentThreadId: "web:default",
-    parentQueueItemId: "parent-queue-item",
+    parentOperationId,
     childSessionId: CHILD_ID,
     binding: BINDING,
     now,
@@ -179,6 +183,17 @@ describe("repository credential delegation", () => {
     await revokeChildCredentialDelegations(api.providers.db, CHILD_ID, now + 2);
     const [revoked] = await api.providers.db.select().from(credentialDelegations);
     expect(revoked).toMatchObject({ ownerId: "local-user", revokedAt: now + 1 });
+  });
+
+  it("converges exact retries and rejects cross-attempt reuse", async () => {
+    api = await bootTestApi();
+    allowCredentialDelegation(api);
+    const now = Date.now();
+    await createGrant(now);
+    await expect(createGrant(now)).resolves.toBeUndefined();
+    await expect(createGrant(now, { type: "user", id: "local-user" }, "other-attempt"))
+      .rejects.toBeInstanceOf(CredentialDelegationInvalidError);
+    expect(await api.providers.db.select().from(credentialDelegations)).toHaveLength(1);
   });
 
   it("rejects a different repository", async () => {

@@ -206,6 +206,8 @@ export type SpawnCellChild = (req: {
    * own id — `dispatchCell` re-stamps whatever the spawn returns.
    */
   childSessionId: string;
+  /** Durable identity for this exact engagement cell dispatch attempt. */
+  parentOperationId: string;
   /** The persona role name for the dispatch prompt's turn. */
   role: string;
 }) => Promise<{ childSessionId: string }>;
@@ -1188,6 +1190,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         repo: engagement.repoFullName,
         ref: engagement.repoRef,
         childSessionId: plannedChildSessionId,
+        parentOperationId: `security-dispatch:${engagement.id}:${cell.id}:${cell.attempts}`,
         role: cell.persona,
       });
       childSessionId = spawned.childSessionId;

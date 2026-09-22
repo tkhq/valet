@@ -2674,7 +2674,7 @@ export type ChildSpawner = (
     actorUserId: string;
     owner: Principal;
     /** Stable identity of the parent turn that requested delegation. */
-    parentQueueItemId?: string;
+    parentOperationId?: string;
     /** The spawning submission's channel origin, so the child.settled
      * signal can inherit it and the settlement turn can reach the channel
      * that asked. */

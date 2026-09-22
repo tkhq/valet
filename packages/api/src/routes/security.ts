@@ -1634,6 +1634,7 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
       {
         parentSessionId: sessionId,
         parentThreadId: threadId,
+        parentOperationId: req.parentOperationId,
         actorUserId: row.userId,
         owner: sessionOwner(row),
       },
@@ -1852,6 +1853,7 @@ securityRouter.post("/:id/security/handoff", async (c) => {
       {
         parentSessionId: sessionId,
         parentThreadId: threadId,
+        parentOperationId: `security-handoff:${result.engagement.id}:${finding.id}:${threadId}`,
         actorUserId: row.userId,
         owner: sessionOwner(row),
       },

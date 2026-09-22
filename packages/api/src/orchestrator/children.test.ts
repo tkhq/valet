@@ -525,7 +525,7 @@ describe("buildChildSpawner", () => {
       {
         parentSessionId: "parent-repo",
         parentThreadId: parent.thread("web:default").id,
-        parentQueueItemId: "parent-queue-repo",
+        parentOperationId: "parent-queue-repo",
         actorUserId: "local-user",
         owner: { type: "user", id: "local-user" },
       },
@@ -579,7 +579,7 @@ describe("buildChildSpawner", () => {
       {
         parentSessionId: parent.id,
         parentThreadId: parent.thread("web:default").id,
-        parentQueueItemId: "parent-queue-denied",
+        parentOperationId: "parent-queue-denied",
         actorUserId: "local-user",
         owner: { type: "user", id: "local-user" },
       },
