@@ -991,21 +991,7 @@ export interface UsageStatsResponse {
     callCount: number;
     percentage: number;
   }>;
-  byUserModel: Array<{ userId: string; model: string; inputTokens: number; outputTokens: number; cost: number | null; callCount: number }>;
-  byPurpose: Array<{ purpose: string; inputTokens: number; outputTokens: number; cost: number | null; callCount: number; percentage: number }>;
-  byWorkflow: Array<{ workflowId: string | null; workflowName: string; triggerType: string; inputTokens: number; outputTokens: number; cost: number | null; callCount: number }>;
-  /** Legacy rolling-window hours; 0 for calendar-month and custom reports. */
   period: number;
-  report: {
-    scope: 'personal' | 'org';
-    periodType: 'lookback' | 'month' | 'range';
-    start: string;
-    end: string;
-    label: string;
-    timezone: 'UTC';
-    boundary: 'start-inclusive/end-exclusive';
-    sandboxUsage: 'recorded-intervals-with-legacy-session-start-attribution';
-  };
 }
 
 // ─── Analytics Performance Types ─────────────────────────────────────────────

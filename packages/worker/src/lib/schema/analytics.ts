@@ -26,8 +26,4 @@ export const analyticsEvents = sqliteTable('analytics_events', {
   index('idx_analytics_events_session_type').on(table.sessionId, table.eventType),
   index('idx_analytics_events_user_type_created').on(table.userId, table.eventType, table.createdAt),
   index('idx_analytics_events_model_created').on(table.model, table.createdAt),
-  index('idx_analytics_events_usage_report').on(
-    table.createdAt, table.userId, table.model, table.sessionId,
-    table.inputTokens, table.outputTokens,
-  ).where(sql`${table.eventType} = 'llm_call'`),
 ]);

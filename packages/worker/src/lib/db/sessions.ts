@@ -351,26 +351,17 @@ export async function updateSessionMetrics(
 }
 
 export async function addActiveSeconds(
-  db: D1Database,
+  db: AppDb,
   id: string,
-  seconds: number,
-  endedAt = new Date(),
+  seconds: number
 ): Promise<void> {
-  const roundedSeconds = Math.round(seconds);
-  if (roundedSeconds <= 0) return;
-
-  const end = endedAt.toISOString();
-  const start = new Date(endedAt.getTime() - roundedSeconds * 1_000).toISOString();
-  await db.batch([
-    db.prepare(
-      `INSERT INTO session_active_intervals
-        (id, session_id, started_at, ended_at, active_seconds, source)
-       VALUES (?, ?, ?, ?, ?, 'recorded')`,
-    ).bind(crypto.randomUUID(), id, start, end, roundedSeconds),
-    db.prepare(
-      'UPDATE sessions SET active_seconds = active_seconds + ? WHERE id = ?',
-    ).bind(roundedSeconds, id),
-  ]);
+  if (seconds <= 0) return;
+  await db
+    .update(sessions)
+    .set({
+      activeSeconds: sql`${sessions.activeSeconds} + ${Math.round(seconds)}`,
+    })
+    .where(eq(sessions.id, id));
 }
 
 // Session title update

@@ -11,7 +11,7 @@ type NavItem = {
   indent?: boolean;
 };
 
-export const staticNavItems: NavItem[] = [
+const staticNavItems: NavItem[] = [
   { href: '/', label: 'Dashboard', icon: DashboardIcon },
   { href: '/orchestrator', label: 'Orchestrator', icon: OrchestratorIcon },
   // Orchestrator Chat is inserted dynamically after Orchestrator
@@ -20,7 +20,6 @@ export const staticNavItems: NavItem[] = [
   { href: '/sessions', label: 'Sessions', icon: SessionsIcon },
   { href: '/integrations', label: 'Integrations', icon: IntegrationsIcon },
   { href: '/settings/skills', label: 'Skills', icon: SkillsIcon },
-  { href: '/settings/usage', label: 'Usage', icon: SettingsIcon },
   { href: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
