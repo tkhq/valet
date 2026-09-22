@@ -207,6 +207,15 @@ sandbox:
   childRetentionHours: 24
   hibernatedRetentionHours: 72
 
+  # Managed egress prerequisite. It remains inactive until the provider
+  # observes the callback and forced-network lifecycle. Do not set enabled
+  # during this checkpoint. The proxy artifact must use an OCI digest.
+  managedEgress:
+    enabled: false
+    contractVersion: hematite-external-authorization-v1
+    proxyArtifact: ""
+    callbackUrl: ""
+
   # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
   # else resolves. Kept for one release; will be removed in a future v2.x.
   # image:

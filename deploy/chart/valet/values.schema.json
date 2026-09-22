@@ -18,6 +18,34 @@
           "exclusiveMaximum": 100
         }
       }
+    },
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "managedEgress": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "contractVersion",
+            "proxyArtifact",
+            "callbackUrl"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "contractVersion": {
+              "const": "hematite-external-authorization-v1"
+            },
+            "proxyArtifact": {
+              "type": "string"
+            },
+            "callbackUrl": {
+              "type": "string"
+            }
+          }
+        }
+      }
     }
   }
 }

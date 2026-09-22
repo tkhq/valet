@@ -9,3 +9,9 @@ export {
   type DockerSandboxCreateOpts,
   type DockerSandboxOptions,
 } from "./sandbox.js";
+export {
+  buildDockerManagedEgressPlan,
+  validateDockerManagedEgressConfig,
+  type DockerManagedEgressConfig,
+  type DockerManagedEgressPlan,
+} from "./managed-egress.js";

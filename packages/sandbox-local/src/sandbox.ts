@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { CappedOutputBuffer } from "@valet/engine";
+import { CappedOutputBuffer, ManagedEgressPrerequisiteError } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -369,10 +369,14 @@ export class LocalSandboxProvider implements SandboxProvider {
       hibernation: false,
       customImage: false,
       coldStartEstimateMs: 0,
+      managedEgress: { supported: false, configured: false, ready: false, reason: "The local provider has no network isolation boundary." },
     };
   }
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    if (opts.managedEgress) {
+      throw new ManagedEgressPrerequisiteError("unsupported_provider", "The local sandbox provider cannot enforce managed egress. Select Docker or Kubernetes after its managed-egress boundary is configured.");
+    }
     const workspace = opts.workspace;
     if (!workspace) {
       throw new Error(

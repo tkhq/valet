@@ -14,6 +14,14 @@ data:
   VALET_SANDBOX_API_URL: {{ printf "http://%s-api.%s.svc.cluster.local:%v" (include "valet.fullname" .) .Release.Namespace .Values.service.port | quote }}
   VALET_SANDBOX_BACKEND: "kubernetes"
   VALET_SANDBOX_NAMESPACE: {{ .Values.sandbox.namespace | quote }}
+  VALET_MANAGED_EGRESS_ENABLED: {{ ternary "1" "0" .Values.sandbox.managedEgress.enabled | quote }}
+  VALET_MANAGED_EGRESS_CONTRACT_VERSION: {{ .Values.sandbox.managedEgress.contractVersion | quote }}
+  {{- if .Values.sandbox.managedEgress.proxyArtifact }}
+  VALET_MANAGED_EGRESS_PROXY_ARTIFACT: {{ .Values.sandbox.managedEgress.proxyArtifact | quote }}
+  {{- end }}
+  {{- if .Values.sandbox.managedEgress.callbackUrl }}
+  VALET_MANAGED_EGRESS_CALLBACK_URL: {{ .Values.sandbox.managedEgress.callbackUrl | quote }}
+  {{- end }}
   {{- /* Deprecated legacy default-image pin. Remote deploys set
        `sandbox.image: null` to omit it entirely — the api then resolves
        every sandbox through the seeded per-profile base sources. */}}

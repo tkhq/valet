@@ -87,6 +87,7 @@ import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
 import { buildApiRouteRegistry, routeResourcePolicyMiddleware, type ApiRouteDescriptorV1 } from "./authorization/route-resource-policy.js";
 import { routeApprovalRouter } from "./authorization/route-approval.js";
+import { ManagedEgressBindingRegistry, managedEgressAuthorizationRouter } from "./routes/managed-egress-authorization.js";
 
 export interface CreatedApp {
   app: Hono<AppEnv>;
@@ -121,6 +122,8 @@ export interface CreateAppOpts {
    * embedded callers have no boot chain).
    */
   isReady?: () => boolean;
+  /** Proxy-only callback bindings. An omitted registry starts empty and denies every request. */
+  managedEgressBindings?: ManagedEgressBindingRegistry;
 }
 
 /**
@@ -162,6 +165,9 @@ export function createApp(
     }),
   );
   app.use("*", providersMiddleware(providers));
+
+  // Proxy-only callback. Bearer authentication is the complete auth mechanism; workloads never receive this token.
+  app.route("", managedEgressAuthorizationRouter(opts.managedEgressBindings ?? new ManagedEgressBindingRegistry()));
 
   // LLM recording proxy — /proxy/anthropic/* and /proxy/openai/*. Uses its
   // own vlt_ key auth (resolveProxyPrincipal); intentionally outside /api/*

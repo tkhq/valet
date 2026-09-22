@@ -67,7 +67,7 @@ import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, ManagedEgressPrerequisiteError, SandboxEvictedError, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -791,6 +791,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       // constructed without secretsApi cannot honor updateCreds().
       credsMount: Boolean(this.deps.secretsApi),
       dockerSupport: true,
+      managedEgress: { supported: false, configured: false, ready: false, reason: "The paired Kubernetes resources are defined but lifecycle observation is not connected." },
     };
   }
 
@@ -831,6 +832,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * the same name, so the label-selector-based readiness poll is unaffected
    * by the pod name. The workspace PVC is retained (decision 5). */
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    if (opts.managedEgress) {
+      throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress is not active on Kubernetes. Configure the pinned proxy boundary after resource observation lands.");
+    }
     if (!opts.workspace) {
       throw new Error(
         "KubernetesSandboxProvider.create: opts.workspace is required " +

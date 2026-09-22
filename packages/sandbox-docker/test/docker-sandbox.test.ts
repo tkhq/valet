@@ -380,6 +380,12 @@ describeDocker("DockerSandbox", () => {
       coldStartEstimateMs: 8000,
       credsMount: true,
       dockerSupport: true,
+      managedEgress: {
+        supported: false,
+        configured: false,
+        ready: false,
+        reason: "The forced Docker topology is defined but lifecycle activation is not connected.",
+      },
     });
   });
 

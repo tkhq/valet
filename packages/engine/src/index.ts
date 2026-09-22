@@ -124,6 +124,15 @@ export {
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
 export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
+export {
+  MANAGED_EGRESS_CONTRACT_VERSION,
+  ManagedEgressPrerequisiteError,
+  validateManagedEgressRequest,
+  type ManagedEgressCapability,
+  type ManagedEgressEffectiveState,
+  type ManagedEgressIdentity,
+  type ManagedEgressRequest,
+} from "./sandbox/managed-egress.js";
 // PgSessionStore lives in @valet/store-postgres.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.

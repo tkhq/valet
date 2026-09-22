@@ -3610,11 +3610,9 @@ export class EngineHost {
         // Authorized-scope egress allowlist env (M-P4b): a live persona child
         // carries VALET_SECURITY_AUTHORIZED_SCOPE. Empty for a non-live child,
         // so the env stays byte-identical.
-        // TODO(M-P4b egress): SandboxCreateOpts has no network-policy field, so
-        // this env is the enforcement seam the live tools honor. Full network-
-        // level egress lockdown (a k8s NetworkPolicy / egress firewall keyed on
-        // this allowlist) is a sandbox-infra follow-up — add it here on the
-        // child sandbox spec once SandboxProvider supports an egress policy.
+        // This env guides cooperative tools only. It is not an egress boundary.
+        // Do not request managed egress until the provider can apply and observe
+        // the separate proxy topology atomically.
         env:
           Object.keys(securityProvisioning.scopeEnv).length > 0
             ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }

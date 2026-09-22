@@ -19,6 +19,7 @@ import {
   SandboxUnavailableError,
   WorkspaceProvisioningError,
 } from "../errors.js";
+import { ManagedEgressPrerequisiteError, validateManagedEgressRequest } from "./managed-egress.js";
 import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
 
 /**
@@ -156,6 +157,16 @@ export class SandboxAttachment {
   private ignoredResourceDriftKey: string | null = null;
 
   constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider) {
+    if (createOpts.managedEgress) {
+      validateManagedEgressRequest(createOpts.managedEgress);
+      const capability = provider.capabilities().managedEgress;
+      if (!capability?.supported || !capability.configured || !capability.ready) {
+        throw new ManagedEgressPrerequisiteError(
+          capability?.configured ? "network_isolation" : "unsupported_provider",
+          capability?.reason ?? `The ${provider.backend} provider cannot enforce managed egress. Select a configured provider.`,
+        );
+      }
+    }
     this.provider = provider;
     this.createOpts = createOpts;
     this.specProvider = specProvider;

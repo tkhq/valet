@@ -176,3 +176,9 @@ export {
 } from "./buildkit-job.js";
 
 export { sandboxEvictionApiAdapter, type SandboxEvictionApi } from "./eviction.js";
+export {
+  buildKubernetesManagedEgressResources,
+  validateKubernetesManagedEgressConfig,
+  type KubernetesManagedEgressConfig,
+  type KubernetesManagedEgressResources,
+} from "./managed-egress.js";

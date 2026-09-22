@@ -17,6 +17,7 @@ import type {
 import {
   CappedOutputBuffer,
   CONTAINER_DEATH_PATTERN,
+  ManagedEgressPrerequisiteError,
   parseResourceQuantity,
 } from "@valet/engine";
 
@@ -997,10 +998,14 @@ export class DockerSandboxProvider implements SandboxProvider {
       coldStartEstimateMs: 8000,
       credsMount: true,
       dockerSupport: true,
+      managedEgress: { supported: false, configured: false, ready: false, reason: "The forced Docker topology is defined but lifecycle activation is not connected." },
     };
   }
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    if (opts.managedEgress) {
+      throw new ManagedEgressPrerequisiteError("network_isolation", "Managed egress is not active on Docker. Configure the pinned proxy boundary after lifecycle activation lands.");
+    }
     const dockerOpts = opts as DockerSandboxCreateOpts;
     const workspace = dockerOpts.workspace;
     if (!workspace) {

@@ -21,10 +21,9 @@
  * deferred-data note. The install-at-prep path is a documented follow-up
  * anchored on `ToolDecl.install`.
  *
- * Egress enforcement seam: `SandboxCreateOpts` carries no network-policy field
- * today, so the honest enforcement point is the env allowlist the live tools
- * read PLUS a network-policy TODO anchored where the sandbox is created. See
- * `authorizedScopeEnv` and the spec's egress section.
+ * Egress declaration seam: the env allowlist is client guidance only. It is not
+ * a network boundary. Managed egress remains inactive until a provider can
+ * force all workload sockets through the separate proxy topology.
  */
 import { mcpActionPlugin } from "@valet/sdk";
 import type { ValetPlugin } from "@valet/engine";
@@ -96,7 +95,7 @@ export function parseAuthorizedScopeHosts(raw: string | null): string[] {
  * service name is the tool id (or the mcp prefix, stripped of `mcp__`
  * decoration), so the child's tool list carries the server's tools under a
  * stable prefix. `noAuth` is set — a self-hosted scanner MCP server on the
- * sandbox network needs no per-user credential; the egress allowlist bounds it.
+ * sandbox network needs no per-user credential; the declaration limits cooperative clients only.
  *
  * A decl with no `mcp` block contributes nothing (its install/image is a
  * separate prep concern). An empty decl list yields no plugins.
@@ -142,11 +141,9 @@ function mcpServiceName(decl: ToolDecl): string {
  * names hosts, else `{}` (an empty scope authorizes nothing — the live persona
  * is told to stop). The live tools read this env to bound their egress.
  *
- * This is the egress ENFORCEMENT SEAM on providers without a network policy: the
- * allowlist rides in the sandbox env, and the live tooling honors it. Full
- * network-level enforcement (a k8s NetworkPolicy / egress firewall keyed on this
- * list) is a sandbox-infra follow-up — see the spec's egress section and the
- * TODO on the host's persona-child sandbox build.
+ * This is client configuration only. It does not enforce egress. A workload can
+ * bypass it with a direct socket unless a provider activates the separate
+ * managed-egress network boundary.
  */
 export function authorizedScopeEnv(scopeHosts: readonly string[]): Record<string, string> {
   const clean = scopeHosts.map((h) => h.trim()).filter((h) => h !== "");
