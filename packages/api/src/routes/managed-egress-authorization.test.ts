@@ -74,6 +74,12 @@ describe("managed egress callback", () => {
     const validBody = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(request))); controller.close(); } });
     const accepted = await router().request(streamRequest(validBody, { authorization: `Bearer ${"x".repeat(4096)}` }));
     expect(accepted.status).toBe(200);
+
+    const exactUtf8Token = "é".repeat(2048);
+    registry = new ManagedEgressBindingRegistry();
+    registry.register(identity, exactUtf8Token);
+    expect((await post(request, exactUtf8Token)).status).toBe(200);
+    expect((await post(request, `${exactUtf8Token}é`)).status).toBe(401);
   });
 
   it("accepts an exact 4 KiB body", async () => {

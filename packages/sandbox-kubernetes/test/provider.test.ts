@@ -398,7 +398,7 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
 interface ManagedLifecycleFixtureOptions {
   applyFailure?: boolean;
   deleteFailures?: number;
-  keepWorkloadAfterDelete?: boolean;
+  keepWorkloadAfterStop?: boolean;
   unreadyObservations?: number;
   caCert?: string;
 }
@@ -410,11 +410,27 @@ function managedLifecycleFixture(options: ManagedLifecycleFixtureOptions = {}) {
   let unreadyObservations = options.unreadyObservations ?? 0;
   const resources = new Set<string>();
   const objectsApi = new FakeObjectsApi();
+  let workspacePvcPresent = true;
+  const originalCreate = objectsApi.createNamespacedCustomObject.bind(objectsApi);
+  objectsApi.createNamespacedCustomObject = async (params) => {
+    workloadPresent = true;
+    return originalCreate(params);
+  };
+  const originalPatch = objectsApi.patchNamespacedCustomObject.bind(objectsApi);
+  objectsApi.patchNamespacedCustomObject = async (params) => {
+    const result = await originalPatch(params);
+    if ("spec" in params.body && params.body.spec.operatingMode === "Suspended") {
+      calls.push("suspend-workload");
+      if (!options.keepWorkloadAfterStop) workloadPresent = false;
+    }
+    return result;
+  };
   const originalDelete = objectsApi.deleteNamespacedCustomObject.bind(objectsApi);
   objectsApi.deleteNamespacedCustomObject = async (params) => {
     calls.push("delete-workload");
     const result = await originalDelete(params);
-    if (!options.keepWorkloadAfterDelete) workloadPresent = false;
+    workspacePvcPresent = false;
+    if (!options.keepWorkloadAfterStop) workloadPresent = false;
     return result;
   };
   const podsApi: SandboxPodsApi = {
@@ -471,7 +487,11 @@ function managedLifecycleFixture(options: ManagedLifecycleFixtureOptions = {}) {
     } },
     managedEgressLifecycle: { registerCallbackBinding, revokeCallbackBinding: () => { calls.push("revoke"); } },
   });
-  return { provider, runtime, objectsApi, podsApi, resources, calls, createOptions, removeWorkload: () => { workloadPresent = false; } };
+  return {
+    provider, runtime, objectsApi, podsApi, resources, calls, createOptions,
+    removeWorkload: () => { workloadPresent = false; },
+    workspacePvcPresent: () => workspacePvcPresent,
+  };
 }
 
 describe("Kubernetes managed egress provider lifecycle", () => {
@@ -535,6 +555,20 @@ describe("Kubernetes managed egress provider lifecycle", () => {
     expect(fixture.resources.size).toBeGreaterThan(0);
   });
 
+  it("allows a bounded first proxy image pull longer than five seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = managedLifecycleFixture({ unreadyObservations: 60 });
+      const creating = fixture.provider.create(fixture.createOptions());
+      await vi.advanceTimersByTimeAsync(6_000);
+      await expect(creating).resolves.toBeDefined();
+      expect(fixture.calls.filter((call) => call === "observe")).toHaveLength(61);
+      expect(fixture.calls).not.toContain("suspend-workload");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["partial apply", "registry full"])("rolls back %s without orphaned managed resources", async (failure) => {
     const fixture = managedLifecycleFixture({ applyFailure: failure === "partial apply" });
     const register = failure === "registry full"
@@ -546,22 +580,44 @@ describe("Kubernetes managed egress provider lifecycle", () => {
     );
 
     expect(fixture.resources.size).toBe(0);
-    expect(fixture.calls.indexOf("delete-workload")).toBeLessThan(fixture.calls.indexOf("delete-resources"));
+    expect(fixture.calls.indexOf("suspend-workload")).toBeLessThan(fixture.calls.indexOf("delete-resources"));
+    expect(fixture.calls).not.toContain("delete-workload");
+    expect(fixture.objectsApi.deleted).toBe(false);
+    expect(fixture.workspacePvcPresent()).toBe(true);
   });
 
-  it("keeps policies when failed create cannot confirm workload removal, then retries cleanup", async () => {
+  it("retains the CR and workspace PVC after transient re-provision failure, then retries", async () => {
+    const fixture = managedLifecycleFixture();
+    let registrationAttempts = 0;
+    const register = () => {
+      registrationAttempts++;
+      if (registrationAttempts === 1) throw new Error("transient registry failure");
+      fixture.calls.push("register");
+    };
+
+    await expect(fixture.provider.create(fixture.createOptions(register))).rejects.toThrow("transient registry failure");
+    expect(fixture.objectsApi.deleted).toBe(false);
+    expect(fixture.workspacePvcPresent()).toBe(true);
+    expect(fixture.calls).toContain("suspend-workload");
+    await expect(fixture.provider.create(fixture.createOptions(register))).resolves.toBeDefined();
+    expect(registrationAttempts).toBe(2);
+    expect(fixture.objectsApi.deleted).toBe(false);
+    expect(fixture.workspacePvcPresent()).toBe(true);
+  });
+
+  it("keeps isolation policy until the suspended workload pod disappears", async () => {
     vi.useFakeTimers();
     try {
-      const fixture = managedLifecycleFixture({ keepWorkloadAfterDelete: true });
+      const fixture = managedLifecycleFixture({ keepWorkloadAfterStop: true });
       const creating = fixture.provider.create(fixture.createOptions(() => { throw new Error("registry capacity reached"); }));
-      const rejected = expect(creating).rejects.toMatchObject({
-        prerequisite: "cleanup",
-        message: expect.stringContaining("policies remain in place"),
-      });
+      const rejected = expect(creating).rejects.toThrow("registry capacity reached");
       await vi.advanceTimersByTimeAsync(60_000);
       await rejected;
       expect(fixture.calls).not.toContain("delete-resources");
+      expect(fixture.calls).not.toContain("delete-workload");
       expect([...fixture.resources].some((name) => name.endsWith("-workload"))).toBe(true);
+      expect(fixture.objectsApi.deleted).toBe(false);
+      expect(fixture.workspacePvcPresent()).toBe(true);
       await expect(fixture.provider.status("managed-session")).rejects.toMatchObject({ prerequisite: "cleanup" });
       fixture.removeWorkload();
       await fixture.provider.destroy("managed-session");
@@ -569,6 +625,19 @@ describe("Kubernetes managed egress provider lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("fully cascades the CR and workspace PVC on session-deletion destroy", async () => {
+    const fixture = managedLifecycleFixture();
+    const sandbox = await fixture.provider.create(fixture.createOptions());
+
+    await fixture.provider.destroy(sandbox.id);
+
+    expect(fixture.calls.indexOf("delete-workload")).toBeLessThan(fixture.calls.indexOf("delete-resources"));
+    expect(fixture.calls).not.toContain("suspend-workload");
+    expect(fixture.objectsApi.deleted).toBe(true);
+    expect(fixture.workspacePvcPresent()).toBe(false);
+    expect(fixture.resources.size).toBe(0);
   });
 
   it("retains managed cleanup state when destroy fails and retries the managed branch", async () => {

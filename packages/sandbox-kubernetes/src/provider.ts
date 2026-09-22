@@ -156,7 +156,8 @@ import {
  * importing it, since this module has no dependency on the policy layer. */
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
-const MANAGED_EGRESS_READY_TIMEOUT_MS = 5_000;
+// A cold proxy start can include scheduling and the first immutable image pull.
+const MANAGED_EGRESS_READY_TIMEOUT_MS = 60_000;
 const MANAGED_EGRESS_POLL_INTERVAL_MS = 100;
 
 function reportAdoptedWorkspacePvcError(args: {
@@ -1162,7 +1163,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           revoke: opts.managedEgressLifecycle?.revokeCallbackBinding ?? (() => {}),
         };
         this.managedSandboxes.set(name, state);
-        await this.cleanupManagedSandbox(name, state);
+        try {
+          await this.cleanupManagedSandbox(name, state, "recovery");
+        } catch (cleanupError) {
+          // Keep the provisioning failure primary. The retained managed state
+          // exposes the cleanup diagnostic to status and the next retry.
+          console.error(`k8s sandbox ${name}: managed egress rollback failed:`, cleanupError);
+        }
       } else {
         opts.managedEgressLifecycle?.revokeCallbackBinding();
       }
@@ -1197,21 +1204,33 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
   }
 
-  /** Delete the workload and prove it is absent before removing egress policy or secret material. */
-  private async cleanupManagedSandbox(name: string, state: KubernetesManagedSandboxState): Promise<void> {
+  /** Stop the workload and prove it is absent before removing egress policy or secret material. */
+  private async cleanupManagedSandbox(
+    name: string,
+    state: KubernetesManagedSandboxState,
+    mode: "recovery" | "terminal" = "recovery",
+  ): Promise<void> {
     state.revoke();
     try {
-      await deleteSandbox(this.deps.objectsApi, this.cfg, name);
+      if (mode === "terminal") {
+        await deleteSandbox(this.deps.objectsApi, this.cfg, name);
+      } else {
+        const cr = await getSandbox(this.deps.objectsApi, this.cfg, name);
+        if (cr !== null) {
+          // Suspension removes workload pods but retains the CR and workspace PVC.
+          await setOperatingMode(this.deps.objectsApi, this.cfg, name, "Suspended");
+        }
+      }
       const deadline = Date.now() + READY_TIMEOUT_MS;
       for (;;) {
-        const [cr, pods] = await Promise.all([
-          getSandbox(this.deps.objectsApi, this.cfg, name),
+        const [currentCr, pods] = await Promise.all([
+          mode === "terminal" ? getSandbox(this.deps.objectsApi, this.cfg, name) : Promise.resolve(null),
           this.deps.podsApi.listNamespacedPod({
             namespace: this.cfg.namespace,
             labelSelector: `${SESSION_LABEL_KEY}=${state.selector.matchLabels[SESSION_LABEL_KEY]}`,
           }),
         ]);
-        if (cr === null && pods.items.length === 0) break;
+        if (currentCr === null && pods.items.length === 0) break;
         if (Date.now() >= deadline) {
           throw new Error(`workload removal was not confirmed within ${READY_TIMEOUT_MS}ms`);
         }
@@ -1270,7 +1289,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   async destroy(id: string): Promise<void> {
     const managed = this.managedSandboxes.get(id);
     if (managed) {
-      await this.cleanupManagedSandbox(id, managed);
+      await this.cleanupManagedSandbox(id, managed, "terminal");
       return;
     }
     await deleteSandbox(this.deps.objectsApi, this.cfg, id);

@@ -230,7 +230,8 @@ export function managedEgressAuthorizationRouter(registry: ManagedEgressBindingR
     if (!validContentType(c.req.header("content-type"))) return c.json({ error: "unsupported_media_type" }, 415, SAFE_HEADERS);
     const authorization = c.req.header("authorization");
     const bearer = authorization?.match(/^Bearer ([^\r\n]+)$/)?.[1];
-    if (!bearer || bearer.length < 32 || bearer.length > MAX_TOKEN_BYTES) return c.json({ error: "unauthorized" }, 401, SAFE_HEADERS);
+    const bearerBytes = bearer === undefined ? 0 : Buffer.byteLength(bearer, "utf8");
+    if (!bearer || bearerBytes < 32 || bearerBytes > MAX_TOKEN_BYTES) return c.json({ error: "unauthorized" }, 401, SAFE_HEADERS);
     const contentLength = parseContentLength(c.req.header("content-length"));
     const transferEncoding = c.req.header("transfer-encoding");
     if (contentLength === false || (contentLength !== null && transferEncoding !== undefined) || (transferEncoding !== undefined && transferEncoding.toLowerCase() !== "chunked")) {
