@@ -19,6 +19,12 @@ When the agent reads Slack via `read_history` and `read_thread`, it gets a minim
 
 ## Design
 
+### Read result channel metadata
+
+`read_history` and `read_thread` return the requested channel ID in `channel` and the resolved Slack name in `channel_name`. Agents use `channel_name` in explanations and user-facing output. They keep `channel` for follow-up tool calls.
+
+`conversations.info` is mandatory pre-read authorization. The access check returns the channel name with the authorization result. If Slack returns `ok: true` without `channel.name`, the read succeeds and returns the channel ID without `channel_name`. If the authorization request fails, or Slack returns `ok: false`, the read fails before it requests messages.
+
 ### 1. Enriched Message Data
 
 #### File metadata in `slimMessage`
