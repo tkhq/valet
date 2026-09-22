@@ -103,6 +103,10 @@ export class CanonicalAuthorizationService implements AuthorizationService {
     return { ok: true };
   }
 
+  async persistedDelegationEvaluationTime(orgId: string, idempotencyKey: string): Promise<number | undefined> {
+    return (await this.find(orgId, idempotencyKey))?.evidence?.delegationReplay?.evaluationTimeMs;
+  }
+
   async authorize(request: AuthorizationRequest, beforePersist?: (envelope: PolicyDecisionEnvelope) => void): Promise<PolicyDecisionEnvelope> {
     const subjectDigest = requestSubjectDigest(request);
     const existing = await this.find(request.subject.orgId, request.idempotencyKey);

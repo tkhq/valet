@@ -920,11 +920,13 @@ export class ChildWatcher {
     // deliberately kept — it is the only durable handle to a sandbox a
     // prior cycle parked, and the next park overwrites it anyway.
     const now = Date.now();
-    await this.deps.db
-      .update(childWatches)
-      .set({ settled: true, settledAt: now, sandboxReclaimedAt: null })
-      .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId)));
-    await revokeChildCredentialDelegations(this.deps.db, childSessionId, now);
+    await this.deps.db.transaction(async (tx) => {
+      await tx
+        .update(childWatches)
+        .set({ settled: true, settledAt: now, sandboxReclaimedAt: null })
+        .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId)));
+      await revokeChildCredentialDelegations(tx, childSessionId, now);
+    });
   }
 
   private async markReclaimed(childSessionId: string, now: number): Promise<void> {

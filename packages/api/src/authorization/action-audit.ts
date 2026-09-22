@@ -25,6 +25,7 @@ export interface DecisionAuditEvidenceV1 {
   readonly decisionDigest: string;
   readonly obligationDigest: string;
   readonly approvalReplay?: { readonly evaluationTimeMs: number; readonly actorUserId?: string };
+  readonly delegationReplay?: { readonly evaluationTimeMs: number };
 }
 export interface DecisionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationDecisionRow; readonly evidence: DecisionAuditEvidenceV1 }
 
@@ -59,6 +60,12 @@ export function buildDecisionAuditPlan(input: {
       : undefined;
     approvalReplay = { evaluationTimeMs, ...(request.subject.actorUserId ? { actorUserId: request.subject.actorUserId } : {}), ...(route ? { route } : {}) };
   }
+  let delegationReplay: DecisionAuditEvidenceV1["delegationReplay"];
+  if (request.kind === "credential.delegate") {
+    const evaluationTimeMs = request.context.evaluationTimeMs;
+    timestamp(evaluationTimeMs);
+    delegationReplay = { evaluationTimeMs };
+  }
   const tvc = envelope.evaluator.kind === "tvc_attested";
   if (tvc !== Boolean(envelope.proof) || tvc !== Boolean(input.proofVerification)) fail("invalid_proof");
   if (envelope.proof) {
@@ -81,10 +88,10 @@ export function buildDecisionAuditPlan(input: {
     proofVerificationStatus: verification?.status ?? "not_required", proofVerifiedAt: verification?.atMs ?? null,
     proofVerificationError: verification?.errorCode ? safeCode(verification.errorCode) : null,
     identityFactProvenance: identityFactProvenance.map(copy), policyFactProvenance: policyFactProvenance.map(copy),
-    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}) },
+    evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}), ...(delegationReplay ? { delegationReplay } : {}) },
     evaluatedAt: envelope.evaluatedAtMs, createdAt: input.createdAtMs,
   };
-  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}) } });
+  return deepFreeze({ schemaVersion: 1, row, evidence: { schemaVersion: 1, profileDigest: input.profileDigest, interpreterDigest: input.interpreterDigest, contractDigest: input.contractDigest, decisionDigest, obligationDigest, ...(approvalReplay ? { approvalReplay } : {}), ...(delegationReplay ? { delegationReplay } : {}) } });
 }
 
 export interface ExecutionAuditPlanV1 { readonly schemaVersion: 1; readonly row: AuthorizationExecutionAttemptRow; readonly requestSubjectDigest: string; readonly resultDigest: string | null }

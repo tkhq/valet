@@ -198,7 +198,9 @@ describe("repository credential delegation", () => {
     await expect(createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation")).rejects.toThrow("credential_delegation_recovery_ambiguous");
     await api.providers.db.delete(credentialDelegations).where(eq(credentialDelegations.id, active.id));
     await api.providers.db.update(authorizationExecutionAttempts).set({ outcome: "started", finishedAt: null }).where(eq(authorizationExecutionAttempts.decisionId, active.decisionId));
-    await createGrant(now + 2, { type: "user", id: "local-user" }, "replacement-operation");
+    await createGrant(now + 60_000, { type: "user", id: "local-user" }, "replacement-operation");
+    const recovered = (await api.providers.db.select().from(credentialDelegations)).find((row) => row.decisionId === active.decisionId);
+    expect(recovered).toMatchObject({ issuedAt: now + 2, expiresAt: now + 2 + DAY_MS });
     expect((await api.providers.db.select().from(authorizationExecutionAttempts)).map((row) => row.outcome)).toContain("completed");
   });
 
