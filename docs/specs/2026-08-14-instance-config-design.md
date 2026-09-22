@@ -380,9 +380,10 @@ A declared `apiKeyEnv` with no value makes the provider disabled. Valet warns
 with the provider and env names. It removes an older key only when instance
 config created it. Valet keeps manually managed credentials.
 
-If `apiKeyEnv` is absent, Valet does not manage the key. An admin can connect
+If `apiKeyEnv` is absent, Valet removes a key previously created from
+instance config. It preserves a manually managed key. An admin can connect
 the key in Organization → Models. The custom provider stays inactive until a
-key exists. Known providers continue to use their standard env fallback.
+manual key exists. Known providers continue to use their standard env fallback.
 
 This section exists because namespaced model ids (`{kind|rowId}/{modelId}`)
 elsewhere point at provider rows — the org's tier map targets
@@ -398,12 +399,15 @@ preferences, this section's original reason for existing, were removed
   the existing row or creates it, then overwrites the declared fields.
   `name` defaults to the kind.
 - **`openai_compatible`** entries require a `name` and `baseUrl`. The
-  reconciler keys them by name and creates missing rows as `prov_cfg_<hash>`.
-  This kind selects the OpenAI chat-completions protocol.
+  reconciler derives the immutable row id `prov_cfg_<hash>` from the declared
+  name. A later display-name edit does not change that identity. This kind
+  selects the OpenAI chat-completions protocol.
 - **`apiKeyEnv`** is valid only for `openai_compatible`. If the env value is
   present, each boot updates the encrypted `llm:<provider-id>` credential.
-  If it is absent or blank, each boot disables the provider. `enabled: false`
-  also keeps the provider disabled when the key exists.
+  Valet warns before this update replaces a distinct manually managed key.
+  If the value is absent or blank, each boot disables the provider.
+  `enabled: false` also keeps the provider disabled when the key exists.
+  Removing `apiKeyEnv` deletes only the key that instance config created.
 - The section only asserts; it never deletes a provider row. (Deletion
   has service-level guards — the org default model's provider refuses to
   delete — and stays in the UI.)

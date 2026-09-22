@@ -11,7 +11,7 @@
  * logic can upsert safely.
  */
 import { createHash, randomUUID } from "node:crypto";
-import type { CredentialOwner, CredentialStore } from "@valet/engine";
+import { credentialSecret, type CredentialOwner, type CredentialStore } from "@valet/engine";
 import { and, eq, isNull, like, lte, notLike, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -61,7 +61,7 @@ export interface ReconcileDeps {
    */
   configPath?: string;
   sourceService?: SourceService;
-  /** Credential store used when an llmProviders entry names apiKeyEnv. */
+  /** Credential store used to reconcile llmProviders keys. */
   credentials?: CredentialStore;
   /** Process environment. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
@@ -603,27 +603,24 @@ async function reconcileLlmProvidersPass(
     const kind = provDecl.kind as LlmProviderKind;
     const declaredName = provDecl.name ?? kind;
     const envKey = provDecl.apiKeyEnv === undefined ? undefined : env[provDecl.apiKeyEnv]?.trim();
-    // A provider that explicitly requires an environment key stays disabled
-    // when that key is absent. This prevents a stale stored key from making a
-    // deployment-configured endpoint active after its Secret is removed.
     const declaredEnabled = (provDecl.enabled ?? true) &&
       (provDecl.apiKeyEnv === undefined || Boolean(envKey));
     const declaredModels = provDecl.models?.map((m) => ({ id: m.id, name: m.name ?? m.id }));
+    const existingRows = await listLlmProviders(db, orgId);
+    let providerId: string;
 
     if (isKnownProviderKind(kind)) {
-      // Singleton by kind — find or create.
-      const existingRows = await listLlmProviders(db, orgId);
-      const existing = existingRows.find((r) => r.kind === kind);
-
+      const existing = existingRows.find((row) => row.kind === kind);
       if (existing) {
-        await updateLlmProvider(db, orgId, existing.id, {
+        providerId = existing.id;
+        await updateLlmProvider(db, orgId, providerId, {
           name: provDecl.name ?? existing.name,
           enabled: declaredEnabled,
           ...(declaredModels !== undefined ? { models: declaredModels } : {}),
           ...(provDecl.baseUrl !== undefined ? { baseUrl: provDecl.baseUrl } : {}),
         });
       } else {
-        await createLlmProvider(db, {
+        const created = await createLlmProvider(db, {
           orgId,
           kind,
           name: declaredName,
@@ -631,70 +628,74 @@ async function reconcileLlmProvidersPass(
           models: declaredModels,
           enabled: declaredEnabled,
         });
+        providerId = created.id;
       }
     } else {
-      // openai_compatible — keyed by name. Direct insert with deterministic id.
-      // name is required (validator ensures it), so provDecl.name is always set here.
+      // The deterministic id is the config identity. The display name is UI
+      // mutable and cannot identify this row after an admin renames it.
       const name = provDecl.name!;
-      const provId = configProviderId(name);
-
-      const existingRows = await listLlmProviders(db, orgId);
-      const existing = existingRows.find((r) => r.kind === "openai_compatible" && r.name === name);
+      const deterministicId = configProviderId(name);
+      const existing = existingRows.find((row) => row.id === deterministicId);
 
       if (existing) {
-        await updateLlmProvider(db, orgId, existing.id, {
+        providerId = existing.id;
+        await updateLlmProvider(db, orgId, providerId, {
           enabled: declaredEnabled,
           ...(declaredModels !== undefined ? { models: declaredModels } : {}),
           ...(provDecl.baseUrl !== undefined ? { baseUrl: provDecl.baseUrl } : {}),
         });
       } else {
-        // Direct insert to keep the deterministic id.
-        const now = Date.now();
+        providerId = deterministicId;
         await db.insert(llmProviders).values({
-          id: provId,
+          id: providerId,
           orgId,
           kind: "openai_compatible",
           name,
           baseUrl: provDecl.baseUrl ?? null,
           enabled: declaredEnabled,
           models: declaredModels ?? [],
-          createdAt: now,
+          createdAt: Date.now(),
         }).onConflictDoNothing();
       }
     }
 
-    if (provDecl.apiKeyEnv === undefined) continue;
-
-    const rows = await listLlmProviders(db, orgId);
-    const provider = isKnownProviderKind(kind)
-      ? rows.find((row) => row.kind === kind)
-      : rows.find((row) => row.kind === "openai_compatible" && row.name === declaredName);
-    if (!provider) {
-      throw new InstanceConfigError(
-        `llmProviders entry ${JSON.stringify(declaredName)} could not resolve its provider row. Check the provider name and restart.`,
-      );
-    }
-
-    const service = `llm:${provider.id}`;
-    if (!envKey) {
-      console.warn(
-        `[config-reconcile] llm provider ${JSON.stringify(declaredName)} is disabled because ` +
-          `${provDecl.apiKeyEnv} is not set or is blank. Set that env var and restart to enable the provider.`,
-      );
-    }
     if (!credentials) {
+      if (provDecl.apiKeyEnv === undefined) continue;
       throw new InstanceConfigError(
         `llmProviders entry ${JSON.stringify(declaredName)} declares apiKeyEnv, but the credential store is unavailable. Configure the credential store before reconciliation.`,
       );
     }
-    if (!envKey) {
-      const stored = await credentials.get(credentialOwner, service);
+
+    const service = `llm:${providerId}`;
+    const stored = await credentials.get(credentialOwner, service);
+    if (provDecl.apiKeyEnv === undefined) {
+      // Removing apiKeyEnv hands credential ownership back to Settings. Revoke
+      // the old config-owned key first so it cannot silently become manual.
       if (stored?.metadata?.source === "instance_config_env") {
         await credentials.delete(credentialOwner, service);
       }
       continue;
     }
 
+    if (!envKey) {
+      console.warn(
+        `[config-reconcile] llm provider ${JSON.stringify(declaredName)} is disabled because ` +
+          `${provDecl.apiKeyEnv} is not set or is blank. Set that env var and restart to enable the provider.`,
+      );
+      if (stored?.metadata?.source === "instance_config_env") {
+        await credentials.delete(credentialOwner, service);
+      }
+      continue;
+    }
+
+    const storedSecret = credentialSecret(stored);
+    if (storedSecret !== undefined && storedSecret !== envKey && stored?.metadata?.source !== "instance_config_env") {
+      console.warn(
+        `[config-reconcile] llm provider ${JSON.stringify(declaredName)} has a manually managed key, but ` +
+          `${provDecl.apiKeyEnv} is declared. Instance config replaces the stored key at every restart. ` +
+          `Remove apiKeyEnv to manage this key in Settings.`,
+      );
+    }
     await credentials.save(credentialOwner, service, {
       type: "api_key",
       apiKey: envKey,

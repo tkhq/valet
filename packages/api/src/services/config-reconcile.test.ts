@@ -24,6 +24,7 @@ import { InstanceConfigError, type InstanceConfig } from "../config/instance-con
 import { findDefaultAssistant } from "../assistants/service.js";
 import { buildOrgCatalog } from "./model-catalog.js";
 import { resolveModelSpec } from "./model-resolution.js";
+import { updateLlmProvider } from "./llm-providers.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -651,6 +652,19 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
     ({ appDb: db } = await freshTestPgDb());
   });
 
+  function kserveConfig(apiKeyEnv?: string): InstanceConfig {
+    return {
+      version: 1,
+      llmProviders: [{
+        kind: "openai_compatible",
+        name: "agents-dev-kserve",
+        baseUrl: "http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1",
+        ...(apiKeyEnv ? { apiKeyEnv } : {}),
+        models: [{ id: "qwen-coder", name: "Agents Dev Qwen Coder" }],
+      }],
+    };
+  }
+
   it("creates a known-kind provider row on first run", async () => {
     const cfg: InstanceConfig = {
       version: 1,
@@ -775,6 +789,105 @@ describe("reconcileInstanceConfig — llmProviders pass", () => {
         provider: providerId,
         baseUrl: "http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1",
       },
+    });
+  });
+
+  it("reconciles by deterministic id after the UI renames a config provider", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const cfg = kserveConfig("VALET_KSERVE_API_KEY");
+    const env = { VALET_KSERVE_API_KEY: "kserve-secret" };
+    await reconcileInstanceConfig({ db, credentials, env }, cfg);
+
+    const org = await ensureOrg(db);
+    const providerId = configProviderId("agents-dev-kserve");
+    await updateLlmProvider(db, org.id, providerId, { name: "Renamed in Settings" });
+
+    await expect(reconcileInstanceConfig({ db, credentials, env }, cfg)).resolves.toBeUndefined();
+    const [provider] = await db.select().from(llmProviders).where(eq(llmProviders.id, providerId));
+    expect(provider?.name).toBe("Renamed in Settings");
+    expect(await credentials.get({ type: "org", id: org.id }, `llm:${providerId}`)).toMatchObject({
+      apiKey: "kserve-secret",
+      metadata: { source: "instance_config_env" },
+    });
+  });
+
+  it("revokes an env-managed key when apiKeyEnv is removed and never resolves it", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const managed = kserveConfig("VALET_KSERVE_API_KEY");
+    const unmanaged = kserveConfig();
+    const org = await ensureOrg(db);
+    const owner = { type: "org" as const, id: org.id };
+    const providerId = configProviderId("agents-dev-kserve");
+    const service = `llm:${providerId}`;
+
+    await reconcileInstanceConfig(
+      { db, credentials, env: { VALET_KSERVE_API_KEY: "stale-secret" } },
+      managed,
+    );
+    await reconcileInstanceConfig({ db, credentials, env: {} }, unmanaged);
+
+    expect(await credentials.get(owner, service)).toBeNull();
+    const get = vi.spyOn(credentials, "get");
+    await expect(
+      resolveModelSpec(db, credentials, org.id, `${providerId}/qwen-coder`),
+    ).rejects.toThrow("provider agents-dev-kserve has no API key");
+    expect(get).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a manual key usable when apiKeyEnv is not declared", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const cfg = kserveConfig();
+    const org = await ensureOrg(db);
+    const owner = { type: "org" as const, id: org.id };
+    const providerId = configProviderId("agents-dev-kserve");
+    const service = `llm:${providerId}`;
+
+    await reconcileInstanceConfig({ db, credentials, env: {} }, cfg);
+    await credentials.save(owner, service, {
+      type: "api_key",
+      apiKey: "manual-secret",
+      metadata: { source: "settings" },
+    });
+    await reconcileInstanceConfig({ db, credentials, env: {} }, cfg);
+
+    expect(await resolveModelSpec(db, credentials, org.id, `${providerId}/qwen-coder`)).toMatchObject({
+      apiKey: "manual-secret",
+      model: { id: "qwen-coder" },
+    });
+  });
+
+  it("warns before apiKeyEnv replaces a distinct manually managed key", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const withoutEnv = kserveConfig();
+    const withEnv = kserveConfig("VALET_KSERVE_API_KEY");
+    const org = await ensureOrg(db);
+    const owner = { type: "org" as const, id: org.id };
+    const service = `llm:${configProviderId("agents-dev-kserve")}`;
+    await reconcileInstanceConfig({ db, credentials, env: {} }, withoutEnv);
+    await credentials.save(owner, service, {
+      type: "api_key",
+      apiKey: "manual-secret",
+      metadata: { source: "settings" },
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await reconcileInstanceConfig(
+        { db, credentials, env: { VALET_KSERVE_API_KEY: "config-secret" } },
+        withEnv,
+      );
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('llm provider "agents-dev-kserve"');
+      expect(lines[0]).toContain("VALET_KSERVE_API_KEY");
+      expect(lines[0]).not.toContain("manual-secret");
+      expect(lines[0]).not.toContain("config-secret");
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await credentials.get(owner, service)).toMatchObject({
+      apiKey: "config-secret",
+      metadata: { source: "instance_config_env" },
     });
   });
 
