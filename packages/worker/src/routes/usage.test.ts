@@ -4,7 +4,7 @@ import type { Env, Variables } from '../env.js';
 
 const mocks = vi.hoisted(() => ({
   hero: vi.fn(), day: vi.fn(), user: vi.fn(), model: vi.fn(), userModel: vi.fn(),
-  purpose: vi.fn(), workflow: vi.fn(), sandboxHero: vi.fn(), sandboxDay: vi.fn(), sandboxUser: vi.fn(),
+  purpose: vi.fn(), workflow: vi.fn(), sandbox: vi.fn(),
 }));
 
 vi.mock('../lib/db/analytics.js', () => ({
@@ -15,9 +15,7 @@ vi.mock('../lib/db/analytics.js', () => ({
   getUsageByUserModel: mocks.userModel,
   getUsageByPurposeModel: mocks.purpose,
   getUsageByWorkflowModel: mocks.workflow,
-  getSandboxHeroStats: mocks.sandboxHero,
-  getSandboxByDay: mocks.sandboxDay,
-  getSandboxByUser: mocks.sandboxUser,
+  getSandboxUsage: mocks.sandbox,
   billableInputTokens: (row: { inputTokens: number }) => row.inputTokens,
   billableOutputTokens: (row: { outputTokens: number }) => row.outputTokens,
 }));
@@ -41,7 +39,7 @@ beforeEach(() => {
   mocks.hero.mockResolvedValue({ totalInputTokens: 0, totalOutputTokens: 0, totalSessions: 0, totalUsers: 0 });
   mocks.day.mockResolvedValue([]); mocks.user.mockResolvedValue([]); mocks.model.mockResolvedValue([]);
   mocks.userModel.mockResolvedValue([]); mocks.purpose.mockResolvedValue([]); mocks.workflow.mockResolvedValue([]);
-  mocks.sandboxHero.mockResolvedValue({ totalActiveSeconds: 0 }); mocks.sandboxDay.mockResolvedValue([]); mocks.sandboxUser.mockResolvedValue([]);
+  mocks.sandbox.mockResolvedValue({ hero: { totalActiveSeconds: 0 }, byDay: [], byUser: [] });
 });
 
 describe('usage report API', () => {
@@ -65,13 +63,20 @@ describe('usage report API', () => {
   });
 
   it('keeps assembled sandbox-only daily totals consistent in CSV exports', async () => {
-    mocks.sandboxHero.mockResolvedValue({ totalActiveSeconds: 30 });
-    mocks.sandboxDay.mockResolvedValue([{ date: '2024-02-29', activeSeconds: 30 }]);
+    mocks.sandbox.mockResolvedValue({
+      hero: { totalActiveSeconds: 30 },
+      byDay: [{ date: '2024-02-29', userId: 'u2', activeSeconds: 30, sandboxCpuCores: 2, sandboxMemoryMib: 2048 }],
+      byUser: [{ userId: 'u2', email: 'u2@example.com', name: null, activeSeconds: 30, sandboxCpuCores: 2, sandboxMemoryMib: 2048 }],
+    });
 
     const response = await app().request('/export.csv?scope=org&periodType=month&month=2024-02', {}, { DB: {} } as Env);
-    const dayRow = (await response.text()).split('\n').find((line) => line.includes('"day","2024-02-29"'));
+    const csv = await response.text();
+    const dayRow = csv.split('\n').find((line) => line.includes('"day","2024-02-29"'));
+    const userRow = csv.split('\n').find((line) => line.includes('"user","u2@example.com"'));
 
-    expect(dayRow).toContain('"0.0019755","","","0.0019755","30"');
+    expect(dayRow).toContain('"0.0027684","","","0.0027684","30"');
+    expect(userRow).toContain('"0","0","0.0027684"');
+    expect(mocks.sandbox).toHaveBeenCalledOnce();
   });
 
   it('combines multi-model workflow usage into one reconcilable row', async () => {

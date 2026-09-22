@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import type { Env, Variables } from '../env.js';
 import type { UsageStatsResponse } from '@valet/shared';
-import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getUsageByUserModel, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxHeroStats, getSandboxByDay, getSandboxByUser } from '../lib/db/analytics.js';
+import { getUsageHeroStats, getUsageByDay, getUsageByUser, getUsageByModel, getUsageByUserModel, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxUsage } from '../lib/db/analytics.js';
 import { getModelPricing } from '../services/model-catalog.js';
 import { computeSandboxCost, DEFAULT_CPU_CORES, DEFAULT_MEMORY_GIB } from '../services/sandbox-pricing.js';
 import { getDb } from '../lib/drizzle.js';
@@ -43,16 +43,14 @@ async function buildUsageResponse(c: UsageContext, period: ResolvedUsagePeriod, 
   const appDb = getDb(db);
 
   // Fetch all data + pricing in parallel (including sandbox stats)
-  const [heroStats, byDayRaw, byUserRaw, byModelRaw, byUserModelRaw, pricingMap, sandboxHero, sandboxByDay, sandboxByUser, byPurposeModelRaw, byWorkflowRaw] = await Promise.all([
+  const [heroStats, byDayRaw, byUserRaw, byModelRaw, byUserModelRaw, pricingMap, sandboxUsage, byPurposeModelRaw, byWorkflowRaw] = await Promise.all([
     getUsageHeroStats(db, period.start, period.end, userFilter),
     getUsageByDay(db, period.start, period.end, userFilter),
     getUsageByUser(db, period.start, period.end, userFilter),
     getUsageByModel(db, period.start, period.end, userFilter),
     getUsageByUserModel(db, period.start, period.end, userFilter),
     getModelPricing(appDb, c.env),
-    getSandboxHeroStats(db, period.start, period.end, userFilter),
-    getSandboxByDay(db, period.start, period.end, userFilter),
-    getSandboxByUser(db, period.start, period.end, userFilter),
+    getSandboxUsage(db, period.start, period.end, userFilter),
     getUsageByPurposeModel(db, period.start, period.end, userFilter),
     getUsageByWorkflowModel(db, period.start, period.end, userFilter),
   ]);
@@ -65,10 +63,6 @@ async function buildUsageResponse(c: UsageContext, period: ResolvedUsagePeriod, 
       heroLlmCost = (heroLlmCost ?? 0) + cost;
     }
   }
-
-  // Compute hero sandbox cost
-  const heroSandboxCost = computeSandboxCost(sandboxHero.totalActiveSeconds);
-  const heroTotalCost = heroLlmCost !== null ? heroLlmCost + heroSandboxCost : heroSandboxCost > 0 ? heroSandboxCost : null;
 
   // Aggregate cost by day (collapse model-level rows into day-level)
   const dayMap = new Map<string, { cost: number | null; inputTokens: number; outputTokens: number; sandboxCost: number; sandboxActiveSeconds: number }>();
@@ -83,10 +77,12 @@ async function buildUsageResponse(c: UsageContext, period: ResolvedUsagePeriod, 
     dayMap.set(row.date, existing);
   }
   // Merge sandbox data into day map (some days may only have sandbox data)
-  for (const row of sandboxByDay) {
+  for (const row of sandboxUsage.byDay) {
     const existing = dayMap.get(row.date) ?? { cost: null, inputTokens: 0, outputTokens: 0, sandboxCost: 0, sandboxActiveSeconds: 0 };
-    existing.sandboxActiveSeconds = row.activeSeconds;
-    existing.sandboxCost = computeSandboxCost(row.activeSeconds);
+    const cpuCores = row.sandboxCpuCores ?? DEFAULT_CPU_CORES;
+    const memoryGiB = row.sandboxMemoryMib != null ? row.sandboxMemoryMib / 1024 : DEFAULT_MEMORY_GIB;
+    existing.sandboxActiveSeconds += row.activeSeconds;
+    existing.sandboxCost += computeSandboxCost(row.activeSeconds, cpuCores, memoryGiB);
     dayMap.set(row.date, existing);
   }
   const costByDay = Array.from(dayMap.entries())
@@ -138,30 +134,41 @@ async function buildUsageResponse(c: UsageContext, period: ResolvedUsagePeriod, 
   }
   const byWorkflow = Array.from(byWorkflowMap.values());
 
-  // Build per-user sandbox cost lookup
-  const userSandboxMap = new Map<string, { cost: number; activeSeconds: number }>();
-  for (const row of sandboxByUser) {
+  // Use each user's configured sandbox size for every sandbox cost dimension.
+  const userSandboxMap = new Map<string, { cost: number; activeSeconds: number; email: string; name: string | null }>();
+  for (const row of sandboxUsage.byUser) {
     const cpuCores = row.sandboxCpuCores ?? DEFAULT_CPU_CORES;
     const memoryGiB = row.sandboxMemoryMib != null ? row.sandboxMemoryMib / 1024 : DEFAULT_MEMORY_GIB;
     userSandboxMap.set(row.userId, {
       cost: computeSandboxCost(row.activeSeconds, cpuCores, memoryGiB),
       activeSeconds: row.activeSeconds,
+      email: row.email,
+      name: row.name,
     });
   }
+  const heroSandboxCost = Array.from(userSandboxMap.values()).reduce((total, row) => total + row.cost, 0);
+  const heroTotalCost = heroLlmCost !== null ? heroLlmCost + heroSandboxCost : heroSandboxCost > 0 ? heroSandboxCost : null;
 
-  const byUser = byUserRaw.map((row) => {
-    const llmCost = userCostMap.get(row.userId) ?? null;
-    const sandbox = userSandboxMap.get(row.userId);
+  // Include sandbox-only users so user costs reconcile with the report total.
+  const usageUsers = new Map(byUserRaw.map((row) => [row.userId, row]));
+  const userIds = new Set([...usageUsers.keys(), ...userSandboxMap.keys()]);
+  const byUser = Array.from(userIds, (userId) => {
+    const usage = usageUsers.get(userId);
+    const sandbox = userSandboxMap.get(userId);
+    const llmCost = userCostMap.get(userId) ?? null;
     const sandboxCost = sandbox?.cost ?? 0;
     const totalCost = llmCost !== null ? llmCost + sandboxCost : sandboxCost > 0 ? sandboxCost : null;
+    const name = usage?.name ?? sandbox?.name;
     return {
-      userId: row.userId,
-      email: row.email,
-      ...(row.name ? { name: row.name } : {}),
-      inputTokens: row.inputTokens,
-      outputTokens: row.outputTokens,
+      userId,
+      email: usage?.email ?? sandbox?.email ?? 'Unknown',
+      ...(name ? { name } : {}),
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
       cost: totalCost,
-      sessionCount: row.sessionCount,
+      // Session counts describe sessions with model calls. Sandbox-only users
+      // have no model session count in this report.
+      sessionCount: usage?.sessionCount ?? 0,
       sandboxCost,
       sandboxActiveSeconds: sandbox?.activeSeconds ?? 0,
     };
@@ -190,9 +197,9 @@ async function buildUsageResponse(c: UsageContext, period: ResolvedUsagePeriod, 
       totalInputTokens: heroStats.totalInputTokens,
       totalOutputTokens: heroStats.totalOutputTokens,
       totalSessions: heroStats.totalSessions,
-      totalUsers: heroStats.totalUsers,
+      totalUsers: byUser.length,
       sandboxCost: heroSandboxCost,
-      sandboxActiveSeconds: sandboxHero.totalActiveSeconds,
+      sandboxActiveSeconds: sandboxUsage.hero.totalActiveSeconds,
     },
     costByDay,
     byUser,

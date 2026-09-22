@@ -35,12 +35,17 @@ describe('usageReportToCsv', () => {
     expect(day).toContain('"0.25","30"');
   });
 
-  it('neutralizes spreadsheet formulas in text dimensions', () => {
+  it('neutralizes spreadsheet formulas and control prefixes in text dimensions', () => {
     const csv = usageReportToCsv({
       ...report,
-      byWorkflow: [{ workflowId: 'w1', workflowName: '=IMPORTXML("x")', triggerType: '@manual', inputTokens: 1, outputTokens: 1, cost: 0, callCount: 1 }],
+      byWorkflow: [
+        { workflowId: 'w1', workflowName: '=IMPORTXML("x")', triggerType: '@manual', inputTokens: 1, outputTokens: 1, cost: 0, callCount: 1 },
+        { workflowId: 'w2', workflowName: '\t=CMD()', triggerType: '\r+SUM(1)', inputTokens: 1, outputTokens: 1, cost: 0, callCount: 1 },
+      ],
     });
     expect(csv).toContain('"\'=IMPORTXML(""x"")"');
     expect(csv).toContain('"\'@manual"');
+    expect(csv).toContain('"\'\t=CMD()"');
+    expect(csv).toContain('"\'\r+SUM(1)"');
   });
 });

@@ -332,13 +332,39 @@ export async function getUsageByModel(
 // ─── Sandbox Usage Queries ──────────────────────────────────────────────────
 
 interface SandboxIntervalRow {
+  sessionId: string;
   userId: string;
+  email: string;
+  name: string | null;
   startedAt: string;
   endedAt: string;
   activeSeconds: number;
   source: 'recorded' | 'legacy_session_total';
   sandboxCpuCores: number | null;
   sandboxMemoryMib: number | null;
+}
+
+// Both UNION branches compare normalized ISO timestamps directly. This keeps
+// the predicates sargable against idx_session_active_intervals_window.
+export function sandboxIntervalQuery(userId?: string): string {
+  const userFilter = userId ? 'AND s.user_id = ?' : '';
+  return `
+    SELECT sai.session_id, s.user_id, u.email, u.name, sai.started_at, sai.ended_at,
+      sai.active_seconds, sai.source, u.sandbox_cpu_cores, u.sandbox_memory_mib
+    FROM session_active_intervals sai
+    JOIN sessions s ON s.id = sai.session_id
+    LEFT JOIN users u ON u.id = s.user_id
+    WHERE sai.source = 'recorded' AND sai.started_at < ? AND sai.ended_at > ?
+      ${userFilter}
+    UNION ALL
+    SELECT sai.session_id, s.user_id, u.email, u.name, sai.started_at, sai.ended_at,
+      sai.active_seconds, sai.source, u.sandbox_cpu_cores, u.sandbox_memory_mib
+    FROM session_active_intervals sai
+    JOIN sessions s ON s.id = sai.session_id
+    LEFT JOIN users u ON u.id = s.user_id
+    WHERE sai.source = 'legacy_session_total' AND sai.started_at >= ? AND sai.started_at < ?
+      ${userFilter}
+  `;
 }
 
 async function getSandboxIntervals(
@@ -348,22 +374,16 @@ async function getSandboxIntervals(
   userId?: string,
 ): Promise<SandboxIntervalRow[]> {
   const end = periodEnd ?? '9999-12-31T23:59:59.999Z';
-  const result = await db.prepare(`
-    SELECT s.user_id, sai.started_at, sai.ended_at, sai.active_seconds, sai.source,
-      u.sandbox_cpu_cores, u.sandbox_memory_mib
-    FROM session_active_intervals sai
-    JOIN sessions s ON s.id = sai.session_id
-    LEFT JOIN users u ON u.id = s.user_id
-    WHERE (
-      (sai.source = 'recorded' AND datetime(sai.ended_at) > datetime(?) AND datetime(sai.started_at) < datetime(?))
-      OR
-      (sai.source = 'legacy_session_total' AND datetime(sai.started_at) >= datetime(?) AND datetime(sai.started_at) < datetime(?))
-    )
-    ${userId ? 'AND s.user_id = ?' : ''}
-  `).bind(periodStart, end, periodStart, end, ...(userId ? [userId] : [])).all();
+  const userBindings = userId ? [userId] : [];
+  const result = await db.prepare(sandboxIntervalQuery(userId))
+    .bind(end, periodStart, ...userBindings, periodStart, end, ...userBindings)
+    .all();
 
   return (result.results ?? []).map((row: Record<string, unknown>) => ({
+    sessionId: String(row.session_id),
     userId: String(row.user_id),
+    email: row.email ? String(row.email) : 'Unknown',
+    name: row.name ? String(row.name) : null,
     startedAt: String(row.started_at),
     endedAt: String(row.ended_at),
     activeSeconds: Number(row.active_seconds),
@@ -373,97 +393,109 @@ async function getSandboxIntervals(
   }));
 }
 
+function intervalBounds(row: SandboxIntervalRow, startMs: number, endMs: number) {
+  const intervalStart = Date.parse(row.startedAt);
+  const intervalEnd = Date.parse(row.endedAt);
+  return {
+    start: Math.max(intervalStart, startMs),
+    end: Math.min(intervalEnd, endMs),
+    duration: intervalEnd - intervalStart,
+  };
+}
+
 function clippedActiveSeconds(row: SandboxIntervalRow, startMs: number, endMs: number): number {
   if (row.source === 'legacy_session_total') return row.activeSeconds;
-  const overlapMs = Math.max(0, Math.min(Date.parse(row.endedAt), endMs) - Math.max(Date.parse(row.startedAt), startMs));
-  return Math.min(row.activeSeconds, Math.round(overlapMs / 1_000));
-}
-
-export interface SandboxHeroStats {
-  totalActiveSeconds: number;
-}
-
-export async function getSandboxHeroStats(
-  db: D1Database,
-  periodStart: string,
-  periodEnd?: string,
-  userId?: string,
-): Promise<SandboxHeroStats> {
-  const rows = await getSandboxIntervals(db, periodStart, periodEnd, userId);
-  const startMs = Date.parse(periodStart);
-  const endMs = periodEnd ? Date.parse(periodEnd) : Number.POSITIVE_INFINITY;
-  return {
-    totalActiveSeconds: rows.reduce((total, row) => total + clippedActiveSeconds(row, startMs, endMs), 0),
-  };
+  const bounds = intervalBounds(row, startMs, endMs);
+  const overlapMs = Math.max(0, bounds.end - bounds.start);
+  if (bounds.duration <= 0) return 0;
+  return Math.min(row.activeSeconds, row.activeSeconds * overlapMs / bounds.duration);
 }
 
 export interface SandboxByDayRow {
   date: string;
-  activeSeconds: number;
-}
-
-export async function getSandboxByDay(
-  db: D1Database,
-  periodStart: string,
-  periodEnd?: string,
-  userId?: string,
-): Promise<SandboxByDayRow[]> {
-  const rows = await getSandboxIntervals(db, periodStart, periodEnd, userId);
-  const reportStartMs = Date.parse(periodStart);
-  const reportEndMs = periodEnd ? Date.parse(periodEnd) : Number.POSITIVE_INFINITY;
-  const totals = new Map<string, number>();
-
-  for (const row of rows) {
-    if (row.source === 'legacy_session_total') {
-      const date = row.startedAt.slice(0, 10);
-      totals.set(date, (totals.get(date) ?? 0) + row.activeSeconds);
-      continue;
-    }
-
-    let cursor = Math.max(Date.parse(row.startedAt), reportStartMs);
-    const intervalEnd = Math.min(Date.parse(row.endedAt), reportEndMs);
-    while (cursor < intervalEnd) {
-      const date = new Date(cursor).toISOString().slice(0, 10);
-      const nextDay = Date.parse(`${date}T00:00:00.000Z`) + 86_400_000;
-      const seconds = Math.round((Math.min(intervalEnd, nextDay) - cursor) / 1_000);
-      totals.set(date, (totals.get(date) ?? 0) + seconds);
-      cursor = nextDay;
-    }
-  }
-
-  return Array.from(totals, ([date, activeSeconds]) => ({ date, activeSeconds }))
-    .sort((a, b) => a.date.localeCompare(b.date));
-}
-
-export interface SandboxByUserRow {
   userId: string;
   activeSeconds: number;
   sandboxCpuCores: number | null;
   sandboxMemoryMib: number | null;
 }
 
-export async function getSandboxByUser(
+export interface SandboxByUserRow {
+  userId: string;
+  email: string;
+  name: string | null;
+  activeSeconds: number;
+  sandboxCpuCores: number | null;
+  sandboxMemoryMib: number | null;
+}
+
+export interface SandboxUsageStats {
+  hero: { totalActiveSeconds: number };
+  byDay: SandboxByDayRow[];
+  byUser: SandboxByUserRow[];
+}
+
+export async function getSandboxUsage(
   db: D1Database,
   periodStart: string,
   periodEnd?: string,
   userId?: string,
-): Promise<SandboxByUserRow[]> {
+): Promise<SandboxUsageStats> {
   const rows = await getSandboxIntervals(db, periodStart, periodEnd, userId);
-  const startMs = Date.parse(periodStart);
-  const endMs = periodEnd ? Date.parse(periodEnd) : Number.POSITIVE_INFINITY;
-  const totals = new Map<string, SandboxByUserRow>();
+  const reportStartMs = Date.parse(periodStart);
+  const reportEndMs = periodEnd ? Date.parse(periodEnd) : Number.POSITIVE_INFINITY;
+  const byDay = new Map<string, SandboxByDayRow>();
+  const byUser = new Map<string, SandboxByUserRow>();
 
   for (const row of rows) {
-    const item = totals.get(row.userId) ?? {
+    const seconds = clippedActiveSeconds(row, reportStartMs, reportEndMs);
+    const user = byUser.get(row.userId) ?? {
       userId: row.userId,
+      email: row.email,
+      name: row.name,
       activeSeconds: 0,
       sandboxCpuCores: row.sandboxCpuCores,
       sandboxMemoryMib: row.sandboxMemoryMib,
     };
-    item.activeSeconds += clippedActiveSeconds(row, startMs, endMs);
-    totals.set(row.userId, item);
+    user.activeSeconds += seconds;
+    byUser.set(row.userId, user);
+
+    if (row.source === 'legacy_session_total') {
+      const date = row.startedAt.slice(0, 10);
+      const key = `${date}\0${row.userId}`;
+      const day = byDay.get(key) ?? {
+        date, userId: row.userId, activeSeconds: 0,
+        sandboxCpuCores: row.sandboxCpuCores,
+        sandboxMemoryMib: row.sandboxMemoryMib,
+      };
+      day.activeSeconds += row.activeSeconds;
+      byDay.set(key, day);
+      continue;
+    }
+
+    const bounds = intervalBounds(row, reportStartMs, reportEndMs);
+    let cursor = bounds.start;
+    while (cursor < bounds.end && bounds.duration > 0) {
+      const date = new Date(cursor).toISOString().slice(0, 10);
+      const nextDay = Date.parse(`${date}T00:00:00.000Z`) + 86_400_000;
+      const sliceMs = Math.min(bounds.end, nextDay) - cursor;
+      const key = `${date}\0${row.userId}`;
+      const day = byDay.get(key) ?? {
+        date, userId: row.userId, activeSeconds: 0,
+        sandboxCpuCores: row.sandboxCpuCores,
+        sandboxMemoryMib: row.sandboxMemoryMib,
+      };
+      day.activeSeconds += row.activeSeconds * sliceMs / bounds.duration;
+      byDay.set(key, day);
+      cursor += sliceMs;
+    }
   }
-  return Array.from(totals.values());
+
+  const users = Array.from(byUser.values());
+  return {
+    hero: { totalActiveSeconds: users.reduce((total, row) => total + row.activeSeconds, 0) },
+    byDay: Array.from(byDay.values()).sort((a, b) => a.date.localeCompare(b.date)),
+    byUser: users,
+  };
 }
 
 // ─── Performance Queries ────────────────────────────────────────────────────

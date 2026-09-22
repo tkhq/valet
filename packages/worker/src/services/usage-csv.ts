@@ -11,7 +11,7 @@ type CsvRow = Partial<Record<(typeof USAGE_CSV_HEADERS)[number], string | number
 
 function csvCell(value: CsvRow[keyof CsvRow]): string {
   let text = value == null ? '' : String(value);
-  if (typeof value === 'string' && /^[=+\-@]/.test(text)) text = `'${text}`;
+  if (typeof value === 'string' && /^[\t\r=+\-@]/.test(text)) text = `'${text}`;
   return `"${text.replaceAll('"', '""')}"`;
 }
 

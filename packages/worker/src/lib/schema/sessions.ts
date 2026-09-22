@@ -44,7 +44,7 @@ export const sessionActiveIntervals = sqliteTable('session_active_intervals', {
   source: text().notNull(),
 }, (table) => [
   index('idx_session_active_intervals_window').on(
-    table.startedAt, table.endedAt, table.sessionId,
+    table.source, table.startedAt, table.endedAt, table.sessionId,
   ),
 ]);
 

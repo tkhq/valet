@@ -11,5 +11,6 @@ export function computeSandboxCost(
   cpuCores = DEFAULT_CPU_CORES,
   memoryGiB = DEFAULT_MEMORY_GIB,
 ): number {
-  return activeSeconds * (cpuCores * SANDBOX_CPU_RATE_PER_CORE_SEC + memoryGiB * SANDBOX_MEM_RATE_PER_GIB_SEC);
+  const cost = activeSeconds * (cpuCores * SANDBOX_CPU_RATE_PER_CORE_SEC + memoryGiB * SANDBOX_MEM_RATE_PER_GIB_SEC);
+  return Number(cost.toFixed(12));
 }

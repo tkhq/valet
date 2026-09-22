@@ -7,6 +7,11 @@ import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const migrationsDir = path.resolve(__dirname, '../../migrations');
+
+export function migrationSql(file: string): string {
+  return fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+}
 
 /**
  * Creates an in-memory SQLite database with all migrations applied,
@@ -17,7 +22,6 @@ export function createTestDb(): { db: BetterSQLite3Database; sqlite: DatabaseTyp
   sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('foreign_keys = ON');
 
-  const migrationsDir = path.resolve(__dirname, '../../migrations');
   const files = fs.readdirSync(migrationsDir)
     .filter((f) => f.endsWith('.sql'))
     .sort();

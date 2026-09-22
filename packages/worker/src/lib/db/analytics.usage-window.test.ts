@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type BetterSqlite3 from 'better-sqlite3';
 import type { D1Database } from '@cloudflare/workers-types';
-import { createD1TestShim, createTestDb } from '../../test-utils/db.js';
-import { getUsageHeroStats, getUsageByDay, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxHeroStats, getSandboxByDay, getSandboxByUser } from './analytics.js';
+import { createD1TestShim, createTestDb, migrationSql } from '../../test-utils/db.js';
+import { getUsageHeroStats, getUsageByDay, getUsageByPurposeModel, getUsageByWorkflowModel, getSandboxUsage, sandboxIntervalQuery } from './analytics.js';
 import { addActiveSeconds } from './sessions.js';
 
 describe('usage report window and scope', () => {
@@ -39,26 +39,45 @@ describe('usage report window and scope', () => {
       .toEqual({ name: 'session_active_intervals' });
   });
 
+  it('does not duplicate legacy totals when migration 0032 is replayed', () => {
+    sqlite.exec(migrationSql('0032_usage_reporting_indexes.sql'));
+    const before = sqlite.prepare("SELECT COUNT(*) AS count FROM session_active_intervals WHERE source = 'legacy_session_total'").get();
+    sqlite.exec(migrationSql('0032_usage_reporting_indexes.sql'));
+    const after = sqlite.prepare("SELECT COUNT(*) AS count FROM session_active_intervals WHERE source = 'legacy_session_total'").get();
+    expect(after).toEqual(before);
+    expect(sqlite.prepare("SELECT started_at FROM session_active_intervals WHERE source = 'legacy_session_total' LIMIT 1").get())
+      .toEqual(expect.objectContaining({ started_at: expect.stringMatching(/T.*Z$/) }));
+  });
+
+  it('uses the interval window index without wrapping timestamp columns', () => {
+    const plan = sqlite.prepare(`EXPLAIN QUERY PLAN ${sandboxIntervalQuery()}`)
+      .all(end, start, start, end)
+      .map((row) => (row as { detail: string }).detail);
+    expect(plan.filter((detail) => detail.includes('idx_session_active_intervals_window'))).toHaveLength(2);
+    expect(sandboxIntervalQuery()).not.toContain('datetime(');
+  });
+
   it('includes start and excludes end consistently across aggregates and breakdowns', async () => {
     expect(await getUsageHeroStats(db, start, end)).toMatchObject({ totalInputTokens: 30, totalOutputTokens: 3, totalUsers: 2 });
     expect((await getUsageByDay(db, start, end)).reduce((sum, row) => sum + row.inputTokens, 0)).toBe(30);
     expect((await getUsageByPurposeModel(db, start, end)).map((row) => row.purpose).sort()).toEqual(['interactive', 'orchestrator']);
-    expect(await getSandboxHeroStats(db, start, end)).toEqual({ totalActiveSeconds: 15 });
-    expect(await getSandboxByDay(db, start, end)).toEqual([
-      { date: '2024-03-01', activeSeconds: 5 },
-      { date: '2024-03-31', activeSeconds: 10 },
+    const sandbox = await getSandboxUsage(db, start, end);
+    expect(sandbox.hero).toEqual({ totalActiveSeconds: 15 });
+    expect(sandbox.byDay).toEqual([
+      expect.objectContaining({ date: '2024-03-01', activeSeconds: 5 }),
+      expect.objectContaining({ date: '2024-03-31', activeSeconds: 10 }),
     ]);
+
+    sqlite.exec(`INSERT INTO session_active_intervals
+      (id, session_id, started_at, ended_at, active_seconds, source)
+      VALUES ('subsecond', 's1', '2024-02-29T23:59:59.500Z', '2024-03-01T00:00:00.500Z', 1, 'recorded')`);
+    expect((await getSandboxUsage(db, start, end)).hero.totalActiveSeconds).toBe(15.5);
   });
 
   it('records active-time flushes as reportable intervals and updates the lifetime counter', async () => {
-    await addActiveSeconds(db, 's1', 8, new Date('2024-03-15T00:00:08.000Z'));
+    await addActiveSeconds(db, 's1', 8);
     expect(sqlite.prepare("SELECT active_seconds FROM sessions WHERE id = 's1'").get()).toEqual({ active_seconds: 18 });
-    expect(sqlite.prepare("SELECT started_at, ended_at, active_seconds, source FROM session_active_intervals WHERE session_id = 's1' ORDER BY ended_at DESC LIMIT 1").get()).toEqual({
-      started_at: '2024-03-15T00:00:00.000Z',
-      ended_at: '2024-03-15T00:00:08.000Z',
-      active_seconds: 8,
-      source: 'recorded',
-    });
+    expect(sqlite.prepare("SELECT active_seconds, source FROM session_active_intervals WHERE session_id = 's1' ORDER BY ended_at DESC LIMIT 1").get()).toEqual({ active_seconds: 8, source: 'recorded' });
   });
 
   it('attributes legacy counters to session creation and labels that limitation', async () => {
@@ -68,8 +87,8 @@ describe('usage report window and scope', () => {
       INSERT INTO session_active_intervals (id, session_id, started_at, ended_at, active_seconds, source)
       VALUES ('legacy:legacy', 'legacy', '2024-03-10 12:00:00', '2024-03-10 12:00:00', 12, 'legacy_session_total');
     `);
-    expect(await getSandboxHeroStats(db, start, end)).toEqual({ totalActiveSeconds: 27 });
-    expect(await getSandboxByUser(db, start, end, 'u1')).toEqual([
+    expect((await getSandboxUsage(db, start, end)).hero).toEqual({ totalActiveSeconds: 27 });
+    expect((await getSandboxUsage(db, start, end, 'u1')).byUser).toEqual([
       expect.objectContaining({ userId: 'u1', activeSeconds: 17 }),
     ]);
   });
@@ -91,6 +110,6 @@ describe('usage report window and scope', () => {
     expect(await getUsageHeroStats(db, start, end, 'u1')).toMatchObject({ totalInputTokens: 10, totalUsers: 1 });
     expect(await getUsageByDay(db, start, end, 'u1')).toHaveLength(1);
     expect(await getUsageByPurposeModel(db, start, end, 'u1')).toEqual([expect.objectContaining({ purpose: 'interactive', inputTokens: 10 })]);
-    expect(await getSandboxHeroStats(db, start, end, 'u1')).toEqual({ totalActiveSeconds: 5 });
+    expect((await getSandboxUsage(db, start, end, 'u1')).hero).toEqual({ totalActiveSeconds: 5 });
   });
 });

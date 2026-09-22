@@ -23,7 +23,9 @@ UTC does not shift at daylight-saving transitions. A custom report from `2026-03
 
 ## Sandbox time
 
-Valet records new sandbox active-time flushes as intervals. Reports clip these intervals to the selected `[start, end)` period and split intervals at UTC day boundaries.
+Valet records new sandbox active-time flushes as intervals. Reports clip these intervals to the selected `[start, end)` period with millisecond precision. Reports split intervals at UTC day boundaries.
+
+Deploy migration `0032` before the worker when possible. Its trigger records increments from old and new workers during a rolling deploy. If worker code deploys first, active-time writes continue in the lifetime counter and later backfill preserves them as legacy usage. Usage report requests fail until the migration creates the interval table.
 
 Historical `active_seconds` values do not contain activity timestamps. The migration keeps these totals and attributes each total to its session creation date. The page, API response, and CSV identify this legacy limitation. Therefore, sandbox totals that include activity from before interval tracking are not exact calendar-period totals.
 
@@ -37,6 +39,6 @@ The first row is the report total. Remaining rows reproduce the daily, origin, w
 period_label,period_start,period_end,timezone,boundary,scope,sandbox_usage_semantics,breakdown,dimension,secondary_dimension,input_tokens,output_tokens,total_cost_usd,call_count,session_count,sandbox_cost_usd,sandbox_active_seconds,percentage,total_users
 ```
 
-All cells are quoted for spreadsheet compatibility. Blank numeric cells mean that the metric does not apply to that breakdown, not zero. To reconcile an export, compare the `total` row with the hero totals and compare rows for each `breakdown` with the corresponding on-screen table or chart.
+All cells are quoted for spreadsheet compatibility. Blank numeric cells mean that the metric does not apply to that breakdown, not zero. The total row matches the hero metrics. Daily and user rows include sandbox-only usage and use each user's configured sandbox size, so their sandbox seconds and costs sum to the total. Origin, workflow, model, and user-model rows describe model usage only.
 
 This report exposes existing usage aggregates. Provider/team/monthly ledger attribution is tracked separately and is not created or modified by this export.

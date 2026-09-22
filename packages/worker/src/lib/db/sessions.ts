@@ -354,23 +354,15 @@ export async function addActiveSeconds(
   db: D1Database,
   id: string,
   seconds: number,
-  endedAt = new Date(),
 ): Promise<void> {
   const roundedSeconds = Math.round(seconds);
   if (roundedSeconds <= 0) return;
 
-  const end = endedAt.toISOString();
-  const start = new Date(endedAt.getTime() - roundedSeconds * 1_000).toISOString();
-  await db.batch([
-    db.prepare(
-      `INSERT INTO session_active_intervals
-        (id, session_id, started_at, ended_at, active_seconds, source)
-       VALUES (?, ?, ?, ?, ?, 'recorded')`,
-    ).bind(crypto.randomUUID(), id, start, end, roundedSeconds),
-    db.prepare(
-      'UPDATE sessions SET active_seconds = active_seconds + ? WHERE id = ?',
-    ).bind(roundedSeconds, id),
-  ]);
+  // Migration 0032 records this increment as an interval with a trigger. A
+  // pre-migration worker still updates the lifetime counter for later backfill.
+  await db.prepare(
+    'UPDATE sessions SET active_seconds = active_seconds + ? WHERE id = ?',
+  ).bind(roundedSeconds, id).run();
 }
 
 // Session title update
