@@ -136,6 +136,51 @@ describe("executeBuiltin", () => {
     expect(r.ok).toBe(true);
     expect(r.output).toContain("Queue");
     expect(r.output).toContain("0 pending");
+    expect(r.output).toContain("Active model");
+    expect(r.output).toContain("Live context (estimated)");
+    expect(r.output).toContain("Tokens in use");
+    expect(r.output).toContain("% used");
+    expect(r.output).toContain("Compaction");
+    expect(r.output).toContain("separate from cumulative token usage and billed cost");
+  });
+
+  it("/status does not invent a percentage for an unknown context limit", async () => {
+    const faux = registerFauxProvider({
+      provider: "b-status-unknown",
+      models: [{ id: "unknown", contextWindow: 0 }],
+    });
+    cleanups.push(() => faux.unregister());
+    const session = await makeSession(faux);
+
+    const r = await executeBuiltin("status", [], session, ctx, session.thread());
+    expect(r.output).toContain("Context-window limit: unknown");
+    expect(r.output).toContain("percentages: unavailable");
+    expect(r.output).not.toContain("% used");
+  });
+
+  it("/status reports the latest historical compaction", async () => {
+    const faux = registerFauxProvider({ provider: "b-status-compacted" });
+    cleanups.push(() => faux.unregister());
+    const session = await makeSession(faux);
+    const thread = session.thread();
+    thread.rehydrateTranscript([
+      {
+        id: "c-1",
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: null,
+        type: "compaction",
+        summary: "Earlier work",
+        coveredEntryIds: ["e-1"],
+        tokenCountBefore: 80_000,
+        tokenCountAfter: 12_000,
+        createdAt: 1,
+      },
+    ]);
+
+    const r = await executeBuiltin("status", [], session, ctx, thread);
+    expect(r.output).toContain("Compaction** occurred");
+    expect(r.output).toContain("~80,000 → ~12,000 tokens");
   });
 
   it("/sessions lists child sessions", async () => {

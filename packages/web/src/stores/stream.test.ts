@@ -1730,3 +1730,74 @@ describe("queueBusy", () => {
     expect(queueBusy({ ...base, status: "paused" })).toBe(false);
   });
 });
+
+describe("live context state", () => {
+  it("ignores unknown future events without wiping live state", () => {
+    useStreamStore.getState().ingest(SESSION, {
+      seq: 1,
+      ts: 1,
+      type: "context.state",
+      threadId: THREAD,
+      context: {
+        model: "openai/gpt-test",
+        estimatedTokens: 10,
+        contextWindow: 100,
+        compactionOccurred: false,
+      },
+    });
+    const before = useStreamStore.getState().bySession[SESSION];
+
+    const futureEvent = JSON.parse(
+      JSON.stringify({ seq: 2, ts: 2, type: "future.event" }),
+    ) as WireEvent;
+    useStreamStore.getState().ingest(SESSION, futureEvent);
+
+    expect(useStreamStore.getState().bySession[SESSION]).toMatchObject({
+      contextByThread: before.contextByThread,
+    });
+  });
+
+  it("keeps another thread's context isolated from the viewed thread", () => {
+    const other = "thread-other";
+    useStreamStore.getState().ingest(SESSION, {
+      seq: 1,
+      ts: 1,
+      type: "context.state",
+      threadId: THREAD,
+      context: { model: "m-a", estimatedTokens: 10, contextWindow: 100, compactionOccurred: false },
+    });
+    useStreamStore.getState().ingest(SESSION, {
+      seq: 2,
+      ts: 2,
+      type: "context.state",
+      threadId: other,
+      context: { model: "m-b", estimatedTokens: 90, contextWindow: 100, compactionOccurred: false },
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].contextByThread[THREAD]?.estimatedTokens).toBe(10);
+  });
+
+  it("stores updates per thread without mixing them with usage totals", () => {
+    useStreamStore.getState().ingest(SESSION, {
+      seq: 1,
+      ts: 1,
+      type: "context.state",
+      threadId: THREAD,
+      context: {
+        model: "openai/gpt-test",
+        estimatedTokens: 25_000,
+        contextWindow: 100_000,
+        compactionOccurred: true,
+        latestCompaction: { tokensBefore: 80_000, tokensAfter: 12_000 },
+      },
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].contextByThread[THREAD]).toEqual({
+      model: "openai/gpt-test",
+      estimatedTokens: 25_000,
+      contextWindow: 100_000,
+      compactionOccurred: true,
+      latestCompaction: { tokensBefore: 80_000, tokensAfter: 12_000 },
+    });
+  });
+});

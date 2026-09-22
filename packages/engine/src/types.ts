@@ -1539,6 +1539,17 @@ export interface ActiveModelState {
   model: string;
 }
 
+/** Live estimate of one thread's current model context. This is occupancy,
+ * not cumulative token usage or billing data. */
+export interface ThreadContextState {
+  model: string;
+  estimatedTokens: number;
+  /** Null when the active model does not publish a context-window limit. */
+  contextWindow: number | null;
+  compactionOccurred: boolean;
+  latestCompaction?: { tokensBefore: number; tokensAfter: number };
+}
+
 export type ModelStateEvent =
   | {
       type: "model_state";
@@ -1605,6 +1616,7 @@ export type EngineEvent =
   | { type: "thread_start"; threadId: string; parentThreadId?: string }
   | { type: "queue_state"; threadId: string; state: QueueState }
   | ModelStateEvent
+  | { type: "context_state"; threadId: string; state: ThreadContextState }
   | { type: "compaction_start" | "compaction_end"; threadId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
   | { type: "status"; threadId: string; status: EngineEventStatus }
@@ -1740,8 +1752,8 @@ export interface EventStream {
   ): Promise<{ events: StoredBusEvent[]; nextOffset: string }>;
   /** Live fan-out. Durable events are delivered AFTER their append commits, in offset order per session. */
   subscribe(filter: EventFilter, callback: (event: DeliveredBusEvent) => void): Unsubscribe;
-  /** Live-only fan-out (for example text deltas and cache hints): no append or offset. */
-  publishEphemeral(event: BusEvent): void;
+  /** Live-only fan-out with optional attempt fencing: no append or offset. */
+  publishEphemeral(event: BusEvent, fence?: WriteFence): Promise<void>;
   /** Delete durable events whose queueItemId is in the list. Returns deleted count. */
   prune(sessionId: string, queueItemIds: string[]): Promise<number>;
   /** Drop the session's entire log (called from deleteSession paths / tests). */
@@ -2231,7 +2243,10 @@ export interface SkillInvokeOptions {
  * absent (bare Anthropic back-compat, where wire id and spec coincide).
  */
 export interface ResolvedModel {
-  model: Model<any>;
+  model: Model<any> & {
+    /** Provider limit. Null means unknown. contextWindow can hold a conservative operational budget. */
+    reportedContextWindow?: number | null;
+  };
   apiKey?: string;
   canonicalId?: string;
 }

@@ -1616,10 +1616,14 @@ export class Session {
       event,
       timestamp: Date.now(),
     };
-    // text_delta / tool_call_update are the high-frequency streaming plane —
-    // never durable.
-    if (event.type === "text_delta" || event.type === "tool_call_update") {
-      this.providers.stream.publishEphemeral(busEvent);
+    // Streaming deltas and re-derivable context snapshots are ephemeral.
+    // They never enter durable replay.
+    if (
+      event.type === "text_delta" ||
+      event.type === "tool_call_update" ||
+      event.type === "context_state"
+    ) {
+      await this.providers.stream.publishEphemeral(busEvent, opts?.fence);
       return;
     }
     // Events are the wakeup/UX plane; the store is truth. A durable append

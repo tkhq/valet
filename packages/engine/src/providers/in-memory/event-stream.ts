@@ -103,7 +103,10 @@ export class InMemoryEventStream implements EventStream {
     return () => this.subs.delete(sub);
   }
 
-  publishEphemeral(event: BusEvent): void {
+  async publishEphemeral(event: BusEvent, fence?: WriteFence): Promise<void> {
+    if (fence && this.opts?.fenceCheck && !this.opts.fenceCheck(fence)) {
+      throw new StaleAttemptError(fence.itemId, fence.attemptId, undefined);
+    }
     const delivered: DeliveredBusEvent = { ...event };
     for (const sub of this.subs) {
       if (matches(sub.filter, delivered)) sub.callback(delivered);

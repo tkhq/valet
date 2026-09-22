@@ -129,6 +129,7 @@ import type {
   SubmissionOutcome,
   SubmissionResult,
   SuspendedTurnState,
+  ThreadContextState,
   ThreadData,
   ToolContext,
   ToolDef,
@@ -353,6 +354,16 @@ function concreteModelId(model: PiModel): string {
   return `${model.provider}/${model.id}`;
 }
 
+/** Keep the provider's public limit separate from its internal safety budget. */
+function publicContextWindow(model: PiModel): number | null {
+  const reported = Reflect.get(model, "reportedContextWindow");
+  if (reported === null) return null;
+  if (typeof reported === "number" && reported > 0) return reported;
+  return typeof model.contextWindow === "number" && model.contextWindow > 0
+    ? model.contextWindow
+    : null;
+}
+
 /**
  * One Thread per (session, key). Owns its own pi-agent-core Agent instance,
  * its own queue, its own active leaf in the DAG, and its own GateManager.
@@ -504,6 +515,10 @@ export class Thread {
    * every turn.
    */
   private consecutiveCompactionFailures = 0;
+  /** Last derived context snapshot. WebSocket handshakes read this without hydrating transcripts. */
+  private contextStateSnapshot: ThreadContextState | undefined;
+  /** Latest checkpoint on the active transcript path, for live context status. */
+  private latestCompaction: { tokensBefore: number; tokensAfter: number } | undefined;
   /**
    * Content hashes from the model's file reads, backing the
    * read-before-write staleness gate (TKAI-318). In-memory only: after a
@@ -2101,6 +2116,12 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.replaceActiveSkillInvocations(entries);
+    const checkpoint = findMostRecentCompaction(
+      walkTranscriptDag(entries, this.activeLeafEntryId),
+    );
+    this.latestCompaction = checkpoint
+      ? { tokensBefore: checkpoint.tokenCountBefore, tokensAfter: checkpoint.tokenCountAfter }
+      : undefined;
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
@@ -2253,6 +2274,7 @@ export class Thread {
         // permanently escalated.
         scope: isAgentSwitch ? "turn" : "thread",
       });
+      await this.emitContextState();
     }
     return { fromModel: before, toModel: after };
   }
@@ -2529,6 +2551,88 @@ export class Thread {
    * rows. Same derivation as the `queue_state` event, without emitting.
    * Used by the `/status` and `/clear` built-ins.
    */
+  async currentContextState(): Promise<ThreadContextState> {
+    await this.ensureTranscript();
+    const configuredSpec =
+      this.modelOverride ?? this.session.options.modelSpec ?? this.session.options.model.id;
+    let model = this.agent.state.model;
+    let modelName = concreteModelId(model);
+    let limitKnown = true;
+    if (
+      !this.runningItem &&
+      configuredSpec !== (this.session.options.modelSpec ?? this.session.options.model.id)
+    ) {
+      try {
+        const resolved = this.session.options.resolveModel
+          ? await this.session.options.resolveModel(configuredSpec)
+          : resolveModelId(configuredSpec);
+        if (resolved) {
+          model = "model" in resolved ? resolved.model : resolved;
+          modelName = concreteModelId(model);
+        } else {
+          modelName = configuredSpec;
+          limitKnown = false;
+        }
+      } catch (error) {
+        if (error instanceof NoCredentialsError) {
+          model = error.model;
+          modelName = concreteModelId(model);
+        } else {
+          modelName = configuredSpec;
+          limitKnown = false;
+        }
+      }
+    }
+    const messages = this.agent.state.messages.filter(
+      (message): message is Message =>
+        message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+    );
+    const state: ThreadContextState = {
+      model: modelName,
+      estimatedTokens: estimateLiveContextTokens(
+        this.modelSystemPrompt(this.agent.state.systemPrompt, model),
+        messages,
+      ),
+      contextWindow: limitKnown ? publicContextWindow(model) : null,
+      compactionOccurred: this.latestCompaction !== undefined,
+      ...(this.latestCompaction ? { latestCompaction: { ...this.latestCompaction } } : {}),
+    };
+    this.contextStateSnapshot = state;
+    return {
+      ...state,
+      ...(state.latestCompaction
+        ? { latestCompaction: { ...state.latestCompaction } }
+        : {}),
+    };
+  }
+
+  /** Cheap reconnect seed. Null means no activity has derived a snapshot yet. */
+  cachedContextState(): ThreadContextState | null {
+    const state = this.contextStateSnapshot;
+    return state
+      ? {
+          ...state,
+          ...(state.latestCompaction
+            ? { latestCompaction: { ...state.latestCompaction } }
+            : {}),
+        }
+      : null;
+  }
+
+  /** Emit a fresh occupancy estimate after transcript-affecting activity. */
+  private async emitContextState(): Promise<void> {
+    const event: EngineEvent = {
+      type: "context_state",
+      threadId: this.id,
+      state: await this.currentContextState(),
+    };
+    if (this.runningItem) {
+      await this.fencedEmit(event, { queueItemId: this.runningItem.id });
+    } else {
+      await this.session.emit(event);
+    }
+  }
+
   async currentQueueState(): Promise<QueueState> {
     const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
     return deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
@@ -4448,6 +4552,10 @@ export class Thread {
     // the un-mutated `entries`.
     let effectiveEntries: readonly SessionEntry[] = entries;
     const prunePlan = planPrune({ entries, cfg, protectedTools });
+    const finishWithoutSummary = async (): Promise<CompactionOutcome> => {
+      if (prunePlan.willCommit) await this.emitContextState();
+      return prunePlan.willCommit ? "pruned" : "noop";
+    };
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
       applyPrune(mutable, prunePlan);
@@ -4474,11 +4582,11 @@ export class Thread {
       // "pruned" is progress; "noop" means the trigger fired but nothing was
       // reclaimable (context dominated by system overhead the budget math
       // cannot see) — left unhandled that repeats silently every turn.
-      return prunePlan.willCommit ? "pruned" : "noop";
+      return finishWithoutSummary();
     }
 
     const head = entries.slice(0, cut.cutIndex);
-    if (head.length === 0) return prunePlan.willCommit ? "pruned" : "noop";
+    if (head.length === 0) return finishWithoutSummary();
 
     // Fail-safe: `fallbackToFloor` means selectCutPoint could not fit even the
     // last turn within the tail budget and kept it anyway. If that forced tail
@@ -4530,7 +4638,7 @@ export class Thread {
       // the breaker counts it instead of compacting again on the next turn.
       // This is not a coverage gap: a gap means live history would be lost,
       // and there is no live history here.
-      return prunePlan.willCommit ? "pruned" : "noop";
+      return finishWithoutSummary();
     }
 
     // Step 3: summarize.
@@ -4713,6 +4821,10 @@ export class Thread {
       });
       // Fenced under the current turn's attempt (compaction is always in-turn).
       await this.appendEntry(compactionEntry, this.fence);
+      this.latestCompaction = {
+        tokensBefore: compactionEntry.tokenCountBefore,
+        tokensAfter: compactionEntry.tokenCountAfter,
+      };
       // A persisted summary closes the failure circuit breaker — any mode's
       // success proves the summarizer works again (manual /compact included).
       this.consecutiveCompactionFailures = 0;
@@ -4740,10 +4852,16 @@ export class Thread {
       // drop is not counted as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
     } finally {
-      await session.emit(
-        { type: "compaction_end", threadId: this.id },
-        { queueItemId: this.runningItem?.id },
-      );
+      // The context refresh must not break the compaction lifecycle pair.
+      // A failed refresh can propagate, but clients always receive the end.
+      try {
+        await this.emitContextState();
+      } finally {
+        await session.emit(
+          { type: "compaction_end", threadId: this.id },
+          { queueItemId: this.runningItem?.id },
+        );
+      }
     }
 
     // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each
@@ -5044,6 +5162,7 @@ export class Thread {
           { type: "status", threadId: this.id, status: "thinking" },
           { queueItemId: this.runningItem?.id },
         );
+        await this.emitContextState();
         break;
       case "message_start": {
         if (event.message.role === "assistant") {
@@ -5196,6 +5315,7 @@ export class Thread {
             },
             { queueItemId: this.runningItem?.id },
           );
+          await this.emitContextState();
         }
         break;
       }
@@ -5264,6 +5384,7 @@ export class Thread {
           },
           { queueItemId: this.runningItem?.id },
         );
+        await this.emitContextState();
         break;
       }
       case "turn_end": {

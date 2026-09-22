@@ -284,6 +284,17 @@ export function registerWsRoutes(
                     queueItemId: null,
                     model: null,
                   });
+              // Context snapshots are re-derivable and can require transcript
+              // hydration. Seed only the in-memory cache, and isolate each
+              // thread so a bad snapshot cannot fail the socket handshake.
+              try {
+                const context = thread.cachedContextState();
+                if (context) {
+                  send(ws, { type: "context.state", threadId: thread.id, context });
+                }
+              } catch (error) {
+                console.error(`ws context seed failed (thread=${thread.id}):`, error);
+              }
             }
 
             // Periodic keepalive.

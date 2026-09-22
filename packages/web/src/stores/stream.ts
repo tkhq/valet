@@ -17,6 +17,7 @@ import type {
   PromptImageAttachment,
   WireEvent,
   WireQueueState,
+  WireThreadContextState,
 } from "@valet/api/wire";
 
 export type ConnectionStatus = "idle" | "connecting" | "open" | "closed" | "error";
@@ -137,6 +138,8 @@ export interface SessionStreamState {
    * settlement or an explicit idle snapshot removes the thread entry.
    */
   activeModelByThread: Record<string, { queueItemId: string; model: string }>;
+  /** Current context occupancy estimate for each thread. Not billing usage. */
+  contextByThread: Record<string, WireThreadContextState>;
   /**
    * Bumps on every `model_switched` wire event, whatever triggered the
    * switch (picker mutation, `/model` command, direct API call). The
@@ -249,6 +252,7 @@ const EMPTY: SessionStreamState = {
   pendingGates: {},
   queueByThread: {},
   activeModelByThread: {},
+  contextByThread: {},
   modelSwitchNonce: 0,
   compactingByThread: {},
   compactionNonce: 0,
@@ -295,6 +299,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.sessionError = undefined;
       next.statusByThread = {};
       next.activeModelByThread = {};
+      next.contextByThread = {};
       // Compacting is transient too: the engine balances the start/end pair
       // in-process, but an api crash mid-compaction orphans the start frame
       // — without this reset the "Compacting context…" strip would survive
@@ -554,6 +559,25 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "context.state": {
+      const previous = slice.contextByThread[ev.threadId];
+      if (
+        previous?.model === ev.context.model &&
+        previous.estimatedTokens === ev.context.estimatedTokens &&
+        previous.contextWindow === ev.context.contextWindow &&
+        previous.compactionOccurred === ev.context.compactionOccurred &&
+        previous.latestCompaction?.tokensBefore === ev.context.latestCompaction?.tokensBefore &&
+        previous.latestCompaction?.tokensAfter === ev.context.latestCompaction?.tokensAfter
+      ) {
+        return ev.offset ? next : slice;
+      }
+      next.contextByThread = {
+        ...slice.contextByThread,
+        [ev.threadId]: ev.context,
+      };
+      return next;
+    }
+
     case "compaction_start": {
       next.compactingByThread = { ...slice.compactingByThread, [ev.threadId]: true };
       return next;
@@ -695,6 +719,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // still advances lastOffset via `next`.
       return next;
     }
+
+    default:
+      // Older clients can receive a newer wire event at runtime. Preserve
+      // live state instead of replacing the session slice with undefined.
+      return next;
   }
 }
 
@@ -1080,6 +1109,16 @@ export function useActiveModelForThread(
     if (!threadId) return undefined;
     return s.bySession[sessionId]?.activeModelByThread[threadId]?.model;
   });
+}
+
+/** Current estimated context occupancy for one thread. */
+export function useContextForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): WireThreadContextState | undefined {
+  return useStreamStore((state) =>
+    threadId ? state.bySession[sessionId]?.contextByThread[threadId] : undefined,
+  );
 }
 
 /**

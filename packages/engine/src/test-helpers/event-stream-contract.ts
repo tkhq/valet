@@ -156,7 +156,7 @@ export function runEventStreamContract(name: string, ctx: EventStreamContractCon
       const received: DeliveredBusEvent[] = [];
       stream.subscribe({ sessionId: "sess-1" }, (e) => received.push(e));
 
-      stream.publishEphemeral(
+      await stream.publishEphemeral(
         ev("sess-1", { event: { type: "text_delta", threadId: "th-1", text: "hi" } as EngineEvent }),
       );
 
@@ -207,6 +207,34 @@ export function runEventStreamContract(name: string, ctx: EventStreamContractCon
 
     if (ctx.fenceFixture) {
       const { seed } = ctx.fenceFixture;
+
+      it("publishEphemeral rejects a stale attempt before fan-out", async () => {
+        const stream = await ctx.factory();
+        const itemId = "fence-ephemeral-stale";
+        const { currentAttemptId } = await seed(itemId);
+        const received: DeliveredBusEvent[] = [];
+        stream.subscribe({ sessionId: "sess-1" }, (event) => received.push(event));
+
+        await expect(
+          stream.publishEphemeral(
+            ev("sess-1", {
+              queueItemId: itemId,
+              event: {
+                type: "context_state",
+                threadId: "th-1",
+                state: {
+                  model: "test/model",
+                  estimatedTokens: 1,
+                  contextWindow: 100,
+                  compactionOccurred: false,
+                },
+              } as EngineEvent,
+            }),
+            { itemId, attemptId: `${currentAttemptId}-stale` },
+          ),
+        ).rejects.toBeInstanceOf(StaleAttemptError);
+        expect(received).toEqual([]);
+      });
 
       it("append with a fence naming the current attempt succeeds", async () => {
         const stream = await ctx.factory();

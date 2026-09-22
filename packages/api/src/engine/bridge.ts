@@ -357,6 +357,15 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "context_state":
+      return [
+        {
+          type: "context.state",
+          threadId: e.threadId,
+          context: e.state,
+        },
+      ];
+
     case "decision_gate":
       return [
         {

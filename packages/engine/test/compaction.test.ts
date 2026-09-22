@@ -147,8 +147,68 @@ describe("compaction: proactive (token threshold)", () => {
     const compEnd = events2.find((e) => e.event.type === "compaction_end");
     expect(compStart).toBeDefined();
     expect(compEnd).toBeDefined();
+    const refreshedContext = events2.findLast(
+      (event) => event.event.type === "context_state" && event.event.state.compactionOccurred,
+    );
+    expect(refreshedContext?.queueItemId).toBe(receipt.queueItemId);
+    if (refreshedContext?.event.type !== "context_state") {
+      throw new Error("missing post-compaction context state");
+    }
+    expect(refreshedContext.event.state.latestCompaction).toBeDefined();
+    const compactionStartIndex = events2.findIndex(
+      (event) => event.event.type === "compaction_start",
+    );
+    const beforeContext = events2
+      .slice(0, compactionStartIndex)
+      .findLast((event) => event.event.type === "context_state");
+    if (beforeContext?.event.type !== "context_state") {
+      throw new Error("missing pre-compaction context state");
+    }
+    expect(refreshedContext.event.state.estimatedTokens).toBeLessThan(
+      beforeContext.event.state.estimatedTokens,
+    );
 
     faux2.unregister();
+  });
+
+  it("keeps unknown reported limits honest while the operational budget still compacts", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-unknown-limit",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("third response"),
+      fauxAssistantMessage(
+        "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      ),
+    ]);
+    const model = Object.assign(faux.getModel("tiny")!, { reportedContextWindow: null });
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "u-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
+      { id: "a-1", sessionId: session.id, threadId: thread.id, parentId: "u-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "u-2", sessionId: session.id, threadId: thread.id, parentId: "a-1", type: "message", role: "user", content: "second prompt", createdAt: 3 },
+      { id: "a-2", sessionId: session.id, threadId: thread.id, parentId: "u-2", type: "message", role: "assistant", content: "second response", createdAt: 4 },
+    ]);
+
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+    await waitFor(() => events.some(
+      (event) => event.event.type === "compaction_end" && event.event.threadId === receipt.threadId,
+    ));
+
+    expect((await store.getEntries(session.id, thread.id)).some((entry) => entry.type === "compaction")).toBe(true);
+    const context = events.findLast((event) => event.event.type === "context_state");
+    expect(context?.event.type === "context_state" ? context.event.state.contextWindow : undefined).toBeNull();
+    faux.unregister();
   });
 
   it("summarizer honors the per-turn resolver apiKey (BYO-key compaction)", async () => {

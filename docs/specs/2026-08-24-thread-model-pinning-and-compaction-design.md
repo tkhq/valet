@@ -491,3 +491,35 @@ It does not admit a second queue item. The original submission settles only
 after this continuation ends. A stale fenced prompt append stops the
 continuation before another model call. A child watcher therefore cannot report
 `child.settled` at the compaction boundary.
+
+## Amendment (TKAI-524): live context status
+
+Each thread exposes one live context estimate from the engine's existing
+`estimateLiveContextTokens` path. The estimate uses provider-reported usage as
+its latest anchor. It estimates messages and tool results added after that
+anchor. This value describes current context occupancy only. It does not use
+cumulative usage or billing records.
+
+The engine emits `context_state` after a user prompt enters the agent loop,
+after assistant messages, after tool results, and after compaction. The API
+maps this event to `context.state` and seeds the same state during the WebSocket
+handshake. The web store keys the value by thread. The chat view shows the
+estimated percentage above the composer.
+
+`/status` reads the same thread state. It reports the active model, estimated
+tokens in use, the context-window limit, used and remaining percentages, and
+the latest compaction counts. It also states that live occupancy is separate
+from cumulative usage and billed cost.
+
+A synthesized model uses a 128,000-token operational budget when its
+provider does not publish a context limit. This budget keeps input spilling,
+overflow detection, and compaction active. The resolved model also records a
+null reported limit. Engine events, the wire state, `/status`, and the web UI
+use the reported limit. They show an unknown limit and do not invent a
+percentage.
+
+The engine publishes `context_state` as an ephemeral event because clients can
+re-derive it. In-turn events use the submission fence and include the queue item
+ID. Each thread caches its last derived snapshot. The WebSocket handshake reads
+only this cache, skips threads without a snapshot, and isolates each thread's
+seed failure.

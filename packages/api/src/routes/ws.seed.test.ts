@@ -214,6 +214,56 @@ describe("WS handshake seeds per-thread state after init", () => {
     expect(idle.model).toBeNull();
   });
 
+  it("seeds a cached context snapshot without hydrating the transcript", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+    const expected = await thread.currentContextState();
+    vi.spyOn(thread, "currentContextState").mockRejectedValue(new Error("must not hydrate"));
+
+    const frames = await collectUntil(
+      api.wsUrl,
+      sessionId,
+      (event) => event.type === "context.state" && event.threadId === thread.id,
+    );
+
+    const context = frames.find(
+      (event) => event.type === "context.state" && event.threadId === thread.id,
+    );
+    if (context?.type !== "context.state") throw new Error("missing context seed");
+    expect(context.context).toEqual(expected);
+    expect(thread.currentContextState).not.toHaveBeenCalled();
+  });
+
+  it("isolates one thread's context seed failure", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const broken = await engineSession.ensureDefaultThread();
+    const healthy = await engineSession.createThread("web:healthy");
+    await healthy.currentContextState();
+    vi.spyOn(broken, "cachedContextState").mockImplementation(() => {
+      throw new Error("bad cached snapshot");
+    });
+
+    const frames = await collectUntil(
+      api.wsUrl,
+      sessionId,
+      (event) => event.type === "context.state" && event.threadId === healthy.id,
+    );
+
+    expect(frames.some((event) => event.type === "context.state" && event.threadId === healthy.id)).toBe(true);
+  });
+
   it("sends the model snapshot after replay and subscription-buffered live events", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);

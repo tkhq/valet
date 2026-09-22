@@ -1418,6 +1418,14 @@ export interface WithdrawDecisionRequest {
  * — those that the loop UI needs to render are surfaced here; the rest are
  * dropped by the bridge.
  */
+export interface WireThreadContextState {
+  model: string;
+  estimatedTokens: number;
+  contextWindow: number | null;
+  compactionOccurred: boolean;
+  latestCompaction?: { tokensBefore: number; tokensAfter: number };
+}
+
 export type WireEvent =
   // `init` carries only session metadata. The client fetches messages via
   // GET /messages?threadId=… (REST is the authoritative source for thread
@@ -1537,6 +1545,14 @@ export type WireEvent =
       threadId: string;
       queueItemId: null;
       model: null;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "context.state";
+      threadId: string;
+      context: WireThreadContextState;
     }
   | {
       /**

@@ -382,4 +382,35 @@ describe("busEventToWire", () => {
     );
     expect(out).toEqual([{ type: "sandbox.status", state: "ready", epoch: 1, estimateMs: undefined }]);
   });
+
+  it("forwards live context occupancy without mapping it to usage", () => {
+    const events = busEventToWire({
+      sessionId: "s1",
+      timestamp: 1,
+      event: {
+        type: "context_state",
+        threadId: "th-1",
+        state: {
+          model: "openai/gpt-test",
+          estimatedTokens: 25_000,
+          contextWindow: 100_000,
+          compactionOccurred: true,
+          latestCompaction: { tokensBefore: 80_000, tokensAfter: 12_000 },
+        },
+      },
+    });
+    expect(events).toEqual([
+      {
+        type: "context.state",
+        threadId: "th-1",
+        context: {
+          model: "openai/gpt-test",
+          estimatedTokens: 25_000,
+          contextWindow: 100_000,
+          compactionOccurred: true,
+          latestCompaction: { tokensBefore: 80_000, tokensAfter: 12_000 },
+        },
+      },
+    ]);
+  });
 });

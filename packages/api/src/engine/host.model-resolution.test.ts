@@ -195,11 +195,12 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(resolved!.apiKey).toBe("org-together");
     });
 
-    it("defaults contextWindow to 128000 and cost to zeros when the entry omits them", async () => {
+    it("keeps an unknown context window unknown and defaults cost to zeros", async () => {
       const row = await makeCustom([{ id: "m1", name: "M1" }]);
       await saveKey(row.id, "k");
       const resolved = await resolveModelSpec(db, credentials, orgId, `${row.id}/m1`);
       expect(resolved?.model.contextWindow).toBe(128_000);
+      expect(resolved?.model.reportedContextWindow).toBeNull();
       expect(resolved?.model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     });
 

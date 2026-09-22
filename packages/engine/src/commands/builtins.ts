@@ -98,15 +98,45 @@ function helpCommand(session: Session): BuiltinResult {
 }
 
 async function statusCommand(session: Session, thread: Thread): Promise<BuiltinResult> {
-  const model =
-    thread.modelId() ?? session.options.modelSpec ?? session.options.model.id;
   const state = await thread.currentQueueState();
+  const context = await thread.currentContextState();
+  const format = (value: number) => value.toLocaleString("en-US");
   const lines = [
     `**Session** \`${session.id}\``,
     `**Thread** \`${thread.id}\``,
-    `**Model** \`${model}\``,
+    `**Active model** \`${context.model}\``,
     `**Queue** ${state.status} (${state.pending.length} pending)`,
+    "**Live context (estimated)**",
   ];
+  if (context.contextWindow === null) {
+    lines.push(
+      `- Tokens in use: ~${format(context.estimatedTokens)}`,
+      "- Context-window limit: unknown",
+      "- Used and remaining percentages: unavailable because the model limit is unknown",
+    );
+  } else {
+    const usedPercent = Math.min(
+      100,
+      Math.max(0, Math.round((context.estimatedTokens / context.contextWindow) * 100)),
+    );
+    const remainingTokens = Math.max(0, context.contextWindow - context.estimatedTokens);
+    const remainingPercent = Math.max(0, 100 - usedPercent);
+    lines.push(
+      `- Tokens in use: ~${format(context.estimatedTokens)} of ${format(context.contextWindow)} (${usedPercent}% used)`,
+      `- Remaining: ~${format(remainingTokens)} tokens (${remainingPercent}%)`,
+    );
+  }
+  lines.push(
+    context.compactionOccurred
+      ? "**Compaction** occurred in this thread."
+      : "**Compaction** has not occurred in this thread.",
+  );
+  if (context.latestCompaction) {
+    lines.push(
+      `- Latest compaction: ~${format(context.latestCompaction.tokensBefore)} → ~${format(context.latestCompaction.tokensAfter)} tokens`,
+    );
+  }
+  lines.push("Live context occupancy is separate from cumulative token usage and billed cost.");
   return { ok: true, output: lines.join("\n") };
 }
 
