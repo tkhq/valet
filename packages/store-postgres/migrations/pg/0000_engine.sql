@@ -165,6 +165,7 @@ CREATE TABLE "engine_sessions" (
 	"purpose" text NOT NULL,
 	"status" text NOT NULL,
 	"sandbox_id" text,
+	"managed_egress" text,
 	"snapshot_id" text,
 	"parent_session_id" text,
 	"parent_thread_id" text,

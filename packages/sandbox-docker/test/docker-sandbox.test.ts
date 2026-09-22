@@ -380,6 +380,12 @@ describeDocker("DockerSandbox", () => {
       coldStartEstimateMs: 8000,
       credsMount: true,
       dockerSupport: true,
+      managedEgress: {
+        supported: false,
+        configured: false,
+        ready: false,
+        reason: "Managed egress is disabled. Configure the Docker provider with a pinned proxy artifact to enable it.",
+      },
     });
   });
 

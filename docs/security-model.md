@@ -198,3 +198,26 @@ default).
   targets, `.env`, or any deployed environment.
 - The API serves one process per deployment. There is no multi-tenant
   cross-org surface — the data model is single-org.
+
+## Managed egress prerequisite
+
+Managed egress is inactive by default. The current checkpoint defines the
+closed Hematite callback contract and provider topology plans. It does not
+apply those plans or claim live enforcement. Docker, Kubernetes, local, and
+virtual providers therefore do not advertise managed egress as ready.
+
+Set no managed-egress chart values in production during this checkpoint. A
+future activation requires all of these observed conditions:
+
+- a digest-pinned Hematite artifact for contract
+  `hematite-external-authorization-v1`;
+- one proxy-only callback token bound server-side to one sandbox identity;
+- a ready proxy listener and read-only token mount;
+- a separate proxy network identity;
+- both forced network policies or both Docker networks;
+- deterministic cleanup and restart adoption.
+
+The callback at `/v1/authorize` always denies with
+`unsupported_prerequisite`. It does not invoke canonical policy and does not
+publish `egress.connect`. See
+`docs/specs/2026-09-13-managed-egress-prerequisite-design.md`.

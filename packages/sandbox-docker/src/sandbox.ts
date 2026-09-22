@@ -13,12 +13,29 @@ import type {
   SandboxCreateOpts,
   SandboxProvider,
   SandboxStatus,
+  ManagedEgressEffectiveState,
+  ManagedEgressRequest,
 } from "@valet/engine";
 import {
   CappedOutputBuffer,
   CONTAINER_DEATH_PATTERN,
+  ManagedEgressPrerequisiteError,
   parseResourceQuantity,
 } from "@valet/engine";
+import {
+  applyDockerManagedEgressInfrastructure,
+  buildDockerManagedEgressPlan,
+  cleanupDockerManagedEgress,
+  dockerManagedEgressCliRuntime,
+  initializeDockerManagedEgressVolumes,
+  observeDockerManagedEgress,
+  renderHematiteConfig,
+  validateDockerManagedEgressConfig,
+  type DockerManagedEgressConfig,
+  type DockerManagedEgressMaterial,
+  type DockerManagedEgressPlan,
+  type DockerManagedEgressRuntime,
+} from "./managed-egress.js";
 
 /** 5-minute backstop eviction for job entries nobody polls to completion
  * (spec decision 9). Primary eviction is on first poll observing terminal
@@ -273,6 +290,8 @@ export interface BuildDockerRunArgsOpts {
    * seccomp/AppArmor/systempaths relaxations, CAP_SYS_ADMIN, CAP_NET_ADMIN,
    * /dev/fuse, /dev/net/tun, and VALET_SANDBOX_DOCKER=1 — never --privileged. */
   docker?: boolean;
+  /** Provider-derived trust mount. Present only for a forced managed-egress boundary. */
+  managedEgressTrustArgs?: string[];
 }
 
 /**
@@ -299,13 +318,14 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     runArgs.push("--env", "VALET_SANDBOX_DOCKER=1");
   }
   if (opts.network !== "bridge") runArgs.push("--network", opts.network);
+  if (opts.managedEgressTrustArgs) runArgs.push(...opts.managedEgressTrustArgs);
   // `host.docker.internal` is how a container reaches the host that runs the
   // api — the address `VALET_API_URL` carries on this backend (see
   // `resolveSandboxApiUrl`). Docker Desktop and colima publish the name
   // themselves; a Linux daemon does not, so map it explicitly. Skipped for
   // `none` (no route to anything) and `host` (the container already shares
   // the host's loopback, and Docker rejects `--add-host` there).
-  if (opts.network !== "none" && opts.network !== "host") {
+  if (!opts.managedEgressTrustArgs && opts.network !== "none" && opts.network !== "host") {
     runArgs.push("--add-host", "host.docker.internal:host-gateway");
   }
   if (opts.env) {
@@ -980,10 +1000,43 @@ async function awaitCredsPropagation(
   }
 }
 
+export interface DockerManagedEgressProviderOptions {
+  config: DockerManagedEgressConfig;
+  caMaterial: (request: ManagedEgressRequest) => Promise<Pick<DockerManagedEgressMaterial, "caCert" | "caKey">>;
+  runtime?: DockerManagedEgressRuntime;
+}
+
+async function awaitDockerManagedEgress(plan: DockerManagedEgressPlan, config: DockerManagedEgressConfig, runtime: DockerManagedEgressRuntime): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      await observeDockerManagedEgress(plan, config, runtime);
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
+interface DockerManagedSandboxState {
+  plan: DockerManagedEgressPlan;
+  config: DockerManagedEgressConfig;
+  effective: ManagedEgressEffectiveState;
+  revoke: () => void;
+}
+
 export class DockerSandboxProvider implements SandboxProvider {
   readonly backend = "docker";
   private sandboxes = new Map<string, DockerSandbox>();
+  private managedSandboxes = new Map<string, DockerManagedSandboxState>();
   private nextId = 1;
+  private readonly managedRuntime: DockerManagedEgressRuntime;
+
+  constructor(private readonly managedEgress?: DockerManagedEgressProviderOptions) {
+    if (managedEgress) validateDockerManagedEgressConfig(managedEgress.config);
+    this.managedRuntime = managedEgress?.runtime ?? dockerManagedEgressCliRuntime();
+  }
 
   capabilities(): SandboxCapabilities {
     return {
@@ -997,10 +1050,16 @@ export class DockerSandboxProvider implements SandboxProvider {
       coldStartEstimateMs: 8000,
       credsMount: true,
       dockerSupport: true,
+      managedEgress: this.managedEgress
+        ? { supported: true, configured: true, ready: true, contractVersion: "hematite-external-authorization-v1", proxyArtifact: this.managedEgress.config.proxyArtifact }
+        : { supported: false, configured: false, ready: false, reason: "Managed egress is disabled. Configure the Docker provider with a pinned proxy artifact to enable it." },
     };
   }
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    if (opts.managedEgress && !this.managedEgress) {
+      throw new ManagedEgressPrerequisiteError("configuration", "Managed egress is disabled. Configure the Docker provider with a pinned proxy artifact before retrying.");
+    }
     const dockerOpts = opts as DockerSandboxCreateOpts;
     const workspace = dockerOpts.workspace;
     if (!workspace) {
@@ -1026,10 +1085,44 @@ export class DockerSandboxProvider implements SandboxProvider {
     const network = dockerOpts.network ?? "bridge";
     const id = `dsb-${this.nextId++}`;
     const containerName = `${CONTAINER_PREFIX}${id}-${Date.now()}`;
+    const managedConfig = opts.managedEgress ? this.managedEgress?.config : undefined;
+    const managedPlan = opts.managedEgress && managedConfig
+      ? buildDockerManagedEgressPlan(managedConfig, opts.managedEgress)
+      : undefined;
 
     if (dockerOpts.pullIfMissing !== false) {
       await ensureImage(image);
+      if (managedPlan) await ensureImage(managedPlan.proxyArtifact);
     }
+
+    if (managedPlan && managedConfig && opts.managedEgress && this.managedEgress) {
+      const material = await this.managedEgress.caMaterial(opts.managedEgress);
+      try {
+        await applyDockerManagedEgressInfrastructure(managedPlan, this.managedRuntime);
+        await initializeDockerManagedEgressVolumes(managedPlan, {
+          token: opts.managedEgress.proxyToken,
+          config: renderHematiteConfig(managedConfig, opts.managedEgress.identity),
+          ...material,
+        }, this.managedRuntime);
+        if (await this.managedRuntime.inspect("container", managedPlan.proxyContainer)) {
+          await this.managedRuntime.run(["rm", "-f", managedPlan.proxyContainer]);
+        }
+        await this.managedRuntime.run(managedPlan.proxyRunArgs);
+        await this.managedRuntime.run(managedPlan.connectProxyOutboundArgs);
+        opts.managedEgressLifecycle?.registerCallbackBinding();
+        await awaitDockerManagedEgress(managedPlan, managedConfig, this.managedRuntime);
+      } catch (error) {
+        opts.managedEgressLifecycle?.revokeCallbackBinding();
+        await cleanupDockerManagedEgress(managedPlan, containerName, this.managedRuntime);
+        throw error;
+      }
+    }
+
+    const rollbackManaged = async () => {
+      if (!managedPlan) return;
+      opts.managedEgressLifecycle?.revokeCallbackBinding();
+      await cleanupDockerManagedEgress(managedPlan, containerName, this.managedRuntime);
+    };
 
     // Write creds files to the host dir BEFORE docker run so the bind is
     // populated at container start. Only when credsFiles is provided and
@@ -1040,23 +1133,36 @@ export class DockerSandboxProvider implements SandboxProvider {
     let sandboxCredsDir: string | undefined;
     if (opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
       sandboxCredsDir = credsHostDir(containerName);
-      await writeCredsFiles(sandboxCredsDir, opts.credsFiles, { docker: opts.docker });
+      try {
+        await writeCredsFiles(sandboxCredsDir, opts.credsFiles, { docker: opts.docker });
+      } catch (error) {
+        await rollbackManaged();
+        throw error;
+      }
     }
 
-    const runArgs = buildDockerRunArgs({
-      containerName,
-      image,
-      workspaceHostPath: abs,
-      network,
-      env: dockerOpts.env,
-      resources: opts.resources,
-      profile: opts.profile,
-      credsHostDir: sandboxCredsDir,
-      docker: opts.docker,
-    });
+    let runArgs: string[];
+    try {
+      runArgs = buildDockerRunArgs({
+        containerName,
+        image,
+        workspaceHostPath: abs,
+        network: managedPlan?.internalNetwork ?? network,
+        env: dockerOpts.env,
+        resources: opts.resources,
+        profile: opts.profile,
+        credsHostDir: sandboxCredsDir,
+        docker: opts.docker,
+        managedEgressTrustArgs: managedPlan?.workloadTrustArgs,
+      });
+    } catch (error) {
+      await rollbackManaged();
+      throw error;
+    }
 
     const startResult = await execProcess("docker", runArgs, {});
     if (startResult.exitCode !== 0) {
+      await rollbackManaged();
       throw new Error(
         `docker run failed (${startResult.exitCode}): ${startResult.stderr.trim() || startResult.stdout.trim()}`,
       );
@@ -1070,6 +1176,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       await verifyWorkspaceMount(containerId, abs, image);
     } catch (err) {
       await execProcess("docker", ["rm", "-f", containerId], {});
+      await rollbackManaged();
       throw err;
     }
 
@@ -1082,6 +1189,33 @@ export class DockerSandboxProvider implements SandboxProvider {
       docker: opts.docker,
     });
     this.sandboxes.set(id, sb);
+    if (managedPlan && managedConfig && opts.managedEgress) {
+      const workloadNetworks = await this.managedRuntime.containerNetworks(containerId);
+      if (workloadNetworks.length !== 1 || workloadNetworks[0] !== managedPlan.internalNetwork) {
+        await rollbackManaged();
+        await this.destroy(id);
+        throw new ManagedEgressPrerequisiteError("network_isolation", "The Docker workload network boundary does not match. Re-provision the sandbox.");
+      }
+      this.managedSandboxes.set(id, {
+        plan: managedPlan,
+        config: managedConfig,
+        revoke: opts.managedEgressLifecycle?.revokeCallbackBinding ?? (() => {}),
+        effective: {
+          requested: true,
+          configured: true,
+          ready: true,
+          effective: true,
+          identity: opts.managedEgress.identity,
+          proxyArtifact: managedConfig.proxyArtifact,
+          topology: {
+            proxyResources: [managedPlan.proxyContainer, managedPlan.tokenVolume, managedPlan.configVolume, managedPlan.trustVolume],
+            policyResources: [managedPlan.internalNetwork, managedPlan.outboundNetwork],
+            workloadSelector: { "docker.container": containerName },
+            callbackBindingId: managedPlan.proxyContainer,
+          },
+        },
+      });
+    }
     return sb;
   }
 
@@ -1139,7 +1273,11 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   async destroy(id: string): Promise<void> {
     const sb = this.sandboxes.get(id);
+    const managed = this.managedSandboxes.get(id);
+    managed?.revoke();
+    if (managed && sb) await cleanupDockerManagedEgress(managed.plan, sb.containerId, this.managedRuntime);
     if (sb) await sb.destroy?.();
+    this.managedSandboxes.delete(id);
     this.sandboxes.delete(id);
   }
 
@@ -1152,9 +1290,18 @@ export class DockerSandboxProvider implements SandboxProvider {
       {},
     );
     if (inspect.exitCode !== 0) return { id, state: "released" };
-    return inspect.stdout.trim() === "true"
-      ? { id, state: "ready", startedAt: Date.now() }
-      : { id, state: "released" };
+    if (inspect.stdout.trim() !== "true") return { id, state: "released" };
+    const managed = this.managedSandboxes.get(id);
+    if (!managed) return { id, state: "ready", startedAt: Date.now() };
+    try {
+      await observeDockerManagedEgress(managed.plan, managed.config, this.managedRuntime);
+      const networks = await this.managedRuntime.containerNetworks(sb.containerId);
+      if (networks.length !== 1 || networks[0] !== managed.plan.internalNetwork) throw new ManagedEgressPrerequisiteError("network_isolation", "The Docker workload left its managed internal network. Re-provision the sandbox.");
+      return { id, state: "ready", startedAt: Date.now(), managedEgress: managed.effective };
+    } catch (error) {
+      managed.revoke();
+      throw error;
+    }
   }
 }
 
