@@ -3421,10 +3421,10 @@ export class EngineHost {
     try {
       const resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
       if (!resolved) throw new Error(`Unknown model selection: ${spec}`);
-      identity = resolved.canonicalId ?? resolved.model.id;
+      identity = `${resolved.model.provider}/${parseModelId(resolved.model.id).modelId}`;
     } catch (error) {
       if (!(error instanceof NoCredentialsError)) throw error;
-      identity = error.model.id;
+      identity = `${error.model.provider}/${parseModelId(error.model.id).modelId}`;
     }
     if (normalized === "xs" || normalized === "s" || normalized === "m" || normalized === "l" || normalized === "xl") return { kind: "tier", tier: normalized };
     return { kind: "concrete", identityDigest: createHash("sha256").update(identity).digest("hex") };

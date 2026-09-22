@@ -319,6 +319,7 @@ describe("buildChildSpawner", () => {
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
     const spawner = buildChildSpawner(deps, watcher);
+    const modelCapability = vi.spyOn(api.providers.engineHost, "delegationModelCapability");
     const now = Date.now();
     await api.providers.db.insert(agentSessions).values({
       id: "parent-actor",
@@ -344,6 +345,7 @@ describe("buildChildSpawner", () => {
       { prompt: "do the thing" },
       { parentSessionId: "parent-actor", parentThreadId: parentThread.id, actorUserId: "local-user", owner: { type: "team", id: "team-x" } },
     );
+    expect(modelCapability).toHaveBeenCalledWith("local-org", "s");
     const rows = await api.providers.db
       .select({ mode: agentSessions.credentialOwnerMode })
       .from(agentSessions)

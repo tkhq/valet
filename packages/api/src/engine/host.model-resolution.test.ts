@@ -414,6 +414,12 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
+  it("digests bare and namespaced aliases as one model identity", async () => {
+    api = await bootTestApi();
+    const bare = await api.providers.engineHost.delegationModelCapability("local-org", ANTHROPIC_MODEL);
+    expect(await api.providers.engineHost.delegationModelCapability("local-org", `anthropic/${ANTHROPIC_MODEL}`)).toEqual(bare);
+  });
+
   it("remapping the org's \"s\" tier changes what a fallback session resolves to", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;

@@ -378,7 +378,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // A pre-assigned id (the security dispatch's cell-claim seam) wins so
     // the caller's durable claim row names the session this spawn builds.
     const childSessionId = req.sessionId ?? newChildSessionId();
-    const model = await deps.engineHost.delegationModelCapability(orgId, req.model ?? parentData.model ?? "s");
+    const model = await deps.engineHost.delegationModelCapability(orgId, req.model ?? "s");
     const adapted = adaptDelegationCreate({
       schemaVersion: 1,
       organizationId: orgId,
