@@ -683,9 +683,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "ping":
-    case "title.updated": {
-      // These frames carry no stream state. Title updates trigger query-cache
-      // invalidation in the socket hook after the persisted write completes.
+    case "title.updated":
+    case "thread.activity": {
+      // These frames carry no stream state. Title and activity updates mutate
+      // the query cache in the socket hook after the persisted write completes.
       return ev.offset && ev.offset > slice.lastOffset ? next : slice;
     }
 

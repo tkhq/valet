@@ -479,18 +479,9 @@ export function useSendPrompt(sessionId: string) {
   >({
     mutationFn: (body) =>
       api.sendPrompt(sessionId, body),
-    // Keep the sidebar's activity sort current without a refetch. The server
-    // records the same submission before this response resolves.
-    onSuccess: (data, { text }) => {
-      const now = Date.now();
-      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
-        ...current,
-        threads: current.threads.map((thread) =>
-          thread.id === data.threadId
-            ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, now) }
-            : thread,
-        ),
-      }));
+    // Thread activity reaches every viewer through the session WebSocket.
+    // Slash commands still refetch because a new socket can miss their result.
+    onSuccess: (_data, { text }) => {
       if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
     },
   });

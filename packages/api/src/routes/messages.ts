@@ -19,7 +19,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import type { PromptAuthor, SessionEntry, Session as EngineSession, Thread } from "@valet/engine";
+import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
@@ -62,6 +62,7 @@ import {
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
+import { recordThreadUserActivity } from "../services/thread-activity.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -688,26 +689,6 @@ messagesRouter.get("/:id/messages", async (c) => {
  * Returns null when `threadId` names no thread of this session. The caller
  * must have authorized the session already — this function does not.
  */
-async function recordThreadUserActivity(
-  db: Providers["db"],
-  sessionId: string,
-  thread: Thread,
-  now: number,
-): Promise<void> {
-  await db
-    .insert(sessionThreads)
-    .values({
-      id: thread.id,
-      sessionId,
-      createdAt: thread.toThreadData().createdAt,
-      lastUserActivityAt: now,
-    })
-    .onConflictDoUpdate({
-      target: sessionThreads.id,
-      set: { lastUserActivityAt: now },
-    });
-}
-
 export async function submitSessionPrompt(
   providers: Pick<Providers, "db" | "engineHost">,
   row: typeof agentSessions.$inferSelect,
@@ -738,6 +719,15 @@ export async function submitSessionPrompt(
   await engineSession.ensureDefaultThread();
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
+  const recordActivity = (activityAt: number) => recordUserActivity
+    ? recordThreadUserActivity(db, {
+        sessionId: row.id,
+        threadId: thread.id,
+        threadCreatedAt: thread.toThreadData().createdAt,
+        activityAt,
+        emit: (event) => engineSession.emit(event),
+      })
+    : Promise.resolve();
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
@@ -746,7 +736,7 @@ export async function submitSessionPrompt(
       .update(agentSessions)
       .set({ updatedAt: now, lastActivityAt: now })
       .where(eq(agentSessions.id, row.id));
-    if (recordUserActivity) await recordThreadUserActivity(db, row.id, thread, now);
+    await recordActivity(now);
     return {
       messageId: receipt.queueItemId || null,
       threadId: receipt.threadId,
@@ -885,7 +875,7 @@ export async function submitSessionPrompt(
     .update(agentSessions)
     .set({ updatedAt: submitNow, lastActivityAt: submitNow })
     .where(eq(agentSessions.id, row.id));
-  if (recordUserActivity) await recordThreadUserActivity(db, row.id, thread, submitNow);
+  await recordActivity(submitNow);
 
   return {
     // Commands take no queue item; "" would read as a real (broken) id.

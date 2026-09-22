@@ -60,6 +60,7 @@ import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
+import { recordThreadUserActivity } from "../services/thread-activity.js";
 import { digestGate } from "./gate-digest.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
@@ -1184,7 +1185,13 @@ export class ChannelHost {
       .update(agentSessions)
       .set({ lastActivityAt: channelNow })
       .where(eq(agentSessions.id, session.id));
-
+    await recordThreadUserActivity(this.deps.db, {
+      sessionId: session.id,
+      threadId: thread.id,
+      threadCreatedAt: thread.toThreadData().createdAt,
+      activityAt: channelNow,
+      emit: (activityEvent) => session.emit(activityEvent),
+    });
   }
 
   private async serializeGateCallback(key: string, callback: () => Promise<void>): Promise<void> {
