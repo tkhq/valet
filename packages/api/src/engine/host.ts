@@ -1,4 +1,5 @@
 import type { Model } from "@earendil-works/pi-ai/compat";
+import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -92,6 +93,7 @@ import { listLlmProviders, parseModelId, providerNamespace } from "../services/l
 import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { CanonicalAuthorizationService } from "../authorization/canonical-authorization-service.js";
+import type { ModelCapability } from "@valet/engine/authorization";
 import { canonicalInteractivePolicyResolver } from "../authorization/canonical-interactive-resolver.js";
 import { canonicalBuiltinPolicyResolver } from "../authorization/canonical-builtin-resolver.js";
 import { withSandboxCapabilityAuthorization } from "../authorization/sandbox-capability-provider.js";
@@ -3413,6 +3415,21 @@ export class EngineHost {
    * `task` tool's absence-of-spawner contract is the engine's depth limit
    * (children can't spawn grandchildren).
    */
+  async delegationModelCapability(orgId: string, spec: string): Promise<ModelCapability> {
+    const normalized = spec.trim().toLowerCase();
+    let identity: string;
+    try {
+      const resolved = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+      if (!resolved) throw new Error(`Unknown model selection: ${spec}`);
+      identity = resolved.canonicalId ?? resolved.model.id;
+    } catch (error) {
+      if (!(error instanceof NoCredentialsError)) throw error;
+      identity = error.model.id;
+    }
+    if (normalized === "xs" || normalized === "s" || normalized === "m" || normalized === "l" || normalized === "xl") return { kind: "tier", tier: normalized };
+    return { kind: "concrete", identityDigest: createHash("sha256").update(identity).digest("hex") };
+  }
+
   async childSessionFor(
     childSessionId: string,
     opts: {

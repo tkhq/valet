@@ -32,7 +32,7 @@ function delegation() {
     parentThreadId: "thread_1",
     childSessionId: "child_1",
     owner: common.principal,
-    modelTier: "m",
+    model: { kind: "tier", tier: "m" },
     profile: "headless",
     docker: false,
     limits: { durationMs: 60_000, turnLimit: 10, hopCount: 1 },
@@ -57,7 +57,7 @@ describe("delegated execution adapters", () => {
     const left = delegation();
     const changed = adaptDelegationCreate({
       ...common, parentSessionId: "parent_1", parentThreadId: "thread_1", childSessionId: "child_1", owner: common.principal,
-      modelTier: "l", profile: "headless", docker: false, limits: { hopCount: 1 }, taskClass: "code_review", capabilities: ["repository.read"], parentIsDelegatee: false,
+      model: { kind: "tier", tier: "l" }, profile: "headless", docker: false, limits: { hopCount: 1 }, taskClass: "code_review", capabilities: ["repository.read"], parentIsDelegatee: false,
     });
     expect(changed.requestSubjectDigest).not.toBe(left.requestSubjectDigest);
   });
@@ -65,7 +65,7 @@ describe("delegated execution adapters", () => {
   it("rejects owner swaps and capability expansion", () => {
     expect(() => adaptDelegationCreate({
       ...common, parentSessionId: "parent_1", parentThreadId: "thread_1", childSessionId: "child_1",
-      owner: { type: "user", id: "user_2" }, modelTier: "m", profile: "headless", docker: false,
+      owner: { type: "user", id: "user_2" }, model: { kind: "tier", tier: "m" }, profile: "headless", docker: false,
       limits: { hopCount: 1 }, taskClass: "review", capabilities: [], parentIsDelegatee: false,
     })).toThrow(/owner_swap/);
     expect(() => adaptSandboxCapability({
@@ -104,7 +104,7 @@ describe("delegated execution adapters", () => {
     const base: DelegationEnvelopeV1 = { schemaVersion: 1, organizationId: "org_1", parentSessionId: "root_1", parentThreadId: "thread_1", childSessionId: "child_1", actorUserId: "user_1", owner: common.principal, depth: 1, parentRootCapable: true, constraints: {}, capabilities: ["repository.read"], expiresAtMs: 1_000, policyDigest: "a".repeat(64), sourceBundleDigest: "b".repeat(64), evaluatorKind: "local_valet", engineDigest: "c".repeat(64) };
     expect(() => assertOneLevelDelegationEnvelope(base)).not.toThrow();
     expect(() => assertOneLevelDelegationEnvelope(base, base)).toThrow(/nested_delegation_unsupported/);
-    expect(() => adaptDelegationCreate({ ...common, parentSessionId: "child_1", parentThreadId: "thread_1", childSessionId: "grandchild_1", owner: common.principal, modelTier: "s", profile: "headless", docker: false, limits: { hopCount: 1 }, taskClass: "task", capabilities: [], parentIsDelegatee: true })).toThrow(/nested_delegation_unsupported/);
+    expect(() => adaptDelegationCreate({ ...common, parentSessionId: "child_1", parentThreadId: "thread_1", childSessionId: "grandchild_1", owner: common.principal, model: { kind: "tier", tier: "s" }, profile: "headless", docker: false, limits: { hopCount: 1 }, taskClass: "task", capabilities: [], parentIsDelegatee: true })).toThrow(/nested_delegation_unsupported/);
     expect(() => assertNestedDelegationNarrower(base, { ...base, parentSessionId: "child_1", childSessionId: "grandchild_1", capabilities: ["repository.write"] })).toThrow(/delegation_widening/);
   });
 

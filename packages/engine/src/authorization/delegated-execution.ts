@@ -45,6 +45,9 @@ export const DELEGATED_EXECUTION_REGISTRY_V1 = Object.freeze([
 export type AgentSignalOperation = "interrupt" | "queue" | "steer" | "cancel" | "status" | "read" | "approve";
 export type SandboxProfile = "headless" | "full";
 export type ModelTier = "xs" | "s" | "m" | "l" | "xl";
+export type ModelCapability =
+  | { readonly kind: "tier"; readonly tier: ModelTier }
+  | { readonly kind: "concrete"; readonly identityDigest: string };
 
 interface CommonInput {
   readonly schemaVersion: 1;
@@ -65,7 +68,7 @@ export interface DelegationCreateAdapterInputV1 extends CommonInput {
   readonly owner: AuthorizationPrincipal;
   readonly teamId?: string;
   readonly repository?: { readonly host: string; readonly fullName: string; readonly branch?: string };
-  readonly modelTier: ModelTier;
+  readonly model: ModelCapability;
   readonly profile: SandboxProfile;
   readonly resources?: { readonly cpu?: number; readonly memory?: string };
   readonly docker: boolean;
@@ -139,11 +142,12 @@ export function adaptDelegationCreate(input: DelegationCreateAdapterInputV1): De
   if (input.owner.type === "user" && input.owner.id !== input.actorUserId) fail("owner_swap");
   if (input.owner.type === "org" && input.owner.id !== input.organizationId) fail("cross_org");
   if ((input.owner.type === "team") !== (input.teamId !== undefined) || (input.teamId !== undefined && input.teamId !== input.owner.id)) fail("owner_swap");
-  if (!["xs", "s", "m", "l", "xl"].includes(input.modelTier) || !["headless", "full"].includes(input.profile) || typeof input.docker !== "boolean") fail("invalid_capability");
+  const model = cleanModelCapability(input.model);
+  if (!["headless", "full"].includes(input.profile) || typeof input.docker !== "boolean") fail("invalid_capability");
   exact(input.limits, ["durationMs", "turnLimit", "hopCount"]); positiveOptional(input.limits.durationMs); positiveOptional(input.limits.turnLimit);
   if (!Number.isSafeInteger(input.limits.hopCount) || input.limits.hopCount !== 1) fail("nested_delegation_unsupported");
   if (input.parentIsDelegatee) fail("nested_delegation_unsupported");
-  const parameters: JsonObject = { parentSessionId: input.parentSessionId, parentThreadId: input.parentThreadId, childSessionId: input.childSessionId, owner: { type: input.owner.type, id: input.owner.id }, ...(input.teamId === undefined ? {} : { teamId: input.teamId }), ...(input.repository === undefined ? {} : { repository: cleanRepository(input.repository) }), modelTier: input.modelTier, profile: input.profile, resources: cleanResources(input.resources), docker: input.docker, limits: input.limits, taskClass: input.taskClass, capabilities: cleanSet(input.capabilities), depth: 1, parentRootCapable: true };
+  const parameters: JsonObject = { parentSessionId: input.parentSessionId, parentThreadId: input.parentThreadId, childSessionId: input.childSessionId, owner: { type: input.owner.type, id: input.owner.id }, ...(input.teamId === undefined ? {} : { teamId: input.teamId }), ...(input.repository === undefined ? {} : { repository: cleanRepository(input.repository) }), model, profile: input.profile, resources: cleanResources(input.resources), docker: input.docker, limits: input.limits, taskClass: input.taskClass, capabilities: cleanSet(input.capabilities), depth: 1, parentRootCapable: true };
   return output(input, "delegation.create", "delegation.create", "delegation", "high", parameters);
 }
 
@@ -227,6 +231,7 @@ function sandboxShape(value: SandboxCapabilityAdapterInputV1["requested"]): Json
 function sandboxSubset(effective: JsonObject, requested: JsonObject): boolean { if (effective.profile === "full" && requested.profile !== "full") return false; for (const key of ["docker", "browser", "nestedKubernetes", "tunnels"] as const) if (effective[key] === true && requested[key] !== true) return false; const requestedPorts = new Set(requested.ports as readonly number[]); const requestedCaps = new Set(requested.capabilities as readonly string[]); return (effective.ports as readonly number[]).every((port) => requestedPorts.has(port)) && (effective.capabilities as readonly string[]).every((cap) => requestedCaps.has(cap)); }
 function cleanRepository(value: NonNullable<DelegationCreateAdapterInputV1["repository"]>): JsonObject { validId(value.host); if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.fullName)) fail("invalid_repository"); if (value.branch !== undefined && (value.branch.length > 255 || /[\u0000-\u001f~^:?*[\\]/.test(value.branch))) fail("invalid_repository"); return { host: value.host, fullName: value.fullName, ...(value.branch === undefined ? {} : { branch: value.branch }) }; }
 function cleanResources(value: DelegationCreateAdapterInputV1["resources"]): JsonObject { if (value === undefined) return {}; exact(value, ["cpu", "memory"]); if (value.cpu !== undefined && (!Number.isFinite(value.cpu) || value.cpu <= 0 || value.cpu > 64)) fail("invalid_capability"); if (value.memory !== undefined && !/^[0-9]+(?:Mi|Gi)$/.test(value.memory)) fail("invalid_capability"); return { ...(value.cpu === undefined ? {} : { cpu: value.cpu }), ...(value.memory === undefined ? {} : { memory: value.memory }) }; }
+function cleanModelCapability(value: ModelCapability): JsonObject { if (value.kind === "tier" && ["xs", "s", "m", "l", "xl"].includes(value.tier)) return { kind: "tier", tier: value.tier }; if (value.kind === "concrete" && /^[0-9a-f]{64}$/.test(value.identityDigest)) return { kind: "concrete", identityDigest: value.identityDigest }; return fail("invalid_capability"); }
 function cleanTarget(value: CredentialUseAdapterInputV1["target"]): JsonObject { const result: Record<string,string> = {}; for (const [key, entry] of Object.entries(value)) if (entry !== undefined) result[key] = checkedId(entry); return result; }
 function cleanResource(value: NonNullable<CredentialUseAdapterInputV1["resource"]>): JsonObject { return { type: checkedId(value.type), ...(value.id === undefined ? {} : { id: checkedResourceId(value.id) }) }; }
 function checkedResourceId(value: string): string { if (typeof value !== "string" || value.length < 1 || value.length > 255 || /[\u0000-\u001f\u007f]/.test(value)) fail("invalid_identity"); return value; }

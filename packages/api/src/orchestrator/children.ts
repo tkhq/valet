@@ -34,7 +34,7 @@ import {
   type SpawnChildResult,
   type SubmissionResult,
 } from "@valet/engine";
-import { adaptAgentSignal, adaptDelegationCreate, assertOneLevelDelegationEnvelope, buildDelegatedExecutionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, type DelegationEnvelopeV1, type ModelTier, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
+import { adaptAgentSignal, adaptDelegationCreate, assertOneLevelDelegationEnvelope, buildDelegatedExecutionObligationPlan, canonicalAuthorizationJson, decisionDigestOf, type DelegationEnvelopeV1, type PolicyDecisionEnvelope } from "@valet/engine/authorization";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, delegationEnvelopes, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
@@ -378,7 +378,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // A pre-assigned id (the security dispatch's cell-claim seam) wins so
     // the caller's durable claim row names the session this spawn builds.
     const childSessionId = req.sessionId ?? newChildSessionId();
-    const modelTier = (req.model ?? "s") as ModelTier;
+    const model = await deps.engineHost.delegationModelCapability(orgId, req.model ?? parentData.model ?? "s");
     const adapted = adaptDelegationCreate({
       schemaVersion: 1,
       organizationId: orgId,
@@ -393,7 +393,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       owner: ctx.owner,
       ...(ctx.owner.type === "team" ? { teamId: ctx.owner.id } : {}),
       ...(binding ? { repository: { host: binding.host ?? "github", fullName: binding.fullName, ...(binding.ref ? { branch: binding.ref } : {}) } } : {}),
-      modelTier,
+      model,
       profile: req.profile ?? "headless",
       ...(req.resources ? { resources: req.resources } : {}),
       docker: req.docker === true,
