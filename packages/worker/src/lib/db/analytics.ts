@@ -77,6 +77,16 @@ export async function batchInsertAnalyticsEvents(
   await db.batch(stmts);
 }
 
+// Usage reports use exact [start, end) windows. The optional user filter powers
+// personal scope without changing the aggregation or exposing another user.
+function usageWindowSql(alias: string, periodEnd?: string, userId?: string): string {
+  return `${periodEnd ? `AND ${alias}.created_at < ?` : ''} ${userId ? `AND ${alias}.user_id = ?` : ''}`;
+}
+
+function usageWindowBindings(periodStart: string, periodEnd?: string, userId?: string): string[] {
+  return [periodStart, ...(periodEnd ? [periodEnd] : []), ...(userId ? [userId] : [])];
+}
+
 // ─── Billing / Usage Aggregate Queries ──────────────────────────────────────
 
 export interface UsageHeroStats {
@@ -89,6 +99,8 @@ export interface UsageHeroStats {
 export async function getUsageHeroStats(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageHeroStats> {
   const row = await db
     .prepare(`
@@ -100,8 +112,9 @@ export async function getUsageHeroStats(
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .first<{
       total_input_tokens: number;
       total_output_tokens: number;
@@ -127,6 +140,8 @@ export interface UsageByDayRow {
 export async function getUsageByDay(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByDayRow[]> {
   const result = await db
     .prepare(`
@@ -134,14 +149,16 @@ export async function getUsageByDay(
         date(ae.created_at) as date,
         ae.model,
         SUM(ae.input_tokens) as input_tokens,
-        SUM(ae.output_tokens) as output_tokens
+        SUM(ae.output_tokens) as output_tokens,
+        COUNT(*) as call_count
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
       GROUP BY date(ae.created_at), ae.model
       ORDER BY date ASC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -164,6 +181,8 @@ export interface UsageByUserRow {
 export async function getUsageByUser(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByUserRow[]> {
   const result = await db
     .prepare(`
@@ -178,11 +197,12 @@ export async function getUsageByUser(
       LEFT JOIN users u ON u.id = ae.user_id
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
         AND ae.user_id IS NOT NULL
       GROUP BY ae.user_id
       ORDER BY (SUM(ae.input_tokens) + SUM(ae.output_tokens)) DESC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -200,11 +220,14 @@ export interface UsageByUserModelRow {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  callCount: number;
 }
 
 export async function getUsageByUserModel(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByUserModelRow[]> {
   const result = await db
     .prepare(`
@@ -212,14 +235,16 @@ export async function getUsageByUserModel(
         ae.user_id,
         ae.model,
         SUM(ae.input_tokens) as input_tokens,
-        SUM(ae.output_tokens) as output_tokens
+        SUM(ae.output_tokens) as output_tokens,
+        COUNT(*) as call_count
       FROM analytics_events ae
       WHERE ae.event_type = 'llm_call'
         AND ae.created_at >= ?
+        ${usageWindowSql('ae', periodEnd, userId)}
         AND ae.user_id IS NOT NULL
       GROUP BY ae.user_id, ae.model
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -227,7 +252,42 @@ export async function getUsageByUserModel(
     model: String(r.model),
     inputTokens: Number(r.input_tokens),
     outputTokens: Number(r.output_tokens),
+    callCount: Number(r.call_count),
   }));
+}
+
+export interface UsageByPurposeModelRow {
+  purpose: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  callCount: number;
+}
+
+const AE_ORIGIN_EXPR = `COALESCE(s.purpose, 'interactive')`;
+
+export async function getUsageByPurposeModel(db: D1Database, periodStart: string, periodEnd?: string, userId?: string): Promise<UsageByPurposeModelRow[]> {
+  const result = await db.prepare(`
+    SELECT ${AE_ORIGIN_EXPR} as purpose, ae.model, SUM(ae.input_tokens) as input_tokens, SUM(ae.output_tokens) as output_tokens, COUNT(*) as call_count
+    FROM analytics_events ae LEFT JOIN sessions s ON s.id = ae.session_id
+    WHERE ae.event_type = 'llm_call' AND ae.created_at >= ? ${usageWindowSql('ae', periodEnd, userId)}
+    GROUP BY ${AE_ORIGIN_EXPR}, ae.model
+  `).bind(...usageWindowBindings(periodStart, periodEnd, userId)).all();
+  return (result.results ?? []).map((r: Record<string, unknown>) => ({ purpose: String(r.purpose), model: String(r.model), inputTokens: Number(r.input_tokens), outputTokens: Number(r.output_tokens), callCount: Number(r.call_count) }));
+}
+
+export interface UsageByWorkflowModelRow {
+  workflowId: string | null; workflowName: string; triggerType: string; model: string; inputTokens: number; outputTokens: number; callCount: number;
+}
+
+export async function getUsageByWorkflowModel(db: D1Database, periodStart: string, periodEnd?: string, userId?: string): Promise<UsageByWorkflowModelRow[]> {
+  const result = await db.prepare(`
+    SELECT we.workflow_id, COALESCE(w.name, w.slug, 'Unknown workflow') as workflow_name, COALESCE(t.type, 'manual') as trigger_type, ae.model, SUM(ae.input_tokens) as input_tokens, SUM(ae.output_tokens) as output_tokens, COUNT(*) as call_count
+    FROM analytics_events ae JOIN sessions s ON s.id = ae.session_id JOIN workflow_executions we ON we.session_id = s.id LEFT JOIN workflows w ON w.id = we.workflow_id LEFT JOIN triggers t ON t.id = we.trigger_id
+    WHERE ae.event_type = 'llm_call' AND ae.created_at >= ? ${usageWindowSql('ae', periodEnd, userId)}
+    GROUP BY we.workflow_id, w.name, w.slug, t.type, ae.model
+  `).bind(...usageWindowBindings(periodStart, periodEnd, userId)).all();
+  return (result.results ?? []).map((r: Record<string, unknown>) => ({ workflowId: r.workflow_id ? String(r.workflow_id) : null, workflowName: String(r.workflow_name), triggerType: String(r.trigger_type), model: String(r.model), inputTokens: Number(r.input_tokens), outputTokens: Number(r.output_tokens), callCount: Number(r.call_count) }));
 }
 
 export interface UsageByModelRow {
@@ -240,6 +300,8 @@ export interface UsageByModelRow {
 export async function getUsageByModel(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<UsageByModelRow[]> {
   const result = await db
     .prepare(`
@@ -251,10 +313,12 @@ export async function getUsageByModel(
       FROM analytics_events
       WHERE event_type = 'llm_call'
         AND created_at >= ?
+        ${periodEnd ? 'AND created_at < ?' : ''}
+        ${userId ? 'AND user_id = ?' : ''}
       GROUP BY model
       ORDER BY (SUM(input_tokens) + SUM(output_tokens)) DESC
     `)
-    .bind(periodStart)
+    .bind(...usageWindowBindings(periodStart, periodEnd, userId))
     .all();
 
   return (result.results ?? []).map((r: Record<string, unknown>) => ({
@@ -267,6 +331,54 @@ export async function getUsageByModel(
 
 // ─── Sandbox Usage Queries ──────────────────────────────────────────────────
 
+interface SandboxIntervalRow {
+  userId: string;
+  startedAt: string;
+  endedAt: string;
+  activeSeconds: number;
+  source: 'recorded' | 'legacy_session_total';
+  sandboxCpuCores: number | null;
+  sandboxMemoryMib: number | null;
+}
+
+async function getSandboxIntervals(
+  db: D1Database,
+  periodStart: string,
+  periodEnd?: string,
+  userId?: string,
+): Promise<SandboxIntervalRow[]> {
+  const end = periodEnd ?? '9999-12-31T23:59:59.999Z';
+  const result = await db.prepare(`
+    SELECT s.user_id, sai.started_at, sai.ended_at, sai.active_seconds, sai.source,
+      u.sandbox_cpu_cores, u.sandbox_memory_mib
+    FROM session_active_intervals sai
+    JOIN sessions s ON s.id = sai.session_id
+    LEFT JOIN users u ON u.id = s.user_id
+    WHERE (
+      (sai.source = 'recorded' AND datetime(sai.ended_at) > datetime(?) AND datetime(sai.started_at) < datetime(?))
+      OR
+      (sai.source = 'legacy_session_total' AND datetime(sai.started_at) >= datetime(?) AND datetime(sai.started_at) < datetime(?))
+    )
+    ${userId ? 'AND s.user_id = ?' : ''}
+  `).bind(periodStart, end, periodStart, end, ...(userId ? [userId] : [])).all();
+
+  return (result.results ?? []).map((row: Record<string, unknown>) => ({
+    userId: String(row.user_id),
+    startedAt: String(row.started_at),
+    endedAt: String(row.ended_at),
+    activeSeconds: Number(row.active_seconds),
+    source: String(row.source) as SandboxIntervalRow['source'],
+    sandboxCpuCores: row.sandbox_cpu_cores != null ? Number(row.sandbox_cpu_cores) : null,
+    sandboxMemoryMib: row.sandbox_memory_mib != null ? Number(row.sandbox_memory_mib) : null,
+  }));
+}
+
+function clippedActiveSeconds(row: SandboxIntervalRow, startMs: number, endMs: number): number {
+  if (row.source === 'legacy_session_total') return row.activeSeconds;
+  const overlapMs = Math.max(0, Math.min(Date.parse(row.endedAt), endMs) - Math.max(Date.parse(row.startedAt), startMs));
+  return Math.min(row.activeSeconds, Math.round(overlapMs / 1_000));
+}
+
 export interface SandboxHeroStats {
   totalActiveSeconds: number;
 }
@@ -274,18 +386,14 @@ export interface SandboxHeroStats {
 export async function getSandboxHeroStats(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<SandboxHeroStats> {
-  const row = await db
-    .prepare(`
-      SELECT COALESCE(SUM(active_seconds), 0) as total_active_seconds
-      FROM sessions
-      WHERE created_at >= ?
-    `)
-    .bind(periodStart)
-    .first<{ total_active_seconds: number }>();
-
+  const rows = await getSandboxIntervals(db, periodStart, periodEnd, userId);
+  const startMs = Date.parse(periodStart);
+  const endMs = periodEnd ? Date.parse(periodEnd) : Number.POSITIVE_INFINITY;
   return {
-    totalActiveSeconds: row?.total_active_seconds ?? 0,
+    totalActiveSeconds: rows.reduce((total, row) => total + clippedActiveSeconds(row, startMs, endMs), 0),
   };
 }
 
@@ -297,24 +405,34 @@ export interface SandboxByDayRow {
 export async function getSandboxByDay(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<SandboxByDayRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT
-        date(created_at) as date,
-        SUM(active_seconds) as active_seconds
-      FROM sessions
-      WHERE created_at >= ?
-      GROUP BY date(created_at)
-      ORDER BY date ASC
-    `)
-    .bind(periodStart)
-    .all();
+  const rows = await getSandboxIntervals(db, periodStart, periodEnd, userId);
+  const reportStartMs = Date.parse(periodStart);
+  const reportEndMs = periodEnd ? Date.parse(periodEnd) : Number.POSITIVE_INFINITY;
+  const totals = new Map<string, number>();
 
-  return (result.results ?? []).map((r: Record<string, unknown>) => ({
-    date: String(r.date),
-    activeSeconds: Number(r.active_seconds),
-  }));
+  for (const row of rows) {
+    if (row.source === 'legacy_session_total') {
+      const date = row.startedAt.slice(0, 10);
+      totals.set(date, (totals.get(date) ?? 0) + row.activeSeconds);
+      continue;
+    }
+
+    let cursor = Math.max(Date.parse(row.startedAt), reportStartMs);
+    const intervalEnd = Math.min(Date.parse(row.endedAt), reportEndMs);
+    while (cursor < intervalEnd) {
+      const date = new Date(cursor).toISOString().slice(0, 10);
+      const nextDay = Date.parse(`${date}T00:00:00.000Z`) + 86_400_000;
+      const seconds = Math.round((Math.min(intervalEnd, nextDay) - cursor) / 1_000);
+      totals.set(date, (totals.get(date) ?? 0) + seconds);
+      cursor = nextDay;
+    }
+  }
+
+  return Array.from(totals, ([date, activeSeconds]) => ({ date, activeSeconds }))
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
 
 export interface SandboxByUserRow {
@@ -327,29 +445,25 @@ export interface SandboxByUserRow {
 export async function getSandboxByUser(
   db: D1Database,
   periodStart: string,
+  periodEnd?: string,
+  userId?: string,
 ): Promise<SandboxByUserRow[]> {
-  const result = await db
-    .prepare(`
-      SELECT
-        s.user_id,
-        SUM(s.active_seconds) as active_seconds,
-        u.sandbox_cpu_cores,
-        u.sandbox_memory_mib
-      FROM sessions s
-      LEFT JOIN users u ON u.id = s.user_id
-      WHERE s.created_at >= ?
-        AND s.user_id IS NOT NULL
-      GROUP BY s.user_id
-    `)
-    .bind(periodStart)
-    .all();
+  const rows = await getSandboxIntervals(db, periodStart, periodEnd, userId);
+  const startMs = Date.parse(periodStart);
+  const endMs = periodEnd ? Date.parse(periodEnd) : Number.POSITIVE_INFINITY;
+  const totals = new Map<string, SandboxByUserRow>();
 
-  return (result.results ?? []).map((r: Record<string, unknown>) => ({
-    userId: String(r.user_id),
-    activeSeconds: Number(r.active_seconds),
-    sandboxCpuCores: r.sandbox_cpu_cores != null ? Number(r.sandbox_cpu_cores) : null,
-    sandboxMemoryMib: r.sandbox_memory_mib != null ? Number(r.sandbox_memory_mib) : null,
-  }));
+  for (const row of rows) {
+    const item = totals.get(row.userId) ?? {
+      userId: row.userId,
+      activeSeconds: 0,
+      sandboxCpuCores: row.sandboxCpuCores,
+      sandboxMemoryMib: row.sandboxMemoryMib,
+    };
+    item.activeSeconds += clippedActiveSeconds(row, startMs, endMs);
+    totals.set(row.userId, item);
+  }
+  return Array.from(totals.values());
 }
 
 // ─── Performance Queries ────────────────────────────────────────────────────

@@ -35,6 +35,19 @@ export const sessions = sqliteTable('sessions', {
   index('idx_sessions_purpose_user_status').on(table.purpose, table.userId, table.status),
 ]);
 
+export const sessionActiveIntervals = sqliteTable('session_active_intervals', {
+  id: text().primaryKey(),
+  sessionId: text().notNull().references(() => sessions.id, { onDelete: 'cascade' }),
+  startedAt: text().notNull(),
+  endedAt: text().notNull(),
+  activeSeconds: integer().notNull(),
+  source: text().notNull(),
+}, (table) => [
+  index('idx_session_active_intervals_window').on(
+    table.startedAt, table.endedAt, table.sessionId,
+  ),
+]);
+
 export const messages = sqliteTable('messages', {
   id: text().primaryKey(),
   sessionId: text().notNull().references(() => sessions.id, { onDelete: 'cascade' }),
