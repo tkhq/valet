@@ -1,8 +1,9 @@
-import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, eq, sql } from "drizzle-orm";
 import type { PluginAction, PluginActionContext, Principal, SessionStore, ValetPlugin } from "@valet/engine";
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult, WorkflowRun, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { pluginStore as pluginStoreRows, workflowDefinitions } from "../schema/index.js";
 import { pluginStore } from "./plugin-store.js";
 
 const COLLECTION = "linked-drive-files";
@@ -84,6 +85,20 @@ function grantKey(scope: { sessionId: string; threadKey: string }, fileId: strin
 
 function workflowGrantKey(runId: string, fileId: string): string {
   return JSON.stringify([runId, fileId]);
+}
+
+function workflowGrantQuotaKey(runId: string): string {
+  return JSON.stringify([runId, "_quota"]);
+}
+
+function workflowFileIdFromKey(runId: string, key: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    return Array.isArray(parsed) && parsed.length === 2 && parsed[0] === runId
+      && typeof parsed[1] === "string" && parsed[1] !== "_quota" && ID.test(parsed[1]) ? parsed[1] : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Bind a team assistant thread after Slack routing, or after an authorized site prompt. */
@@ -204,10 +219,47 @@ export class GoogleWorkspaceLinkScope {
         eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, args.context.owner.id))).limit(1);
     const description = linearIssueDescription(args.result.result);
     if (!definition || description === null) return;
-    const store = pluginStore(this.deps.db, "valet").org(args.context.orgId);
-    for (const fileId of linkedDriveFileIds(description.slice(0, 1_000_000), MAX_WORKFLOW_FILE_REFS)) {
-      await store.put(WORKFLOW_COLLECTION, workflowGrantKey(run.runId, fileId), { source: "linear_issue_description" });
-    }
+    await this.recordWorkflowGrants(args.context.orgId, run.runId,
+      linkedDriveFileIds(description.slice(0, 1_000_000), MAX_WORKFLOW_FILE_REFS));
+  }
+
+  /** Allocate file grants under one locked per-run quota row. */
+  private async recordWorkflowGrants(orgId: string, runId: string, fileIds: readonly string[]): Promise<void> {
+    if (fileIds.length === 0) return;
+    const quotaKey = workflowGrantQuotaKey(runId);
+    const prefix = JSON.stringify([runId]).slice(0, -1);
+    const escapedPrefix = prefix.replace(/([\\%_])/g, "\\\\$1");
+    await this.deps.db.transaction(async (tx) => {
+      const now = Date.now();
+      await tx.insert(pluginStoreRows).values({
+        id: randomUUID(), plugin: "valet", scopeType: "org", scopeId: orgId,
+        collection: WORKFLOW_COLLECTION, key: quotaKey, doc: { fileIds: [] }, revision: 1,
+        createdAt: now, updatedAt: now,
+      }).onConflictDoNothing();
+      const [quota] = await tx.select({ doc: pluginStoreRows.doc }).from(pluginStoreRows).where(and(
+        eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
+        eq(pluginStoreRows.collection, WORKFLOW_COLLECTION), eq(pluginStoreRows.key, quotaKey),
+      )).for("update");
+      if (!quota) throw new Error("workflow Drive grant quota was not created");
+      const existing = await tx.select({ key: pluginStoreRows.key }).from(pluginStoreRows).where(and(
+        eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
+        eq(pluginStoreRows.collection, WORKFLOW_COLLECTION), sql`${pluginStoreRows.key} LIKE ${escapedPrefix + "%"} ESCAPE '\\'`,
+      ));
+      const granted = new Set(existing.map((row) => workflowFileIdFromKey(runId, row.key)).filter((id): id is string => id !== null));
+      const additions = [...new Set(fileIds)].filter((id) => !granted.has(id)).slice(0, MAX_WORKFLOW_FILE_REFS - granted.size);
+      if (additions.length === 0) return;
+      await tx.update(pluginStoreRows).set({ doc: { fileIds: [...granted, ...additions] }, revision: sql`${pluginStoreRows.revision} + 1`, updatedAt: now }).where(and(
+        eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
+        eq(pluginStoreRows.collection, WORKFLOW_COLLECTION), eq(pluginStoreRows.key, quotaKey),
+      ));
+      for (const fileId of additions) {
+        await tx.insert(pluginStoreRows).values({
+          id: randomUUID(), plugin: "valet", scopeType: "org", scopeId: orgId,
+          collection: WORKFLOW_COLLECTION, key: workflowGrantKey(runId, fileId),
+          doc: { source: "linear_issue_description" }, revision: 1, createdAt: now, updatedAt: now,
+        }).onConflictDoNothing();
+      }
+    });
   }
 
   wrapPlugins(plugins: ValetPlugin[]): ValetPlugin[] {

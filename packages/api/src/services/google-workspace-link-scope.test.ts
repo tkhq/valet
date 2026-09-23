@@ -8,6 +8,7 @@ import { workflowDefinitions } from "../schema/index.js";
 import { assemblePlugins, pluginSessionExtras } from "../plugins/assemble.js";
 import { buildActionInvoker } from "../plugins/action-invoker.js";
 import { GoogleWorkspaceLinkScope, linkedDriveFileId, bindLinkedDriveThread, recordLinkedDrivePrompt } from "./google-workspace-link-scope.js";
+import { pluginStore } from "./plugin-store.js";
 
 const owner = { type: "team", id: "legal" } satisfies PluginActionContext["owner"];
 const slackMessage = (text: string, overrides: Record<string, unknown> = {}) => ({
@@ -187,14 +188,21 @@ describe("linked Drive scope", () => {
     });
     expect((await read.execute({ documentId: "other-action" }, workflowContext)).success).toBe(false);
 
-    const links = Array.from({ length: 101 }, (_, i) => `https://docs.google.com/document/d/cap${i}/edit`).join(" ");
-    await scope.recordCanonicalWorkflowAction({
-      request: { invocationId: "workflow:run-linear:cap", service: "linear", action: "linear.get_issue", params: {} },
-      context: { orgId: "org1", owner, workflowExecutionId: "run-linear" },
-      result: { ok: true, result: { description: links } },
-    });
-    expect((await read.execute({ documentId: "cap99" }, workflowContext)).success).toBe(true);
-    expect((await read.execute({ documentId: "cap100" }, workflowContext)).success).toBe(false);
+    run = { ...run, runId: "run-cap" };
+    const capContext = context({ sessionId: "wf:run-cap:fetch", sessionPurpose: "workflow" });
+    const firstLinks = Array.from({ length: 100 }, (_, i) => `https://docs.google.com/document/d/cap${i}/edit`).join(" ");
+    const secondLinks = Array.from({ length: 100 }, (_, i) => `https://docs.google.com/document/d/cap${i + 100}/edit`).join(" ");
+    await Promise.all([["workflow:run-cap:cap-a", firstLinks], ["workflow:run-cap:cap-b", secondLinks]].map(([invocationId, description]) =>
+      scope.recordCanonicalWorkflowAction({
+        request: { invocationId, service: "linear", action: "linear.get_issue", params: {} },
+        context: { orgId: "org1", owner, workflowExecutionId: "run-cap" },
+        result: { ok: true, result: { description } },
+      }),
+    ));
+    const grants = await pluginStore(db, "valet").org("org1").list("linked-drive-workflow-files", { limit: 200 });
+    expect(grants.items.filter((grant) => grant.key.includes("run-cap") && (grant.doc as { source?: string }).source === "linear_issue_description")).toHaveLength(100);
+    expect((await read.execute({ documentId: "cap99" }, capContext)).success).toBe(true);
+    expect((await read.execute({ documentId: "cap100" }, capContext)).success).toBe(false);
   });
 
   it("guards the real Google actions and never follows embedded links or shortcuts", async () => {

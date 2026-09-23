@@ -152,7 +152,7 @@ A workflow can also use a direct file URL from an event dispatcher's `refs` bag.
 Manual input cannot grant a file reference.
 A successful `linear.get_issue` action can add direct file URLs from its `description` result to that run only.
 The action invoker records this grant only after durable dedup selects its canonical result.
-The wrapper records at most 100 grants by organization, run ID, and file ID.
+The wrapper records at most 100 grants for one organization and run ID across all issue fetches.
 It does not scan other action results, attachments, comments, metadata, or arbitrary trigger payloads.
 Runs without an origin can use only these run-bound references.
 Ordinary child sessions cannot use this integration.
