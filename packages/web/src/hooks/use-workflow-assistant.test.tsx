@@ -120,7 +120,7 @@ describe("useWorkflowAssistant", () => {
     ensureAssistantSession.mockResolvedValue({ sessionId: SESSION });
     ensureOrchestrator.mockResolvedValue({ sessionId: SESSION });
     createThread.mockResolvedValue({ id: "thread_1", sessionId: SESSION, createdAt: 1, lastUserActivityAt: 1 });
-    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1" });
+    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1", activityAt: 1 });
   });
 
   it("opens the explicitly selected team assistant and isolates its remembered thread", async () => {
@@ -332,7 +332,7 @@ describe("WorkflowAssistantPanel", () => {
     });
     ensureAssistantSession.mockResolvedValue({ sessionId: SESSION });
     createThread.mockResolvedValue({ id: "thread_1", sessionId: SESSION, createdAt: 1, lastUserActivityAt: 1 });
-    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1" });
+    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1", activityAt: 1 });
   });
 
   it("replaces the opening spinner with the conversation", async () => {
