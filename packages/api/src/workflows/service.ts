@@ -7,7 +7,7 @@
 import { lockTeamDeletionAccess, TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { checkAssistantForOwner, resolveDefaultAssistant } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   resolveTriggerInput,
   triggerDataSchema,
@@ -1111,7 +1111,7 @@ export async function deleteWorkflowDefinition(
     await refuseRepoOwned(tx, row);
 
     const active = await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
-      eq(workflowRuns.workflowId, id), inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
+      eq(workflowRuns.workflowId, id), hasUnsettledWorkflowRun(),
     )).limit(1);
     if (active.length > 0) return "has_active_runs";
 
@@ -1167,10 +1167,23 @@ export async function purgeWorkflowRows(
   await disarmWorkflowTriggers(db, orgId, workflowId);
 }
 
-const UNSETTLED_RUN_STATUSES = ["pending", "running", "parked", "terminalizing"] as const;
+const ACTIVE_RUN_STATUSES = ["pending", "running", "parked"] as const;
+
+/**
+ * A terminalizing run has already reserved its outcome. It cannot execute
+ * more workflow work, even if a host crashed before it wrote `settled`.
+ * Keep its history and allow the definition delete. A terminalizing row with
+ * no outcome is corrupt or incomplete, so keep the conflict until it settles.
+ */
+export function hasUnsettledWorkflowRun() {
+  return or(
+    inArray(workflowRuns.status, [...ACTIVE_RUN_STATUSES]),
+    and(eq(workflowRuns.status, "terminalizing"), isNull(workflowRuns.outcome)),
+  );
+}
 
 /** Throws `TeamHasActiveRunsError` when any team-owned workflow has a run
- * that has not settled.
+ * that can still execute workflow work.
  *
  * Reads `workflow_runs` through the handle it is given, never through
  * `WorkflowStore`. `reapTeamWorkflows` calls this from inside `deleteTeam`'s
@@ -1193,7 +1206,7 @@ export async function assertNoTeamOwnedActiveRuns(db: AppQueryable, teamId: stri
           workflowRuns.workflowId,
           defs.map((d) => d.id),
         ),
-        inArray(workflowRuns.status, [...UNSETTLED_RUN_STATUSES]),
+        hasUnsettledWorkflowRun(),
       ),
     )
     .limit(1);

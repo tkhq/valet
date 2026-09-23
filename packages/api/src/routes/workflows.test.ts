@@ -2332,6 +2332,29 @@ describe("run detail checkpoint links", () => {
 });
 
 describe("DELETE /api/workflows/:id with a run in flight", () => {
+  it("deletes when finalization reserved the run outcome", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl, "terminalizing-history");
+    const runId = "wfrun_terminalizing_delete";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    const claimed = await api.providers.workflowStore.claimRun(runId, "test-owner", 30_000);
+    if (!claimed) throw new Error("expected claim to succeed");
+    await api.providers.workflowStore.beginTerminalize(runId, claimed.attempt, "completed");
+
+    const deleted = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    expect(await api.providers.workflowStore.getRun(runId)).toMatchObject({
+      status: "terminalizing",
+      outcome: "completed",
+    });
+  });
+
   it("409s while a run is not settled, then deletes once it settles", async () => {
     api = await bootTestApi({ workflowRunHost: new StubRunHost() });
     const created = await createWorkflow(api.baseUrl);
