@@ -802,8 +802,9 @@ describe("ChannelHost outbound delivery", () => {
     });
   });
 
-  it("retries feedback admission without another terminal event or normal send", async () => {
+  it("retries and logs unrelated feedback admission failures", async () => {
     faux.setResponses([fauxAssistantMessage("retrying")]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const send = vi.spyOn(keyedTransport, "send").mockRejectedValueOnce(new Error("rate_limited"));
     const admit = vi.spyOn(engineStore, "admitSubmission").mockRejectedValueOnce(new Error("database unavailable"));
     const { session, threadId } = await emitTerminalTurn({
@@ -817,6 +818,36 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(send).toHaveBeenCalledTimes(1);
     expect(admit).toHaveBeenCalledTimes(2);
+    expect(error.mock.calls.some(([message]) => message === "[channels] reply-dropped feedback failed")).toBe(true);
+  });
+
+  it("deduplicates different addressed failure reasons without logging", async () => {
+    faux.setResponses([fauxAssistantMessage("retrying")]);
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "user", id: USER_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const thread = session.thread("events");
+    await thread.submitPrompt({
+      kind: "signal",
+      signalType: "channel.reply_dropped",
+      body: "Your response was not posted to keyed:D100. Delivery failed: channel_archived. Call keyed.reply_to_origin with the response text to retry.",
+      tagName: "delivery_failure",
+      attributes: { feedback: "reply_dropped" },
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+    }, { dispatchId: "feedback:reply-failed:qi-reason-divergence" });
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(keyedTransport, "send").mockRejectedValueOnce(new Error("rate_limited"));
+
+    const emitted = await emitTerminalTurn({
+      queueItemId: "qi-reason-divergence",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(await replyFeedbackEntries(emitted.session.id, emitted.threadId)).toHaveLength(1);
+    expect(error.mock.calls.some(([message]) => message === "[channels] reply-dropped feedback failed")).toBe(false);
   });
 
   it("caps feedback admission and cancels backoff without retrying the normal send", async () => {

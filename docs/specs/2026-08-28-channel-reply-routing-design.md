@@ -156,7 +156,7 @@ change addressed first-response selection.
 If an addressed first-response send fails before text lands, the host submits queue-item-scoped feedback.
 The feedback contains an allowlisted public reason. The host makes at most three process-local admission attempts.
 It waits 50 ms and then 100 ms between attempts. Shutdown cancels either wait.
-Attempts keep one dispatch ID and never repeat the normal send. This best-effort path does not survive shutdown.
+Attempts keep one dispatch ID and never repeat the normal send. A reason mismatch deduplicates by that ID. This path does not survive shutdown.
 
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the

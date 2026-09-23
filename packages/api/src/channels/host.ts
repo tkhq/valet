@@ -834,6 +834,7 @@ export class ChannelHost {
     const feedback = {
       dispatchId: `feedback:reply-failed:${queueItemId}`,
       body: `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
+      acceptDispatchConflict: true,
     };
     for (const delay of FEEDBACK_RETRY_DELAYS_MS) {
       if (delay > 0) await this.sleepOrAbort(delay, signal);
