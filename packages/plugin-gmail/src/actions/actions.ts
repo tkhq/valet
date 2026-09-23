@@ -7,6 +7,7 @@ import type {
   PluginActionResult,
 } from "@valet/engine";
 import { gmailFetch, decodeBase64Url, encodeBase64Url } from "./api.js";
+import { renderMarkdownToHtml } from "./markdown.js";
 
 // ─── Internal Types ──────────────────────────────────────────────────────────
 
@@ -94,7 +95,6 @@ function buildMimeMessage(opts: {
   bcc?: string[];
   subject: string;
   body: string;
-  bodyHtml?: string;
   inReplyTo?: string | null;
   references?: string | null;
 }): string {
@@ -107,20 +107,7 @@ function buildMimeMessage(opts: {
   lines.push(`Subject: ${encodeHeader(sanitizeHeaderValue(opts.subject))}`);
   lines.push('MIME-Version: 1.0');
 
-  // A blank bodyHtml would emit an empty text/html alternative, which mail
-  // clients prefer over the plain-text part — the recipient would see an
-  // empty email. The schemas reject blank bodyHtml; this trim-aware guard
-  // also keeps the builder itself safe for whitespace-only values.
-  if (!opts.bodyHtml?.trim()) {
-    lines.push('Content-Type: text/plain; charset="UTF-8"');
-    lines.push('Content-Transfer-Encoding: 8bit');
-    if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
-    if (opts.references) lines.push(`References: ${opts.references}`);
-    lines.push('');
-    lines.push(opts.body);
-    return lines.join('\r\n');
-  }
-
+  const bodyHtml = renderMarkdownToHtml(opts.body);
   const boundary = `valet-${crypto.randomUUID()}`;
   lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
   if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
@@ -135,7 +122,7 @@ function buildMimeMessage(opts: {
   lines.push('Content-Type: text/html; charset="UTF-8"');
   lines.push('Content-Transfer-Encoding: 8bit');
   lines.push('');
-  lines.push(toCrlf(opts.bodyHtml));
+  lines.push(toCrlf(bodyHtml));
   lines.push(`--${boundary}--`);
   return lines.join('\r\n');
 }
@@ -173,7 +160,6 @@ async function prepareMimeRequest(
     to: string | string[];
     subject: string;
     body: string;
-    bodyHtml?: string;
     cc?: string[];
     bcc?: string[];
     replyToMessageId?: string;
@@ -199,7 +185,6 @@ async function prepareMimeRequest(
       bcc: args.bcc,
       subject: args.subject,
       body: args.body,
-      bodyHtml: args.bodyHtml,
       inReplyTo,
       references,
     }),
@@ -304,15 +289,7 @@ const sendEmail = action(
       description: 'Recipient email address, or an array of recipient email addresses.',
     }),
     subject: Type.String({ description: 'Email subject line.' }),
-    body: Type.String({ description: 'Plain-text body of the email.' }),
-    bodyHtml: Type.Optional(
-      Type.String({
-        minLength: 1,
-        pattern: '\\S',
-        description:
-          'Optional HTML body; must contain non-whitespace content when provided. Gmail receives plain-text and HTML MIME alternatives.',
-      }),
-    ),
+    body: Type.String({ description: 'Markdown body of the email. Gmail receives it as text/plain and rendered text/html MIME alternatives.' }),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -321,12 +298,12 @@ const sendEmail = action(
           'Optional Gmail message ID to reply to. When set, the new email is threaded with the original and uses In-Reply-To/References headers.',
       }),
     ),
-  }),
+  }, { additionalProperties: false }),
 )({
   id: 'gmail.send_email',
   name: 'Send Email',
   description:
-    'Sends an email from the authenticated Gmail account. Add bodyHtml to send HTML with the plain-text body as an alternative. Supports cc/bcc and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
+    'Sends an email from the authenticated Gmail account. Gmail preserves body as text/plain and renders Markdown as text/html. Supports cc/bcc and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
@@ -624,15 +601,7 @@ const createDraft = action(
       description: 'Recipient email address, or an array of recipient email addresses.',
     }),
     subject: Type.String({ description: 'Email subject line.' }),
-    body: Type.String({ description: 'Plain-text body of the draft.' }),
-    bodyHtml: Type.Optional(
-      Type.String({
-        minLength: 1,
-        pattern: '\\S',
-        description:
-          'Optional HTML body; must contain non-whitespace content when provided. Gmail receives plain-text and HTML MIME alternatives.',
-      }),
-    ),
+    body: Type.String({ description: 'Markdown body of the draft. Gmail receives it as text/plain and rendered text/html MIME alternatives.' }),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -640,12 +609,12 @@ const createDraft = action(
         description: 'Optional Gmail message ID to draft a reply to. The draft is threaded with the original.',
       }),
     ),
-  }),
+  }, { additionalProperties: false }),
 )({
   id: 'gmail.create_draft',
   name: 'Create Draft',
   description:
-    'Creates a Gmail draft (does NOT send). Add bodyHtml to include an HTML alternative. Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, or deleted with delete_draft. Supports threading via replyToMessageId.',
+    'Creates a Gmail draft (does NOT send). Gmail preserves body as text/plain and renders Markdown as text/html. Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, or deleted with delete_draft. Supports threading via replyToMessageId.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -812,26 +781,18 @@ const updateDraft = action(
       description: 'Recipient email address, or an array of recipient email addresses.',
     }),
     subject: Type.String({ description: 'Email subject line.' }),
-    body: Type.String({ description: 'New plain-text body of the draft.' }),
-    bodyHtml: Type.Optional(
-      Type.String({
-        minLength: 1,
-        pattern: '\\S',
-        description:
-          'Optional HTML body; must contain non-whitespace content when provided. Gmail receives plain-text and HTML MIME alternatives.',
-      }),
-    ),
+    body: Type.String({ description: 'Markdown body of the draft. Gmail receives it as text/plain and rendered text/html MIME alternatives.' }),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
       Type.String({ description: 'Optional Gmail message ID to thread the draft with.' }),
     ),
-  }),
+  }, { additionalProperties: false }),
 )({
   id: 'gmail.update_draft',
   name: 'Update Draft',
   description:
-    'Replaces the contents of an existing Gmail draft. Add bodyHtml to include an HTML alternative. The new contents fully overwrite the old draft (this is a full replace, not a patch). Use this when iterating on an AI-composed draft before sending.',
+    'Replaces the contents of an existing Gmail draft. Gmail preserves body as text/plain and renders Markdown as text/html. The new contents fully overwrite the old draft (this is a full replace, not a patch). Use this when iterating on an AI-composed draft before sending.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;

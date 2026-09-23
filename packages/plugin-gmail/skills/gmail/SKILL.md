@@ -10,14 +10,13 @@ Use these actions to read, compose, and manage Gmail messages and drafts on beha
 ## Messages
 
 ### `gmail.send_email`
-Send an email. Set optional `bodyHtml` (must contain non-whitespace content) to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. Supports `cc`, `bcc`, and threading via `replyToMessageId` (which sets `In-Reply-To`/`References` and places the reply in the original thread).
+Send an email with Markdown in `body`. Gmail preserves the Markdown source as `text/plain` and renders safe HTML as `text/html`. Raw HTML is escaped. Do not pass `bodyHtml`; `body` is the only message source. Supports `cc`, `bcc`, and threading via `replyToMessageId`.
 
 ```json
 {
   "to": "alice@example.com",
   "subject": "Hello",
-  "body": "Hi Alice, ...",
-  "bodyHtml": "<p>Hi Alice, ...</p>",
+  "body": "# Hello\n\nHi Alice, ...",
   "cc": ["bob@example.com"],
   "replyToMessageId": "<optional gmail message id>"
 }
@@ -94,14 +93,13 @@ Risk: **high**.
 ## Drafts
 
 ### `gmail.create_draft`
-Create a draft without sending. Set optional `bodyHtml` (must contain non-whitespace content) to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. Prefer this over `send_email` when the user should review before sending. Supports threading via `replyToMessageId`.
+Create a draft without sending. Write Markdown in `body`. Gmail preserves it as `text/plain` and renders safe HTML as `text/html`. Raw HTML is escaped. Do not pass `bodyHtml`. Prefer this over `send_email` when the user should review before sending. Supports threading via `replyToMessageId`.
 
 ```json
 {
   "to": "alice@example.com",
   "subject": "Proposal",
   "body": "Dear Alice, ...",
-  "bodyHtml": "<p>Dear Alice, ...</p>",
   "replyToMessageId": "<optional>"
 }
 ```
@@ -133,15 +131,14 @@ Risk: **low**.
 ---
 
 ### `gmail.update_draft`
-Fully replace a draft's contents (subject, body, recipients). Set optional `bodyHtml` (must contain non-whitespace content) to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. This is a full overwrite, not a patch.
+Fully replace a draft's contents (subject, body, recipients). Write Markdown in `body`. Gmail preserves it as `text/plain` and renders safe HTML as `text/html`. Raw HTML is escaped. Do not pass `bodyHtml`. This is a full overwrite, not a patch.
 
 ```json
 {
   "draftId": "r8765432109",
   "to": "alice@example.com",
   "subject": "Updated Proposal",
-  "body": "Dear Alice, revised text...",
-  "bodyHtml": "<p>Dear Alice, revised text...</p>"
+  "body": "Dear Alice, revised text..."
 }
 ```
 

@@ -24,9 +24,11 @@
     "@valet/engine": "workspace:*",
     "@valet/shared": "workspace:*",
     "@valet/workflow": "workspace:*",
+    "markdown-it": "^14.1.0",
     "typebox": "^1.1.24"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }
