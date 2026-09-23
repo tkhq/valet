@@ -8,6 +8,7 @@ import { pluginStore } from "./plugin-store.js";
 
 const COLLECTION = "linked-drive-files";
 const WORKFLOW_COLLECTION = "linked-drive-workflow-files";
+const WORKFLOW_QUOTA_COLLECTION = "linked-drive-workflow-file-quotas";
 const THREADS = "linked-drive-threads";
 const ID = /^[a-zA-Z0-9_-]+$/;
 const MAX_WORKFLOW_FILE_REFS = 100;
@@ -88,14 +89,14 @@ function workflowGrantKey(runId: string, fileId: string): string {
 }
 
 function workflowGrantQuotaKey(runId: string): string {
-  return JSON.stringify([runId, "_quota"]);
+  return runId;
 }
 
 function workflowFileIdFromKey(runId: string, key: string): string | null {
   try {
     const parsed: unknown = JSON.parse(key);
     return Array.isArray(parsed) && parsed.length === 2 && parsed[0] === runId
-      && typeof parsed[1] === "string" && parsed[1] !== "_quota" && ID.test(parsed[1]) ? parsed[1] : null;
+      && typeof parsed[1] === "string" && ID.test(parsed[1]) ? parsed[1] : null;
   } catch {
     return null;
   }
@@ -233,12 +234,12 @@ export class GoogleWorkspaceLinkScope {
       const now = Date.now();
       await tx.insert(pluginStoreRows).values({
         id: randomUUID(), plugin: "valet", scopeType: "org", scopeId: orgId,
-        collection: WORKFLOW_COLLECTION, key: quotaKey, doc: { fileIds: [] }, revision: 1,
+        collection: WORKFLOW_QUOTA_COLLECTION, key: quotaKey, doc: { fileIds: [] }, revision: 1,
         createdAt: now, updatedAt: now,
       }).onConflictDoNothing();
       const [quota] = await tx.select({ doc: pluginStoreRows.doc }).from(pluginStoreRows).where(and(
         eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
-        eq(pluginStoreRows.collection, WORKFLOW_COLLECTION), eq(pluginStoreRows.key, quotaKey),
+        eq(pluginStoreRows.collection, WORKFLOW_QUOTA_COLLECTION), eq(pluginStoreRows.key, quotaKey),
       )).for("update");
       if (!quota) throw new Error("workflow Drive grant quota was not created");
       const existing = await tx.select({ key: pluginStoreRows.key }).from(pluginStoreRows).where(and(
@@ -250,7 +251,7 @@ export class GoogleWorkspaceLinkScope {
       if (additions.length === 0) return;
       await tx.update(pluginStoreRows).set({ doc: { fileIds: [...granted, ...additions] }, revision: sql`${pluginStoreRows.revision} + 1`, updatedAt: now }).where(and(
         eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
-        eq(pluginStoreRows.collection, WORKFLOW_COLLECTION), eq(pluginStoreRows.key, quotaKey),
+        eq(pluginStoreRows.collection, WORKFLOW_QUOTA_COLLECTION), eq(pluginStoreRows.key, quotaKey),
       ));
       for (const fileId of additions) {
         await tx.insert(pluginStoreRows).values({

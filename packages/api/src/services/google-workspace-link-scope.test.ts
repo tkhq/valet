@@ -160,6 +160,7 @@ describe("linked Drive scope", () => {
       result: { ok: true, result: { description: "Review https://docs.google.com/document/d/from-linear/edit" } },
     });
     expect((await read.execute({ documentId: "from-linear" }, workflowContext)).success).toBe(true);
+    expect((await read.execute({ documentId: "_quota" }, workflowContext)).success).toBe(false);
     expect((await read.execute({ documentId: "not-in-linear" }, workflowContext)).success).toBe(false);
 
     run.params.input = {
