@@ -188,19 +188,19 @@ describe("linked Drive scope", () => {
     });
     expect((await read.execute({ documentId: "other-action" }, workflowContext)).success).toBe(false);
 
-    run = { ...run, runId: "run-cap" };
-    const capContext = context({ sessionId: "wf:run-cap:fetch", sessionPurpose: "workflow" });
+    run = { ...run, runId: "run_01J2Q5A7K3M8N4P6R9S0T1V2W3" };
+    const capContext = context({ sessionId: "wf:run_01J2Q5A7K3M8N4P6R9S0T1V2W3:fetch", sessionPurpose: "workflow" });
     const firstLinks = Array.from({ length: 100 }, (_, i) => `https://docs.google.com/document/d/cap${i}/edit`).join(" ");
     const secondLinks = Array.from({ length: 100 }, (_, i) => `https://docs.google.com/document/d/cap${i + 100}/edit`).join(" ");
-    await Promise.all([["workflow:run-cap:cap-a", firstLinks], ["workflow:run-cap:cap-b", secondLinks]].map(([invocationId, description]) =>
+    await Promise.all([["workflow:run_01J2Q5A7K3M8N4P6R9S0T1V2W3:cap-a", firstLinks], ["workflow:run_01J2Q5A7K3M8N4P6R9S0T1V2W3:cap-b", secondLinks]].map(([invocationId, description]) =>
       scope.recordCanonicalWorkflowAction({
         request: { invocationId, service: "linear", action: "linear.get_issue", params: {} },
-        context: { orgId: "org1", owner, workflowExecutionId: "run-cap" },
+        context: { orgId: "org1", owner, workflowExecutionId: "run_01J2Q5A7K3M8N4P6R9S0T1V2W3" },
         result: { ok: true, result: { description } },
       }),
     ));
     const grants = await pluginStore(db, "valet").org("org1").list("linked-drive-workflow-files", { limit: 200 });
-    expect(grants.items.filter((grant) => grant.key.includes("run-cap") && (grant.doc as { source?: string }).source === "linear_issue_description")).toHaveLength(100);
+    expect(grants.items.filter((grant) => grant.key.includes("run_01J2Q5A7K3M8N4P6R9S0T1V2W3") && (grant.doc as { source?: string }).source === "linear_issue_description")).toHaveLength(100);
     expect((await read.execute({ documentId: "cap99" }, capContext)).success).toBe(true);
     expect((await read.execute({ documentId: "cap100" }, capContext)).success).toBe(false);
   });

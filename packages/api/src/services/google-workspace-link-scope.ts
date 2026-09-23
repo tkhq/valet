@@ -228,7 +228,7 @@ export class GoogleWorkspaceLinkScope {
     if (fileIds.length === 0) return;
     const quotaKey = workflowGrantQuotaKey(runId);
     const prefix = JSON.stringify([runId]).slice(0, -1);
-    const escapedPrefix = prefix.replace(/([\\%_])/g, "\\\\$1");
+    const escapedPrefix = prefix.replace(/([\\%_])/g, "\\$1");
     await this.deps.db.transaction(async (tx) => {
       const now = Date.now();
       await tx.insert(pluginStoreRows).values({
