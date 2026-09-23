@@ -18,6 +18,7 @@ import {
   parseAssistantSessionId,
   SANDBOX_READY_TIMEOUT_MS,
   type ActionPlugin,
+  type ChannelOrigin,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -181,6 +182,20 @@ function isGatePromptRef(value: unknown): value is GatePromptRef {
 
 type OriginReplyState = "none" | "pending" | "succeeded" | "failed";
 
+function successfulToolCall(
+  part: Extract<
+    NonNullable<Extract<SessionEntry, { type: "message" }>["parts"]>[number],
+    { type: "tool_call" }
+  >,
+): boolean {
+  return (
+    part.status === "completed" &&
+    isRecord(part.result) &&
+    isRecord(part.result.details) &&
+    part.result.details.ok === true
+  );
+}
+
 /** Classify explicit origin delivery across every assistant entry in a submission. */
 function originReplyState(entries: SessionEntry[], queueItemId: string): OriginReplyState {
   const calls = entries.flatMap((entry) => {
@@ -195,17 +210,67 @@ function originReplyState(entries: SessionEntry[], queueItemId: string): OriginR
   if (
     calls.some(
       (part) =>
-        part.type === "tool_call" &&
-        part.status === "completed" &&
-        isRecord(part.result) &&
-        isRecord(part.result.details) &&
-        part.result.details.ok === true,
+        part.type === "tool_call" && successfulToolCall(part),
     )
   ) {
     return "succeeded";
   }
   if (calls.some((part) => part.type === "tool_call" && part.status === "running")) return "pending";
   return "failed";
+}
+
+function sameOriginSend(toolId: string, args: Record<string, unknown>, origin: ChannelOrigin): boolean {
+  if (toolId !== `${origin.channelType}.send_message`) return false;
+  const params = isRecord(args.params) ? args.params : undefined;
+  if (!params || typeof params.channel !== "string") return false;
+  const prefix = `${origin.channelType}:`;
+  if (!origin.threadKey.startsWith(prefix)) return false;
+  const [channel, threadTs] = origin.threadKey.slice(prefix.length).split(":", 2);
+  if (params.channel !== channel) return false;
+  return threadTs === undefined || params.thread_ts === threadTs;
+}
+
+/** True when this submission successfully posted, reacted, or sent a DM. */
+function turnCompletedChannelAction(
+  entries: SessionEntry[],
+  queueItemId: string,
+  origin: ChannelOrigin,
+): boolean {
+  return entries.some((entry) => {
+    if (entry.type !== "message" || entry.role !== "assistant" || entry.queueItemId !== queueItemId) return false;
+    return (entry.parts ?? []).some((part) => {
+      if (part.type !== "tool_call" || !successfulToolCall(part) || !isRecord(part.args)) return false;
+      const toolId = part.args.tool_id;
+      if (typeof toolId !== "string" || !toolId.startsWith(`${origin.channelType}.`)) return false;
+      return (
+        toolId.endsWith(".reply_to_origin") ||
+        toolId.endsWith(".react_to_origin") ||
+        toolId.endsWith(".dm_owner") ||
+        toolId.endsWith(".dm_user") ||
+        sameOriginSend(toolId, part.args, origin)
+      );
+    });
+  });
+}
+
+function turnPromptIsFeedback(entries: SessionEntry[], queueItemId: string): boolean {
+  return entries.some(
+    (entry) =>
+      entry.type === "message" &&
+      entry.role === "user" &&
+      entry.queueItemId === queueItemId &&
+      (entry.signal?.signalType === "channel.reply_dropped" || entry.signal?.attributes?.feedback !== undefined),
+  );
+}
+
+function boundedDeliveryReason(error: unknown): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  const safe = reason
+    .replace(/https?:\/\/\S+/gi, "[redacted-url]")
+    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, "[redacted-value]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return safe.slice(0, 160) || "unknown transport error";
 }
 
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
@@ -648,8 +713,8 @@ export class ChannelHost {
     const triggerEntry = trigger.messageId === undefined
       ? undefined
       : entries.find(
-          (entry) =>
-            entry.id === trigger.messageId && entry.type === "message" && entry.role === "assistant",
+          (entry): entry is Extract<SessionEntry, { type: "message" }> =>
+            entry.type === "message" && entry.role === "assistant" && entry.id === trigger.messageId,
         );
     const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
     if (!queueItemId) return;
@@ -673,7 +738,22 @@ export class ChannelHost {
     );
     if (!first || first.type !== "message" || !first.content) return;
     const origin = turnOrigin(entries, queueItemId);
-    if (!origin || origin.reply === "manual") return;
+    if (!origin) return;
+    if (origin.reply === "manual") {
+      if (
+        triggerEntry?.stopReason === "end_turn" &&
+        !turnCompletedChannelAction(entries, queueItemId, origin) &&
+        !turnPromptIsFeedback(entries, queueItemId)
+      ) {
+        await this.submitReplyFeedback(sessionId, thread.key, origin, {
+          dispatchId: `feedback:reply-dropped:${queueItemId}`,
+          body:
+            `Your response was not posted to ${origin.threadKey}. ` +
+            `Call ${origin.channelType}.reply_to_origin with the response text to post it.`,
+        });
+      }
+      return;
+    }
 
     const explicit = originReplyState(entries, queueItemId);
     if (explicit === "pending" || explicit === "succeeded") return;
@@ -685,10 +765,56 @@ export class ChannelHost {
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.assistantSenderIdentity(sessionId);
-    await transport.send(target.conversationKey, {
-      markdown: first.content,
-      ...(sender !== undefined ? { sender } : {}),
-    });
+    try {
+      await transport.send(target.conversationKey, {
+        markdown: first.content,
+        ...(sender !== undefined ? { sender } : {}),
+      });
+    } catch (error) {
+      const reason = boundedDeliveryReason(error);
+      try {
+        const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+        await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, reason);
+      } catch (dropError) {
+        console.error("[channels] reply failure drop-log failed", dropError);
+      }
+      await this.submitReplyFeedback(sessionId, thread.key, origin, {
+        dispatchId: `feedback:reply-failed:${queueItemId}`,
+        body:
+          `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. ` +
+          `Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
+      });
+    }
+  }
+
+  /** Submit one manual, digest-exempt recovery turn on the same assistant thread. */
+  private async submitReplyFeedback(
+    sessionId: string,
+    threadKey: string,
+    origin: ChannelOrigin,
+    feedback: { dispatchId: string; body: string },
+  ): Promise<void> {
+    try {
+      const session = this.deps.engineHost.liveSession(sessionId);
+      if (!session) return;
+      await session.thread(threadKey).submitPrompt(
+        {
+          kind: "signal",
+          signalType: "channel.reply_dropped",
+          body: feedback.body,
+          tagName: "delivery_failure",
+          attributes: { feedback: "reply_dropped" },
+          origin: {
+            channelType: origin.channelType,
+            threadKey: origin.threadKey,
+            reply: "manual",
+          },
+        },
+        { dispatchId: feedback.dispatchId },
+      );
+    } catch (error) {
+      console.error("[channels] reply-dropped feedback failed", error);
+    }
   }
 
   /**

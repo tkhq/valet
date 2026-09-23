@@ -136,6 +136,19 @@ default for actual overheard content. They can reply to an explicit mention, a
 direct request, or a follow-up from the only other participant shown in thread
 context. The agent must call a channel action to post.
 
+**Dropped-reply feedback (TKAI-553).** When a terminal manual-delivery turn
+contains assistant text but no successful channel action, the host submits one
+`channel.reply_dropped` signal on the same assistant thread. The signal uses
+manual delivery, bypasses overheard digests, and tells the agent to call the
+origin service's `reply_to_origin` action. A successful origin reply,
+reaction, same-origin send, or DM suppresses the signal. The submission ID
+makes duplicate terminal events idempotent. A feedback-triggered turn cannot
+submit another feedback signal.
+
+If an addressed first-response send fails before text lands, the host submits
+the same feedback signal with a bounded, redacted reason. It does not change
+the existing first-response selection or delivery rules.
+
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the
 tool context, so explicit origin actions work for both paths.
@@ -274,7 +287,7 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
 ## Testing
 
 - **Engine.** Channel-signal origins reach the tool context.
-- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. A manual-delivery turn has no automatic post.
+- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. A swallowed manual-delivery response submits one feedback signal. Successful channel actions suppress it. Failed addressed delivery submits one actionable signal. Duplicate terminal events and feedback turns do not create extra signals.
   Command results and gate cards retain their existing surface checks.
 - **Slack.** `reply_to_origin` posts text exactly once.
   `reply_file_to_origin` uploads a sandbox file exactly once.

@@ -74,7 +74,8 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("only other participant's follow-up");
     expect(persona).toContain("telegram.reply_to_origin");
     expect(persona).toContain("reply_file_to_origin");
-    expect(persona).not.toContain("delivery_failure");
+    expect(persona).toContain("A `delivery_failure` note means your response was not posted");
+    expect(persona).toContain("origin service's reply_to_origin action");
   });
 
   it("tells the model to check list_tools before denying a capability", () => {

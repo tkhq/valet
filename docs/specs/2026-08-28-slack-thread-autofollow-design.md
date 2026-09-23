@@ -249,6 +249,20 @@ digest. A redelivery whose recomputed body differs from the first delivery
 (the cursor advanced, so the prefix is gone) hits the dispatchId content
 check; the follow-router swallows that `ConflictError` as a clean dedup.
 
+### Dropped-reply feedback (TKAI-553, restored 2026-09-23)
+
+A terminal manual-delivery turn that writes assistant text without a successful
+channel action submits one `channel.reply_dropped` signal on the same assistant
+thread. The signal tells the agent to call `slack.reply_to_origin`. It uses
+manual delivery and bypasses overheard digests. Its submission ID deduplicates
+terminal-event redelivery. A feedback-triggered turn cannot submit more
+feedback. Successful origin replies, reactions, same-origin sends, and DMs
+suppress the signal.
+
+An addressed automatic send failure submits equivalent feedback when no text
+lands. The feedback includes a bounded, redacted transport reason. Addressed
+first-response behavior does not otherwise change.
+
 ### First-turn seed hardening (TKAI-284, added 2026-09-01)
 
 `deliverToAssistantThread` serializes deliveries per assistant thread with an
@@ -270,7 +284,8 @@ admit and claim. Two rapid mentions on one new thread seed the transcript once.
 ## Testing
 
 - Origin `reply`/`messageTs` round-trip. Addressed turns post only the first
-  assistant text. Overheard turns stay internal without an explicit action.
+  assistant text. A swallowed manual-delivery response submits one deduplicated
+  feedback signal. Successful channel actions and feedback turns submit none.
 - Dispatcher writes a `followed_threads` row for a follow-enabled mention;
   writes none when `follow` is off.
 - Follow-router: a threaded channel message on a followed thread delivers to the
