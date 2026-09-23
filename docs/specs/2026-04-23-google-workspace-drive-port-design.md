@@ -148,8 +148,13 @@ Existing action policies and approvals still apply; an approval cannot bypass th
 
 Workflow tool and session nodes resolve their stored run origin to the same team assistant thread.
 The wrapper verifies the run's team, the definition's organization/team, and the origin session's ownership.
-Runs without an origin, unattended event-triggered runs, and ordinary child sessions cannot use this integration.
-For the supported workflow, start it from the conversation that linked the file.
+A workflow can also use a direct file URL from its canonical trigger `refs` bag.
+A successful Linear action can add direct file URLs from its result to that run only.
+The wrapper records these grants by organization, run ID, and file ID.
+It does not scan arbitrary trigger payloads, other action results, or attachments.
+Runs without an origin can use only these run-bound references.
+Ordinary child sessions cannot use this integration.
+For the conversation path, start the workflow from the conversation that linked the file.
 Use `workflows.start_run` from that conversation so the backend records the origin.
 
 This restriction assumes trusted participants. Posting a link authorizes the connected account to access that file.

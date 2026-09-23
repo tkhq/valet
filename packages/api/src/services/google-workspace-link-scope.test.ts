@@ -140,6 +140,40 @@ describe("linked Drive scope", () => {
     expect((await action(scope).execute({ documentId: "fileA" }, context({ sessionId: "wf:run1:review", sessionPurpose: "workflow" }))).success).toBe(false);
   });
 
+  it("propagates Linear issue links to the same run and accepts explicit trigger refs", async () => {
+    await db.insert(workflowDefinitions).values({ id: "def-linear", orgId: "org1", ownerType: "team", ownerId: "legal", name: "review", definition: {}, createdAt: 0, updatedAt: 0 });
+    run = {
+      runId: "run-linear", status: "running", waitingOn: [], updatedAt: 0,
+      params: {
+        workflowId: "def-linear", definitionVersionId: "v1",
+        input: { type: "manual", data: { key: "linear.issue.create", refs: {}, payload: { identifier: "LEG-11" } } },
+      },
+      definition: {}, definitionVersionId: "v1", attempt: 1, wakeRequested: false, createdAt: 0,
+      owner: { ownerType: "team", ownerId: "legal" },
+    };
+    const linearExecute = vi.fn(async () => ({ success: true as const, data: { description: "Review https://docs.google.com/document/d/from-linear/edit" } }));
+    const linear: ValetPlugin = {
+      name: "linear", version: "1", actions: [{ service: "linear", actions: [{
+        id: "linear.get_issue", name: "Get issue", description: "Get issue", riskLevel: "low", parameters: Type.Object({}), execute: linearExecute,
+      }] }],
+    };
+    const wrapped = scope.wrapPlugins([linear, fixturePlugin()]);
+    const linearAction = wrapped[0]?.actions?.[0]?.actions?.[0];
+    const read = wrapped[1]?.actions?.[0]?.actions?.find((candidate) => candidate.id === "docs.read_document");
+    if (!linearAction || !read) throw new Error("fixture actions missing");
+    const workflowContext = context({ sessionId: "wf:run-linear:fetch", sessionPurpose: "workflow" });
+    expect((await linearAction.execute({}, workflowContext)).success).toBe(true);
+    expect(linearExecute).toHaveBeenCalledOnce();
+    expect((await read.execute({ documentId: "from-linear" }, workflowContext)).success).toBe(true);
+    expect((await read.execute({ documentId: "not-in-linear" }, workflowContext)).success).toBe(false);
+
+    run.params.input = {
+      type: "manual",
+      data: { key: "linear.issue.create", refs: { contract: "https://drive.google.com/file/d/explicit-ref/view" }, payload: { identifier: "LEG-12" } },
+    };
+    expect((await read.execute({ documentId: "explicit-ref" }, workflowContext)).success).toBe(true);
+  });
+
   it("guards the real Google actions and never follows embedded links or shortcuts", async () => {
     const real: ValetPlugin = { name: "google-workspace", version: "1", actions: [googleWorkspacePlugin] };
     await scope.recordSlackMessage("org1", slackMessage("https://docs.google.com/document/d/fileA/edit"));
