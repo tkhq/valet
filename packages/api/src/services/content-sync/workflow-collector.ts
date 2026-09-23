@@ -49,6 +49,7 @@ import {
 } from "../../schema/index.js";
 import {
   disarmWorkflowTriggers,
+  hasUnsettledWorkflowRun,
   newWorkflowId,
   purgeWorkflowRows,
 } from "../../workflows/service.js";
@@ -75,11 +76,6 @@ import type {
 
 /** The two roots that hold definitions. */
 const WORKFLOW_ROOTS = [".valet/workflows", "workflows"] as const;
-
-/** A run in one of these has not settled, so the workflow that holds it is
- * disarmed rather than deleted. Mirrors the `has_active_runs` guard in
- * `workflows/service.ts`. */
-const UNSETTLED = ["pending", "running", "parked", "terminalizing"] as const;
 
 export interface WorkflowCollectorDeps {
   /**
@@ -847,7 +843,7 @@ async function workflowsWithUnsettledRuns(db: AppDb, ids: string[]): Promise<Set
   const rows = await db
     .select({ workflowId: workflowRuns.workflowId })
     .from(workflowRuns)
-    .where(and(inArray(workflowRuns.workflowId, ids), inArray(workflowRuns.status, [...UNSETTLED])));
+    .where(and(inArray(workflowRuns.workflowId, ids), hasUnsettledWorkflowRun()));
   return new Set(rows.map((row) => row.workflowId));
 }
 

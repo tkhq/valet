@@ -12,6 +12,7 @@ import {
   teamMembers,
   teams,
   workflowDefinitions,
+  workflowRuns,
   workflowSchedules,
   workflowWebhooks,
 } from "../schema/index.js";
@@ -74,6 +75,71 @@ afterAll(async () => {
 });
 
 describe("deleteWorkflowDefinition trigger cleanup", () => {
+  it("keeps a terminalizing run with a reserved outcome as history", async () => {
+    const def = await createWorkflowDefinition(deps, OWNER, {
+      name: "terminalizing-history",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+    });
+    const now = Date.now();
+    await db.insert(workflowRuns).values({
+      id: "wfrun_terminalizing_history",
+      workflowId: def.id,
+      definitionVersionId: "v1",
+      definition: def.definition,
+      params: {},
+      status: "terminalizing",
+      outcome: "completed",
+      ownerType: "user",
+      ownerId: OWNER.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(await deleteWorkflowDefinition(deps, OWNER, def.id)).toBe("deleted");
+    expect(await deps.workflowStore.getRun("wfrun_terminalizing_history")).toMatchObject({
+      status: "terminalizing",
+      outcome: "completed",
+    });
+  });
+
+  it("refuses while a run can still execute workflow work", async () => {
+    const def = await createWorkflowDefinition(deps, OWNER, {
+      name: "parked-run",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+    });
+    await deps.workflowStore.createRun(
+      "wfrun_parked_delete",
+      { workflowId: def.id, definitionVersionId: "v1" },
+      def.definition,
+      "v1",
+      { ownerType: "user", ownerId: OWNER.userId },
+    );
+
+    expect(await deleteWorkflowDefinition(deps, OWNER, def.id)).toBe("has_active_runs");
+  });
+
+  it("refuses a terminalizing run until it reserves an outcome", async () => {
+    const def = await createWorkflowDefinition(deps, OWNER, {
+      name: "incomplete-terminalization",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+    });
+    const now = Date.now();
+    await db.insert(workflowRuns).values({
+      id: "wfrun_incomplete_terminalization",
+      workflowId: def.id,
+      definitionVersionId: "v1",
+      definition: def.definition,
+      params: {},
+      status: "terminalizing",
+      ownerType: "user",
+      ownerId: OWNER.userId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(await deleteWorkflowDefinition(deps, OWNER, def.id)).toBe("has_active_runs");
+  });
+
   it("deletes schedules and event-trigger subscriptions for the workflow", async () => {
     const def = await createWorkflowDefinition(deps, OWNER, {
       name: "trigger-cleanup-test",
