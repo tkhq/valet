@@ -341,66 +341,89 @@ if (upstream) gitSpawn(["branch", "--set-upstream-to", remote + "/" + branch, so
 
 /** Git shim for unsigned modes. It records a successful ordinary branch push. */
 export function observedGitWrapperScript(apiUrl: string): string {
-  return String.raw`#!/usr/bin/env node
-// Valet Git wrapper. Workspace prep preserves the image Git before install.
-const { execFileSync, spawnSync } = require("node:child_process");
-const fs = require("node:fs");
-const path = require("node:path");
-const real = "__REAL_GIT__";
-const args = process.argv.slice(2);
-${gitInvocationParserScript(false)}
-const invocation = parseGitInvocation(args);
-function finish(result) {
-  if (result.error) { console.error(result.error.message); process.exit(1); }
-  if (result.signal) { process.kill(process.pid, result.signal); return; }
-  process.exit(result.status ?? 1);
+  return `#!/bin/sh
+# Valet Git wrapper. Parse a function-local argv copy and keep the original argv intact.
+real=${REAL_GIT_PATH}
+git_command() {
+  while [ \$# -gt 0 ]; do
+    case "$1" in
+      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env) [ \$# -ge 2 ] || { echo other; return; }; shift 2 ;;
+      -C?*|-c?*|--git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--bare|--no-pager|--paginate|-p|-P|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice) shift ;;
+      --) shift; break ;;
+      -*) echo other; return ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "\${1:-other}"
 }
-if (!invocation) finish(spawnSync(real, args, { stdio: "inherit", env: process.env }));
-const globalArgs = invocation.globalArgs;
-const gitExec = (gitArgs, options) => execFileSync(real, [...globalArgs, ...gitArgs], options);
-const gitSpawn = (gitArgs, options) => spawnSync(real, [...globalArgs, ...gitArgs], options);
-let callArgs = args; let env = process.env;
-if (invocation.command === "commit") {
-  const found = gitSpawn(["rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
-  if (found.status === 0) {
-    const gitDir = found.stdout.trim(); const managedDir = gitDir + "/valet-hooks";
-    if (fs.existsSync(managedDir + "/valet-prepare-commit-msg")) {
-      if (process.env.VALET_HOOK_DISPATCH_ACTIVE === "1") {
-        const original = process.env.VALET_REPO_HOOKS_DIR;
-        if (original) callArgs = [...globalArgs, "-c", "core.hooksPath=" + original, invocation.command, ...invocation.commandArgs];
-      } else {
-        const top = gitExec(["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-        const configured = gitSpawn(["config", "--path", "--get", "core.hooksPath"], { encoding: "utf8" });
-        const configuredDir = configured.status === 0 ? configured.stdout.trim() : gitDir + "/hooks";
-        const original = path.isAbsolute(configuredDir) ? configuredDir : path.resolve(top, configuredDir);
-        if (original !== managedDir) {
-          callArgs = [...globalArgs, "-c", "core.hooksPath=" + managedDir, invocation.command, ...invocation.commandArgs];
-          env = { ...process.env, VALET_REPO_HOOKS_DIR: original };
-        }
-      }
-    }
-  }
-}
-const result = spawnSync(real, callArgs, { stdio: "inherit", env });
-if (result.error || result.signal || result.status !== 0 || invocation.command !== "push") finish(result);
-const rest = invocation.commandArgs; const positional = rest.filter((arg) => arg !== "-u" && arg !== "--set-upstream");
-if (rest.some((arg) => arg.startsWith("-") && arg !== "-u" && arg !== "--set-upstream") || positional.length > 2) process.exit(0);
-const remote = positional[0] || "origin"; const spec = positional[1] || "HEAD";
-if (spec.startsWith(":") || spec.endsWith(":") || spec.includes("*") || spec.startsWith("+") || spec.includes("^")) process.exit(0);
-const pieces = spec.split(":"); if (pieces.length > 2) process.exit(0);
-const src = pieces[0] || "HEAD";
-let destination = pieces[1];
-if (!destination) destination = src === "HEAD" ? gitExec(["symbolic-ref", "--short", "HEAD"], { encoding: "utf8" }).trim() : src.replace(/^refs\/heads\//u, "");
-if (destination.startsWith("refs/tags/") || (destination.startsWith("refs/") && !destination.startsWith("refs/heads/"))) process.exit(0);
-const targetRef = destination.startsWith("refs/heads/") ? destination : "refs/heads/" + destination;
-let headSha, remoteUrl;
-try { headSha = gitExec(["rev-parse", "--verify", src + "^{commit}"], { encoding: "utf8" }).trim(); remoteUrl = gitExec(["remote", "get-url", remote], { encoding: "utf8" }).trim(); } catch { process.exit(0); }
-const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/iu); if (!match) process.exit(0);
-const repoFullName = match[1] + "/" + match[2];
-let token = process.env.VALET_SANDBOX_TOKEN || "";
-try { token = fs.readFileSync("/etc/valet/creds/token", "utf8").trim() || token; } catch {}
-if (!token) process.exit(0);
-spawnSync("curl", ["--max-time", "10", "-fsS", "-X", "POST", "__API__/api/sandbox/git-push/observe", "-H", "x-valet-sandbox: " + token, "-H", "Content-Type: application/json", "-d", JSON.stringify({ repoFullName, targetRef, headSha })], { stdio: "ignore" });
-process.exit(0);
-`.replace("__REAL_GIT__", REAL_GIT_PATH).replaceAll("__API__", apiUrl.replace(/\/$/u, ""));
+git_context() (
+  operation=$1; shift; configured=
+  while [ \$# -gt 0 ]; do
+    case "$1" in
+      -C) [ \$# -ge 2 ] || exit 1; cd "$2" || exit 1; shift 2 ;;
+      -C?*) cd "\${1#-C}" || exit 1; shift ;;
+      -c) [ \$# -ge 2 ] || exit 1; case "$2" in core.hooksPath=*) configured=\${2#core.hooksPath=} ;; esac; shift 2 ;;
+      -c?*) case "\${1#-c}" in core.hooksPath=*) configured=\${1#-ccore.hooksPath=} ;; esac; shift ;;
+      --git-dir|--work-tree|--namespace|--super-prefix|--config-env) shift 2 ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--bare|--no-pager|--paginate|-p|-P|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice) shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  case "$operation" in
+    git-dir) "$real" rev-parse --absolute-git-dir ;;
+    top) "$real" rev-parse --show-toplevel ;;
+    hooks) [ -n "$configured" ] && printf '%s\\n' "$configured" || "$real" config --path --get core.hooksPath ;;
+  esac
+)
+command=\$(git_command "$@")
+if [ "$command" = commit ]; then
+  git_dir=\$(git_context git-dir "$@" 2>/dev/null) || git_dir=
+  managed="$git_dir/valet-hooks"
+  if [ -n "$git_dir" ] && [ -x "$managed/valet-prepare-commit-msg" ]; then
+    if [ "\${VALET_HOOK_DISPATCH_ACTIVE:-}" = 1 ]; then
+      if [ -n "\${VALET_REPO_HOOKS_DIR:-}" ]; then
+        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$VALET_REPO_HOOKS_DIR" exec "$real" "$@"
+      fi
+    else
+      configured=\$(git_context hooks "$@" 2>/dev/null) || configured="$git_dir/hooks"
+      case "$configured" in /*) original="$configured" ;; *) top=\$(git_context top "$@"); original="$top/$configured" ;; esac
+      if [ "$original" != "$managed" ]; then
+        VALET_REPO_HOOKS_DIR="$original" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$managed" exec "$real" "$@"
+      fi
+    fi
+  fi
+fi
+[ "$command" = push ] || exec "$real" "$@"
+"$real" "$@"
+status=\$?
+[ \$status -eq 0 ] || exit \$status
+observe_push() (
+  while [ \$# -gt 0 ]; do
+    case "$1" in
+      -C) cd "$2" || exit 0; shift 2 ;; -C?*) cd "\${1#-C}" || exit 0; shift ;;
+      -c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env) shift 2 ;;
+      -c?*|--git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--bare|--no-pager|--paginate|-p|-P|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice) shift ;;
+      --) shift; break ;; push) shift; break ;; *) exit 0 ;;
+    esac
+  done
+  remote=origin; spec=HEAD
+  while [ \$# -gt 0 ]; do case "$1" in -u|--set-upstream) shift ;; -*) exit 0 ;; *) remote=$1; shift; [ \$# -eq 0 ] || { spec=$1; shift; }; break ;; esac; done
+  [ \$# -eq 0 ] || exit 0
+  case "$spec" in :*|*:|*\\**|+*|*^*) exit 0 ;; *:*) src=\${spec%%:*}; dst=\${spec#*:} ;; *) src=$spec; dst= ;; esac
+  [ -n "$src" ] || src=HEAD
+  if [ -z "$dst" ]; then if [ "$src" = HEAD ]; then dst=\$("$real" symbolic-ref --short HEAD 2>/dev/null) || exit 0; else dst=\${src#refs/heads/}; fi; fi
+  case "$dst" in refs/tags/*|refs/*) case "$dst" in refs/heads/*) ;; *) exit 0 ;; esac ;; esac
+  case "$dst" in refs/heads/*) target_ref=$dst ;; *) target_ref=refs/heads/$dst ;; esac
+  head_sha=\$("$real" rev-parse --verify "$src^{commit}" 2>/dev/null) || exit 0
+  url=\$("$real" remote get-url "$remote" 2>/dev/null) || exit 0
+  repo=\$(printf '%s' "$url" | sed -n 's#.*github\\.com[/:]\\([^/]*\\)/\\([^/]*\\)\\(.git\\)\\?$#\\1/\\2#p'); repo=\${repo%.git}
+  [ -n "$repo" ] || exit 0
+  ${SANDBOX_TOKEN_READ_SH}
+  [ -n "$tok" ] || exit 0
+  curl --max-time 10 -fsS -X POST "${apiUrl.replace(/\/$/u, "")}/api/sandbox/git-push/observe" -H "x-valet-sandbox: $tok" -H "Content-Type: application/json" -d "{\\"repoFullName\\":\\"$repo\\",\\"targetRef\\":\\"$target_ref\\",\\"headSha\\":\\"$head_sha\\"}" >/dev/null 2>&1 || true
+)
+observe_push "$@"
+exit 0
+`;
 }

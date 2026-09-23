@@ -175,10 +175,10 @@ if (args[0] === "stdin") process.stdout.write(fs.readFileSync(0));
 if (args[0]?.startsWith("exit-")) process.exit(Number(args[0].slice(5)));
 if (args[0] === "signal") process.kill(process.pid, "SIGTERM");
 `, { mode: 0o755 });
-    const script = generate(API_URL).replace(
-      `const real = ${JSON.stringify(REAL_GIT_PATH)};`,
-      `const real = ${JSON.stringify(real)};`,
-    );
+    const generated = generate(API_URL);
+    const script = generated.startsWith("#!/bin/sh")
+      ? generated.replace(`real=${REAL_GIT_PATH}`, `real=${real}`)
+      : generated.replace(`const real = ${JSON.stringify(REAL_GIT_PATH)};`, `const real = ${JSON.stringify(real)};`);
     writeFileSync(wrapper, script, { mode: 0o755 });
     return { dir, wrapper, capture };
   }
