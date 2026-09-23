@@ -1,3 +1,5 @@
+import { GIT_REPLAY_MAX_BODY_BYTES, GIT_REPLAY_MAX_DECODED_BYTES, GIT_REPLAY_MAX_OBJECTS, GIT_REPLAY_MAX_TREE_ENTRIES } from "../services/git-replay-limits.js";
+
 /**
  * In-sandbox git credential surface — pure script-text generators
  * (GitHub/repo integration plan, Task 8). These produce POSIX `sh` scripts
@@ -241,8 +243,9 @@ try { invocation = parseGitInvocation(args); } catch (error) { fail(error.messag
 const globalArgs = invocation.globalArgs;
 const gitExec = (gitArgs, options) => execFileSync(real, [...globalArgs, ...gitArgs], options);
 const gitSpawn = (gitArgs, options) => spawnSync(real, [...globalArgs, ...gitArgs], options);
+const COMMIT_CREATING_COMMANDS = new Set(["commit", "merge", "cherry-pick", "revert", "rebase", "am"]);
 function argsWithManagedHooks() {
-  if (invocation.command !== "commit") return { args, env: process.env };
+  if (!COMMIT_CREATING_COMMANDS.has(invocation.command)) return { args, env: process.env };
   const gitDirResult = gitSpawn(["rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
   if (gitDirResult.status !== 0) return { args, env: process.env };
   const gitDir = gitDirResult.stdout.trim(); const managedDir = gitDir + "/valet-hooks";
@@ -289,6 +292,8 @@ function acquireLock() {
   fail("could not acquire reconcile lock " + lockPath + ". Verify that no signed push is active, remove the stale lock, and retry.");
 }
 acquireLock();
+(async () => {
+try {
 const src = pieces[0] || "HEAD";
 const sourceRef = src === "HEAD"
   ? gitExec(["symbolic-ref", "HEAD"], { encoding: "utf8" }).trim()
@@ -314,18 +319,29 @@ const remoteRef = "refs/valet/remote/" + branch;
 if (!createRef) gitExec(["fetch", "--quiet", remote, targetRef + ":" + remoteRef]);
 const range = createRef ? [localSha, "--not", "--remotes=" + remote] : [localSha, "^" + remoteRef];
 const commitIds = gitExec(["rev-list", "--reverse", ...range], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
-if (!commitIds.length) { console.log("Everything up-to-date"); process.exit(0); }
+if (!commitIds.length) { console.log("Everything up-to-date"); return; }
 const commits = commitIds.map((sha) => { const raw = gitExec(["cat-file", "commit", sha]); const split = raw.indexOf(Buffer.from("\n\n")); const headers = raw.subarray(0, split).toString("utf8").split("\n"); const parents = headers.filter((line) => line.startsWith("parent ")).map((line) => line.slice(7)); for (const parent of parents) if (gitSpawn(["cat-file", "-e", parent + "^{commit}"]).status !== 0) fail("commit " + sha + " has missing parent " + parent + "; fetch the complete parent history before App signing."); return { localSha: sha, treeSha: headers.find((line) => line.startsWith("tree ")).slice(5), parents, message: raw.subarray(split + 2).toString("utf8") }; });
 const objectLines = gitExec(["rev-list", "--objects", ...range], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 const ids = [...new Set(objectLines.map((line) => line.split(" ")[0]))]; const blobs = []; const trees = []; const lfsObjects = [];
 const MAX_BLOB_BYTES = 100 * 1024 * 1024; const paths = new Map(objectLines.map((line) => { const space = line.indexOf(" "); return [line.slice(0, space < 0 ? line.length : space), space < 0 ? "(unknown path)" : line.slice(space + 1)]; }));
 for (const sha of ids) { const type = gitExec(["cat-file", "-t", sha], { encoding: "utf8" }).trim(); if (type === "blob") { const size = Number(gitExec(["cat-file", "-s", sha], { encoding: "utf8" }).trim()); if (!Number.isSafeInteger(size) || size > MAX_BLOB_BYTES) fail("tracked blob " + paths.get(sha) + " is " + size + " bytes; GitHub Git Database accepts at most " + MAX_BLOB_BYTES + " bytes."); const content = gitExec(["cat-file", "blob", sha], { maxBuffer: MAX_BLOB_BYTES + 1 }); blobs.push({ sha, contentBase64: content.toString("base64") }); const pointer = content.toString("utf8").match(/^version https:\/\/git-lfs.github.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize ([0-9]+)\n?$/); if (pointer) { const file = gitDir + "/lfs/objects/" + pointer[1].slice(0, 2) + "/" + pointer[1].slice(2, 4) + "/" + pointer[1]; if (!fs.existsSync(file)) fail("LFS object " + pointer[1] + " is missing locally."); lfsObjects.push({ oid: pointer[1], size: Number(pointer[2]), contentBase64: fs.readFileSync(file).toString("base64") }); } } if (type === "tree") { const raw = gitExec(["ls-tree", "-z", sha]); const entries = raw.toString("utf8").split("\0").filter(Boolean).map((line) => { const tab = line.indexOf("\t"); const [mode, entryType, entrySha] = line.slice(0, tab).split(" "); return { path: line.slice(tab + 1), mode, type: entryType, sha: entrySha }; }); trees.push({ sha, entries }); } }
+const objectCount = blobs.length + trees.length + lfsObjects.length + commits.length;
+if (objectCount > __MAX_OBJECTS__) fail("[git_replay_object_limit] This push contains " + objectCount + " replay objects. Split it below __MAX_OBJECTS__ objects and retry.");
+const treeEntryCount = trees.reduce((total, tree) => total + tree.entries.length, 0);
+if (treeEntryCount > __MAX_TREE_ENTRIES__) fail("[git_replay_tree_limit] This push contains " + treeEntryCount + " tree entries. Split it below __MAX_TREE_ENTRIES__ entries and retry.");
+const base64Bytes = (content) => content.length === 0 ? 0 : content.length / 4 * 3 - (content.endsWith("==") ? 2 : content.endsWith("=") ? 1 : 0);
+const textBytes = (value) => Buffer.byteLength(value, "utf8");
+const decodedBytes = blobs.reduce((total, blob) => total + base64Bytes(blob.contentBase64) + textBytes(blob.sha), 0)
+  + lfsObjects.reduce((total, object) => total + base64Bytes(object.contentBase64) + textBytes(object.oid), 0)
+  + trees.reduce((total, tree) => total + textBytes(tree.sha) + tree.entries.reduce((sum, entry) => sum + textBytes(entry.path) + textBytes(entry.mode) + textBytes(entry.type) + textBytes(entry.sha), 0), 0)
+  + commits.reduce((total, commit) => total + textBytes(commit.localSha) + textBytes(commit.message) + textBytes(commit.treeSha) + commit.parents.reduce((sum, parent) => sum + textBytes(parent), 0), 0);
+if (decodedBytes > __MAX_DECODED__) fail("[git_replay_decoded_limit] This push needs " + decodedBytes + " decoded bytes. Split it below __MAX_DECODED__ bytes and retry.");
+const payloadJson = JSON.stringify({ repoFullName, targetRef, expectedRemoteSha, createRef, blobs, trees, lfsObjects, commits });
+const encodedBytes = textBytes(payloadJson);
+if (encodedBytes > __MAX_BODY__) fail("[git_replay_body_limit] This push needs " + encodedBytes + " encoded bytes. Split it below __MAX_BODY__ bytes and retry.");
 const tok = (() => { try { return fs.readFileSync("/etc/valet/creds/token", "utf8").trim(); } catch { return process.env.VALET_SANDBOX_TOKEN || ""; } })();
 if (!tok) fail("the sandbox credential is unavailable; restart the session.");
-(async () => {
-try {
-
-const response = await fetch("__API__/api/sandbox/git-push", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok }, body: JSON.stringify({ repoFullName, targetRef, expectedRemoteSha, createRef, blobs, trees, lfsObjects, commits }) }); const body = await response.json(); if (!response.ok) fail(body.error || "host replay failed");
+const response = await fetch("__API__/api/sandbox/git-push", { method: "POST", headers: { "content-type": "application/json", "content-length": String(encodedBytes), "x-valet-sandbox": tok }, body: payloadJson }); const body = await response.json(); if (!response.ok) fail(body.error || "host replay failed");
 if (gitExec(["rev-parse", sourceRef], { encoding: "utf8" }).trim() !== startSource) fail("the pushed source branch changed during replay; the signed ref is published. Retry to reconcile it.");
 if (checkedOutSource && (gitExec(["rev-parse", "HEAD"], { encoding: "utf8" }).trim() !== startHead || !gitExec(["status", "--porcelain=v1", "-z"]).equals(startStatus) || gitExec(["write-tree"], { encoding: "utf8" }).trim() !== startIndex)) fail("local HEAD, index, or working tree changed during replay; the signed ref is published. Retry to reconcile it.");
 const signedRef = "refs/valet/signed/" + branch; gitExec(["fetch", "--quiet", remote, targetRef + ":" + signedRef]);
@@ -334,9 +350,17 @@ const localTree = gitExec(["rev-parse", startSource + "^{tree}"], { encoding: "u
 gitExec(["update-ref", "refs/valet/backup/" + sourceRef.slice("refs/heads/".length), startSource]); gitExec(["update-ref", sourceRef, body.signedHeadSha, startSource]); gitExec(["update-ref", "refs/remotes/" + remote + "/" + branch, body.signedHeadSha]);
 const reconciled = await fetch("__API__/api/sandbox/git-push/" + encodeURIComponent(body.operationId) + "/reconcile", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok } }); if (!reconciled.ok) fail("the signed push was published locally, but operation reconciliation failed. Retry the push.");
 if (upstream) gitSpawn(["branch", "--set-upstream-to", remote + "/" + branch, sourceRef], { stdio: "ignore" }); console.log("To " + remoteUrl + "\n   " + expectedRemoteSha.slice(0, 7) + ".." + body.signedHeadSha.slice(0, 7) + "  " + sourceRef.slice("refs/heads/".length) + " -> " + branch);
+} catch (error) {
+  const detail = error instanceof Error ? error.message.split("\n", 1)[0] : "Unknown setup failure.";
+  fail("could not prepare or reconcile the signed push. Resolve the repository error, then retry. " + detail);
 } finally { releaseLock(); }
-})().catch((error) => fail(error.message));
-`.replace("__REAL_GIT__", REAL_GIT_PATH).replaceAll("__API__", apiUrl.replace(/\/$/u, ""));
+})();
+`.replace("__REAL_GIT__", REAL_GIT_PATH)
+  .replaceAll("__API__", apiUrl.replace(/\/$/u, ""))
+  .replaceAll("__MAX_BODY__", String(GIT_REPLAY_MAX_BODY_BYTES))
+  .replaceAll("__MAX_DECODED__", String(GIT_REPLAY_MAX_DECODED_BYTES))
+  .replaceAll("__MAX_OBJECTS__", String(GIT_REPLAY_MAX_OBJECTS))
+  .replaceAll("__MAX_TREE_ENTRIES__", String(GIT_REPLAY_MAX_TREE_ENTRIES));
 }
 
 /** Git shim for unsigned modes. It records a successful ordinary branch push. */
@@ -377,7 +401,8 @@ git_context() (
   esac
 )
 command=\$(git_command "$@")
-if [ "$command" = commit ]; then
+case "$command" in
+  commit|merge|cherry-pick|revert|rebase|am)
   git_dir=\$(git_context git-dir "$@" 2>/dev/null) || git_dir=
   managed="$git_dir/valet-hooks"
   if [ -n "$git_dir" ] && [ -x "$managed/valet-prepare-commit-msg" ]; then
@@ -393,7 +418,8 @@ if [ "$command" = commit ]; then
       fi
     fi
   fi
-fi
+  ;;
+esac
 [ "$command" = push ] || exec "$real" "$@"
 "$real" "$@"
 status=\$?

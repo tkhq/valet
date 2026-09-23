@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, sessionGitAttributionHeads, sessionGitAttributionSnapshots, teamMembers, teams } from "../schema/index.js";
+import { ensureGitSnapshot } from "../services/git-attribution.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -28,6 +29,30 @@ describe("session Git attribution authorization", () => {
     expect((await get("git-personal", "test-member")).status).toBe(200);
   });
 
+  it("keeps a pending team session read-only and snapshots the canonical actor", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "git-pending-team", orgId: "local-org", name: "Pending Git team", origin: "local", externalId: null, gitAttributionSettings: { mode: "valet_unsigned", coAuthoredBy: true }, createdAt: Date.now() });
+    await api.providers.db.insert(teamMembers).values([
+      { teamId: "git-pending-team", userId: "local-user", role: "admin" },
+      { teamId: "git-pending-team", userId: "test-member", role: "member" },
+    ]);
+    await seedSession("git-pending-session", "team", "git-pending-team", "local-user");
+    await api.providers.db.update(agentSessions).set({ gitAttributionSnapshotPending: true });
+
+    const first = await (await get("git-pending-session", "test-member")).json();
+    const second = await (await get("git-pending-session", "test-member")).json();
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({ generation: 1, counterpartUserId: "local-user", mode: "valet_unsigned", coAuthoredBy: true });
+    expect(await api.providers.db.select().from(sessionGitAttributionHeads)).toHaveLength(0);
+    expect(await api.providers.db.select().from(sessionGitAttributionSnapshots)).toHaveLength(0);
+
+    await ensureGitSnapshot(api.providers.db, "git-pending-session", "local-user");
+    const snapshots = await api.providers.db.select().from(sessionGitAttributionSnapshots);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({ counterpartUserId: "local-user", createdBy: "local-user" });
+    expect(await (await get("git-pending-session", "test-member")).json()).toMatchObject({ generation: 1, counterpartUserId: "local-user", mode: "valet_unsigned", coAuthoredBy: true });
+  });
+
   it("lets team members view but only team admins apply settings", async () => {
     api = await bootTestApi();
     await api.providers.db.insert(teams).values({ id: "git-team", orgId: "local-org", name: "Git team", origin: "local", externalId: null, createdAt: Date.now() });
@@ -35,9 +60,12 @@ describe("session Git attribution authorization", () => {
       { teamId: "git-team", userId: "local-user", role: "admin" },
       { teamId: "git-team", userId: "test-member", role: "member" },
     ]);
-    await seedSession("git-team-session", "team", "git-team", "local-user");
+    await seedSession("git-team-session", "team", "git-team", "test-member");
     expect((await get("git-team-session", "test-member")).status).toBe(200);
     expect((await apply("git-team-session", "test-member")).status).toBe(404);
     expect((await apply("git-team-session")).status).toBe(200);
+    expect(await api.providers.db.select().from(sessionGitAttributionSnapshots)).toEqual([
+      expect.objectContaining({ counterpartUserId: "test-member", createdBy: "test-member" }),
+    ]);
   });
 });

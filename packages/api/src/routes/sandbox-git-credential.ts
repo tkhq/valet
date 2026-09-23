@@ -71,6 +71,11 @@ import { getTeamInOrg } from "../services/teams.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
 import { workflowSessionOwner, workflowSessionRepo } from "../workflows/session-owner.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
+import {
+  GitReplayPayloadError,
+  readBoundedGitReplayJson,
+  validateGitReplayPayload,
+} from "../services/git-replay-limits.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
 
@@ -292,7 +297,13 @@ sandboxGitCredentialRouter.post("/git-push", async (c) => {
   const sandbox = c.var.sandbox;
   if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
   let body: import("../wire/types.js").PostSandboxGitPushRequest;
-  try { body = await c.req.json(); } catch { return c.json({ error: "Send a valid Git push request." }, 400); }
+  try {
+    const payload = await readBoundedGitReplayJson(c.req.raw);
+    body = validateGitReplayPayload(payload.value, payload.encodedBytes);
+  } catch (error) {
+    if (error instanceof GitReplayPayloadError) return c.json({ error: error.message, code: "git_replay_payload_invalid" }, error.status);
+    return c.json({ error: "Send a valid Git push request.", code: "git_replay_payload_invalid" }, 400);
+  }
   if (body.force) return c.json({ error: "App-signed history cannot be force-pushed in V1. Create a new branch." }, 409);
   if (!body.repoFullName || !body.targetRef || !body.expectedRemoteSha || !Array.isArray(body.commits)) return c.json({ error: "repoFullName, targetRef, expectedRemoteSha, and commits are required." }, 400);
   const { db, engineCredentials, encryptionKey } = c.var.providers;

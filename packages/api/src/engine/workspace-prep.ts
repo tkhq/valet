@@ -775,8 +775,17 @@ export async function installGitAttributionHook(
 set -eu
 msg="$1"
 # Remove only managed entries, then let Git create one final trailer block.
-sed -i '/^Valet-Session:/Id;/^Valet-Queue-Item:/Id' "$msg"
-${coAuthor ? `managed_coauthor=${shQuote(`Co-authored-by: ${coAuthor}`)}\ntmp="$msg.valet.$$"\ngrep -Fivx -- "$managed_coauthor" "$msg" > "$tmp" || true\nmv "$tmp" "$msg"` : ""}
+managed_coauthor=${shQuote(coAuthor ? `Co-authored-by: ${coAuthor}` : "")}
+tmp="$msg.valet.$$"
+awk -v managed="$managed_coauthor" '
+  {
+    lower = tolower($0)
+    if (lower ~ /^valet-session:/ || lower ~ /^valet-queue-item:/) next
+    if (managed != "" && lower == tolower(managed)) next
+    print
+  }
+' "$msg" > "$tmp"
+mv "$tmp" "$msg"
 ${config.correlationTrailers ? ': "\${VALET_SESSION_CORRELATION_ID:?Valet correlation is enabled, but this command has no session correlation ID. Run git commit through Valet.}"\n: "\${VALET_QUEUE_ITEM_CORRELATION_ID:?Valet correlation is enabled, but this command has no queue correlation ID. Run git commit through Valet.}"' : ""}
 git interpret-trailers --in-place --if-exists addIfDifferent --if-missing add \\
 ${coAuthor ? `  --trailer ${shQuote(`Co-authored-by: ${coAuthor}`)} \\\n` : ""}${config.correlationTrailers ? '  --trailer "Valet-Session: $VALET_SESSION_CORRELATION_ID" \\\n  --trailer "Valet-Queue-Item: $VALET_QUEUE_ITEM_CORRELATION_ID" \\\n' : ""}  "$msg"
@@ -790,7 +799,9 @@ managed=\$(dirname "$0")
 if [ -n "$repo" ] && [ "$repo" != "$managed" ] && [ -x "$repo/$hook" ]; then
   VALET_HOOK_DISPATCH_ACTIVE=1 "$repo/$hook" "$@"
 fi
-if [ "$hook" = prepare-commit-msg ]; then exec "$managed/valet-prepare-commit-msg" "$@"; fi
+case "$hook" in
+  prepare-commit-msg|applypatch-msg) exec "$managed/valet-prepare-commit-msg" "$@" ;;
+esac
 `;
   await sandbox.exec(`mkdir -p ${shQuote(hookDir)}`);
   await sandbox.writeFile(enrichment, enrichmentScript);

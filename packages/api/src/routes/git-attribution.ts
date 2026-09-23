@@ -6,6 +6,7 @@ import { canAdministerTeam, canViewTeam } from "../services/teams.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import {
   ensureGitSnapshot,
+  previewGitSnapshot,
   readSettingsForScope,
   writeSettingsForScope,
 } from "../services/git-attribution.js";
@@ -74,7 +75,7 @@ async function accessibleSession(c: Context<AppEnv>, id: string, administer = fa
 
 async function sessionResponse(c: Context<AppEnv>, id: string): Promise<SessionGitAttributionResponse | null> {
   const row = await accessibleSession(c, id); if (!row) return null;
-  const snapshot = await ensureGitSnapshot(c.var.providers.db, id, c.var.user.id);
+  const snapshot = await previewGitSnapshot(c.var.providers.db, row);
   const scope = row.ownerType === "team" ? "team" : row.ownerType === "org" ? "organization" : "user";
   const current = await readSettingsForScope(c.var.providers.db, { scope, id: row.ownerId || row.userId, orgId: row.orgId });
   return { sessionId: id, generation: snapshot.generation, mode: snapshot.mode, coAuthoredBy: snapshot.coAuthoredBy, correlationTrailers: snapshot.correlationTrailers, ownerType: snapshot.ownerType, ownerId: snapshot.ownerId, counterpartUserId: snapshot.counterpartUserId, counterpartName: snapshot.counterpartName, counterpartEmail: snapshot.counterpartEmail, valetName: snapshot.valetName, valetEmail: snapshot.valetEmail, settingsFingerprint: snapshot.settingsFingerprint, createdAt: snapshot.createdAt, currentValues: current.values, updateAvailable: snapshot.mode !== current.values.mode || snapshot.coAuthoredBy !== current.values.coAuthoredBy || snapshot.correlationTrailers !== current.values.correlationTrailers };
@@ -91,7 +92,7 @@ gitAttributionRouter.post("/sessions/:id/git-attribution/apply", async (c) => {
   const operations = await c.var.providers.db.select({ id: gitPushOperations.id }).from(gitPushOperations)
     .where(and(eq(gitPushOperations.sessionId, id), inArray(gitPushOperations.state, ["capturing", "replaying", "publishing"]))).limit(1);
   if (unsettled.length || operations.length) return c.json({ error: "Wait for the current queue item or Git operation to finish, then apply the settings." }, 409);
-  await ensureGitSnapshot(c.var.providers.db, id, c.var.user.id, true);
+  await ensureGitSnapshot(c.var.providers.db, id, row.userId, true);
   c.var.providers.engineHost.evictCache(id);
   const value = await sessionResponse(c, id); return c.json(value!);
 });

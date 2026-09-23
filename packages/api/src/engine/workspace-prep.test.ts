@@ -787,6 +787,111 @@ describe("Git attribution hook execution", () => {
         "Valet-Session: v1s_new",
         "Valet-Queue-Item: v1q_new",
       ]);
+      writeFileSync(message, "Missing queue context\n");
+      const missingQueue = spawnSync(hook, [message], { env: process.env, encoding: "utf8" });
+      expect(missingQueue.status).not.toBe(0);
+      expect(missingQueue.stderr).toContain("no session correlation ID");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["merge", "cherry-pick", "revert", "rebase", "am"] as const)("enriches commits created by git %s exactly once", async (operation) => {
+    const { enrichment, dispatcher } = await hookScripts();
+    const dir = mkdtempSync(join(tmpdir(), `valet-${operation}-`));
+    try {
+      const git = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const run = (args: string[], env = process.env) => spawnSync(git, args, { cwd: dir, env, encoding: "utf8" });
+      expect(run(["init", "-q", "-b", "main"]).status).toBe(0);
+      expect(run(["config", "user.name", "Test"]).status).toBe(0);
+      expect(run(["config", "user.email", "test@example.com"]).status).toBe(0);
+      writeFileSync(join(dir, "base"), "base\n");
+      expect(run(["add", "."]).status).toBe(0);
+      expect(run(["commit", "-qm", "Base"]).status).toBe(0);
+      const base = run(["rev-parse", "HEAD"]).stdout.trim();
+      expect(run(["checkout", "-qb", "topic"]).status).toBe(0);
+      writeFileSync(join(dir, "topic"), "topic\n");
+      expect(run(["add", "."]).status).toBe(0);
+      expect(run(["commit", "-qm", "Topic\n\nCo-authored-by: Human <human@example.com>"]).status).toBe(0);
+      const topic = run(["rev-parse", "HEAD"]).stdout.trim();
+      let command: string[];
+      if (operation === "revert") {
+        command = ["revert", "--no-edit", topic];
+      } else if (operation === "rebase") {
+        expect(run(["checkout", "main"]).status).toBe(0);
+        writeFileSync(join(dir, "main"), "main\n");
+        expect(run(["add", "."]).status).toBe(0);
+        expect(run(["commit", "-qm", "Main"]).status).toBe(0);
+        expect(run(["checkout", "topic"]).status).toBe(0);
+        command = ["rebase", "main"];
+      } else if (operation === "am") {
+        const formatted = run(["format-patch", "-1", topic, "--stdout"]);
+        expect(formatted.status).toBe(0);
+        const patch = join(dir, "topic.patch");
+        writeFileSync(patch, formatted.stdout);
+        expect(run(["checkout", "main"]).status).toBe(0);
+        command = ["am", patch];
+      } else {
+        expect(run(["checkout", "main"]).status).toBe(0);
+        command = operation === "merge"
+          ? ["merge", "--no-ff", "topic", "-m", "Merge topic\n\nCo-authored-by: Human <human@example.com>"]
+          : ["cherry-pick", topic];
+      }
+
+      const managed = join(dir, ".git", "valet-hooks");
+      mkdirSync(managed);
+      writeFileSync(join(managed, "valet-prepare-commit-msg"), enrichment, { mode: 0o755 });
+      writeFileSync(join(managed, "dispatch"), dispatcher, { mode: 0o755 });
+      for (const hook of ["applypatch-msg", "prepare-commit-msg"]) symlinkSync("dispatch", join(managed, hook));
+      const repoHooks = join(dir, ".repo-hooks");
+      mkdirSync(repoHooks);
+      writeFileSync(join(repoHooks, "prepare-commit-msg"), "#!/bin/sh\nprintf 'prepare\\n' >> repo-hooks-ran\n", { mode: 0o755 });
+      writeFileSync(join(repoHooks, "applypatch-msg"), "#!/bin/sh\nprintf 'applypatch\\n' >> repo-hooks-ran\n", { mode: 0o755 });
+      expect(run(["config", "core.hooksPath", ".repo-hooks"]).status).toBe(0);
+      const wrapper = join(dir, "git-wrapper");
+      writeFileSync(wrapper, observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`), { mode: 0o755 });
+      const env = { ...process.env, VALET_SESSION_CORRELATION_ID: "v1s_test", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_test" };
+      const result = spawnSync(wrapper, command, { cwd: dir, env, encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(run(["rev-parse", "HEAD"]).stdout.trim()).not.toBe(operation === "revert" ? topic : base);
+      const message = run(["log", "-1", "--format=%B"]).stdout;
+      expect(message.match(/Co-authored-by: Human <human@example.com>/gu) ?? []).toHaveLength(operation === "revert" ? 0 : 1);
+      expect(message.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
+      expect(message.match(/Valet-Session: v1s_test/gu)).toHaveLength(1);
+      expect(message.match(/Valet-Queue-Item: v1q_test/gu)).toHaveLength(1);
+      expect(readFileSync(join(dir, "repo-hooks-ran"), "utf8")).toMatch(operation === "am" ? /applypatch/u : /prepare/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not enrich or require queue context when merge creates no commit", async () => {
+    const { enrichment, dispatcher } = await hookScripts();
+    const dir = mkdtempSync(join(tmpdir(), "valet-fast-forward-"));
+    try {
+      const git = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const run = (args: string[]) => spawnSync(git, args, { cwd: dir, encoding: "utf8" });
+      expect(run(["init", "-q", "-b", "main"]).status).toBe(0);
+      expect(run(["config", "user.name", "Test"]).status).toBe(0);
+      expect(run(["config", "user.email", "test@example.com"]).status).toBe(0);
+      writeFileSync(join(dir, "base"), "base\n");
+      expect(run(["add", "."]).status).toBe(0);
+      expect(run(["commit", "-qm", "Base"]).status).toBe(0);
+      expect(run(["checkout", "-qb", "topic"]).status).toBe(0);
+      writeFileSync(join(dir, "topic"), "topic\n");
+      expect(run(["add", "."]).status).toBe(0);
+      expect(run(["commit", "-qm", "Topic"]).status).toBe(0);
+      expect(run(["checkout", "main"]).status).toBe(0);
+      const managed = join(dir, ".git", "valet-hooks");
+      mkdirSync(managed);
+      writeFileSync(join(managed, "valet-prepare-commit-msg"), enrichment, { mode: 0o755 });
+      writeFileSync(join(managed, "dispatch"), dispatcher, { mode: 0o755 });
+      symlinkSync("dispatch", join(managed, "prepare-commit-msg"));
+      const wrapper = join(dir, "git-wrapper");
+      writeFileSync(wrapper, observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`), { mode: 0o755 });
+      const result = spawnSync(wrapper, ["merge", "--ff-only", "topic"], { cwd: dir, encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(run(["log", "-1", "--format=%B"]).stdout).toBe("Topic\n\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -219,6 +219,11 @@ describe("appSignedGitWrapperScript", () => {
     ["feature:refs/heads/live-lock", "refs/heads/live-lock", true, "live"],
     ["feature:refs/heads/api-error", "refs/heads/api-error", true, "error"],
     ["feature:refs/heads/amend-race", "refs/heads/amend-race", true, "race"],
+    ["feature:refs/heads/setup-symbolic", "refs/heads/setup-symbolic", true, "setup:rev-parse --symbolic-full-name feature"],
+    ["feature:refs/heads/setup-status", "refs/heads/setup-status", true, "setup:status --porcelain=v1 -z"],
+    ["feature:refs/heads/setup-index", "refs/heads/setup-index", true, "setup:write-tree"],
+    ["feature:refs/heads/setup-remote", "refs/heads/setup-remote", true, "setup:remote get-url origin"],
+    ["feature:refs/heads/setup-ls", "refs/heads/setup-ls", true, "setup:ls-remote origin refs/heads/setup-ls"],
   ] as const)("executes push parsing and lock hygiene for %s (%s)", async (refspec, expectedRef, createRef, lockMode) => {
     const dir = mkdtempSync(join(tmpdir(), "valet-app-git-success-"));
     const requests: Array<Record<string, unknown>> = [];
@@ -242,6 +247,7 @@ describe("appSignedGitWrapperScript", () => {
       writeFileSync(fakeGit, `#!/bin/sh
 while [ "$1" = -C ] || [ "$1" = -c ]; do shift 2; done
 printf '%s\\n' "$*" >> "$TEST_GIT_LOG"
+if [ -n "$TEST_FAIL_MATCH" ] && [ "$*" = "$TEST_FAIL_MATCH" ]; then echo fixture-setup-failure >&2; exit 1; fi
 case "$1" in
   rev-parse)
     case "$*" in
@@ -281,7 +287,7 @@ esac
       if (lockMode === "live") writeFileSync(lockPath, JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "peer" }));
       const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
         const child = spawn(process.execPath, [wrapper, "-C", dir, "-c", "color.ui=false", "push", "origin", refspec], {
-          env: { ...process.env, VALET_SANDBOX_TOKEN: "test-token", TEST_NEW_BRANCH: createRef ? "1" : "0", TEST_SOURCE_MAIN: refspec.startsWith("main:") ? "1" : "0", TEST_RACE: lockMode === "race" ? "1" : "0", TEST_RACE_FILE: join(dir, "race"), TEST_GIT_DIR: dir, TEST_GIT_LOG: join(dir, "git.log") },
+          env: { ...process.env, VALET_SANDBOX_TOKEN: "test-token", TEST_NEW_BRANCH: createRef ? "1" : "0", TEST_SOURCE_MAIN: refspec.startsWith("main:") ? "1" : "0", TEST_RACE: lockMode === "race" ? "1" : "0", TEST_RACE_FILE: join(dir, "race"), TEST_GIT_DIR: dir, TEST_GIT_LOG: join(dir, "git.log"), TEST_FAIL_MATCH: lockMode.startsWith("setup:") ? lockMode.slice("setup:".length) : "" },
         });
         let stderr = "";
         child.stderr.setEncoding("utf8");
@@ -293,6 +299,14 @@ esac
         expect(result.stderr).toContain(`reconcile lock ${lockPath} is held by live process ${process.pid}`);
         expect(result.stderr).toContain(`remove ${lockPath} and retry`);
         expect(JSON.parse(readFileSync(lockPath, "utf8"))).toMatchObject({ token: "peer" });
+        expect(requests).toHaveLength(0);
+        return;
+      }
+      if (lockMode.startsWith("setup:")) {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("Resolve the repository error, then retry");
+        expect(result.stderr).not.toContain("at ");
+        expect(existsSync(lockPath)).toBe(false);
         expect(requests).toHaveLength(0);
         return;
       }

@@ -137,6 +137,50 @@ export async function writeSettingsForScope(db: AppDb, args: { scope: "user" | "
 
 function fingerprint(value: object): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 
+export async function readActiveGitSnapshot(db: AppDb, sessionId: string) {
+  const head = (await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sessionId)).limit(1))[0];
+  if (!head) return undefined;
+  return (await db.select().from(sessionGitAttributionSnapshots).where(and(
+    eq(sessionGitAttributionSnapshots.sessionId, sessionId),
+    eq(sessionGitAttributionSnapshots.generation, head.activeGeneration),
+  )).limit(1))[0];
+}
+
+/** Build the stable generation-one response for a session without inserting state. */
+export async function previewGitSnapshot(db: AppDb, session: typeof agentSessions.$inferSelect) {
+  const active = await readActiveGitSnapshot(db, session.id);
+  if (active) return active;
+  const parent = (await db.select({ sessionId: childWatches.parentSessionId }).from(childWatches)
+    .where(eq(childWatches.childSessionId, session.id)).limit(1))[0];
+  const workflowRun = session.id.startsWith("wf:") ? session.id.split(":").slice(0, 2).join(":") : undefined;
+  const workflowHead = workflowRun
+    ? (await db.select().from(sessionGitAttributionHeads).where(sql`${sessionGitAttributionHeads.sessionId} like ${`${workflowRun}:%`} and ${sessionGitAttributionHeads.sessionId} <> ${session.id}`).limit(1))[0]
+    : undefined;
+  const inherited = parent ? await readActiveGitSnapshot(db, parent.sessionId) : workflowHead ? await readActiveGitSnapshot(db, workflowHead.sessionId) : undefined;
+  const scope = session.ownerType === "team" ? "team" : session.ownerType === "org" ? "organization" : "user";
+  const values = inherited
+    ? { mode: inherited.mode, coAuthoredBy: inherited.coAuthoredBy, correlationTrailers: inherited.correlationTrailers }
+    : session.gitAttributionSnapshotPending
+      ? (await readSettingsForScope(db, { scope, id: session.ownerId || session.userId, orgId: session.orgId })).values
+      : DEFAULT_GIT_ATTRIBUTION;
+  const person = (await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, session.userId)).limit(1))[0];
+  return {
+    sessionId: session.id,
+    generation: 1,
+    ...values,
+    ownerType: session.ownerType,
+    ownerId: session.ownerId || session.userId,
+    counterpartUserId: person?.id ?? null,
+    counterpartName: person?.name ?? null,
+    counterpartEmail: person?.email ?? null,
+    valetName: process.env.VALET_GIT_NAME?.trim() || DEFAULT_VALET_IDENTITY.name,
+    valetEmail: process.env.VALET_GIT_EMAIL?.trim() || DEFAULT_VALET_IDENTITY.email,
+    settingsFingerprint: fingerprint(values),
+    createdBy: session.userId,
+    createdAt: session.createdAt,
+  };
+}
+
 /** Insert-only, generationed snapshot creation. The advisory lock serializes first touch and Apply. */
 export async function ensureGitSnapshot(
   db: AppDb, sessionId: string, createdBy: string, forceNew = false,
