@@ -188,32 +188,6 @@ export function opaqueCorrelationIds(key: string, sessionId: string, queueItemId
   return { session: `v1s_${digest("session", sessionId)}`, queueItem: `v1q_${digest("queue", `${sessionId}\0${queueItemId}`)}` };
 }
 
-/** Deterministic final-trailer construction. Managed lines are replaced, never duplicated. */
-export function buildCommitMessage(message: string, managed: { coAuthor?: { name: string; email: string }; sessionId?: string; queueItemId?: string }): string {
-  const lines = message.replace(/\n+$/u, "").split("\n");
-  let trailerStart = lines.length;
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (lines[i] === "") { trailerStart = i + 1; break; }
-    if (!/^[A-Za-z0-9-]+:\s*.+$/u.test(lines[i]!) && !/^\s+.+$/u.test(lines[i]!)) {
-      trailerStart = lines.length;
-      break;
-    }
-    trailerStart = i;
-  }
-  const body = lines.slice(0, trailerStart);
-  while (body.at(-1) === "") body.pop();
-  const managedLine = /^(?:Valet-Session|Valet-Queue-Item):/iu;
-  const counterpart = managed.coAuthor
-    ? `Co-authored-by: ${managed.coAuthor.name} <${managed.coAuthor.email}>`
-    : undefined;
-  const trailers = lines.slice(trailerStart).filter((line) =>
-    !managedLine.test(line) && (!counterpart || line.toLowerCase() !== counterpart.toLowerCase()));
-  if (counterpart) trailers.push(counterpart);
-  if (managed.sessionId) trailers.push(`Valet-Session: ${managed.sessionId}`);
-  if (managed.queueItemId) trailers.push(`Valet-Queue-Item: ${managed.queueItemId}`);
-  return `${body.join("\n")}${trailers.length ? `${body.length ? "\n\n" : ""}${trailers.join("\n")}` : ""}\n`;
-}
-
 export type GitHubReplayCommit = { localSha: string; message: string; treeSha: string; parents: string[] };
 export type GitHubCreatedCommit = { sha: string; message: string; tree: { sha: string }; parents: Array<{ sha: string }>; author: { name: string }; committer: { name: string }; verification: { verified: boolean; reason?: string } };
 export interface GitHubReplayClient { uploadLfs?(objects: import("../wire/types.js").GitPushReplayLfsObject[]): Promise<void>; createBlob?(contentBase64: string): Promise<string>; createTree?(entries: import("../wire/types.js").GitPushReplayTreeEntry[]): Promise<string>; createCommit(input: { message: string; tree: string; parents: string[] }): Promise<GitHubCreatedCommit>; getCommit(sha: string): Promise<GitHubCreatedCommit>; getRef(ref: string): Promise<string | null>; createRef(ref: string, sha: string): Promise<void>; updateRef(ref: string, sha: string, force: false): Promise<void>; refresh(): Promise<void>; }

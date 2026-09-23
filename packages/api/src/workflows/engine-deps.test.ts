@@ -16,7 +16,7 @@ import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
-import { assistants, workflowDefinitions } from "../schema/index.js";
+import { assistants, sessionPullRequests, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -82,6 +82,33 @@ function makeFixturePlugin(): { plugin: ValetPlugin; actionPlugin: ActionPlugin;
 }
 
 describe("buildWorkflowEngineDeps: invokeAction", () => {
+  it("wires canonical PR observation through a headless workflow action", async () => {
+    const action: PluginAction = {
+      id: "demo.create_pr", name: "create pr", description: "fixture", riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        await ctx.observePullRequest?.({ repoFullName: "other/widgets", number: 9,
+          url: "https://github.com/other/widgets/pull/9", headRef: "feature", headSha: "abc",
+          baseRef: "main", state: "open" });
+        return { success: true, data: { number: 9 } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [action] };
+    const plugin: ValetPlugin = { name: "demo", version: "0.0.1", actions: [actionPlugin] };
+    api = await bootTestApi({ plugins: [plugin] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+      actionPluginByService, credentials: engineCredentials });
+    const runId = "wfrun_observe_pr";
+    await seedRun(api, runId, "wf_observe_pr");
+
+    expect(await deps.invokeAction({ service: "demo", action: "create_pr", params: {},
+      invocationId: `workflow:${runId}:node1` })).toEqual({ ok: true, result: { number: 9 } });
+    expect(await db.select().from(sessionPullRequests)).toEqual([
+      expect.objectContaining({ sessionId: `wf:${runId}:actions`, repoFullName: "other/widgets", prNumber: 9 }),
+    ]);
+  });
+
   it("happy path: resolves the fixture action and returns {ok:true, result}", async () => {
     const fixture = makeFixturePlugin();
     api = await bootTestApi({ plugins: [fixture.plugin] });

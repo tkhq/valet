@@ -104,6 +104,8 @@ export interface ActionInvocationContext {
    * context), so the action executes as before.
    */
   workflowExecutionId?: string;
+  /** Best-effort canonical PR observation for successful create actions. */
+  observePullRequest?: PluginActionContext["observePullRequest"];
 }
 
 export interface ActionInvokerOpts {
@@ -917,6 +919,7 @@ function buildActionContext(
       return assistant ? assistantSenderIdentity(assistant) : undefined;
     },
     sandbox: throwingSandbox(sessionId),
+    ...(ctx.observePullRequest ? { observePullRequest: ctx.observePullRequest } : {}),
     // Unlike the capabilities stubbed out below, document extraction is
     // genuinely available here: it is a pure call over bytes against the
     // native extractor in this process, needing no session, thread or

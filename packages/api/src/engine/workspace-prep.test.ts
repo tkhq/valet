@@ -24,7 +24,7 @@ import {
   resolveStartRef,
   installGitAttributionHook,
 } from "./workspace-prep.js";
-import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { gitCredentialHelperScript, ghWrapperScript, observedGitWrapperScript, REAL_GIT_PATH } from "./git-credential-helper.js";
 import type { RepoBinding } from "../wire/types.js";
 import { opShimScript } from "./secrets-cli-script.js";
 
@@ -34,8 +34,6 @@ const STAGED_HELPER = ".valet-prep/git-credential-valet";
 const STAGED_GH = ".valet-prep/valet-gh";
 const STAGED_SECRETS = ".valet-prep/valet-secrets";
 const STAGED_OP_SHIM = ".valet-prep/op";
-const INSTALL_CMD =
-  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && cp '.valet-prep/op' /usr/local/bin/op && rm -f /usr/local/bin/git && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets /usr/local/bin/op";
 
 interface ExecCall {
   command: string;
@@ -149,7 +147,7 @@ describe("installCredentialHelper", () => {
     expect(sandbox.writes.get(STAGED_OP_SHIM)).toBe(opShimScript());
 
     const commands = sandbox.execCalls.map((c) => c.command);
-    expect(commands).toContain(INSTALL_CMD);
+    expect(sandbox.execCalls.some((call) => call.opts?.privileged && call.command.includes(`cp '${STAGED_HELPER}'`))).toBe(true);
     expect(commands).toContain("git config --global credential.helper '/usr/local/bin/git-credential-valet'");
     // Hard prerequisite (Task 8 review): without this, git never sends
     // `path=` to the helper and every clone runs anonymous.
@@ -165,21 +163,25 @@ describe("installCredentialHelper", () => {
     const sandbox = new RecordingSandbox();
     await installCredentialHelper(sandbox, API_URL);
 
-    const install = sandbox.execCalls.find((c) => c.command === INSTALL_CMD);
-    expect(install?.opts?.privileged).toBe(true);
+    const install = sandbox.execCalls.find((call) => call.opts?.privileged);
+    expect(install?.command).toContain(`cp '${STAGED_HELPER}'`);
 
     // Every git config (and the staging cleanup) runs as the workload user
     // so /home/dockerd/.gitconfig — not /root/.gitconfig — gets the config
     // in docker-enabled sandboxes.
     for (const call of sandbox.execCalls) {
-      if (call.command === INSTALL_CMD) continue;
+      if (call === install) continue;
       expect(call.opts?.privileged, call.command).toBeUndefined();
     }
   });
 
   it("install failure THROWS before any git config is attempted", async () => {
+    const probe = new RecordingSandbox();
+    await installCredentialHelper(probe, API_URL);
+    const installCommand = probe.execCalls.find((call) => call.opts?.privileged)?.command;
+    expect(installCommand).toBeDefined();
     const sandbox = new RecordingSandbox();
-    sandbox.setResult(INSTALL_CMD, { stdout: "", stderr: "permission denied", exitCode: 1 });
+    sandbox.setResult(installCommand!, { stdout: "", stderr: "permission denied", exitCode: 1 });
     await expect(installCredentialHelper(sandbox, API_URL)).rejects.toThrow(/installing credential helper/);
     expect(sandbox.execCalls.some((c) => c.command.startsWith("git config"))).toBe(false);
   });
@@ -750,27 +752,60 @@ describe("Git attribution hook execution", () => {
   it("preserves human co-authors and deduplicates only the managed counterpart", async () => {
     const sandbox = new RecordingSandbox();
     await installGitAttributionHook(sandbox, "repo", { coAuthor: { name: "Valet", email: "valet@example.com" }, correlationTrailers: true });
-    const script = sandbox.writes.get("repo/.git/hooks/prepare-commit-msg");
+    const script = sandbox.writes.get("repo/.git/valet-hooks/prepare-commit-msg");
     expect(script).toBeDefined();
     const dir = mkdtempSync(join(tmpdir(), "valet-hook-"));
     try {
       const hook = join(dir, "prepare-commit-msg"); const message = join(dir, "message");
       writeFileSync(hook, script!, { mode: 0o755 });
       writeFileSync(message, "Subject\n\nCo-authored-by: Human <human@example.com>\nCo-authored-by: Valet <valet@example.com>\nValet-Session: stale\n");
-      const result = spawnSync(hook, [message], { env: { ...process.env, VALET_SESSION_CORRELATION_ID: "v1s_new", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_new" } });
-      expect(result.status).toBe(0);
+      const env = { ...process.env, VALET_SESSION_CORRELATION_ID: "v1s_new", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_new" };
+      expect(spawnSync(hook, [message], { env }).status).toBe(0);
+      const first = readFileSync(message, "utf8");
+      expect(spawnSync(hook, [message], { env }).status).toBe(0);
       const enriched = readFileSync(message, "utf8");
+      expect(enriched).toBe(first);
       expect(enriched).toContain("Co-authored-by: Human <human@example.com>");
       expect(enriched.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
       expect(enriched).toContain("Valet-Session: v1s_new");
       expect(enriched).not.toContain("Valet-Session: stale");
+      const parsed = spawnSync("git", ["interpret-trailers", "--parse", message], { encoding: "utf8" });
+      expect(parsed.status).toBe(0);
+      expect(parsed.stdout.trim().split("\n")).toEqual([
+        "Co-authored-by: Human <human@example.com>",
+        "Co-authored-by: Valet <valet@example.com>",
+        "Valet-Session: v1s_new",
+        "Valet-Queue-Item: v1q_new",
+      ]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("installs in an existing core.hooksPath and chains its hook", async () => {
+  it("survives a later hooksPath change and runs both hooks exactly once", async () => {
     const sandbox = new RecordingSandbox();
-    sandbox.setResult("git config --path --get core.hooksPath", { stdout: ".husky/_\n", stderr: "", exitCode: 0 });
-    await installGitAttributionHook(sandbox, "repo", { coAuthor: { name: "Valet", email: "valet@example.com" }, correlationTrailers: false });
-    expect(sandbox.writes.get("repo/.husky/_/prepare-commit-msg")).toContain("prepare-commit-msg.valet-original");
+    await installGitAttributionHook(sandbox, ".", { coAuthor: { name: "Valet", email: "valet@example.com" }, correlationTrailers: false });
+    const managed = sandbox.writes.get(".git/valet-hooks/prepare-commit-msg");
+    expect(managed).toBeDefined();
+    const dir = mkdtempSync(join(tmpdir(), "valet-hook-dispatch-"));
+    try {
+      const git = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      expect(spawnSync(git, ["init", "-q", dir]).status).toBe(0);
+      const hookDir = join(dir, ".git", "valet-hooks");
+      spawnSync("mkdir", ["-p", hookDir]);
+      writeFileSync(join(hookDir, "prepare-commit-msg"), managed!, { mode: 0o755 });
+      const repoHooks = join(dir, ".repo-hooks");
+      spawnSync("mkdir", ["-p", repoHooks]);
+      writeFileSync(join(repoHooks, "prepare-commit-msg"), "#!/bin/sh\nprintf 'repo\\n' >> hook-count\n", { mode: 0o755 });
+      writeFileSync(join(dir, "file"), "content\n");
+      expect(spawnSync(git, ["config", "user.name", "Test"], { cwd: dir }).status).toBe(0);
+      expect(spawnSync(git, ["config", "user.email", "test@example.com"], { cwd: dir }).status).toBe(0);
+      expect(spawnSync(git, ["config", "core.hooksPath", ".repo-hooks"], { cwd: dir }).status).toBe(0);
+      expect(spawnSync(git, ["add", "file"], { cwd: dir }).status).toBe(0);
+      const wrapper = join(dir, "git-wrapper");
+      writeFileSync(wrapper, observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`), { mode: 0o755 });
+      expect(spawnSync(wrapper, ["commit", "-m", "Subject"], { cwd: dir, encoding: "utf8" }).status).toBe(0);
+      const message = spawnSync(git, ["log", "-1", "--format=%B"], { cwd: dir, encoding: "utf8" }).stdout;
+      expect(message.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
+      expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("repo\n");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

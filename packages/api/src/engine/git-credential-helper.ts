@@ -27,6 +27,9 @@
 /** Path (relative to the API base) of the credential-minting route. */
 const ROUTE_PATH = "/api/sandbox/git-credential";
 
+/** Preserved image Git binary. Generated wrappers never guess an image path. */
+export const REAL_GIT_PATH = "/usr/local/lib/valet/git-real";
+
 /**
  * The sandbox token, read at call time: the creds mount first (rotated in
  * place on backends that have one), then `$VALET_SANDBOX_TOKEN`. Every
@@ -203,11 +206,26 @@ exec "\$real" "\$@"
 /** Transparent git shim for App-signed mode. Non-push commands chain to the image's git. */
 export function appSignedGitWrapperScript(apiUrl: string): string {
   return String.raw`#!/usr/bin/env node
+// Valet Git wrapper. Workspace prep preserves the image Git before install.
 const { execFileSync, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const real = "/usr/bin/git";
+const real = "__REAL_GIT__";
 const args = process.argv.slice(2);
-if (args[0] !== "push") process.exit(spawnSync(real, args, { stdio: "inherit" }).status ?? 1);
+function argsWithManagedHooks(gitArgs) {
+  if (gitArgs[0] !== "commit") return { args: gitArgs, env: process.env };
+  const gitDirResult = spawnSync(real, ["rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
+  if (gitDirResult.status !== 0) return { args: gitArgs, env: process.env };
+  const gitDir = gitDirResult.stdout.trim(); const managedDir = gitDir + "/valet-hooks";
+  if (!fs.existsSync(managedDir + "/prepare-commit-msg")) return { args: gitArgs, env: process.env };
+  const top = execFileSync(real, ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+  const configured = spawnSync(real, ["config", "--path", "--get", "core.hooksPath"], { encoding: "utf8" });
+  const configuredDir = configured.status === 0 ? configured.stdout.trim() : gitDir + "/hooks";
+  const path = require("node:path");
+  const chain = path.isAbsolute(configuredDir) ? configuredDir + "/prepare-commit-msg" : path.resolve(top, configuredDir, "prepare-commit-msg");
+  const env = { ...process.env, ...(chain === managedDir + "/prepare-commit-msg" ? {} : { VALET_CHAIN_PREPARE_COMMIT_MSG: chain }) };
+  return { args: ["-c", "core.hooksPath=" + managedDir, ...gitArgs], env };
+}
+if (args[0] !== "push") { const call = argsWithManagedHooks(args); process.exit(spawnSync(real, call.args, { stdio: "inherit", env: call.env }).status ?? 1); }
 function fail(message) { console.error("git push (Valet App signing): " + message); process.exit(2); }
 const rest = args.slice(1); const upstream = rest.includes("-u") || rest.includes("--set-upstream");
 if (rest.some((arg) => arg.startsWith("-") && arg !== "-u" && arg !== "--set-upstream")) fail("force, delete, tags, mirror, atomic, and custom push options are not supported in V1.");
@@ -218,13 +236,13 @@ if (spec.startsWith(":") || spec.endsWith(":")) fail("branch deletion and empty 
 if (spec.includes("*") || spec.startsWith("+") || spec.includes("^")) fail("wildcard, forced, and exclusion refspecs are not supported in V1.");
 const pieces = spec.split(":"); if (pieces.length > 2) fail("use one standard source:destination refspec.");
 const src = pieces[0] || "HEAD";
-const localSha = execFileSync(real, ["rev-parse", "--verify", src + "^{commit}"], { encoding: "utf8" }).trim();
+const sourceRef = src === "HEAD"
+  ? execFileSync(real, ["symbolic-ref", "HEAD"], { encoding: "utf8" }).trim()
+  : execFileSync(real, ["rev-parse", "--symbolic-full-name", src], { encoding: "utf8" }).trim();
+if (!sourceRef.startsWith("refs/heads/")) fail("the source must resolve to a local branch in V1.");
+const localSha = execFileSync(real, ["rev-parse", "--verify", sourceRef + "^{commit}"], { encoding: "utf8" }).trim();
 let destination = pieces[1];
-if (!destination) {
-  if (src === "HEAD") destination = execFileSync(real, ["symbolic-ref", "--short", "HEAD"], { encoding: "utf8" }).trim();
-  else if (/^(?:refs\/heads\/)?[A-Za-z0-9._/-]+$/.test(src) && !src.startsWith("refs/tags/")) destination = src.replace(/^refs\/heads\//, "");
-  else fail("this source needs an explicit source:refs/heads/branch destination.");
-}
+if (!destination) destination = sourceRef.slice("refs/heads/".length);
 if (destination.startsWith("refs/tags/") || (!destination.startsWith("refs/heads/") && destination.startsWith("refs/"))) fail("only branch destinations are supported in V1.");
 const branch = destination.replace(/^refs\/heads\//, "");
 if (!branch || branch === "HEAD" || branch.includes("..") || branch.startsWith("/") || branch.endsWith("/")) fail("the destination branch is invalid.");
@@ -244,27 +262,48 @@ const commitIds = execFileSync(real, ["rev-list", "--reverse", ...range], { enco
 if (!commitIds.length) { console.log("Everything up-to-date"); process.exit(0); }
 const commits = commitIds.map((sha) => { const raw = execFileSync(real, ["cat-file", "commit", sha]); const split = raw.indexOf(Buffer.from("\n\n")); const headers = raw.subarray(0, split).toString("utf8").split("\n"); const parents = headers.filter((line) => line.startsWith("parent ")).map((line) => line.slice(7)); for (const parent of parents) if (spawnSync(real, ["cat-file", "-e", parent + "^{commit}"]).status !== 0) fail("commit " + sha + " has missing parent " + parent + "; fetch the complete parent history before App signing."); return { localSha: sha, treeSha: headers.find((line) => line.startsWith("tree ")).slice(5), parents, message: raw.subarray(split + 2).toString("utf8") }; });
 const objectLines = execFileSync(real, ["rev-list", "--objects", ...range], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
-const ids = [...new Set(objectLines.map((line) => line.split(" ")[0]))]; const blobs = []; const trees = []; const lfsObjects = []; const gitDir = execFileSync(real, ["rev-parse", "--git-dir"], { encoding: "utf8" }).trim();
+const ids = [...new Set(objectLines.map((line) => line.split(" ")[0]))]; const blobs = []; const trees = []; const lfsObjects = []; const gitDir = execFileSync(real, ["rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
 const MAX_BLOB_BYTES = 100 * 1024 * 1024; const paths = new Map(objectLines.map((line) => { const space = line.indexOf(" "); return [line.slice(0, space < 0 ? line.length : space), space < 0 ? "(unknown path)" : line.slice(space + 1)]; }));
 for (const sha of ids) { const type = execFileSync(real, ["cat-file", "-t", sha], { encoding: "utf8" }).trim(); if (type === "blob") { const size = Number(execFileSync(real, ["cat-file", "-s", sha], { encoding: "utf8" }).trim()); if (!Number.isSafeInteger(size) || size > MAX_BLOB_BYTES) fail("tracked blob " + paths.get(sha) + " is " + size + " bytes; GitHub Git Database accepts at most " + MAX_BLOB_BYTES + " bytes."); const content = execFileSync(real, ["cat-file", "blob", sha], { maxBuffer: MAX_BLOB_BYTES + 1 }); blobs.push({ sha, contentBase64: content.toString("base64") }); const pointer = content.toString("utf8").match(/^version https:\/\/git-lfs.github.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize ([0-9]+)\n?$/); if (pointer) { const file = gitDir + "/lfs/objects/" + pointer[1].slice(0, 2) + "/" + pointer[1].slice(2, 4) + "/" + pointer[1]; if (!fs.existsSync(file)) fail("LFS object " + pointer[1] + " is missing locally."); lfsObjects.push({ oid: pointer[1], size: Number(pointer[2]), contentBase64: fs.readFileSync(file).toString("base64") }); } } if (type === "tree") { const raw = execFileSync(real, ["ls-tree", "-z", sha]); const entries = raw.toString("utf8").split("\0").filter(Boolean).map((line) => { const tab = line.indexOf("\t"); const [mode, entryType, entrySha] = line.slice(0, tab).split(" "); return { path: line.slice(tab + 1), mode, type: entryType, sha: entrySha }; }); trees.push({ sha, entries }); } }
 const tok = (() => { try { return fs.readFileSync("/etc/valet/creds/token", "utf8").trim(); } catch { return process.env.VALET_SANDBOX_TOKEN || ""; } })();
 if (!tok) fail("the sandbox credential is unavailable; restart the session.");
-(async () => { const startHead = execFileSync(real, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); const startStatus = execFileSync(real, ["status", "--porcelain=v1", "-z"]); const startIndex = execFileSync(real, ["write-tree"], { encoding: "utf8" }).trim(); const response = await fetch("__API__/api/sandbox/git-push", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok }, body: JSON.stringify({ repoFullName, targetRef, expectedRemoteSha, createRef, blobs, trees, lfsObjects, commits }) }); const body = await response.json(); if (!response.ok) fail(body.error || "host replay failed");
-if (execFileSync(real, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() !== startHead || !execFileSync(real, ["status", "--porcelain=v1", "-z"]).equals(startStatus) || execFileSync(real, ["write-tree"], { encoding: "utf8" }).trim() !== startIndex) fail("local HEAD, index, or working tree changed during replay; the signed ref is published. Run git fetch before retrying.");
+(async () => {
+const lockPath = gitDir + "/valet-reconcile.lock"; let lockFd;
+try { lockFd = fs.openSync(lockPath, "wx"); } catch { fail("another signed push is reconciling this repository. Retry after it finishes."); }
+try {
+const startHead = execFileSync(real, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); const startSource = execFileSync(real, ["rev-parse", sourceRef], { encoding: "utf8" }).trim(); const checkedOutSource = spawnSync(real, ["symbolic-ref", "--quiet", "HEAD"], { encoding: "utf8" }).stdout.trim() === sourceRef; const startStatus = execFileSync(real, ["status", "--porcelain=v1", "-z"]); const startIndex = execFileSync(real, ["write-tree"], { encoding: "utf8" }).trim();
+const response = await fetch("__API__/api/sandbox/git-push", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok }, body: JSON.stringify({ repoFullName, targetRef, expectedRemoteSha, createRef, blobs, trees, lfsObjects, commits }) }); const body = await response.json(); if (!response.ok) fail(body.error || "host replay failed");
+if (execFileSync(real, ["rev-parse", sourceRef], { encoding: "utf8" }).trim() !== startSource) fail("the pushed source branch changed during replay; the signed ref is published. Retry to reconcile it.");
+if (checkedOutSource && (execFileSync(real, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() !== startHead || !execFileSync(real, ["status", "--porcelain=v1", "-z"]).equals(startStatus) || execFileSync(real, ["write-tree"], { encoding: "utf8" }).trim() !== startIndex)) fail("local HEAD, index, or working tree changed during replay; the signed ref is published. Retry to reconcile it.");
 const signedRef = "refs/valet/signed/" + branch; execFileSync(real, ["fetch", "--quiet", remote, targetRef + ":" + signedRef]);
 if (execFileSync(real, ["rev-parse", signedRef], { encoding: "utf8" }).trim() !== body.signedHeadSha) fail("the published signed head changed before local reconciliation.");
-const localTree = execFileSync(real, ["rev-parse", startHead + "^{tree}"], { encoding: "utf8" }).trim(); const signedTree = execFileSync(real, ["rev-parse", body.signedHeadSha + "^{tree}"], { encoding: "utf8" }).trim(); if (localTree !== signedTree) fail("the signed commit tree differs from the local commit; local history was not changed.");
-execFileSync(real, ["update-ref", "refs/valet/backup/" + branch, startHead]); execFileSync(real, ["reset", "--soft", body.signedHeadSha]); execFileSync(real, ["update-ref", "refs/remotes/" + remote + "/" + branch, body.signedHeadSha]);
+const localTree = execFileSync(real, ["rev-parse", startSource + "^{tree}"], { encoding: "utf8" }).trim(); const signedTree = execFileSync(real, ["rev-parse", body.signedHeadSha + "^{tree}"], { encoding: "utf8" }).trim(); if (localTree !== signedTree) fail("the signed commit tree differs from the pushed source branch; local history was not changed.");
+execFileSync(real, ["update-ref", "refs/valet/backup/" + sourceRef.slice("refs/heads/".length), startSource]); execFileSync(real, ["update-ref", sourceRef, body.signedHeadSha, startSource]); execFileSync(real, ["update-ref", "refs/remotes/" + remote + "/" + branch, body.signedHeadSha]);
 const reconciled = await fetch("__API__/api/sandbox/git-push/" + encodeURIComponent(body.operationId) + "/reconcile", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok } }); if (!reconciled.ok) fail("the signed push was published locally, but operation reconciliation failed. Retry the push.");
-if (upstream) spawnSync(real, ["branch", "--set-upstream-to", remote + "/" + branch], { stdio: "ignore" }); console.log("To " + remoteUrl + "\n   " + expectedRemoteSha.slice(0, 7) + ".." + body.signedHeadSha.slice(0, 7) + "  " + branch + " -> " + branch); })().catch((error) => fail(error.message));
-`.replaceAll("__API__", apiUrl.replace(/\/$/u, ""));
+if (upstream) spawnSync(real, ["branch", "--set-upstream-to", remote + "/" + branch, sourceRef], { stdio: "ignore" }); console.log("To " + remoteUrl + "\n   " + expectedRemoteSha.slice(0, 7) + ".." + body.signedHeadSha.slice(0, 7) + "  " + sourceRef.slice("refs/heads/".length) + " -> " + branch);
+} finally { if (lockFd !== undefined) fs.closeSync(lockFd); try { fs.unlinkSync(lockPath); } catch {} }
+})().catch((error) => fail(error.message));
+`.replace("__REAL_GIT__", REAL_GIT_PATH).replaceAll("__API__", apiUrl.replace(/\/$/u, ""));
 }
 
 /** Git shim for unsigned modes. It records a successful ordinary branch push. */
 export function observedGitWrapperScript(apiUrl: string): string {
   return `#!/bin/sh
-# Run git first. Observation must never change the push result.
-/usr/bin/git "$@"
+# Valet Git wrapper. Run the preserved image Git. The managed dispatcher keeps working if a
+# repository changes core.hooksPath after workspace prep.
+real=${REAL_GIT_PATH}
+if [ "\${1:-}" = commit ]; then
+  git_dir=$("$real" rev-parse --absolute-git-dir 2>/dev/null) || git_dir=
+  managed="$git_dir/valet-hooks"
+  if [ -n "$git_dir" ] && [ -x "$managed/prepare-commit-msg" ]; then
+    configured=$("$real" config --path --get core.hooksPath 2>/dev/null) || configured="$git_dir/hooks"
+    case "$configured" in /*) chain="$configured/prepare-commit-msg" ;; *) top=$("$real" rev-parse --show-toplevel); chain="$top/$configured/prepare-commit-msg" ;; esac
+    VALET_CHAIN_PREPARE_COMMIT_MSG="$chain" "$real" -c core.hooksPath="$managed" "$@"
+    exit $?
+  fi
+fi
+# Observation must never change the push result.
+"$real" "$@"
 status=$?
 [ $status -eq 0 ] || exit $status
 [ "\${1:-}" = "push" ] || exit 0
@@ -289,14 +328,14 @@ case "$spec" in
 esac
 [ -n "$src" ] || src=HEAD
 if [ -z "$dst" ]; then
-  if [ "$src" = HEAD ]; then dst=$(/usr/bin/git symbolic-ref --short HEAD 2>/dev/null) || exit 0
+  if [ "$src" = HEAD ]; then dst=$("$real" symbolic-ref --short HEAD 2>/dev/null) || exit 0
   else dst=\${src#refs/heads/}
   fi
 fi
 case "$dst" in refs/tags/*|refs/*) case "$dst" in refs/heads/*) ;; *) exit 0 ;; esac ;; esac
 case "$dst" in refs/heads/*) target_ref=$dst ;; *) target_ref=refs/heads/$dst ;; esac
-head_sha=$(/usr/bin/git rev-parse --verify "$src^{commit}" 2>/dev/null) || exit 0
-url=$(/usr/bin/git remote get-url "$remote" 2>/dev/null) || exit 0
+head_sha=$("$real" rev-parse --verify "$src^{commit}" 2>/dev/null) || exit 0
+url=$("$real" remote get-url "$remote" 2>/dev/null) || exit 0
 repo=$(printf '%s' "$url" | sed -n 's#.*github\\.com[/:]\\([^/]*\\)/\\([^/]*\\)\\(.git\\)\\?$#\\1/\\2#p')
 repo=\${repo%.git}
 [ -n "$repo" ] || exit 0

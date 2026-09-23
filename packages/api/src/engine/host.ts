@@ -1199,20 +1199,8 @@ export class EngineHost {
         }
       : undefined;
     const observePullRequest = this.opts.db
-      ? async (pullRequest: { repoFullName: string; number: number; url: string; headRef: string; headSha: string; baseRef: string; state: string }) => {
-          const binding = (await this.opts.db!.select({ fullName: sessionRepos.fullName }).from(sessionRepos).where(eq(sessionRepos.sessionId, sessionId)))
-            .find((row) => row.fullName.toLowerCase() === pullRequest.repoFullName.toLowerCase());
-          if (!binding) throw new Error("The pull request repository is not bound to this session.");
-          const now = Date.now();
-          await this.opts.db!.insert(sessionPullRequests).values({
-            sessionId, repoFullName: binding.fullName, prNumber: pullRequest.number, prUrl: pullRequest.url,
-            headRef: pullRequest.headRef, headSha: pullRequest.headSha, baseRef: pullRequest.baseRef,
-            state: pullRequest.state, firstObservedAt: now, updatedAt: now,
-          }).onConflictDoUpdate({
-            target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId],
-            set: { prUrl: pullRequest.url, headRef: pullRequest.headRef, headSha: pullRequest.headSha, baseRef: pullRequest.baseRef, state: pullRequest.state, updatedAt: now },
-          });
-        }
+      ? (pullRequest: { repoFullName: string; number: number; url: string; headRef: string; headSha: string; baseRef: string; state: string }) =>
+          this.observePullRequest(sessionId, pullRequest)
       : undefined;
     const session = existing
       ? await engine.restoreSession({
@@ -2829,6 +2817,25 @@ export class EngineHost {
     if (rowPersonality !== null) return personaPrefixText(name, rowPersonality);
     const row = await readOwnFile(db, scope, "assistant/personality.md");
     return personaPrefixText(name, row ? row.content : "");
+  }
+
+  /** Persist canonical PR facts for session and headless workflow actions. */
+  async observePullRequest(
+    sessionId: string,
+    pullRequest: { repoFullName: string; number: number; url: string; headRef: string; headSha: string; baseRef: string; state: string },
+  ): Promise<void> {
+    const db = this.opts.db;
+    if (!db) return;
+    const now = Date.now();
+    await db.insert(sessionPullRequests).values({
+      sessionId, repoFullName: pullRequest.repoFullName, prNumber: pullRequest.number,
+      prUrl: pullRequest.url, headRef: pullRequest.headRef, headSha: pullRequest.headSha,
+      baseRef: pullRequest.baseRef, state: pullRequest.state, firstObservedAt: now, updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId],
+      set: { prUrl: pullRequest.url, headRef: pullRequest.headRef, headSha: pullRequest.headSha,
+        baseRef: pullRequest.baseRef, state: pullRequest.state, updatedAt: now },
+    });
   }
 
   /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */

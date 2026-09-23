@@ -8,13 +8,13 @@
  * interpolated value is `apiUrl`, which is not secret.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript, REAL_GIT_PATH } from "./git-credential-helper.js";
 
 const API_URL = "http://valet-api.example.com";
 
@@ -175,6 +175,7 @@ describe("appSignedGitWrapperScript", () => {
     ["feature", "refs/heads/feature", false],
     ["feature:refs/heads/review", "refs/heads/review", false],
     ["feature:refs/heads/new-branch", "refs/heads/new-branch", true],
+    ["main:refs/heads/review", "refs/heads/review", false],
   ] as const)("executes push parsing for %s", async (refspec, expectedRef, createRef) => {
     const dir = mkdtempSync(join(tmpdir(), "valet-app-git-success-"));
     const requests: Array<Record<string, unknown>> = [];
@@ -195,16 +196,22 @@ describe("appSignedGitWrapperScript", () => {
       if (!address || typeof address === "string") throw new Error("test server did not bind");
       const fakeGit = join(dir, "git-real");
       writeFileSync(fakeGit, `#!/bin/sh
+printf '%s\\n' "$*" >> "$TEST_GIT_LOG"
 case "$1" in
   rev-parse)
     case "$*" in
       *--is-shallow-repository*) echo false ;;
+      *--symbolic-full-name*) echo "refs/heads/$3" ;;
       *refs/valet/signed/*) echo signedsha ;;
+      *"signedsha^{tree}"*) [ "$TEST_SOURCE_MAIN" = 1 ] && echo tree-main || echo tree1 ;;
+      *"mainsha^{tree}"*) echo tree-main ;;
       *"^{tree}"*) echo tree1 ;;
-      *--git-dir*) echo .git ;;
+      *--absolute-git-dir*) echo "$TEST_GIT_DIR" ;;
+      *refs/heads/main*) echo mainsha ;;
+      *HEAD*) [ "$TEST_SOURCE_MAIN" = 1 ] && echo featuresha || echo localsha ;;
       *) echo localsha ;;
     esac ;;
-  symbolic-ref) echo feature ;;
+  symbolic-ref) echo refs/heads/feature ;;
   remote) echo https://github.com/acme/widgets.git ;;
   ls-remote) [ "$TEST_NEW_BRANCH" = 1 ] || printf 'oldsha\\t%s\\n' "$3" ;;
   fetch|update-ref|reset|branch|status) ;;
@@ -221,11 +228,11 @@ esac
 `, { mode: 0o755 });
       const wrapper = join(dir, "git");
       const script = appSignedGitWrapperScript(`http://127.0.0.1:${address.port}`)
-        .replace('const real = "/usr/bin/git";', `const real = ${JSON.stringify(fakeGit)};`);
+        .replace(`const real = ${JSON.stringify(REAL_GIT_PATH)};`, `const real = ${JSON.stringify(fakeGit)};`);
       writeFileSync(wrapper, script, { mode: 0o755 });
       const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
         const child = spawn(process.execPath, [wrapper, "push", "origin", refspec], {
-          env: { ...process.env, VALET_SANDBOX_TOKEN: "test-token", TEST_NEW_BRANCH: createRef ? "1" : "0" },
+          env: { ...process.env, VALET_SANDBOX_TOKEN: "test-token", TEST_NEW_BRANCH: createRef ? "1" : "0", TEST_SOURCE_MAIN: refspec.startsWith("main:") ? "1" : "0", TEST_GIT_DIR: dir, TEST_GIT_LOG: join(dir, "git.log") },
         });
         let stderr = "";
         child.stderr.setEncoding("utf8");
@@ -235,6 +242,13 @@ esac
       expect(result.status, result.stderr).toBe(0);
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({ targetRef: expectedRef, createRef });
+      if (refspec.startsWith("main:")) {
+        const calls = readFileSync(join(dir, "git.log"), "utf8");
+        expect(calls).toContain("update-ref refs/heads/main signedsha mainsha");
+        expect(calls).toContain("rev-parse HEAD");
+        expect(calls).toContain("rev-parse mainsha^{tree}");
+        expect(calls).not.toContain("reset --soft");
+      }
     } finally {
       server.close();
       rmSync(dir, { recursive: true, force: true });
@@ -246,7 +260,7 @@ esac
     expect(script).toContain("maxBuffer: MAX_BLOB_BYTES + 1");
     expect(script).toContain("tracked blob ");
     expect(script).toContain("shallow clones cannot be App-signed");
-    expect(script).toContain('destination = src.replace(/^refs\\/heads\\//, "")');
+    expect(script).toContain('destination = sourceRef.slice("refs/heads/".length)');
     expect(script).toContain("/reconcile");
   });
 

@@ -1389,15 +1389,21 @@ const createPullRequest = action(Type.Object({
         body: args.body || undefined,
         draft: args.draft,
       });
-      await ctx.observePullRequest?.({
-        repoFullName: `${args.owner}/${args.repo}`,
-        number: pr.number,
-        url: pr.html_url,
-        headRef: pr.head.ref,
-        headSha: pr.head.sha,
-        baseRef: pr.base.ref,
-        state: pr.state,
-      });
+      try {
+        await ctx.observePullRequest?.({
+          repoFullName: `${args.owner}/${args.repo}`,
+          number: pr.number,
+          url: pr.html_url,
+          headRef: pr.head.ref,
+          headSha: pr.head.sha,
+          baseRef: pr.base.ref,
+          state: pr.state,
+        });
+      } catch (error) {
+        // GitHub already created the pull request. Attribution is best-effort;
+        // a retry here could create a duplicate pull request.
+        console.error("github.create_pull_request: attribution observation failed:", error);
+      }
       return {
         success: true,
         data: {

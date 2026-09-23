@@ -567,6 +567,8 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
+        observePullRequest: (pullRequest) =>
+          opts.host.observePullRequest(`wf:${runId}:actions`, pullRequest),
       });
     },
 

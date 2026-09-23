@@ -48,6 +48,24 @@ describeDocker("buildWorkspacePrep (docker)", () => {
   });
 
   it(
+    "preserves Git when the image provides it only at /usr/local/bin/git",
+    async () => {
+      sandbox = await provider.create({ workspace: tmp, image: "alpine:3.20" });
+      const install = await sandbox.exec("apk add --no-cache git curl nodejs && real=$(command -v git) && mkdir -p /usr/local/bin && [ \"$real\" = /usr/local/bin/git ] || mv \"$real\" /usr/local/bin/git");
+      expect(install.exitCode).toBe(0);
+
+      await installCredentialHelper(sandbox, "http://127.0.0.1:1", [], true);
+
+      const version = await sandbox.exec("git --version");
+      expect(version.exitCode).toBe(0);
+      expect(version.stdout).toContain("git version");
+      const preserved = await sandbox.exec("test -x /usr/local/lib/valet/git-real && test -x /usr/local/bin/git");
+      expect(preserved.exitCode).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
     "clones a tiny public repo tokenless into an empty workspace root",
     async () => {
       sandbox = await provider.create({ workspace: tmp, image: "alpine:3.20" });
