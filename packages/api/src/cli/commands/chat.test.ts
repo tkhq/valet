@@ -90,7 +90,7 @@ function makeDeps(
   const client: ChatClient = {
     sendPrompt: async (id, body) => {
       sendCalls.push({ id, body });
-      return opts.sendResponse ?? { messageId: "msg1", threadId: "t1" };
+      return opts.sendResponse ?? { messageId: "msg1", threadId: "t1", activityAt: 1 };
     },
     resolveDecision: async (id, gateId, body) => {
       resolveCalls.push({ id, gateId, body });

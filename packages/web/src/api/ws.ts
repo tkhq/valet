@@ -7,7 +7,7 @@
  */
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { WireEvent } from "@valet/api/wire";
+import type { ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
 import { qk } from "./queries";
 
@@ -38,6 +38,8 @@ function summarizeForLog(ev: WireEvent): string {
       return ev.reason;
     case "title.updated":
       return `${ev.sessionId}/${ev.threadId}`;
+    case "thread.activity":
+      return `${ev.threadId} ${ev.lastUserActivityAt}`;
     case "error":
       return `${ev.code}: ${ev.message}`;
     case "model_switched":
@@ -132,6 +134,16 @@ export function useSessionWebSocket(sessionId: string) {
           ingest(sessionId, wire);
           if (wire.type === "title.updated") {
             invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
+          }
+          if (wire.type === "thread.activity") {
+            qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+              ...current,
+              threads: current.threads.map((thread) =>
+                thread.id === wire.threadId
+                  ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) }
+                  : thread,
+              ),
+            }));
           }
           // Reset backoff only after receiving init — confirms the session
           // is valid and the connection is healthy. Resetting in onopen

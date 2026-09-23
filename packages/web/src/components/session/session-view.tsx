@@ -34,6 +34,7 @@ import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messag
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
+import { defaultThreadId } from "~/lib/thread-default";
 
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
@@ -128,13 +129,8 @@ export function SessionView({
   useSessionWebSocket(sessionId);
   const stream = useSessionStream(sessionId);
 
-  // No explicit ?thread → land on the MOST RECENT thread (matches the
-  // sidebar's newest-first ordering), not the oldest.
-  const newestThreadId = threads.data?.threads.reduce<{ id: string; createdAt: number } | undefined>(
-    (best, t) => (best === undefined || t.createdAt > best.createdAt ? { id: t.id, createdAt: t.createdAt } : best),
-    undefined,
-  )?.id;
-  const effectiveThreadId = activeThreadId ?? newestThreadId ?? undefined;
+  // The shared default keeps an omitted ?thread aligned with the sidebar, regardless of its sort mode.
+  const effectiveThreadId = activeThreadId ?? defaultThreadId(threads.data?.threads ?? []);
   const [replyTarget, setReplyTarget] = useState<MessageReplyReference>();
   useEffect(() => setReplyTarget(undefined), [effectiveThreadId]);
 

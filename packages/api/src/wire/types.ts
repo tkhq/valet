@@ -1018,6 +1018,8 @@ export interface ThreadSummary {
   sessionId: string;
   title?: string;
   createdAt: number;
+  /** Most recent user action on this thread. Agent activity does not update it. */
+  lastUserActivityAt: number;
   /** Thread-level model override. Falls back to the session default when undefined. */
   model?: string;
   /** Thread-level reasoning/thinking level override. */
@@ -1334,6 +1336,8 @@ export interface SendPromptResponse {
    */
   messageId: string | null;
   threadId: string;
+  /** Server time when this accepted user action occurred, in epoch milliseconds. */
+  activityAt: number;
 }
 
 // ── REST: decision gates ──────────────────────────────────────────────────
@@ -1599,6 +1603,15 @@ export type WireEvent =
       threadId: string;
       sessionTitle?: string;
       threadTitle?: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "thread.activity";
+      sessionId: string;
+      threadId: string;
+      lastUserActivityAt: number;
     }
   | {
       seq: number;

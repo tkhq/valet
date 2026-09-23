@@ -62,6 +62,7 @@ import {
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
+import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -283,13 +284,14 @@ function threadToSummary(
   threadId: string,
   createdAt: number,
   sessionId: string,
+  lastUserActivityAt: number,
   title?: string,
   model?: string,
   key?: string,
   archivedAt?: number,
   reasoning?: string | null,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt, reasoning };
+  return { id: threadId, sessionId, title, createdAt, lastUserActivityAt, model, key, archivedAt, reasoning };
 }
 
 async function loadEngineSession(
@@ -335,12 +337,23 @@ messagesRouter.get("/:id/threads", async (c) => {
           id: sessionThreads.id,
           title: sessionThreads.title,
           archivedAt: sessionThreads.archivedAt,
+          lastUserActivityAt: sessionThreads.lastUserActivityAt,
         })
         .from(sessionThreads)
         .where(inArray(sessionThreads.id, ids))
     : [];
   const metaById = new Map(
-    metaRows.map((r) => [r.id, { title: r.title ?? undefined, archivedAt: r.archivedAt ?? undefined }] as const),
+    metaRows.map(
+      (r) =>
+        [
+          r.id,
+          {
+            title: r.title ?? undefined,
+            archivedAt: r.archivedAt ?? undefined,
+            lastUserActivityAt: r.lastUserActivityAt ?? undefined,
+          },
+        ] as const,
+    ),
   );
 
   // Default list excludes archived threads; `?archived=1` lists only them.
@@ -352,6 +365,7 @@ messagesRouter.get("/:id/threads", async (c) => {
         t.id,
         t.toThreadData().createdAt,
         session.id,
+        metaById.get(t.id)?.lastUserActivityAt ?? t.toThreadData().createdAt,
         metaById.get(t.id)?.title,
         t.modelId(),
         t.key,
@@ -529,7 +543,11 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
 
   // Return the same title and archive state as a subsequent GET.
   const rows = await db
-    .select({ archivedAt: sessionThreads.archivedAt, title: sessionThreads.title })
+    .select({
+      archivedAt: sessionThreads.archivedAt,
+      title: sessionThreads.title,
+      lastUserActivityAt: sessionThreads.lastUserActivityAt,
+    })
     .from(sessionThreads)
     .where(eq(sessionThreads.id, thread.id))
     .limit(1);
@@ -540,6 +558,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
+    rows[0]?.lastUserActivityAt ?? thread.toThreadData().createdAt,
     title,
     thread.modelId(),
     thread.key,
@@ -600,6 +619,7 @@ messagesRouter.post("/:id/threads", async (c) => {
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
+    thread.toThreadData().createdAt,
     body.title,
     thread.modelId(),
     thread.key,
@@ -681,11 +701,13 @@ export async function submitSessionPrompt(
     promoteItemId?: string;
     /** The authenticated sender, persisted on the user entry as `MessageEntry.author`. */
     author?: PromptAuthor;
+    /** False for agent-driven submissions, which must not reorder the sidebar. */
+    recordUserActivity?: boolean;
     /** Server-validated assistant entry reference. */
     replyTo?: MessageReplyReference;
   },
 ): Promise<SendPromptResponse | null> {
-  const { threadId, attachments, fileRefs, author, replyTo } = opts ?? {};
+  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo } = opts ?? {};
   const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -697,17 +719,25 @@ export async function submitSessionPrompt(
   await engineSession.ensureDefaultThread();
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
+  const recordActivity = (activityAt: number) => recordUserActivity
+    ? recordThreadUserActivity(db, {
+        sessionId: row.id,
+        threadId: thread.id,
+        threadCreatedAt: thread.toThreadData().createdAt,
+        activityAt,
+        emit: (event) => engineSession.emit(event),
+      })
+    : Promise.resolve();
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
-    const now = Date.now();
-    await db
-      .update(agentSessions)
-      .set({ updatedAt: now, lastActivityAt: now })
-      .where(eq(agentSessions.id, row.id));
+    const activityAt = Date.now();
+    await recordSessionActivity(db, row.id, activityAt);
+    await recordThreadActivityBestEffort(() => recordActivity(activityAt));
     return {
       messageId: receipt.queueItemId || null,
       threadId: receipt.threadId,
+      activityAt,
     };
   }
 
@@ -799,6 +829,9 @@ export async function submitSessionPrompt(
       ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
 
+  // This is the user action time. Persist it only after the engine accepts
+  // the prompt, so a slow command cannot overtake a later user submission.
+  const activityAt = Date.now();
   let receipt;
   try {
     // Scan the member's typed text before the turn starts. A skill expansion
@@ -838,16 +871,17 @@ export async function submitSessionPrompt(
     throw err;
   }
 
-  const submitNow = Date.now();
-  await db
-    .update(agentSessions)
-    .set({ updatedAt: submitNow, lastActivityAt: submitNow })
-    .where(eq(agentSessions.id, row.id));
+  // Session recency is completion time. `activityAt` marks request start and
+  // can be older than a later submission that already finished.
+  const sessionTouchedAt = Date.now();
+  await recordSessionActivity(db, row.id, sessionTouchedAt);
+  await recordThreadActivityBestEffort(() => recordActivity(activityAt));
 
   return {
     // Commands take no queue item; "" would read as a real (broken) id.
     messageId: receipt.queueItemId || null,
     threadId: receipt.threadId,
+    activityAt,
   };
 }
 

@@ -17,7 +17,7 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { eventDropLog, userIdentityLinks, users } from "../schema/index.js";
+import { eventDropLog, sessionThreads, userIdentityLinks, users } from "../schema/index.js";
 import { linkIdentity, mintLinkCode } from "./identity-links.js";
 import { ChannelHost } from "./host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
@@ -301,6 +301,24 @@ describe("ChannelHost.handleUpdate", () => {
     await vi.waitFor(async () => {
       expect(await engineStore.listUnsettledSubmissions(session.id)).toHaveLength(0);
     });
+  });
+
+  it("records inbound channel messages as thread user activity", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+
+    await host.handleUpdate("fake", inbound());
+
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "user", id: USER_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const thread = session.thread("fake:99");
+    const rows = await testDb.appDb
+      .select({ lastUserActivityAt: sessionThreads.lastUserActivityAt })
+      .from(sessionThreads)
+      .where(eq(sessionThreads.id, thread.id));
+    expect(rows[0]?.lastUserActivityAt).toBeGreaterThanOrEqual(thread.toThreadData().createdAt);
   });
 
   it("concurrent channel and event deliveries share one durable thread", async () => {

@@ -444,7 +444,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const securityRunnerDriver = new SecurityRunnerDriver({
     db,
     engineStore,
-    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text, { recordUserActivity: false }),
     sweepIntervalMs: 0,
   });
 

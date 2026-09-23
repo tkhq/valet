@@ -423,6 +423,16 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "thread_user_activity":
+      return [
+        {
+          type: "thread.activity",
+          sessionId: ev.sessionId,
+          threadId: e.threadId,
+          lastUserActivityAt: e.activityAt,
+        },
+      ];
+
     case "command_result":
       return [
         {

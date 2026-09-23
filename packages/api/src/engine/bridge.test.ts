@@ -159,6 +159,19 @@ describe("busEventToWire", () => {
     ]);
   });
 
+  it("forwards persisted thread user activity", () => {
+    expect(
+      busEventToWire(ev({ type: "thread_user_activity", threadId: "t1", activityAt: 250 })),
+    ).toEqual([
+      {
+        type: "thread.activity",
+        sessionId: "s1",
+        threadId: "t1",
+        lastUserActivityAt: 250,
+      },
+    ]);
+  });
+
   it("drops out-of-scope event types (thread_start, ...)", () => {
     expect(busEventToWire(ev({ type: "thread_start", threadId: "t1" }))).toEqual([]);
   });

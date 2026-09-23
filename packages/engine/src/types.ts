@@ -1664,6 +1664,12 @@ export type EngineEvent =
       threadTitle?: string;
     }
   | {
+      /** Server-derived user activity for thread ordering. */
+      type: "thread_user_activity";
+      threadId: string;
+      activityAt: number;
+    }
+  | {
       /**
        * Stuck-head attention event (spec §Reconciliation, "Stuck-head alarm").
        * Emitted once per observation pass when an unsettled submission crosses

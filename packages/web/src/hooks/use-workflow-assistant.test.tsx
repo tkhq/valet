@@ -119,8 +119,8 @@ describe("useWorkflowAssistant", () => {
     });
     ensureAssistantSession.mockResolvedValue({ sessionId: SESSION });
     ensureOrchestrator.mockResolvedValue({ sessionId: SESSION });
-    createThread.mockResolvedValue({ id: "thread_1", sessionId: SESSION, createdAt: 1 });
-    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1" });
+    createThread.mockResolvedValue({ id: "thread_1", sessionId: SESSION, createdAt: 1, lastUserActivityAt: 1 });
+    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1", activityAt: 1 });
   });
 
   it("opens the explicitly selected team assistant and isolates its remembered thread", async () => {
@@ -166,13 +166,13 @@ describe("useWorkflowAssistant", () => {
     let failA: (error: Error) => void = () => {};
     createThread.mockImplementation((sessionId) => sessionId === "assistant:a"
       ? new Promise((resolve, reject) => { finishA = resolve; failA = reject; })
-      : Promise.resolve({ id: "thread-b", sessionId, createdAt: 1 }));
+      : Promise.resolve({ id: "thread-b", sessionId, createdAt: 1, lastUserActivityAt: 1 }));
     const { result, rerender } = renderHook(({ assistantId }) => useWorkflowAssistant(workflow, "Deploy", { assistantId, ownerType: "team", ownerId: "team-1" }), { wrapper, initialProps: { assistantId: "a" } });
     await waitFor(() => expect(createThread).toHaveBeenCalledWith("assistant:a"));
     rerender({ assistantId: "b" });
     await waitFor(() => expect(result.current.threadId).toBe("thread-b"));
     await act(async () => {
-      if (outcome === "success") finishA({ id: "thread-a", sessionId: "assistant:a", createdAt: 1 });
+      if (outcome === "success") finishA({ id: "thread-a", sessionId: "assistant:a", createdAt: 1, lastUserActivityAt: 1 });
       else failA(new Error("late failure"));
     });
     expect(sendPrompt).toHaveBeenCalledExactlyOnceWith("assistant:b", expect.objectContaining({ threadId: "thread-b" }));
@@ -214,7 +214,7 @@ describe("useWorkflowAssistant", () => {
     // React Query drops the callbacks passed to `mutate` when the observer
     // loses its listeners, so a thread remembered from one of those
     // callbacks would be lost with the first mount.
-    settle({ id: "thread_1", sessionId: SESSION, createdAt: 1 });
+    settle({ id: "thread_1", sessionId: SESSION, createdAt: 1, lastUserActivityAt: 1 });
     await waitFor(() => expect(second.result.current.threadId).toBe("thread_1"));
     expect(createThread).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledTimes(1);
@@ -226,7 +226,7 @@ describe("useWorkflowAssistant", () => {
     const first = renderHook(() => useWorkflowAssistant("wf-remount-complete", "Deploy"), { wrapper });
     await waitFor(() => expect(createThread).toHaveBeenCalledTimes(1));
     first.unmount();
-    await act(async () => { finish({ id: "thread-remount", sessionId: SESSION, createdAt: 1 }); });
+    await act(async () => { finish({ id: "thread-remount", sessionId: SESSION, createdAt: 1, lastUserActivityAt: 1 }); });
     expect(sendPrompt).not.toHaveBeenCalled();
     const second = renderHook(() => useWorkflowAssistant("wf-remount-complete", "Deploy"), { wrapper });
     await waitFor(() => expect(second.result.current.threadId).toBe("thread-remount"));
@@ -331,8 +331,8 @@ describe("WorkflowAssistantPanel", () => {
       activeChildren: 0,
     });
     ensureAssistantSession.mockResolvedValue({ sessionId: SESSION });
-    createThread.mockResolvedValue({ id: "thread_1", sessionId: SESSION, createdAt: 1 });
-    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1" });
+    createThread.mockResolvedValue({ id: "thread_1", sessionId: SESSION, createdAt: 1, lastUserActivityAt: 1 });
+    sendPrompt.mockResolvedValue({ messageId: "m1", threadId: "thread_1", activityAt: 1 });
   });
 
   it("replaces the opening spinner with the conversation", async () => {

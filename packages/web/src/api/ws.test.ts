@@ -7,6 +7,7 @@
  * the cleanup itself must mark the slice closed or it reads "open" forever.
  */
 import { createElement, type PropsWithChildren } from "react";
+import type { ListThreadsResponse } from "@valet/api/wire";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
@@ -155,6 +156,47 @@ describe("useSessionWebSocket", () => {
       exact: true,
     });
     expect(useStreamStore.getState().bySession.s1).toBeDefined();
+    unmount();
+  });
+
+  it("updates thread activity from the socket without invalidation loops", () => {
+    const { queryClient, unmount } = renderSocketHook("s1");
+    queryClient.setQueryData<ListThreadsResponse>(["sessions", "s1", "threads"], {
+      threads: [
+        { id: "t1", sessionId: "s1", createdAt: 1, lastUserActivityAt: 10 },
+        { id: "t2", sessionId: "s1", createdAt: 2, lastUserActivityAt: 20 },
+      ],
+    });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const socket = FakeWebSocket.instances[0];
+
+    act(() => {
+      socket?.onmessage?.({
+        data: JSON.stringify({
+          type: "thread.activity",
+          seq: 1,
+          ts: 1,
+          sessionId: "s1",
+          threadId: "t1",
+          lastUserActivityAt: 30,
+        }),
+      });
+      socket?.onmessage?.({
+        data: JSON.stringify({
+          type: "thread.activity",
+          seq: 2,
+          ts: 2,
+          sessionId: "s1",
+          threadId: "t1",
+          lastUserActivityAt: 25,
+        }),
+      });
+    });
+
+    const cached = queryClient.getQueryData<ListThreadsResponse>(["sessions", "s1", "threads"]);
+    expect(cached?.threads.find((thread) => thread.id === "t1")?.lastUserActivityAt).toBe(30);
+    expect(cached?.threads.find((thread) => thread.id === "t2")?.lastUserActivityAt).toBe(20);
+    expect(invalidate).not.toHaveBeenCalled();
     unmount();
   });
 
