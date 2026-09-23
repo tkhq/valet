@@ -142,7 +142,7 @@ Admission is always a `SignalContent` (`signalType: 'slack.message'` etc., sende
 
 ### Replies and personas
 
-Outbound replies flow through the bound transport with the orchestrator's persona (name/avatar) resolved per identity row. Reply targets come from the thread's origin channel; when a thread has no channel origin (web, automation), channel sends require an explicit target from the model. Delivery is fail-closed: a reply that cannot resolve its origin target surfaces in the web UI only, never broadcast to all bindings.
+Outbound replies flow through the bound transport. Persona, name, and avatar are internal or profile-only data. Slack always uses the installed Valet bot identity. Reply targets come from the thread's origin channel; when a thread has no channel origin (web, automation), channel sends require an explicit target from the model. Delivery is fail-closed: a reply that cannot resolve its origin target surfaces in the web UI only, never broadcasts to all bindings.
 
 ## Thread Policy
 

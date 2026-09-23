@@ -51,7 +51,6 @@ Valet uses an org-level Slack integration. One admin installs the app for the en
         "channels:history",
         "channels:read",
         "chat:write",
-        "chat:write.customize",
         "chat:write.public",
         "files:read",
         "groups:history",
@@ -152,7 +151,6 @@ Once linked, messages you send in Slack channels where the bot is present will r
 | `channels:history` | Read messages in public channels the bot is in |
 | `channels:read` | Look up channel info for display labels |
 | `chat:write` | Send messages and replies |
-| `chat:write.customize` | Send messages with custom username/avatar (persona identity) |
 | `chat:write.public` | Post in channels the bot hasn't joined |
 | `files:read` | Access file attachments shared in messages |
 | `groups:history` | Read messages in private channels the bot is invited to |

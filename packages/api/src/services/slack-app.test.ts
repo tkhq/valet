@@ -119,7 +119,6 @@ describe("slack bot scopes", () => {
     const declared = new Set([...SLACK_REQUIRED_BOT_SCOPES, ...SLACK_OPTIONAL_BOT_SCOPES]);
     for (const scope of [
       "app_mentions:read",
-      "chat:write.customize",
       "chat:write.public",
       "users:read.email",
       "usergroups:read",

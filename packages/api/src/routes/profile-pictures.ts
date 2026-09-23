@@ -3,8 +3,9 @@
  *
  * Uploads use the configured BlobStore. The server validates and rewrites
  * every accepted image to WebP before storage. Public reads use only a
- * server-derived hash, so Slack can fetch assistant avatars without a Valet
- * session and clients cannot select another principal's storage key.
+ * server-derived hash. Public reads do not need a Valet session, and clients
+ * cannot select another principal's storage key. Profile pictures do not
+ * affect Slack sender identity.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { Hono, type Context } from "hono";

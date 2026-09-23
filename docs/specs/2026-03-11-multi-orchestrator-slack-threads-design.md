@@ -6,7 +6,7 @@ When multiple Valet users communicate in the same public Slack thread, each user
 
 ## Design Summary
 
-Switch public channel Slack threads from single-owner auto-routing to multi-orchestrator shared context with explicit invocation. Each user's orchestrator participates independently in the thread with its own persona identity (name, avatar). Agents only respond when explicitly @mentioned. Thread context is pulled from Slack on each invocation so every agent sees the full conversation — including other agents' responses and other users' messages.
+Switch public channel Slack threads from single-owner auto-routing to multi-orchestrator shared context with explicit invocation. Each user's orchestrator has its own internal behavior profile. Slack posts always use the installed Valet bot identity. Agents only respond when explicitly @mentioned. Slack provides thread context on each invocation. Each agent sees the full conversation, including other agents' responses and other users' messages.
 
 ## Routing Rules
 
@@ -14,7 +14,7 @@ Switch public channel Slack threads from single-owner auto-routing to multi-orch
 
 - Agent only responds to `app_mention` events — no auto-routing on subsequent messages
 - Any user can @Valet at any point in any public thread, even threads where Valet hasn't participated before
-- The mentioning user's orchestrator handles the message and responds as its persona
+- The mentioning user's orchestrator handles the message with its internal behavior profile. Slack sends the reply as the installed Valet bot
 - Channel bindings do not apply in public channels; multi-orchestrator rules always govern
 - The Valet bot must be a member of the channel to receive events and respond (standard Slack constraint)
 
@@ -33,7 +33,7 @@ Unchanged. Unlinked Slack users receive the account linking prompt in-thread bef
 When an orchestrator is invoked in a public thread:
 
 1. **Fetch thread history** — Call Slack `conversations.replies(channel, thread_ts)` to get the thread. Cap at the most recent 200 messages to avoid exceeding model context windows. Paginate via Slack's `cursor` parameter if needed.
-2. **Resolve Slack display names** — For every message, resolve the Slack user ID to the user's Slack display name (via `users.info` or cached lookup). Use Slack display names universally — both linked and unlinked users — so the agent builds consistent memories about participants. For bot/agent messages, use the `username` field from the message payload (the persona name set via `chat.postMessage`). Cache resolved names in an in-memory Map scoped to the request to avoid redundant API calls.
+2. **Resolve Slack display names** — For every message, resolve the Slack user ID to the user's Slack display name (via `users.info` or cached lookup). Use Slack display names universally — both linked and unlinked users — so the agent builds consistent memories about participants. For bot messages, use the installed bot name from the message payload. Do not infer an assistant persona from Slack identity fields. Cache resolved names in an in-memory Map scoped to the request to avoid redundant API calls.
 3. **Compute delta from cursor** — Look up the orchestrator's `lastSeenTs` in `channel_thread_mappings` for this user + thread. Filter to only messages newer than the cursor. Include the orchestrator's own prior messages in the delta for continuity (the agent needs to see what it previously said).
 4. **Inject as context** — Prepend the new messages as a formatted block in the `content` field passed to `dispatchOrchestratorPrompt`. The block is separated from the user's new message by a delimiter (see Context Message Format below).
 5. **Advance cursor** — Update `lastSeenTs` to the current message's timestamp.
@@ -131,13 +131,13 @@ Key changes:
 
 - Use `users.info` to resolve Slack user IDs to display names
 - Cache resolved names in an in-memory `Map<string, string>` scoped to the request handler (a single thread pull may reference the same user multiple times)
-- For bot messages (other agents' responses), use the `username` field from the message payload
+- For bot messages, use the installed bot name from the message payload. Do not infer an assistant persona from Slack identity fields
 
 ## Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| Multi-orchestrator over single-owner | Each agent has distinct identity (name, avatar, persona) making multi-agent threads legible. Each operates with its own user's credentials. |
+| Multi-orchestrator over single-owner | Each agent has an internal behavior profile and its own user's credentials. Slack posts use the installed bot identity. |
 | Explicit invocation in public channels | Prevents noise. Agents only speak when asked. Natural Slack @mention pattern. |
 | Pull model over push | Simpler to implement. Push is the future goal for ambient awareness but adds complexity. Handler structured for easy push addition later. |
 | Slack display names for all users | Agents build memories keyed on display names. Slack is the communication layer, so Slack names are the stable identifier. |

@@ -41,7 +41,7 @@ It is a **helper class scoped to one DO instance** — not a Durable Object, not
 interface ChannelRouterDeps {
   /** Resolve auth token for a channel. Implementation branches on channelType (Slack uses org-level bot token, others use per-user credentials). */
   resolveToken(channelType: string, userId: string): Promise<string | undefined>;
-  /** Resolve persona identity for channel messages. Called for all channels — transports ignore it if unused. Must not throw — returns undefined if unavailable. */
+  /** Resolve persona behavior context. It never changes provider sender identity. */
   resolvePersona(userId: string): Promise<Persona | undefined>;
   /** Callback when a substantive reply is sent — DO uses this to resolve follow-up reminders. Awaited by sendReply to prevent data loss on hibernation. */
   onReplySent(channelType: string, channelId: string): Promise<void>;
@@ -89,7 +89,7 @@ Internal flow:
 2. Resolve token via `deps.resolveToken(channelType, userId)`
 3. Parse channelId via `transport.parseTarget?.(channelId) ?? { channelType, channelId }` (see Composite ChannelId Parsing section)
 4. Build `OutboundMessage` with attachments if present
-5. Resolve persona via `deps.resolvePersona(userId)` — called for all channel types, set on `ctx.persona`. Transports that don't use persona (Telegram, etc.) simply ignore it. This avoids a `channelType === 'slack'` guard in ChannelRouter and makes the design extensible for future channels that support custom identity (Discord, Teams).
+5. Resolve persona behavior via `deps.resolvePersona(userId)` when the model context needs it. It never changes a transport sender identity. Slack uses the installed Valet bot identity.
 6. Call `transport.sendMessage(target, outbound, ctx)`
 7. On success, `await deps.onReplySent(channelType, channelId)` if `followUp !== false` (must be awaited — the callback writes to SQLite and a hibernation between send and write would lose the followup resolution)
 8. Return result
@@ -248,7 +248,7 @@ Beyond the auto-reply code path itself, the following become dead code and shoul
 
 ### Telegram and Other Channels
 
-The Telegram transport uses the same `ChannelTransport` contract. It does not use composite channelIds, shimmer, or persona resolution. The refactor is transparent to it — all three ChannelRouter dispatch methods resolve the transport generically and only apply Slack-specific behavior (persona, composite channelId) when applicable.
+The Telegram transport uses the same `ChannelTransport` contract. It does not use composite channelIds or shimmer. The refactor is transparent to it. All three ChannelRouter dispatch methods resolve the transport generically. Slack uses the installed Valet bot identity.
 
 ### Files Changed
 

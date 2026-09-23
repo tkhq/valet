@@ -104,12 +104,6 @@ export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
   // never delivers the mention and the trigger never fires.
   "app_mentions:read",
 
-  // Per-assistant outbound identity (TKAI-387): the `username`/`icon_url`
-  // overrides on `chat.postMessage`. Without it Slack rejects a branded
-  // post; the transport still posts under the app's own identity when no
-  // assistant override is set.
-  "chat:write.customize",
-
   // ── V1 parity, held for surfaces that are ported next ───────────────
   // Slack grants only scopes the installed manifest declared.
   // Posting into public channels the bot has not joined.

@@ -129,32 +129,20 @@ describe('slack actions', () => {
     });
   });
 
-  it('dm_user posts with the current assistant identity', async () => {
+  it('dm_user keeps the installed bot identity when an assistant has a name and avatar', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }))
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '111.222', channel: 'D2' }));
 
     const result = await action('slack.dm_user').execute(
       { user: 'U123', text: 'hi there' },
-      pluginCtx({
-        resolveOutboundSender: async () => ({
-          displayName: 'Ada',
-          avatarUrl: 'https://example.com/a.png',
-        }),
-      }),
+      pluginCtx(),
     );
 
     const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(JSON.parse(postInit.body as string)).toEqual({
-      channel: 'D2',
-      text: 'hi there',
-      mrkdwn: true,
-      username: 'Ada',
-      icon_url: 'https://example.com/a.png',
-    });
+    expect(JSON.parse(postInit.body as string)).toEqual({ channel: 'D2', text: 'hi there', mrkdwn: true });
     expect(result).toEqual({ success: true, data: { ts: '111.222', channel: 'D2' } });
   });
-
   it('lookup_user_by_email resolves an explicit email for dm_user', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
@@ -258,50 +246,31 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9' } });
   });
 
-  it('reply_to_origin uses the current assistant identity', async () => {
+  it('reply_to_origin keeps the installed bot identity', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
     await action('slack.reply_to_origin').execute(
-      { text: 'branded answer' },
-      pluginCtx({
-        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
-        resolveOutboundSender: async () => ({
-          displayName: 'Ledger',
-          avatarUrl: 'https://cdn.example.com/ledger.png',
-        }),
-      }),
+      { text: 'answer' },
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' } }),
     );
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toMatchObject({
-      username: 'Ledger',
-      icon_url: 'https://cdn.example.com/ledger.png',
-    });
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.username).toBeUndefined();
+    expect(body.icon_url).toBeUndefined();
   });
-
-  it('reply_to_origin retries without rejected identity decoration', async () => {
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_arguments' }))
-      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+  it('reply_to_origin does not retry a rejected post', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_arguments' }));
     const result = await action('slack.reply_to_origin').execute(
       { text: 'must land' },
-      pluginCtx({
-        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
-        resolveOutboundSender: async () => ({ displayName: 'Ledger' }),
-      }),
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' } }),
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string).username).toBe('Ledger');
-    expect(JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string).username).toBeUndefined();
-    expect(result.success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(false);
   });
-
   it('reply_to_origin does not retry an HTTP failure with an identity override', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(500, { ok: false, error: 'server_error' }));
     const result = await action('slack.reply_to_origin').execute(
       { text: 'must not duplicate' },
-      pluginCtx({
-        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
-        resolveOutboundSender: async () => ({ displayName: 'Ledger' }),
-      }),
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' } }),
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ success: false });
@@ -311,10 +280,7 @@ describe('slack actions', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ts: '9.9' }));
     const result = await action('slack.reply_to_origin').execute(
       { text: 'must not duplicate' },
-      pluginCtx({
-        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
-        resolveOutboundSender: async () => ({ displayName: 'Ledger' }),
-      }),
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' } }),
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ success: false });
@@ -1164,24 +1130,21 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '125.678', channel: 'C1' } });
   });
 
-  it('send_message uses the current assistant identity', async () => {
+  it('send_message keeps the installed bot identity', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '126.789', channel: 'C1' }));
 
     const result = await action('slack.send_message').execute(
       { channel: 'C1', text: 'from assistant' },
-      pluginCtx({ resolveOutboundSender: async () => ({ displayName: 'Alice' }) }),
+      pluginCtx(),
     );
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
-    const body = JSON.parse(init.body as string);
-    expect(body).toMatchObject({ username: 'Alice' });
-    // No configured picture keeps Slack's bot icon while preserving the
-    // assistant name. Slack has no safe generated icon URL fallback.
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.username).toBeUndefined();
     expect(body.icon_url).toBeUndefined();
     expect(result).toEqual({ success: true, data: { ts: '126.789', channel: 'C1' } });
   });
-
   it('send_message adds attribution context block for non-DM channels when owner is linked', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '127.890', channel: 'C1' }));

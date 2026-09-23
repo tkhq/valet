@@ -25,7 +25,7 @@ import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teams, workflowDefinitions } from "../schema/index.js";
+import { actionInvocations, actionPolicies, runtimeGrants, sessionRepos, githubInstallations, orgs, teams, workflowDefinitions } from "../schema/index.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -35,7 +35,6 @@ import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { InMemoryWorkflowStore } from "@valet/workflow";
-import { createAssistant } from "../assistants/service.js";
 import { slackPlugin } from "@valet/plugin-slack/actions";
 
 /** Fake `OnePasswordService` — only `resolveCredential` is exercised by the invoker's credential providers. */
@@ -544,14 +543,8 @@ describe("buildActionInvoker", () => {
     }
   });
 
-  it("workflow slack.send_message posts as the owner's configured assistant", async () => {
+  it("workflow slack.send_message keeps the installed bot identity", async () => {
     const db = await makeDb();
-    const assistant = await createAssistant(db, "org1", { type: "user", id: "u1" }, "Release bot");
-    await db
-      .update(assistants)
-      .set({ avatarUrl: "https://cdn.example.com/release-bot.png" })
-      .where(eq(assistants.id, assistant.id));
-
     const store = new FakeCredentialStore();
     store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
     const plugin: ValetPlugin = {
@@ -577,17 +570,13 @@ describe("buildActionInvoker", () => {
       );
 
       expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "C1" } });
-      expect(JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string)).toMatchObject({
-        channel: "C1",
-        text: "Deploy complete",
-        username: "Release bot",
-        icon_url: "https://cdn.example.com/release-bot.png",
-      });
+      const body = JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
+      expect(body.username).toBeUndefined();
+      expect(body.icon_url).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }
   });
-
   it("team-owned run: a declared service with no team credential refuses before execute", async () => {
     const fixture = countingAction();
     const actionPlugin: ActionPlugin = { service: "demo", actions: [fixture.action] };

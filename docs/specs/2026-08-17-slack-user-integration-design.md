@@ -350,5 +350,4 @@ Every user-facing message names the corrective action when one exists.
   without it).
 - Multi-workspace (Enterprise Grid) — the deployment resolves one
   workspace, same as the webhook route's team gate.
-- Persona posting (`chat:write.customize` username/icon overrides) — a
-  separate V1 feature, not part of this port.
+- Slack sender overrides. V2 uses the installed Valet bot identity. Assistant personas are internal behavior profiles.

@@ -521,9 +521,7 @@ When the runner sends a `channel-reply` message (agent explicitly called the `ch
 2. Resolves persona via the generic `resolveOrchestratorPersona()` utility
 3. Sends the reply via the transport
 
-The `handleChannelReply` method stays in the DO because it handles file/image attachments, credential resolution per channel type, and Slack shimmer status clearing — logic that is beyond the scope of the text-only `sendChannelReply` auto-reply path. But it loses its Slack-specific persona code, replaced by generic persona resolution via `ChannelContext.persona`.
-
-Note: The Slack transport's `sendMessage` implementation must be updated to read persona from `ctx.persona` instead of `message.platformOptions`.
+The `handleChannelReply` method stays in the DO because it handles file/image attachments, credential resolution per channel type, and Slack shimmer status clearing — logic that is beyond the scope of the text-only `sendChannelReply` auto-reply path. Persona behavior remains internal model context. Slack sender identity stays the installed Valet bot.
 
 ### API
 
@@ -596,11 +594,11 @@ This function does NOT:
 
 ## 3. Persona Resolution via ChannelContext
 
-Persona resolution (looking up the orchestrator's name and avatar) is a platform concern, not a plugin concern. Plugin transports receive the persona through the existing `ChannelContext` interface and map it to their wire format.
+Persona resolution is a platform concern, not a plugin concern. It supplies internal behavior context. It does not map an orchestrator name or avatar to a provider sender identity. Slack always uses the installed Valet bot identity.
 
 ### SDK change
 
-The `ChannelContext` interface gains a `persona` field. Existing fields (`orgId`, `platformCache`) are preserved.
+The `ChannelContext` interface can carry persona behavior context. Existing fields (`orgId`, `platformCache`) are preserved. A transport must not use that context to change Slack sender identity.
 
 ```typescript
 // packages/sdk/src/channels/index.ts
@@ -623,40 +621,9 @@ The `metadata` field allows transports to access platform-specific persona data 
 
 ### Platform utility
 
-```typescript
-// packages/worker/src/services/persona.ts
-async function resolveOrchestratorPersona(
-  env: Env,
-  userId: string,
-): Promise<{ name?: string; avatar?: string; metadata?: Record<string, unknown> }> {
-  // Query D1 for orchestrator identity via getOrchestratorIdentity(appDb, userId).
-  // Same data as current getSlackPersonaOptions() but returns generic shape.
-  // metadata may include slackUserId for Slack attribution compliance.
-}
-```
+Assistant personas are internal behavior profiles. A transport can use persona context only in a provider field known to be safe. Slack has no such v2 field. Slack sends every message as the installed Valet bot. It never maps a persona name or avatar to `username` or `icon_url`.
 
-The DO has `userId` readily available in state. Called once before dispatching to any transport. Each transport maps persona to its own wire format:
-
-```typescript
-// Slack transport — uses persona for username/icon
-// NOTE: Must be updated to read from ctx.persona instead of message.platformOptions
-sendMessage(target, content, ctx) {
-  await postMessage({
-    channel: target.channelId,
-    text: content.markdown,
-    ...(ctx.persona?.name ? { username: ctx.persona.name } : {}),
-    ...(ctx.persona?.avatar ? { icon_url: ctx.persona.avatar } : {}),
-  });
-}
-
-// Telegram transport — persona not applicable to bot API
-sendMessage(target, content, ctx) {
-  await sendTelegramMessage(target.channelId, content.markdown);
-}
-```
-
-Plugin authors never query D1 for identities. They just read `ctx.persona` if their channel supports it.
-
+Telegram and other transports keep their stable provider identities.
 ---
 
 ## 4. Elimination of Direct D1 Message Writes

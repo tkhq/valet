@@ -677,11 +677,6 @@ export interface ToolContext {
    * `reply_to_origin` / `react_to_origin` read it so the model supplies no ids.
    */
   origin?: ChannelOrigin;
-  /**
-   * Resolve the sending assistant's current outbound identity. Hosts keep this
-   * dynamic so profile edits apply without rebuilding a cached session.
-   */
-  resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   cwd?: string;
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
@@ -2330,8 +2325,6 @@ export interface CreateSessionOptions {
    * behind a resolver it was given.
    */
   credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
-  /** Resolve the assistant identity used by provider-specific outbound actions. */
-  resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */
   skillTelemetry?: SkillTelemetrySink;
   /**

@@ -8,7 +8,7 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-describe("SlackApi.joinChannel", () => {
+describe("SlackApi", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -18,6 +18,22 @@ describe("SlackApi.joinChannel", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("posts messages with the installed bot identity", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: "1.2" }));
+
+    const api = new SlackApi("xoxb-test");
+    await api.postMessage({ channel: "C123", text: "hello" });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://slack.com/api/chat.postMessage");
+    expect(JSON.parse(init.body as string)).toEqual({
+      channel: "C123",
+      text: "hello",
+      mrkdwn: true,
+      unfurl_links: false,
+    });
   });
 
   it("posts conversations.join with the channel id and bearer token", async () => {
