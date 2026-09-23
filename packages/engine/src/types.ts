@@ -729,6 +729,16 @@ export interface ToolContext {
    * hosts (and tests) that wire no store.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /** Persist a pull request created by a same-process plugin action. */
+  observePullRequest?: (pullRequest: {
+    repoFullName: string;
+    number: number;
+    url: string;
+    headRef: string;
+    headSha: string;
+    baseRef: string;
+    state: string;
+  }) => Promise<void>;
   /**
    * Host-provided text extraction for a document the model cannot read on
    * its own. A PDF is the case that matters: no sandbox image carries a PDF
@@ -760,6 +770,8 @@ export interface ToolContext {
    * Consumed by `call_tool`'s policy audit (`PolicyInvocationRecord.queueItemId`).
    */
   queueItemId?: string;
+  /** Host-computed environment bound to this exact queue execution. */
+  executionEnv?: Record<string, string>;
   emitArtifact?: (artifact: ToolArtifact) => Promise<void>;
   suspendedDecision?: { gateId: string; ordinal: number; resolution?: DecisionResolution };
   signal: AbortSignal;
@@ -2251,6 +2263,8 @@ export interface CreateSessionOptions {
   purpose?: SessionPurpose;
   parentSessionId?: string;
   parentThreadId?: string;
+  /** Host-only queue environment factory. Values are passed to exec and execJob. */
+  executionEnv?: (queueItemId: string | undefined) => Record<string, string> | undefined;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
   /**
@@ -2359,6 +2373,16 @@ export interface CreateSessionOptions {
    * `buildToolContext`. Absent === no `pluginStore` on plugin actions.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /** Persist a pull request created by a same-process plugin action. */
+  observePullRequest?: (pullRequest: {
+    repoFullName: string;
+    number: number;
+    url: string;
+    headRef: string;
+    headSha: string;
+    baseRef: string;
+    state: string;
+  }) => Promise<void>;
   /**
    * Threaded onto `ToolContext.extractDocument` via `buildToolContext`.
    * Absent === plugin actions get no document extraction.

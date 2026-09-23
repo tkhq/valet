@@ -78,6 +78,7 @@ import {
 } from "./resolve-repo-resources.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
+import { opaqueCorrelationIds } from "../services/git-attribution.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import {
@@ -102,6 +103,7 @@ import {
   securityCells,
   securityEngagements,
   sessionRepos,
+  sessionPullRequests,
   teams,
   users,
   type SecurityCellRow,
@@ -483,6 +485,8 @@ export interface SessionMeta {
    */
   userName?: string;
   userEmail?: string;
+  /** Immutable active Git attribution generation loaded before preparation. */
+  gitAttribution?: typeof import("../schema/index.js").sessionGitAttributionSnapshots.$inferSelect;
   /**
    * The owning team when the session lives in a team workspace
    * (`agent_sessions.owner_type = 'team'`), else absent. Feeds the
@@ -1186,6 +1190,18 @@ export class EngineHost {
     const sessionRoles = personaCell
       ? [...extras.roles, ...securityRolesForCell(personaCell.persona, personaRepoRoleMarkdown)]
       : extras.roles;
+    const executionEnv = meta.gitAttribution?.correlationTrailers && this.opts.githubTokenDeps?.key
+      ? (queueItemId: string | undefined) => {
+          if (!queueItemId) return undefined;
+          const correlationKeyV1 = process.env.VALET_CORRELATION_KEY_V1 ?? this.opts.githubTokenDeps!.key.toString("base64");
+          const ids = opaqueCorrelationIds(correlationKeyV1, sessionId, queueItemId);
+          return { VALET_SESSION_CORRELATION_ID: ids.session, VALET_QUEUE_ITEM_CORRELATION_ID: ids.queueItem };
+        }
+      : undefined;
+    const observePullRequest = this.opts.db
+      ? (pullRequest: { repoFullName: string; number: number; url: string; headRef: string; headSha: string; baseRef: string; state: string }) =>
+          this.observePullRequest(sessionId, pullRequest)
+      : undefined;
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -1194,6 +1210,7 @@ export class EngineHost {
             orgId: meta.orgId,
             owner: principal,
             workspace: meta.workspace,
+            ...(executionEnv ? { executionEnv } : {}),
             sandbox: sandboxOpts,
             model,
             modelSpec,
@@ -1211,6 +1228,7 @@ export class EngineHost {
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(observePullRequest ? { observePullRequest } : {}),
             extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
@@ -1221,6 +1239,7 @@ export class EngineHost {
           orgId: meta.orgId,
           owner: principal,
           workspace: meta.workspace,
+          ...(executionEnv ? { executionEnv } : {}),
           sandbox: sandboxOpts,
           model,
           modelSpec,
@@ -1238,6 +1257,7 @@ export class EngineHost {
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+          ...(observePullRequest ? { observePullRequest } : {}),
           extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
@@ -2797,6 +2817,25 @@ export class EngineHost {
     if (rowPersonality !== null) return personaPrefixText(name, rowPersonality);
     const row = await readOwnFile(db, scope, "assistant/personality.md");
     return personaPrefixText(name, row ? row.content : "");
+  }
+
+  /** Persist canonical PR facts for session and headless workflow actions. */
+  async observePullRequest(
+    sessionId: string,
+    pullRequest: { repoFullName: string; number: number; url: string; headRef: string; headSha: string; baseRef: string; state: string },
+  ): Promise<void> {
+    const db = this.opts.db;
+    if (!db) return;
+    const now = Date.now();
+    await db.insert(sessionPullRequests).values({
+      sessionId, repoFullName: pullRequest.repoFullName, prNumber: pullRequest.number,
+      prUrl: pullRequest.url, headRef: pullRequest.headRef, headSha: pullRequest.headSha,
+      baseRef: pullRequest.baseRef, state: pullRequest.state, firstObservedAt: now, updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId],
+      set: { prUrl: pullRequest.url, headRef: pullRequest.headRef, headSha: pullRequest.headSha,
+        baseRef: pullRequest.baseRef, state: pullRequest.state, updatedAt: now },
+    });
   }
 
   /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */

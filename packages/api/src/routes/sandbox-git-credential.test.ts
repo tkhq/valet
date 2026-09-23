@@ -15,9 +15,10 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, contentSources, gitPushOperations, githubInstallations, orgs, sessionGitAttributionHeads, sessionGitAttributionSnapshots, sessionGitBranches, sessionPullRequests, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { saveAppConfig } from "../services/github-app.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
@@ -278,6 +279,7 @@ describe("POST /api/sandbox/git-credential", () => {
   });
 });
 
+
 // ── Workflow sessions act as their run's owner ─────────────────────────────
 //
 // A `session` node's sandbox token carries the run actor: the member who
@@ -326,6 +328,28 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     });
   }
 
+
+  async function activateAppSigned(sessionId: string): Promise<void> {
+    const now = Date.now();
+    await api!.providers.db.insert(sessionGitAttributionSnapshots).values({
+      sessionId, generation: 1, mode: "valet_app_signed", coAuthoredBy: true, correlationTrailers: true,
+      ownerType: "team", ownerId: TEAM.id, counterpartUserId: null, counterpartName: null, counterpartEmail: null,
+      valetName: "Valet", valetEmail: "valet@example.com", settingsFingerprint: "test", createdBy: "local-user", createdAt: now,
+    });
+    await api!.providers.db.insert(sessionGitAttributionHeads).values({ sessionId, activeGeneration: 1, updatedAt: now });
+  }
+
+  async function bindMirroredWorkflow(runId: string, repoFullName = "tkhq/docs"): Promise<void> {
+    const now = Date.now(); const sourceId = `source_${runId}`;
+    await api!.providers.db.insert(contentSources).values({
+      id: sourceId, orgId: ORG, ownerType: "team", ownerId: TEAM.id, repoFullName, ref: "", subpath: "",
+      kinds: ["workflows"], enabled: true, status: "ok", attempts: 0, nextAttemptAt: now, createdAt: now, updatedAt: now,
+    });
+    await api!.providers.db.update(workflowDefinitions)
+      .set({ origin: "repo", sourceId, upstreamPath: ".valet/workflows/test.yaml" })
+      .where(eq(workflowDefinitions.id, `wf_def_${runId}`));
+  }
+
   /** An App with one installation, on `accountLogin`, that mints `INSTALLATION_TOKEN`. */
   async function installApp(accountLogin: string): Promise<void> {
     fixture = startGithubFixture({
@@ -365,6 +389,87 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
       updatedAt: now,
     });
   }
+
+  it("downscopes an App-signed workflow to its explicit mirrored repository", async () => {
+    api = await bootTestApi();
+    await installApp("tkhq");
+    const runId = "wfrun_signed_bound";
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId, orgId: ORG, owner: TEAM, actorUserId: "local-user" });
+    await bindMirroredWorkflow(runId);
+    await activateAppSigned(sessionId);
+    await saveUserCredential("ghp_must_not_be_used");
+    await saveOrgPat("ghp_org_must_not_be_used");
+    const token = await tokenFor(sessionId, "local-user");
+
+    const git = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(git.status).toBe(200);
+    expect(await git.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+    const gitMint = fixture!.calls.filter((call) => call.path.endsWith("/access_tokens")).at(-1);
+    expect(gitMint?.body).toEqual({ permissions: { contents: "read", metadata: "read" }, repositories: ["docs"] });
+
+    const gh = await post(token, { host: "github.com", owner: "tkhq", repo: "docs", purpose: "api" });
+    expect(gh.status).toBe(200);
+    const apiMint = fixture!.calls.filter((call) => call.path.endsWith("/access_tokens")).at(-1);
+    expect(apiMint?.body).toEqual({ permissions: { metadata: "read", pull_requests: "write", issues: "write" }, repositories: ["docs"] });
+    expect(apiMint?.body).not.toMatchObject({ permissions: { contents: "write" } });
+
+    const replay = await fetch(`${api.baseUrl}/api/sandbox/git-push`, {
+      method: "POST", headers: { ...HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ repoFullName: "tkhq/docs", targetRef: "refs/heads/feature", expectedRemoteSha: "old", createRef: true, commits: [{ localSha: "local", treeSha: "tree", parents: [], message: "Subject" }] }),
+    });
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toMatchObject({ error: expect.stringContaining("GitHub Git Database API") });
+    const replayMint = fixture!.calls.filter((call) => call.path.endsWith("/access_tokens")).at(-1);
+    expect(replayMint?.body).toEqual({ permissions: { contents: "write", metadata: "read" }, repositories: ["docs"] });
+  });
+
+  it("rejects App-signed workflows without an explicit repository before minting", async () => {
+    api = await bootTestApi();
+    await installApp("tkhq");
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId: "wfrun_signed_unbound", orgId: ORG, owner: TEAM });
+    await activateAppSigned(sessionId);
+    await saveUserCredential("ghp_must_not_be_used");
+    await saveOrgPat("ghp_org_must_not_be_used");
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const response = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "app_signed_repo_binding_required" });
+    expect(fixture!.calls.filter((call) => call.path.endsWith("/access_tokens"))).toHaveLength(0);
+  });
+
+  it("rejects another repository for an App-signed workflow without credential fallback", async () => {
+    api = await bootTestApi();
+    await installApp("tkhq");
+    const runId = "wfrun_signed_other";
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId, orgId: ORG, owner: TEAM });
+    await bindMirroredWorkflow(runId);
+    await activateAppSigned(sessionId);
+    await api.providers.engineCredentials.save(TEAM, "github", { type: "oauth2", accessToken: "ghp_team_must_not_be_used" });
+    await saveUserCredential("ghp_user_must_not_be_used");
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const response = await post(token, { host: "github.com", owner: "tkhq", repo: "other" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "app_signed_repo_not_authorized" });
+    expect(fixture!.calls.filter((call) => call.path.endsWith("/access_tokens"))).toHaveLength(0);
+  });
+
+  it("does not fall back to OAuth or PAT for an authorized App-signed workflow", async () => {
+    api = await bootTestApi();
+    const runId = "wfrun_signed_no_app";
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId, orgId: ORG, owner: TEAM });
+    await bindMirroredWorkflow(runId);
+    await activateAppSigned(sessionId);
+    await api.providers.engineCredentials.save(TEAM, "github", { type: "oauth2", accessToken: "ghp_team_must_not_be_used" });
+    await saveUserCredential("ghp_user_must_not_be_used");
+    await saveOrgPat("ghp_org_must_not_be_used");
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const response = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "app_signed_credential_unavailable" });
+  });
 
   it("a team run a member started never resolves that member's credential or the org PAT", async () => {
     api = await bootTestApi();
@@ -628,5 +733,45 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ anonymous: true });
+
+  });
+});
+
+
+describe("sandbox Git attribution observations", () => {
+  it("records only bound ordinary pushes and pull requests for the authenticated session", async () => {
+    api = await bootTestApi();
+    await bindRepo();
+    const token = await mintToken();
+    const otherToken = await mintToken("session-other");
+    const request = (path: string, auth: string, body: unknown) => fetch(`${api!.baseUrl}/api/sandbox/${path}`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": auth },
+      body: JSON.stringify(body),
+    });
+
+    const push = await request("git-push/observe", token, { repoFullName: "ACME/WIDGETS", targetRef: "refs/heads/feature", headSha: "abc123" });
+    expect(push.status).toBe(200);
+    expect(await api.providers.db.select().from(sessionGitBranches)).toMatchObject([{ sessionId: SESSION_ID, repoFullName: "acme/widgets", ref: "refs/heads/feature", headSha: "abc123" }]);
+
+    const pull = await request("git-pr/observe", token, { repoFullName: "acme/widgets", prNumber: 7, prUrl: "https://github.com/acme/widgets/pull/7", headRef: "feature", headSha: "abc123" });
+    expect(pull.status).toBe(200);
+    expect(await api.providers.db.select().from(sessionPullRequests)).toMatchObject([{ sessionId: SESSION_ID, repoFullName: "acme/widgets", prNumber: 7, headRef: "feature", headSha: "abc123" }]);
+
+    expect((await request("git-push/observe", otherToken, { repoFullName: "acme/widgets", targetRef: "refs/heads/feature", headSha: "abc123" })).status).toBe(403);
+    expect((await request("git-pr/observe", otherToken, { repoFullName: "acme/widgets", prNumber: 8, prUrl: "https://github.com/acme/widgets/pull/8", headRef: "feature", headSha: "abc123" })).status).toBe(403);
+  });
+
+  it("rejects reconciliation through a token for another session", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(gitPushOperations).values({ id: "gpo-test", sessionId: SESSION_ID, generation: 1, repoFullName: "acme/widgets", targetRef: "refs/heads/feature", expectedRemoteSha: "old", localHeadSha: "local", signedHeadSha: "signed", state: "reconciling", createdAt: now, updatedAt: now });
+    const wrong = await mintToken("session-other");
+    const denied = await fetch(`${api!.baseUrl}/api/sandbox/git-push/gpo-test/reconcile`, { method: "POST", headers: { "x-valet-sandbox": wrong } });
+    expect(denied.status).toBe(409);
+    const right = await mintToken();
+    const accepted = await fetch(`${api!.baseUrl}/api/sandbox/git-push/gpo-test/reconcile`, { method: "POST", headers: { "x-valet-sandbox": right } });
+    expect(accepted.status).toBe(200);
+
   });
 });

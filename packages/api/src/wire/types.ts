@@ -42,6 +42,18 @@ export interface AuthConfigResponse {
   sso: { name: string } | null;
 }
 
+// ── REST: Git attribution ──────────────────────────────────────────────────
+
+export type GitCommitMode = "user_unsigned" | "user_turnkey_signed" | "valet_unsigned" | "valet_app_signed";
+export interface GitAttributionValues { mode: GitCommitMode; coAuthoredBy: boolean; correlationTrailers: boolean }
+export interface GitSettingsOverrides { mode?: GitCommitMode; coAuthoredBy?: boolean; correlationTrailers?: boolean }
+export interface GitAttributionFieldSource { scope: "scope" | "organization" | "product"; label: string }
+export interface GitSignerCapability { available: boolean; reason?: string }
+export interface GitSignerCapabilities { userTurnkeySigned: GitSignerCapability; valetAppSigned: GitSignerCapability }
+export interface GitSettingsResponse { scope: "user" | "team" | "organization"; overrides: GitSettingsOverrides; values: GitAttributionValues; sources: Record<keyof GitAttributionValues, GitAttributionFieldSource>; capabilities: GitSignerCapabilities }
+export type PatchGitSettingsRequest = { mode?: GitCommitMode | null; coAuthoredBy?: boolean | null; correlationTrailers?: boolean | null };
+export interface SessionGitAttributionResponse extends GitAttributionValues { sessionId: string; generation: number; ownerType: string; ownerId: string; counterpartUserId: string | null; counterpartName: string | null; counterpartEmail: string | null; valetName: string; valetEmail: string; settingsFingerprint: string; createdAt: number; currentValues: GitAttributionValues; updateAvailable: boolean }
+
 // ── REST: sessions ────────────────────────────────────────────────────────
 
 export type SessionStatus = "active" | "hibernated" | "archived" | "deleted";
@@ -5346,3 +5358,11 @@ export interface ListBakeQueueResponse {
   recent: BakeQueueItem[];
   blocked: BakeQueueBlockedSource[];
 }
+
+export interface GitPushReplayCommit { localSha: string; message: string; treeSha: string; parents: string[] }
+export interface GitPushReplayBlob { sha: string; contentBase64: string }
+export interface GitPushReplayTreeEntry { path: string; mode: string; type: "blob" | "tree" | "commit"; sha: string }
+export interface GitPushReplayTree { sha: string; entries: GitPushReplayTreeEntry[] }
+export interface GitPushReplayLfsObject { oid: string; size: number; contentBase64: string }
+export interface PostSandboxGitPushRequest { repoFullName: string; targetRef: string; expectedRemoteSha: string; createRef?: boolean; force?: boolean; blobs?: GitPushReplayBlob[]; trees?: GitPushReplayTree[]; lfsObjects?: GitPushReplayLfsObject[]; commits: GitPushReplayCommit[] }
+export interface PostSandboxGitPushResponse { operationId: string; signedHeadSha: string }

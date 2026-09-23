@@ -3,6 +3,7 @@ import { useOrgDirectory } from "~/api/settings";
 import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { TeamsPanel } from "~/components/settings/teams-panel";
+import { GitSettingsPanel } from "~/components/settings/git-settings-panel";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 export const Route = createFileRoute("/settings/team")({
@@ -20,6 +21,7 @@ function SelectedTeamSettings({ teamId }: { teamId: string }) {
   const directory = useOrgDirectory();
 
   return (
+    <>
     <Section title="Team" description="Settings for the selected team workspace.">
       <div className="py-3">
         <Link to="/assistants" className="text-sm text-moss underline-offset-2 hover:underline">
@@ -36,5 +38,7 @@ function SelectedTeamSettings({ teamId }: { teamId: string }) {
         <ErrorRow>Team settings are unavailable. Select another workspace or reload the page.</ErrorRow>
       )}
     </Section>
+    <GitSettingsPanel scope="team" teamId={teamId} />
+    </>
   );
 }

@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import { rm } from "node:fs/promises";
 import { createSandboxWorkspace, DockerSandboxProvider } from "@valet/sandbox-docker";
 import type { Sandbox } from "@valet/engine";
-import { installCredentialHelper, configureGitIdentity, prepBinding, computeTargetDirs } from "./workspace-prep.js";
+import { installCredentialHelper, configureGitIdentity, prepBinding, computeTargetDirs, installGitAttributionHook } from "./workspace-prep.js";
 
 function dockerAvailable(): boolean {
   const r = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe" });
@@ -46,6 +46,47 @@ describeDocker("buildWorkspacePrep (docker)", () => {
     if (sandbox?.id) await provider.destroy(sandbox.id).catch(() => {});
     await rm(tmp, { recursive: true, force: true });
   });
+
+  it(
+    "preserves Git when the image provides it only at /usr/local/bin/git",
+    async () => {
+      sandbox = await provider.create({ workspace: tmp, image: "alpine:3.20" });
+      const install = await sandbox.exec("apk add --no-cache git curl nodejs && real=$(command -v git) && mkdir -p /usr/local/bin && [ \"$real\" = /usr/local/bin/git ] || mv \"$real\" /usr/local/bin/git");
+      expect(install.exitCode).toBe(0);
+
+      await installCredentialHelper(sandbox, "http://127.0.0.1:1", [], true);
+
+      const version = await sandbox.exec("git --version");
+      expect(version.exitCode).toBe(0);
+      expect(version.stdout).toContain("git version");
+      const preserved = await sandbox.exec("test -x /usr/local/lib/valet/git-real && test -x /usr/local/bin/git");
+      expect(preserved.exitCode).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    "enriches commits with BusyBox tools and preserves human trailers",
+    async () => {
+      sandbox = await provider.create({ workspace: tmp, image: "alpine:3.20" });
+      const install = await sandbox.exec("apk add --no-cache git curl nodejs && git config --global --add safe.directory '*' && git init -q -b main && git config user.name Test && git config user.email test@example.com", { cwd: "." });
+      expect(install.exitCode, install.stderr).toBe(0);
+      await installCredentialHelper(sandbox, "http://127.0.0.1:1", [], false);
+      await installGitAttributionHook(sandbox, ".", {
+        coAuthor: { name: "Valet", email: "valet@example.com" },
+        correlationTrailers: true,
+      });
+      const commit = await sandbox.exec("printf 'content\\n' > file && git add file && VALET_SESSION_CORRELATION_ID=v1s_busybox VALET_QUEUE_ITEM_CORRELATION_ID=v1q_busybox git commit -m 'Subject' -m 'Co-authored-by: Human <human@example.com>'");
+      expect(commit.exitCode, commit.stderr).toBe(0);
+      const message = await sandbox.exec("git log -1 --format=%B");
+      expect(message.exitCode).toBe(0);
+      expect(message.stdout.match(/Co-authored-by: Human <human@example.com>/gu)).toHaveLength(1);
+      expect(message.stdout.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
+      expect(message.stdout.match(/Valet-Session: v1s_busybox/gu)).toHaveLength(1);
+      expect(message.stdout.match(/Valet-Queue-Item: v1q_busybox/gu)).toHaveLength(1);
+    },
+    60_000,
+  );
 
   it(
     "clones a tiny public repo tokenless into an empty workspace root",

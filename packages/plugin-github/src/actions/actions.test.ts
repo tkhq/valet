@@ -1240,3 +1240,43 @@ describe("github.update_pull_request", () => {
     expect(server.calls[0].body).toEqual({ assignees: [] });
   });
 });
+
+describe("github.create_pull_request attribution", () => {
+  it("keeps a completed GitHub create successful when attribution fails", async () => {
+    const server = useFixture();
+    const ctx = fakeActionContext("test-token");
+    ctx.observePullRequest = async () => { throw new Error("not bound"); };
+
+    const result = await findAction("github.create_pull_request").execute(
+      { owner: "other", repo: "widgets", title: "Change", head: "feature", base: "main" },
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("reports canonical pull request facts through the host seam", async () => {
+    useFixture();
+    const observed: unknown[] = [];
+    const ctx = fakeActionContext("test-token");
+    ctx.observePullRequest = async (pullRequest) => { observed.push(pullRequest); };
+
+    const result = await findAction("github.create_pull_request").execute(
+      { owner: "acme", repo: "widgets", title: "Change", head: "feature", base: "main" },
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    expect(observed).toEqual([{
+      repoFullName: "acme/widgets",
+      number: 42,
+      url: "https://github.com/acme/widgets/pull/42",
+      headRef: "feature",
+      headSha: "fixture-head-sha",
+      baseRef: "main",
+      state: "open",
+    }]);
+  });
+});

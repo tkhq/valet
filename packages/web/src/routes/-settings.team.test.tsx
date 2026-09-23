@@ -32,6 +32,9 @@ vi.mock("~/api/settings", () => ({
 }));
 // The real panel's permission and mutation targets have their own tests.
 // This draft verifies that the route replaces its child on a scope change.
+vi.mock("~/components/settings/git-settings-panel", () => ({
+  GitSettingsPanel: ({ teamId: target }: { teamId: string }) => <span>Git settings for {target}</span>,
+}));
 vi.mock("~/components/settings/teams-panel", () => ({
   TeamsPanel: ({ teamId: target }: { teamId: string }) => {
     const [draft, setDraft] = useState("");

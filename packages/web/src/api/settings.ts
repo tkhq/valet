@@ -14,6 +14,8 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  GitSettingsResponse,
+  PatchGitSettingsRequest,
   AddTeamMemberRequest,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
@@ -92,6 +94,7 @@ export function pluginEnabledForCaller(
 
 export const qkSettings = {
   me: () => ["settings", "me"] as const,
+  git: (scope: string, teamId?: string) => ["settings", "git", scope, teamId ?? ""] as const,
   org: () => ["settings", "org"] as const,
   orgMembers: () => ["settings", "org", "members"] as const,
   orgDirectory: () => ["settings", "org", "directory"] as const,
@@ -713,4 +716,12 @@ export function useDeleteSlackApp() {
       qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
     },
   });
+}
+
+export function useGitSettings(scope: "user" | "team" | "organization", teamId?: string) {
+  return useQuery<GitSettingsResponse>({ queryKey: qkSettings.git(scope, teamId), queryFn: () => api.getGitSettings(scope, teamId), enabled: scope !== "team" || Boolean(teamId) });
+}
+export function usePatchGitSettings(scope: "user" | "team" | "organization", teamId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation<GitSettingsResponse, Error, PatchGitSettingsRequest>({ mutationFn: (body) => api.patchGitSettings(scope, body, teamId), onSuccess: (data) => queryClient.setQueryData(qkSettings.git(scope, teamId), data) });
 }

@@ -160,17 +160,17 @@ describe("determinism", () => {
 describe("golden hashes", () => {
   it("repoBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithRepoBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"b9d884304b2a399701db7817132e02c97ecf4c8345380773c8fc41cfea6af5ec"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"9f93063bb2d4adcdcdc05a79dcc7c1740b90d4bf9855b60cd78b22c74e3e1c6e"`);
   });
 
   it("baseBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithBaseBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"4a1a501c0cb22b00ab077c7c673d4caabfbe03c7ef6e3a6ed283e7c9a54ecf69"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"6cf7b9f8ad1f90450c9bc9047cfe7fa4431c4b11c1a174f3fd1e7d6ae65c6124"`);
   });
 
   it("stock image spec has expected specHash", () => {
     const spec = computeSpec(snapWithStockOnly);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"015b7d4dc69ac3f9604437c1b2ec310c985f9ec18c44dd29a104f7c3c2300b63"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"c70e0128e0fd76bfd34a88f9e6c8203fcf4a4bd7c8f71f14caaa7ca924db5dcf"`);
   });
 });
 
@@ -179,7 +179,7 @@ describe("resource opinion hashing", () => {
 
   it("preserves the existing hash when no resource opinion exists", () => {
     expect(specHash(spec, undefined)).toBe(specHash(spec));
-    expect(specHash(spec)).toBe("b9d884304b2a399701db7817132e02c97ecf4c8345380773c8fc41cfea6af5ec");
+    expect(specHash(spec)).toBe("9f93063bb2d4adcdcdc05a79dcc7c1740b90d4bf9855b60cd78b22c74e3e1c6e");
   });
 
   it("uses fixed cpu then memory order independent of insertion order", () => {
@@ -222,6 +222,14 @@ describe("hash sensitivity", () => {
     expect(changedSteps["credential-scripts"]).not.toBe(baseSteps["credential-scripts"]);
     expect(changedSteps["git-identity"]).toBe(baseSteps["git-identity"]);
     expect(changedSteps["clone:acme/widget"]).toBe(baseSteps["clone:acme/widget"]);
+  });
+
+  it("changes wrapper and hook steps when an attribution generation changes", () => {
+    const attributed = { ...snapWithRepoBake, gitAttribution: { generation: 1, mode: "valet_app_signed", coAuthoredBy: true, correlationTrailers: true, settingsFingerprint: "one", counterpartName: "Ada", counterpartEmail: "ada@example.com", valetName: "Valet", valetEmail: "valet@example.com" } };
+    const first = Object.fromEntries(computeSpec(attributed).steps.map((step) => [step.id, step.hash]));
+    const second = Object.fromEntries(computeSpec({ ...attributed, gitAttribution: { ...attributed.gitAttribution, generation: 2, mode: "valet_unsigned", correlationTrailers: false } }).steps.map((step) => [step.id, step.hash]));
+    expect(second["credential-scripts"]).not.toBe(first["credential-scripts"]);
+    expect(second["clone:acme/widget"]).not.toBe(first["clone:acme/widget"]);
   });
 
   it("changing userEmail changes only git-identity hash", () => {

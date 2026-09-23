@@ -45,7 +45,7 @@
  */
 import { recordSandboxWorkspaceGrow } from "@valet/engine";
 import type { ExecResult, Sandbox, SessionStartRef } from "@valet/engine";
-import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript, observedGitWrapperScript, REAL_GIT_PATH } from "./git-credential-helper.js";
 import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
 import type { CredentialCommand } from "./credential-commands.js";
 import { ownerOf } from "../services/session-github-token.js";
@@ -72,6 +72,7 @@ const GH_WRAPPER_PATH = "/usr/local/bin/valet-gh";
  * precedes /usr/bin on PATH, so a plain `gh` transparently authenticates.
  * The script locates the real binary by skipping /usr/local/bin. */
 const GH_SHIM_PATH = "/usr/local/bin/gh";
+const GIT_SHIM_PATH = "/usr/local/bin/git";
 
 const DEFAULT_USER_NAME = "Valet Agent";
 const DEFAULT_USER_EMAIL = "agent@valet.local";
@@ -261,16 +262,19 @@ export async function installCredentialHelper(
   sandbox: Sandbox,
   apiUrl: string,
   credentialCommands: CredentialCommand[] = [],
+  appSigned?: boolean,
 ): Promise<void> {
   await sandbox.mkdir(STAGING_DIR);
   const stagedHelper = posixJoin(STAGING_DIR, "git-credential-valet");
   const stagedGhWrapper = posixJoin(STAGING_DIR, "valet-gh");
   const stagedSecrets = posixJoin(STAGING_DIR, "valet-secrets");
   const stagedOpShim = posixJoin(STAGING_DIR, "op");
+  const stagedGitShim = posixJoin(STAGING_DIR, "git");
   await sandbox.writeFile(stagedHelper, gitCredentialHelperScript(apiUrl));
   await sandbox.writeFile(stagedGhWrapper, ghWrapperScript(apiUrl));
   await sandbox.writeFile(stagedSecrets, secretsCliScript(apiUrl));
   await sandbox.writeFile(stagedOpShim, opShimScript());
+  if (appSigned !== undefined) await sandbox.writeFile(stagedGitShim, appSigned ? appSignedGitWrapperScript(apiUrl) : observedGitWrapperScript(apiUrl));
   // One wrapper per declared command, staged beside the fixed scripts and
   // installed in the same privileged exec below.
   const staged = credentialCommands.map((cmd) => ({
@@ -294,8 +298,16 @@ export async function installCredentialHelper(
       `cp ${shQuote(stagedGhWrapper)} ${GH_SHIM_PATH}`,
       `cp ${shQuote(stagedSecrets)} ${SECRETS_CLI_PATH}`,
       `cp ${shQuote(stagedOpShim)} ${OP_SHIM_PATH}`,
+      ...(appSigned !== undefined
+        ? [
+            `mkdir -p ${shQuote(REAL_GIT_PATH.slice(0, REAL_GIT_PATH.lastIndexOf("/")))} ${shQuote(`${REAL_GIT_PATH}-bin`)}`,
+            `if ! ${shQuote(REAL_GIT_PATH)} --version >/dev/null 2>&1; then rm -f ${shQuote(REAL_GIT_PATH)} ${shQuote(`${REAL_GIT_PATH}-bin/git`)}; real=$(command -v git) || exit 1; if [ "$real" = ${shQuote(GIT_SHIM_PATH)} ] && grep -q 'Valet Git wrapper' ${shQuote(GIT_SHIM_PATH)} 2>/dev/null; then real=; oldifs=$IFS; IFS=:; for d in $PATH; do [ "$d" = /usr/local/bin ] && continue; if [ -x "$d/git" ]; then real="$d/git"; break; fi; done; IFS=$oldifs; [ -n "$real" ] || exit 1; fi; if [ "$real" = ${shQuote(GIT_SHIM_PATH)} ]; then mv "$real" ${shQuote(`${REAL_GIT_PATH}-bin/git`)}; else ln -s "$real" ${shQuote(`${REAL_GIT_PATH}-bin/git`)}; fi; printf '%s\n' '#!/bin/sh' 'exec ${REAL_GIT_PATH}-bin/git "$@"' > ${shQuote(REAL_GIT_PATH)}; chmod 755 ${shQuote(REAL_GIT_PATH)}; fi`,
+            `${shQuote(REAL_GIT_PATH)} --version >/dev/null`,
+            `cp ${shQuote(stagedGitShim)} ${GIT_SHIM_PATH}`,
+          ]
+        : [`if grep -q 'Valet Git wrapper' ${shQuote(GIT_SHIM_PATH)} 2>/dev/null; then rm -f ${shQuote(GIT_SHIM_PATH)}; fi`]),
       ...staged.map(({ path, installed }) => `cp ${shQuote(path)} ${installed}`),
-      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH} ${OP_SHIM_PATH}${staged
+      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH} ${OP_SHIM_PATH}${appSigned !== undefined ? ` ${GIT_SHIM_PATH}` : ""}${staged
         .map(({ installed }) => ` ${installed}`)
         .join("")}`,
     ].join(" && "),
@@ -621,7 +633,7 @@ async function stagePrebuiltRepo(sandbox: Sandbox, dir: string): Promise<void> {
   // overwrites in place, so no cleanup step is needed.
   const result = await safeExecGrowRetry(
     sandbox,
-    `mkdir -p ${q} && cp -a ${PREBUILT_REPO_PATH}/. ${q}`,
+    `owner=$(stat -c '%u:%g' .) && mkdir -p ${q} && cp -a ${PREBUILT_REPO_PATH}/. ${q} && if [ "$(id -u)" = 0 ]; then chown -R "$owner" ${q}; fi`,
     undefined,
     `staging prebuilt repo into ${dir}`,
   );
@@ -732,4 +744,67 @@ export async function resolveStartRef(sandbox: Sandbox, dir: string): Promise<Se
     branch: branch && branch !== "HEAD" ? branch : undefined,
     capturedAt: Date.now(),
   };
+}
+
+export interface GitAttributionHookConfig {
+  coAuthor?: { name: string; email: string };
+  correlationTrailers: boolean;
+}
+
+/** Install hook dispatchers that preserve the repository hooks and add Valet enrichment. */
+export async function installGitAttributionHook(
+  sandbox: Sandbox,
+  targetDir: string,
+  config: GitAttributionHookConfig,
+): Promise<void> {
+  const hookPath = await safeExec(sandbox, "git rev-parse --git-path valet-hooks", { cwd: targetDir });
+  const resolvedHookDir = hookPath.exitCode === 0 ? hookPath.stdout.trim() : "";
+  const hookDir = resolvedHookDir
+    ? resolvedHookDir.startsWith("/") || targetDir === "." ? resolvedHookDir : `${targetDir}/${resolvedHookDir}`
+    : targetDir === "." ? ".git/valet-hooks" : `${targetDir}/.git/valet-hooks`;
+  const enrichment = `${hookDir}/valet-prepare-commit-msg`;
+  const dispatcher = `${hookDir}/dispatch`;
+  const hooks = "applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg commit-msg post-commit pre-rebase post-checkout post-merge pre-push pre-auto-gc post-rewrite sendemail-validate fsmonitor-watchman post-index-change reference-transaction proc-receive update pre-receive post-receive post-update push-to-checkout";
+  if (!config.coAuthor && !config.correlationTrailers) {
+    await safeExec(sandbox, `rm -rf ${shQuote(hookDir)}`);
+    return;
+  }
+  const coAuthor = config.coAuthor ? `${config.coAuthor.name} <${config.coAuthor.email}>` : "";
+  const enrichmentScript = `#!/bin/sh
+# Valet Git attribution enrichment. The dispatcher runs the repository hook first.
+set -eu
+msg="$1"
+# Remove only managed entries, then let Git create one final trailer block.
+managed_coauthor=${shQuote(coAuthor ? `Co-authored-by: ${coAuthor}` : "")}
+tmp="$msg.valet.$$"
+awk -v managed="$managed_coauthor" '
+  {
+    lower = tolower($0)
+    if (lower ~ /^valet-session:/ || lower ~ /^valet-queue-item:/) next
+    if (managed != "" && lower == tolower(managed)) next
+    print
+  }
+' "$msg" > "$tmp"
+mv "$tmp" "$msg"
+${config.correlationTrailers ? ': "\${VALET_SESSION_CORRELATION_ID:?Valet correlation is enabled, but this command has no session correlation ID. Run git commit through Valet.}"\n: "\${VALET_QUEUE_ITEM_CORRELATION_ID:?Valet correlation is enabled, but this command has no queue correlation ID. Run git commit through Valet.}"' : ""}
+git interpret-trailers --in-place --if-exists addIfDifferent --if-missing add \\
+${coAuthor ? `  --trailer ${shQuote(`Co-authored-by: ${coAuthor}`)} \\\n` : ""}${config.correlationTrailers ? '  --trailer "Valet-Session: $VALET_SESSION_CORRELATION_ID" \\\n  --trailer "Valet-Queue-Item: $VALET_QUEUE_ITEM_CORRELATION_ID" \\\n' : ""}  "$msg"
+`;
+  const dispatcherScript = `#!/bin/sh
+# Valet Git hook dispatcher. Preserve every hook from the repository's effective hooksPath.
+set -eu
+hook=\${0##*/}
+repo=\${VALET_REPO_HOOKS_DIR:-}
+managed=\$(dirname "$0")
+if [ -n "$repo" ] && [ "$repo" != "$managed" ] && [ -x "$repo/$hook" ]; then
+  VALET_HOOK_DISPATCH_ACTIVE=1 "$repo/$hook" "$@"
+fi
+case "$hook" in
+  prepare-commit-msg|applypatch-msg) exec "$managed/valet-prepare-commit-msg" "$@" ;;
+esac
+`;
+  await sandbox.exec(`mkdir -p ${shQuote(hookDir)}`);
+  await sandbox.writeFile(enrichment, enrichmentScript);
+  await sandbox.writeFile(dispatcher, dispatcherScript);
+  await sandbox.exec(`chmod 755 ${shQuote(enrichment)} ${shQuote(dispatcher)} && for hook in ${hooks}; do ln -sf dispatch ${shQuote(hookDir)}/"$hook"; done`);
 }

@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import type { SandboxResourceField, SandboxResources } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
-import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
+import { gitCredentialHelperScript, ghWrapperScript, observedGitWrapperScript, appSignedGitWrapperScript } from "./git-credential-helper.js";
 import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
 import type { CredentialCommand } from "./credential-commands.js";
 
@@ -57,6 +57,7 @@ export interface ResolveSnapshot {
   repos: Array<RepoBinding & { targetDir: string }>;
   userName?: string;
   userEmail?: string;
+  gitAttribution?: { generation: number; mode: string; coAuthoredBy: boolean; correlationTrailers: boolean; settingsFingerprint: string; counterpartName?: string | null; counterpartEmail?: string | null; valetName: string; valetEmail: string };
 }
 
 export interface StepSpec {
@@ -112,6 +113,7 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
   const credInput =
     gitCredentialHelperScript(snap.apiUrl) +
     ghWrapperScript(snap.apiUrl) +
+    (snap.gitAttribution?.mode === "valet_app_signed" ? appSignedGitWrapperScript(snap.apiUrl) : observedGitWrapperScript(snap.apiUrl)) +
     // `valet-secrets` is installed by the same step, so it belongs in the
     // same hash: without it, editing the script would never re-install on a
     // sandbox that already ran prep.
@@ -124,17 +126,23 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     // declarations has to re-run it. Hashing the generated scripts rather
     // than the config means a rename or a changed reference reinstalls.
     (snap.credentialCommands ?? []).map(commandWrapperScript).join("") +
+    (snap.gitAttribution ? `${snap.gitAttribution.generation}|${snap.gitAttribution.mode}` : "") +
     String(PREP_VERSION);
   steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: true });
 
   // Step 2: git-identity
-  const identityInput = `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${PREP_VERSION}`;
+  const identityInput = snap.gitAttribution
+    ? `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${snap.gitAttribution.generation}|${snap.gitAttribution.mode}|${snap.gitAttribution.coAuthoredBy}|${snap.gitAttribution.correlationTrailers}|${snap.gitAttribution.settingsFingerprint}|${PREP_VERSION}`
+    : `${snap.userName ?? ""}|${snap.userEmail ?? ""}|${PREP_VERSION}`;
   steps.push({ id: "git-identity", hash: sha256(identityInput), critical: true });
 
   // Step 3: one clone step per binding
   for (const binding of snap.repos) {
     const { fullName, cloneUrl, ref, auth, targetDir } = binding;
-    const cloneInput = `${fullName}|${cloneUrl}|${ref ?? ""}|${auth ?? ""}|${targetDir}|${PREP_VERSION}`;
+    const attributionInput = snap.gitAttribution
+      ? `|${snap.gitAttribution.generation}|${snap.gitAttribution.coAuthoredBy}|${snap.gitAttribution.correlationTrailers}|${snap.gitAttribution.counterpartName ?? ""}|${snap.gitAttribution.counterpartEmail ?? ""}`
+      : "";
+    const cloneInput = `${fullName}|${cloneUrl}|${ref ?? ""}|${auth ?? ""}|${targetDir}${attributionInput}|${PREP_VERSION}`;
     steps.push({ id: `clone:${fullName}`, hash: sha256(cloneInput), critical: true });
   }
 

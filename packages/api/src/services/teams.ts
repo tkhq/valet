@@ -390,6 +390,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Cr
     createdAt: now,
     defaultModel: null,
     defaultReasoning: null,
+    gitAttributionSettings: null,
   };
   const adoptedSources: ContentSourceRow[] = [];
 
@@ -533,6 +534,7 @@ export async function listTeamsForUser(db: AppDb, userId: string): Promise<TeamR
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
       defaultReasoning: teams.defaultReasoning,
+      gitAttributionSettings: teams.gitAttributionSettings,
     })
     .from(teamMembers)
     .innerJoin(teams, eq(teamMembers.teamId, teams.id))
@@ -643,6 +645,7 @@ export async function listTeamsForOrg(db: AppDb, orgId: string): Promise<TeamRow
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
       defaultReasoning: teams.defaultReasoning,
+      gitAttributionSettings: teams.gitAttributionSettings,
     })
     .from(teams)
     .where(eq(teams.orgId, orgId))

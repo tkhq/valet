@@ -19,6 +19,7 @@ import {
   resolveGitHubToken,
   type GitHubAuthMode,
   type GitHubTokenDeps,
+  type GitHubCredentialCapability,
   type ResolvedGitHubToken,
 } from "./github-tokens.js";
 
@@ -161,6 +162,7 @@ export async function resolveSessionGitHubToken(
     purpose: "git" | "api";
     auth?: GitHubAuthMode;
     repo?: { owner: string; name: string };
+    capability?: GitHubCredentialCapability;
   },
 ): Promise<ResolvedGitHubToken> {
   const binding = args.sessionId ? await primaryRepoBinding(deps.db, args.sessionId) : undefined;
@@ -170,5 +172,6 @@ export async function resolveSessionGitHubToken(
     purpose: args.purpose,
     repo: args.repo ?? binding?.repo,
     auth: args.auth ?? binding?.auth ?? "auto",
+    capability: args.capability,
   });
 }

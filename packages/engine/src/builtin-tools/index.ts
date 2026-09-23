@@ -299,6 +299,7 @@ export const bashTool = defineTool({
   }),
   execute: async (args, ctx) => {
     const timeoutMs = (args.timeout ?? BASH_DEFAULT_TIMEOUT_S) * 1000;
+    const queueEnv = { ...(ctx.executionEnv ?? {}), ...(ctx.queueItemId ? { VALET_QUEUE_ITEM_ID: ctx.queueItemId } : {}) };
 
     // Mode selection (spec decision 10). NOTE: `ctx.sandbox` is normally a
     // PolicySandbox, whose execJob/pollJob/cancelJob are ALWAYS defined
@@ -324,7 +325,7 @@ export const bashTool = defineTool({
     if (timeoutMs > JOB_MODE_THRESHOLD_MS && execJob && pollJob && cancelJob) {
       let handle: ExecJobHandle | undefined;
       try {
-        handle = await execJob(args.command, { signal: ctx.signal });
+        handle = await execJob(args.command, { signal: ctx.signal, env: queueEnv });
       } catch (err) {
         if (!isJobUnsupported(err)) throw err;
         // Underlying sandbox doesn't support job mode — fall through to sync exec.
@@ -334,7 +335,7 @@ export const bashTool = defineTool({
       }
     }
 
-    const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
+    const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs, env: queueEnv });
     const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
     return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}` };

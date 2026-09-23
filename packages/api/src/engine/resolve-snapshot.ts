@@ -138,5 +138,6 @@ export async function resolveSnapshot(deps: ResolveSnapshotDeps): Promise<Resolv
     repos: repos.map((binding) => ({ ...binding })),
     userName: meta.userName,
     userEmail: meta.userEmail,
+    gitAttribution: meta.gitAttribution,
   };
 }

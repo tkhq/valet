@@ -59,19 +59,34 @@
  * The token is emitted ONLY in the JSON response body; it is never logged.
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
+import type { AppQueryable } from "../lib/drizzle.js";
 import { credentialSecret } from "@valet/engine";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { sessionRepos } from "../schema/index.js";
+import { sessionGitAttributionHeads, sessionGitAttributionSnapshots, sessionRepos } from "../schema/index.js";
 import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-resolution.js";
 import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
 import { getTeamInOrg } from "../services/teams.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
-import { workflowSessionOwner } from "../workflows/session-owner.js";
+import { workflowSessionOwner, workflowSessionRepo } from "../workflows/session-owner.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
+import {
+  GitReplayPayloadError,
+  readBoundedGitReplayJson,
+  validateGitReplayPayload,
+} from "../services/git-replay-limits.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
+
+type RepoBinding = Pick<typeof sessionRepos.$inferSelect, "fullName" | "cloneUrl" | "auth">;
+
+async function sessionRepoBindings(db: AppQueryable, sessionId: string, orgId: string): Promise<RepoBinding[]> {
+  const rows = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sessionId));
+  if (rows.length > 0) return rows;
+  const workflowRepo = await workflowSessionRepo(db, sessionId, orgId);
+  return workflowRepo ? [workflowRepo] : [];
+}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -114,6 +129,32 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
 
   const { db, engineCredentials, encryptionKey, onePassword, plugins } = c.var.providers;
   const anonymous: PostSandboxGitCredentialResponse = { anonymous: true };
+
+  const bindings = await sessionRepoBindings(db, sandbox.sessionId, sandbox.orgId);
+  const heads = await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1);
+  const active = heads[0] ? (await db.select({ mode: sessionGitAttributionSnapshots.mode }).from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, sandbox.sessionId), eq(sessionGitAttributionSnapshots.generation, heads[0].activeGeneration))).limit(1))[0] : undefined;
+  const appSignedCapability = active?.mode === "valet_app_signed" ? (purpose === "git" ? "sandbox_git_read" : "sandbox_api_limited") : undefined;
+
+  if (appSignedCapability) {
+    const exactBinding = owner && wantRepo
+      ? bindings.find((binding) => binding.fullName.toLowerCase() === `${owner}/${wantRepo}`.toLowerCase())
+      : undefined;
+    if (!exactBinding) {
+      const code = bindings.length === 0 ? "app_signed_repo_binding_required" : "app_signed_repo_not_authorized";
+      const error = bindings.length === 0
+        ? "App-signed Git requires an explicit repository binding. Use a repository-backed workflow or select unsigned Git."
+        : "This repository is not authorized for App-signed Git. Use the repository bound to this session.";
+      return c.json({ error, code }, 409);
+    }
+    const repoHost = repoHostForUrl(exactBinding.cloneUrl);
+    if (!repoHost) return c.json({ error: "No credential host supports the bound repository. Select unsigned Git." }, 409);
+    const result = await repoHost.resolveGitToken(
+      { orgId: sandbox.orgId, userId: sandbox.userId, deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) } },
+      { owner: ownerOf(exactBinding.fullName), repo: repoOf(exactBinding.fullName), purpose, auth: "app", capability: appSignedCapability },
+    );
+    if (!result || "anonymous" in result) return c.json({ error: "The App credential for this repository is unavailable. Reinstall the GitHub App or select unsigned Git.", code: "app_signed_credential_unavailable" }, 409);
+    return c.json({ username: result.username, password: result.token } satisfies PostSandboxGitCredentialResponse);
+  }
 
   // A workflow session acts as its run's owner. Its token carries the run
   // actor instead: the member who clicked Run, or a synthetic `team:{id}` /
@@ -178,8 +219,6 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     const cred: PostSandboxGitCredentialResponse = { username: result.username, password: result.token };
     return c.json(cred);
   }
-
-  const bindings = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId));
 
   const wantOwner = owner?.toLowerCase();
   const binding =
@@ -252,4 +291,117 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
   // Token material is returned ONLY here, in the response body — never logged.
   const cred: PostSandboxGitCredentialResponse = { username: result.username, password: result.token };
   return c.json(cred);
+});
+
+sandboxGitCredentialRouter.post("/git-push", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  let body: import("../wire/types.js").PostSandboxGitPushRequest;
+  try {
+    const payload = await readBoundedGitReplayJson(c.req.raw);
+    body = validateGitReplayPayload(payload.value, payload.encodedBytes);
+  } catch (error) {
+    if (error instanceof GitReplayPayloadError) return c.json({ error: error.message, code: "git_replay_payload_invalid" }, error.status);
+    return c.json({ error: "Send a valid Git push request.", code: "git_replay_payload_invalid" }, 400);
+  }
+  if (body.force) return c.json({ error: "App-signed history cannot be force-pushed in V1. Create a new branch." }, 409);
+  if (!body.repoFullName || !body.targetRef || !body.expectedRemoteSha || !Array.isArray(body.commits)) return c.json({ error: "repoFullName, targetRef, expectedRemoteSha, and commits are required." }, 400);
+  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const binding = (await sessionRepoBindings(db, sandbox.sessionId, sandbox.orgId))
+    .find((row) => row.fullName.toLowerCase() === body.repoFullName.toLowerCase());
+  if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
+  const head = (await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1))[0];
+  const snapshot = head ? (await db.select().from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, sandbox.sessionId), eq(sessionGitAttributionSnapshots.generation, head.activeGeneration))).limit(1))[0] : undefined;
+  if (!snapshot || snapshot.mode !== "valet_app_signed") return c.json({ error: "App-signed push is not active for this session." }, 409);
+  const owner = ownerOf(binding.fullName); const repo = repoOf(binding.fullName);
+  let token = "";
+  const refresh = async () => {
+    const result = await repoHostForUrl(binding.cloneUrl)!.resolveGitToken({ orgId: sandbox.orgId, userId: sandbox.userId, deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) } }, { owner, repo, purpose: "git", auth: "app", capability: "host_commit_replay" });
+    if (!result || "anonymous" in result) throw new Error("The host replay credential is unavailable. Reinstall the GitHub App for this repository.");
+    token = result.token;
+  };
+  const api = process.env.GITHUB_API_URL ?? "https://api.github.com";
+  const request = async (path: string, init?: RequestInit) => {
+    const send = () => fetch(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28", ...(init?.headers ?? {}) } });
+    let res = await send();
+    if (res.status === 401) { await refresh(); res = await send(); }
+    if (!res.ok) throw new Error(`GitHub Git Database API returned ${res.status}. Retry after checking the App installation.`);
+    return res.json() as Promise<Record<string, unknown>>;
+  };
+  const client: import("../services/git-attribution.js").GitHubReplayClient = {
+    refresh,
+    async uploadLfs(objects) {
+      const auth = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+      const batch = await fetch(`https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/info/lfs/objects/batch`, { method: "POST", headers: { Authorization: auth, Accept: "application/vnd.git-lfs+json", "Content-Type": "application/vnd.git-lfs+json" }, body: JSON.stringify({ operation: "upload", transfers: ["basic"], objects: objects.map(({ oid, size }) => ({ oid, size })) }) });
+      if (!batch.ok) throw new Error(`GitHub LFS batch returned ${batch.status}.`);
+      const payload = await batch.json() as { objects?: Array<{ oid?: string; error?: { message?: string }; actions?: { upload?: { href?: string; header?: Record<string, string> } } }> };
+      for (const object of objects) {
+        const action = payload.objects?.find((item) => item.oid === object.oid);
+        if (action?.error) throw new Error(action.error.message ?? "GitHub refused an LFS object.");
+        const upload = action?.actions?.upload; if (!upload?.href) continue;
+        const sent = await fetch(upload.href, { method: "PUT", headers: upload.header, body: Buffer.from(object.contentBase64, "base64") });
+        if (!sent.ok) throw new Error(`GitHub LFS upload returned ${sent.status}.`);
+      }
+    },
+    async createBlob(contentBase64) { const value = await request("/git/blobs", { method: "POST", body: JSON.stringify({ content: contentBase64, encoding: "base64" }) }); if (typeof value.sha !== "string") throw new Error("GitHub returned an invalid blob response."); return value.sha; },
+    async createTree(entries) { const value = await request("/git/trees", { method: "POST", body: JSON.stringify({ tree: entries }) }); if (typeof value.sha !== "string") throw new Error("GitHub returned an invalid tree response."); return value.sha; },
+    async createCommit(input) { return await request("/git/commits", { method: "POST", body: JSON.stringify(input) }) as import("../services/git-attribution.js").GitHubCreatedCommit; },
+    async getCommit(sha) { return await request(`/git/commits/${encodeURIComponent(sha)}`) as import("../services/git-attribution.js").GitHubCreatedCommit; },
+    async getRef(ref) { const path = `/git/ref/${encodeURIComponent(ref.replace(/^refs\//u, ""))}`; const send = () => fetch(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } }); let res = await send(); if (res.status === 401) { await refresh(); res = await send(); } if (res.status === 404) return null; if (!res.ok) throw new Error(`GitHub Git Database API returned ${res.status}.`); const value = await res.json() as Record<string, unknown>; const object = value.object; if (!object || typeof object !== "object" || typeof (object as Record<string, unknown>).sha !== "string") throw new Error("GitHub returned an invalid ref response."); return (object as Record<string, unknown>).sha as string; },
+    async createRef(ref, sha) { await request("/git/refs", { method: "POST", body: JSON.stringify({ ref, sha }) }); },
+    async updateRef(ref, sha) { await request(`/git/refs/${encodeURIComponent(ref.replace(/^refs\//u, ""))}`, { method: "PATCH", body: JSON.stringify({ sha, force: false }) }); },
+  };
+  try {
+    const { replaySignedCommits } = await import("../services/git-attribution.js");
+    return c.json(await replaySignedCommits(db, client, { sessionId: sandbox.sessionId, generation: snapshot.generation, repoFullName: binding.fullName, targetRef: body.targetRef, expectedRemoteSha: body.expectedRemoteSha, createRef: body.createRef, blobs: body.blobs, trees: body.trees, lfsObjects: body.lfsObjects, commits: body.commits }));
+  } catch (error) { return c.json({ error: error instanceof Error ? error.message : "Signed replay failed." }, 409); }
+});
+
+sandboxGitCredentialRouter.post("/git-push/:operationId/reconcile", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  try {
+    const { completeSignedPushReconciliation } = await import("../services/git-attribution.js");
+    return c.json(await completeSignedPushReconciliation(c.var.providers.db, {
+      operationId: c.req.param("operationId"),
+      sessionId: sandbox.sessionId,
+    }));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "The signed push could not be reconciled." }, 409);
+  }
+});
+
+sandboxGitCredentialRouter.post("/git-push/observe", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+  if (!body || typeof body.repoFullName !== "string" || typeof body.targetRef !== "string" || typeof body.headSha !== "string" || !body.targetRef.startsWith("refs/heads/")) {
+    return c.json({ error: "Send a repository, branch ref, and head SHA." }, 400);
+  }
+  const repoFullName = body.repoFullName; const targetRef = body.targetRef; const headSha = body.headSha;
+  const binding = (await sessionRepoBindings(c.var.providers.db, sandbox.sessionId, sandbox.orgId))
+    .find((row) => row.fullName.toLowerCase() === repoFullName.toLowerCase());
+  if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
+  const { sessionGitBranches } = await import("../schema/index.js");
+  const head = (await c.var.providers.db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1))[0];
+  await c.var.providers.db.insert(sessionGitBranches).values({ sessionId: sandbox.sessionId, generation: head?.activeGeneration ?? 1, repoFullName: binding.fullName, ref: targetRef, headSha, pushOperationId: null, observedAt: Date.now() })
+    .onConflictDoUpdate({ target: [sessionGitBranches.sessionId, sessionGitBranches.repoFullName, sessionGitBranches.ref], set: { generation: head?.activeGeneration ?? 1, headSha, pushOperationId: null, observedAt: Date.now() } });
+  return c.json({ ok: true });
+});
+
+sandboxGitCredentialRouter.post("/git-pr/observe", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+  if (!body || typeof body.repoFullName !== "string" || typeof body.prNumber !== "number" || typeof body.prUrl !== "string" || typeof body.headRef !== "string" || typeof body.headSha !== "string") {
+    return c.json({ error: "Send the repository and pull request result." }, 400);
+  }
+  const { repoFullName, prNumber, prUrl, headRef, headSha } = body;
+  const binding = (await sessionRepoBindings(c.var.providers.db, sandbox.sessionId, sandbox.orgId))
+    .find((row) => row.fullName.toLowerCase() === repoFullName.toLowerCase());
+  if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
+  const { sessionPullRequests } = await import("../schema/index.js"); const now = Date.now();
+  await c.var.providers.db.insert(sessionPullRequests).values({ sessionId: sandbox.sessionId, repoFullName: binding.fullName, prNumber, prUrl, headRef, headSha, baseRef: "", state: "open", firstObservedAt: now, updatedAt: now })
+    .onConflictDoUpdate({ target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId], set: { prUrl, headRef, headSha, state: "open", updatedAt: now } });
+  return c.json({ ok: true });
 });
