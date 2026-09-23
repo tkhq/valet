@@ -106,6 +106,8 @@ export interface WorkflowEngineDepsOpts {
    * wired.
    */
   onePassword?: OnePasswordService;
+  /** Receives an action invoker result after durable dedup selects it. */
+  onStoredActionResult?: ActionInvokerOpts["onStoredResult"];
 }
 
 /**
@@ -335,6 +337,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     plugins: opts.plugins,
     githubTokenDeps: opts.githubTokenDeps,
     onePassword: opts.onePassword,
+    onStoredResult: opts.onStoredActionResult,
   });
 
   return {

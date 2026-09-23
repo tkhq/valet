@@ -835,6 +835,21 @@ describe("buildActionInvoker", () => {
     expect(a).toEqual(b);
   });
 
+  it("passes only the durable winning result to result side effects", async () => {
+    let sequence = 0;
+    const fixture = countingAction({ execute: async () => ({ success: true, data: { sequence: ++sequence } }) });
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+    const observed: unknown[] = [];
+    const invoke = buildActionInvoker({
+      db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService,
+      onStoredResult: async ({ result }) => { observed.push(result); },
+    });
+    const request = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:canonical" };
+    const results = await Promise.all([invoke(request, userOwner), invoke(request, userOwner)]);
+    expect(results[0]).toEqual(results[1]);
+    expect(observed).toEqual([results[0], results[0]]);
+  });
+
   it("returns a deterministic error for a service whose org prerequisite is unconfigured", async () => {
     // Availability gate (integration-availability design): the plugin declares
     // requires.orgCredential and no org credential exists for ctx.orgId.

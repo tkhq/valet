@@ -654,6 +654,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
     onePassword,
+    onStoredActionResult: (args) => linkedDriveScope.recordCanonicalWorkflowAction(args),
   });
 
   // Approval attention (decision 12): the FIRST park on an approval node

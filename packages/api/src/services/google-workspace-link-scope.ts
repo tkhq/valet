@@ -1,13 +1,17 @@
-import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, eq, sql } from "drizzle-orm";
 import type { PluginAction, PluginActionContext, Principal, SessionStore, ValetPlugin } from "@valet/engine";
-import type { WorkflowStore } from "@valet/workflow";
+import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult, WorkflowRun, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { pluginStore as pluginStoreRows, workflowDefinitions } from "../schema/index.js";
 import { pluginStore } from "./plugin-store.js";
 
 const COLLECTION = "linked-drive-files";
+const WORKFLOW_COLLECTION = "linked-drive-workflow-files";
+const WORKFLOW_QUOTA_COLLECTION = "linked-drive-workflow-file-quotas";
 const THREADS = "linked-drive-threads";
 const ID = /^[a-zA-Z0-9_-]+$/;
+const MAX_WORKFLOW_FILE_REFS = 100;
 const SLACK_THREAD = /^slack:[CG][A-Z0-9]+:\d+\.\d+$/;
 const SITE_THREAD = /^web:[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const DENIED = "This Google action is outside this thread's allowed file scope. Post the contract's direct Drive or Docs link in this conversation, on the site or in Slack.";
@@ -44,14 +48,33 @@ export function linkedDriveFileId(value: string): string | null {
 }
 
 /** Direct file ids written in a person's own message. Folder URLs and bare ids do not count. */
-export function linkedDriveFileIds(text: string): string[] {
+export function linkedDriveFileIds(text: string, limit = Number.POSITIVE_INFINITY): string[] {
   const ids = new Set<string>();
   // Attachment and unfurl text is not part of `text`, so it never grants access.
   for (const match of text.matchAll(/https:\/\/[^\s<>|"']+/g)) {
     const id = linkedDriveFileId(match[0]);
     if (id) ids.add(id);
+    if (ids.size === limit) break;
   }
   return [...ids];
+}
+
+/** Read refs only from the event dispatcher payload, never manually supplied input. */
+function workflowReferenceFileIds(input: unknown): Set<string> {
+  if (!record(input) || input.type !== "event" || !record(input.data)) return new Set();
+  const { key, refs } = input.data;
+  if (typeof key !== "string" || !record(refs)) return new Set();
+  const ids = new Set<string>();
+  for (const value of Object.values(refs)) {
+    if (typeof value !== "string") continue;
+    for (const id of linkedDriveFileIds(value, MAX_WORKFLOW_FILE_REFS - ids.size)) ids.add(id);
+    if (ids.size === MAX_WORKFLOW_FILE_REFS) break;
+  }
+  return ids;
+}
+
+function linearIssueDescription(value: unknown): string | null {
+  return record(value) && typeof value.description === "string" ? value.description : null;
 }
 
 function grantKey(scope: { sessionId: string; threadKey: string }, fileId: string): string {
@@ -59,6 +82,24 @@ function grantKey(scope: { sessionId: string; threadKey: string }, fileId: strin
   // repeat across assistants, so the session id keeps those grants apart.
   if (SLACK_THREAD.test(scope.threadKey)) return JSON.stringify([scope.threadKey, fileId]);
   return JSON.stringify([scope.sessionId, scope.threadKey, fileId]);
+}
+
+function workflowGrantKey(runId: string, fileId: string): string {
+  return JSON.stringify([runId, fileId]);
+}
+
+function workflowGrantQuotaKey(runId: string): string {
+  return runId;
+}
+
+function workflowFileIdFromKey(runId: string, key: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    return Array.isArray(parsed) && parsed.length === 2 && parsed[0] === runId
+      && typeof parsed[1] === "string" && ID.test(parsed[1]) ? parsed[1] : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Bind a team assistant thread after Slack routing, or after an authorized site prompt. */
@@ -131,20 +172,24 @@ export class GoogleWorkspaceLinkScope {
     }
   }
 
-  private async threadScope(ctx: PluginActionContext, teamId: string): Promise<{ sessionId: string; threadKey: string } | null> {
+  private async workflowRun(ctx: PluginActionContext, teamId: string): Promise<WorkflowRun | null> {
+    if (ctx.sessionPurpose !== "workflow") return null;
+    const runId = ctx.sessionId.match(/^wf:invoke:workflow:([a-zA-Z0-9_-]+):/)?.[1]
+      ?? ctx.sessionId.match(/^wf:([a-zA-Z0-9_-]+):[a-zA-Z0-9_-]+(?::\d+)?$/)?.[1];
+    if (!runId) return null;
+    const run = await this.deps.getRun(runId);
+    if (!run || run.owner?.ownerType !== "team" || run.owner.ownerId !== teamId) return null;
+    const [definition] = await this.deps.db.select({ id: workflowDefinitions.id }).from(workflowDefinitions)
+      .where(and(eq(workflowDefinitions.id, run.params.workflowId), eq(workflowDefinitions.orgId, ctx.orgId),
+        eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, teamId))).limit(1);
+    return definition ? run : null;
+  }
+
+  private async threadScope(ctx: PluginActionContext, teamId: string, run?: WorkflowRun | null): Promise<{ sessionId: string; threadKey: string } | null> {
     let sessionId = ctx.sessionId;
     let threadId = ctx.threadId;
     if (ctx.sessionPurpose === "workflow") {
-      // Both forms are host-minted: session nodes and headless tool invocations.
-      const runId = sessionId.match(/^wf:invoke:workflow:([a-zA-Z0-9_-]+):/)?.[1]
-        ?? sessionId.match(/^wf:([a-zA-Z0-9_-]+):[a-zA-Z0-9_-]+(?::\d+)?$/)?.[1];
-      if (!runId) return null;
-      const run = await this.deps.getRun(runId);
-      if (!run || run.owner?.ownerType !== "team" || run.owner.ownerId !== teamId || !run.params.origin) return null;
-      const [definition] = await this.deps.db.select({ id: workflowDefinitions.id }).from(workflowDefinitions)
-        .where(and(eq(workflowDefinitions.id, run.params.workflowId), eq(workflowDefinitions.orgId, ctx.orgId),
-          eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, teamId))).limit(1);
-      if (!definition) return null;
+      if (!run?.params.origin) return null;
       sessionId = run.params.origin.assistantSessionId;
       threadId = run.params.origin.threadId;
     }
@@ -158,6 +203,64 @@ export class GoogleWorkspaceLinkScope {
     // A caller-created thread with a Slack-looking key must not acquire the channel's grants.
     if (!record(binding?.doc) || binding.doc.threadKey !== thread.key) return null;
     return { sessionId, threadKey: thread.key };
+  }
+
+  /** Record links only from the durable winner of a Linear issue fetch. */
+  async recordCanonicalWorkflowAction(args: {
+    request: WorkflowInvokeActionRequest;
+    context: { orgId: string; owner: Principal; workflowExecutionId?: string };
+    result: WorkflowInvokeActionResult;
+  }): Promise<void> {
+    if (args.request.service !== "linear" || (args.request.action !== "get_issue" && args.request.action !== "linear.get_issue")
+      || !args.result.ok || args.context.owner.type !== "team" || !args.context.workflowExecutionId) return;
+    const run = await this.deps.getRun(args.context.workflowExecutionId);
+    if (!run || run.owner?.ownerType !== "team" || run.owner.ownerId !== args.context.owner.id) return;
+    const [definition] = await this.deps.db.select({ id: workflowDefinitions.id }).from(workflowDefinitions)
+      .where(and(eq(workflowDefinitions.id, run.params.workflowId), eq(workflowDefinitions.orgId, args.context.orgId),
+        eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, args.context.owner.id))).limit(1);
+    const description = linearIssueDescription(args.result.result);
+    if (!definition || description === null) return;
+    await this.recordWorkflowGrants(args.context.orgId, run.runId,
+      linkedDriveFileIds(description.slice(0, 1_000_000), MAX_WORKFLOW_FILE_REFS));
+  }
+
+  /** Allocate file grants under one locked per-run quota row. */
+  private async recordWorkflowGrants(orgId: string, runId: string, fileIds: readonly string[]): Promise<void> {
+    if (fileIds.length === 0) return;
+    const quotaKey = workflowGrantQuotaKey(runId);
+    const prefix = JSON.stringify([runId]).slice(0, -1);
+    const escapedPrefix = prefix.replace(/([\\%_])/g, "\\$1");
+    await this.deps.db.transaction(async (tx) => {
+      const now = Date.now();
+      await tx.insert(pluginStoreRows).values({
+        id: randomUUID(), plugin: "valet", scopeType: "org", scopeId: orgId,
+        collection: WORKFLOW_QUOTA_COLLECTION, key: quotaKey, doc: { fileIds: [] }, revision: 1,
+        createdAt: now, updatedAt: now,
+      }).onConflictDoNothing();
+      const [quota] = await tx.select({ doc: pluginStoreRows.doc }).from(pluginStoreRows).where(and(
+        eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
+        eq(pluginStoreRows.collection, WORKFLOW_QUOTA_COLLECTION), eq(pluginStoreRows.key, quotaKey),
+      )).for("update");
+      if (!quota) throw new Error("workflow Drive grant quota was not created");
+      const existing = await tx.select({ key: pluginStoreRows.key }).from(pluginStoreRows).where(and(
+        eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
+        eq(pluginStoreRows.collection, WORKFLOW_COLLECTION), sql`${pluginStoreRows.key} LIKE ${escapedPrefix + "%"} ESCAPE '\\'`,
+      ));
+      const granted = new Set(existing.map((row) => workflowFileIdFromKey(runId, row.key)).filter((id): id is string => id !== null));
+      const additions = [...new Set(fileIds)].filter((id) => !granted.has(id)).slice(0, MAX_WORKFLOW_FILE_REFS - granted.size);
+      if (additions.length === 0) return;
+      await tx.update(pluginStoreRows).set({ doc: { fileIds: [...granted, ...additions] }, revision: sql`${pluginStoreRows.revision} + 1`, updatedAt: now }).where(and(
+        eq(pluginStoreRows.plugin, "valet"), eq(pluginStoreRows.scopeType, "org"), eq(pluginStoreRows.scopeId, orgId),
+        eq(pluginStoreRows.collection, WORKFLOW_QUOTA_COLLECTION), eq(pluginStoreRows.key, quotaKey),
+      ));
+      for (const fileId of additions) {
+        await tx.insert(pluginStoreRows).values({
+          id: randomUUID(), plugin: "valet", scopeType: "org", scopeId: orgId,
+          collection: WORKFLOW_COLLECTION, key: workflowGrantKey(runId, fileId),
+          doc: { source: "linear_issue_description" }, revision: 1, createdAt: now, updatedAt: now,
+        }).onConflictDoNothing();
+      }
+    });
   }
 
   wrapPlugins(plugins: ValetPlugin[]): ValetPlugin[] {
@@ -177,10 +280,15 @@ export class GoogleWorkspaceLinkScope {
             const fileId = ID.test(target) ? target : linkedDriveFileId(target);
             if (!fileId) return { success: false, error: DENIED };
             try {
-              const scope = await this.threadScope(ctx, ctx.owner.id);
-              const grant = scope && await pluginStore(this.deps.db, "valet").org(ctx.orgId)
-                .get(COLLECTION, grantKey(scope, fileId));
-              if (!grant) return { success: false, error: DENIED };
+              const run = await this.workflowRun(ctx, ctx.owner.id);
+              const store = pluginStore(this.deps.db, "valet").org(ctx.orgId);
+              const workflowGrant = run && (workflowReferenceFileIds(run.params.input).has(fileId)
+                || await store.get(WORKFLOW_COLLECTION, workflowGrantKey(run.runId, fileId)));
+              if (!workflowGrant) {
+                const scope = await this.threadScope(ctx, ctx.owner.id, run);
+                const grant = scope && await store.get(COLLECTION, grantKey(scope, fileId));
+                if (!grant) return { success: false, error: DENIED };
+              }
             } catch {
               return { success: false, error: "Drive file scope is unavailable. Retry this action after the service recovers." };
             }
