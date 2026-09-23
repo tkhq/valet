@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { PluginAction, PluginActionContext, Principal, SessionStore, ValetPlugin } from "@valet/engine";
-import type { WorkflowRun, WorkflowStore } from "@valet/workflow";
+import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult, WorkflowRun, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { pluginStore } from "./plugin-store.js";
@@ -9,6 +9,7 @@ const COLLECTION = "linked-drive-files";
 const WORKFLOW_COLLECTION = "linked-drive-workflow-files";
 const THREADS = "linked-drive-threads";
 const ID = /^[a-zA-Z0-9_-]+$/;
+const MAX_WORKFLOW_FILE_REFS = 100;
 const SLACK_THREAD = /^slack:[CG][A-Z0-9]+:\d+\.\d+$/;
 const SITE_THREAD = /^web:[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const DENIED = "This Google action is outside this thread's allowed file scope. Post the contract's direct Drive or Docs link in this conversation, on the site or in Slack.";
@@ -45,43 +46,33 @@ export function linkedDriveFileId(value: string): string | null {
 }
 
 /** Direct file ids written in a person's own message. Folder URLs and bare ids do not count. */
-export function linkedDriveFileIds(text: string): string[] {
+export function linkedDriveFileIds(text: string, limit = Number.POSITIVE_INFINITY): string[] {
   const ids = new Set<string>();
   // Attachment and unfurl text is not part of `text`, so it never grants access.
   for (const match of text.matchAll(/https:\/\/[^\s<>|"']+/g)) {
     const id = linkedDriveFileId(match[0]);
     if (id) ids.add(id);
+    if (ids.size === limit) break;
   }
   return [...ids];
 }
 
-/** Extract direct links from a bounded, trusted action result. */
-function linkedDriveFileIdsInValue(value: unknown, ids = new Set<string>(), depth = 0): Set<string> {
-  if (ids.size >= 100 || depth > 10) return ids;
-  if (typeof value === "string") {
-    for (const id of linkedDriveFileIds(value.slice(0, 1_000_000))) ids.add(id);
-  } else if (Array.isArray(value)) {
-    for (const item of value) linkedDriveFileIdsInValue(item, ids, depth + 1);
-  } else if (record(value)) {
-    for (const item of Object.values(value)) linkedDriveFileIdsInValue(item, ids, depth + 1);
+/** Read refs only from the event dispatcher payload, never manually supplied input. */
+function workflowReferenceFileIds(input: unknown): Set<string> {
+  if (!record(input) || input.type !== "event" || !record(input.data)) return new Set();
+  const { key, refs } = input.data;
+  if (typeof key !== "string" || !record(refs)) return new Set();
+  const ids = new Set<string>();
+  for (const value of Object.values(refs)) {
+    if (typeof value !== "string") continue;
+    for (const id of linkedDriveFileIds(value, MAX_WORKFLOW_FILE_REFS - ids.size)) ids.add(id);
+    if (ids.size === MAX_WORKFLOW_FILE_REFS) break;
   }
   return ids;
 }
 
-/** Read direct Drive links from the trigger's canonical refs bag, never its arbitrary payload. */
-function workflowReferenceFileIds(input: unknown): Set<string> {
-  const ids = new Set<string>();
-  let current = input;
-  for (let depth = 0; depth < 4 && record(current); depth += 1) {
-    const refs = current.refs;
-    if (typeof current.key === "string" && record(refs)) {
-      for (const value of Object.values(refs)) {
-        if (typeof value === "string") for (const id of linkedDriveFileIds(value)) ids.add(id);
-      }
-    }
-    current = current.data;
-  }
-  return ids;
+function linearIssueDescription(value: unknown): string | null {
+  return record(value) && typeof value.description === "string" ? value.description : null;
 }
 
 function grantKey(scope: { sessionId: string; threadKey: string }, fileId: string): string {
@@ -198,36 +189,31 @@ export class GoogleWorkspaceLinkScope {
     return { sessionId, threadKey: thread.key };
   }
 
-  private async recordLinearLinks(ctx: PluginActionContext, data: unknown): Promise<void> {
-    if (!ctx.owner || ctx.owner.type !== "team") return;
-    const run = await this.workflowRun(ctx, ctx.owner.id);
-    if (!run) return;
-    const fileIds = linkedDriveFileIdsInValue(data);
-    const store = pluginStore(this.deps.db, "valet").org(ctx.orgId);
-    for (const fileId of fileIds) await store.put(WORKFLOW_COLLECTION, workflowGrantKey(run.runId, fileId), { source: "linear" });
+  /** Record links only from the durable winner of a Linear issue fetch. */
+  async recordCanonicalWorkflowAction(args: {
+    request: WorkflowInvokeActionRequest;
+    context: { orgId: string; owner: Principal; workflowExecutionId?: string };
+    result: WorkflowInvokeActionResult;
+  }): Promise<void> {
+    if (args.request.service !== "linear" || (args.request.action !== "get_issue" && args.request.action !== "linear.get_issue")
+      || !args.result.ok || args.context.owner.type !== "team" || !args.context.workflowExecutionId) return;
+    const run = await this.deps.getRun(args.context.workflowExecutionId);
+    if (!run || run.owner?.ownerType !== "team" || run.owner.ownerId !== args.context.owner.id) return;
+    const [definition] = await this.deps.db.select({ id: workflowDefinitions.id }).from(workflowDefinitions)
+      .where(and(eq(workflowDefinitions.id, run.params.workflowId), eq(workflowDefinitions.orgId, args.context.orgId),
+        eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, args.context.owner.id))).limit(1);
+    const description = linearIssueDescription(args.result.result);
+    if (!definition || description === null) return;
+    const store = pluginStore(this.deps.db, "valet").org(args.context.orgId);
+    for (const fileId of linkedDriveFileIds(description.slice(0, 1_000_000), MAX_WORKFLOW_FILE_REFS)) {
+      await store.put(WORKFLOW_COLLECTION, workflowGrantKey(run.runId, fileId), { source: "linear_issue_description" });
+    }
   }
 
   wrapPlugins(plugins: ValetPlugin[]): ValetPlugin[] {
     return plugins.map((plugin) => ({
       ...plugin,
       actions: plugin.actions?.map((actions) => {
-        if (actions.service === "linear") {
-          const wrapLinear = (action: PluginAction): PluginAction => ({
-            ...action,
-            execute: async (args, ctx) => {
-              const result = await action.execute(args, ctx);
-              if (result.success) await this.recordLinearLinks(ctx, result.data);
-              return result;
-            },
-          });
-          const resolveActions = actions.resolveActions;
-          return {
-            ...actions,
-            actions: actions.actions?.map(wrapLinear),
-            ...(resolveActions ? { resolveActions: async (...args: Parameters<typeof resolveActions>) =>
-              (await resolveActions(...args)).map(wrapLinear) } : {}),
-          };
-        }
         if ((actions.credentialService ?? actions.service) !== "google_workspace") return actions;
         const wrap = (action: PluginAction): PluginAction => ({
           ...action,

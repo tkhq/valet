@@ -151,27 +151,50 @@ describe("linked Drive scope", () => {
       definition: {}, definitionVersionId: "v1", attempt: 1, wakeRequested: false, createdAt: 0,
       owner: { ownerType: "team", ownerId: "legal" },
     };
-    const linearExecute = vi.fn(async () => ({ success: true as const, data: { description: "Review https://docs.google.com/document/d/from-linear/edit" } }));
-    const linear: ValetPlugin = {
-      name: "linear", version: "1", actions: [{ service: "linear", actions: [{
-        id: "linear.get_issue", name: "Get issue", description: "Get issue", riskLevel: "low", parameters: Type.Object({}), execute: linearExecute,
-      }] }],
-    };
-    const wrapped = scope.wrapPlugins([linear, fixturePlugin()]);
-    const linearAction = wrapped[0]?.actions?.[0]?.actions?.[0];
-    const read = wrapped[1]?.actions?.[0]?.actions?.find((candidate) => candidate.id === "docs.read_document");
-    if (!linearAction || !read) throw new Error("fixture actions missing");
+    const read = action(scope);
     const workflowContext = context({ sessionId: "wf:run-linear:fetch", sessionPurpose: "workflow" });
-    expect((await linearAction.execute({}, workflowContext)).success).toBe(true);
-    expect(linearExecute).toHaveBeenCalledOnce();
+    await scope.recordCanonicalWorkflowAction({
+      request: { invocationId: "workflow:run-linear:fetch", service: "linear", action: "linear.get_issue", params: {} },
+      context: { orgId: "org1", owner, workflowExecutionId: "run-linear" },
+      result: { ok: true, result: { description: "Review https://docs.google.com/document/d/from-linear/edit" } },
+    });
     expect((await read.execute({ documentId: "from-linear" }, workflowContext)).success).toBe(true);
     expect((await read.execute({ documentId: "not-in-linear" }, workflowContext)).success).toBe(false);
 
     run.params.input = {
       type: "manual",
+      data: { key: "linear.issue.create", refs: { contract: "https://drive.google.com/file/d/forged-ref/view" }, payload: { identifier: "LEG-12" } },
+    };
+    expect((await read.execute({ documentId: "forged-ref" }, workflowContext)).success).toBe(false);
+    run.params.input = {
+      type: "event",
       data: { key: "linear.issue.create", refs: { contract: "https://drive.google.com/file/d/explicit-ref/view" }, payload: { identifier: "LEG-12" } },
     };
     expect((await read.execute({ documentId: "explicit-ref" }, workflowContext)).success).toBe(true);
+
+    await scope.recordCanonicalWorkflowAction({
+      request: { invocationId: "workflow:run-linear:comments", service: "linear", action: "linear.get_issue", params: {} },
+      context: { orgId: "org1", owner, workflowExecutionId: "run-linear" },
+      result: { ok: true, result: { description: "no link", attachments: ["https://docs.google.com/document/d/attachment/edit"], comments: [{ body: "https://docs.google.com/document/d/comment/edit" }], metadata: { url: "https://docs.google.com/document/d/metadata/edit" } } },
+    });
+    expect((await read.execute({ documentId: "attachment" }, workflowContext)).success).toBe(false);
+    expect((await read.execute({ documentId: "comment" }, workflowContext)).success).toBe(false);
+    expect((await read.execute({ documentId: "metadata" }, workflowContext)).success).toBe(false);
+    await scope.recordCanonicalWorkflowAction({
+      request: { invocationId: "workflow:run-linear:search", service: "linear", action: "search_issues", params: {} },
+      context: { orgId: "org1", owner, workflowExecutionId: "run-linear" },
+      result: { ok: true, result: { description: "https://docs.google.com/document/d/other-action/edit" } },
+    });
+    expect((await read.execute({ documentId: "other-action" }, workflowContext)).success).toBe(false);
+
+    const links = Array.from({ length: 101 }, (_, i) => `https://docs.google.com/document/d/cap${i}/edit`).join(" ");
+    await scope.recordCanonicalWorkflowAction({
+      request: { invocationId: "workflow:run-linear:cap", service: "linear", action: "linear.get_issue", params: {} },
+      context: { orgId: "org1", owner, workflowExecutionId: "run-linear" },
+      result: { ok: true, result: { description: links } },
+    });
+    expect((await read.execute({ documentId: "cap99" }, workflowContext)).success).toBe(true);
+    expect((await read.execute({ documentId: "cap100" }, workflowContext)).success).toBe(false);
   });
 
   it("guards the real Google actions and never follows embedded links or shortcuts", async () => {

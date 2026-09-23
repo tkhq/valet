@@ -148,10 +148,12 @@ Existing action policies and approvals still apply; an approval cannot bypass th
 
 Workflow tool and session nodes resolve their stored run origin to the same team assistant thread.
 The wrapper verifies the run's team, the definition's organization/team, and the origin session's ownership.
-A workflow can also use a direct file URL from its canonical trigger `refs` bag.
-A successful Linear action can add direct file URLs from its result to that run only.
-The wrapper records these grants by organization, run ID, and file ID.
-It does not scan arbitrary trigger payloads, other action results, or attachments.
+A workflow can also use a direct file URL from an event dispatcher's `refs` bag.
+Manual input cannot grant a file reference.
+A successful `linear.get_issue` action can add direct file URLs from its `description` result to that run only.
+The action invoker records this grant only after durable dedup selects its canonical result.
+The wrapper records at most 100 grants by organization, run ID, and file ID.
+It does not scan other action results, attachments, comments, metadata, or arbitrary trigger payloads.
 Runs without an origin can use only these run-bound references.
 Ordinary child sessions cannot use this integration.
 For the conversation path, start the workflow from the conversation that linked the file.
