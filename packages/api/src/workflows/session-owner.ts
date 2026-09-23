@@ -15,7 +15,7 @@
 import { and, eq } from "drizzle-orm";
 import { parsePrincipal, type Principal } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, contentSources, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { parseWorkflowSessionId } from "./engine-deps.js";
 
 /**
@@ -69,4 +69,25 @@ export async function workflowSessionOwner(
   if (named.type === "user") return null;
   if (named.type === "org" && named.id !== orgId) return null;
   return named;
+}
+
+/** Returns the repository that explicitly owns a mirrored workflow. */
+export async function workflowSessionRepo(
+  db: AppQueryable,
+  sessionId: string,
+  orgId: string,
+): Promise<{ fullName: string; cloneUrl: string; auth: "app" } | null | undefined> {
+  if (!sessionId.startsWith("wf:")) return undefined;
+  const appRows = await db.select({ id: agentSessions.id }).from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  if (appRows.length > 0) return undefined;
+  let runId: string;
+  try { runId = parseWorkflowSessionId(sessionId).runId; } catch { return null; }
+  const rows = await db.select({ repoFullName: contentSources.repoFullName })
+    .from(workflowRuns)
+    .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+    .innerJoin(contentSources, eq(contentSources.id, workflowDefinitions.sourceId))
+    .where(and(eq(workflowRuns.id, runId), eq(workflowDefinitions.orgId, orgId), eq(contentSources.orgId, orgId)))
+    .limit(1);
+  const fullName = rows[0]?.repoFullName;
+  return fullName ? { fullName, cloneUrl: `https://github.com/${fullName}.git`, auth: "app" } : null;
 }

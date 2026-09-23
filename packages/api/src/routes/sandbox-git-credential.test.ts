@@ -15,9 +15,10 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, gitPushOperations, githubInstallations, orgs, sessionGitBranches, sessionPullRequests, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, contentSources, gitPushOperations, githubInstallations, orgs, sessionGitAttributionHeads, sessionGitAttributionSnapshots, sessionGitBranches, sessionPullRequests, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { saveAppConfig } from "../services/github-app.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
@@ -327,6 +328,28 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     });
   }
 
+
+  async function activateAppSigned(sessionId: string): Promise<void> {
+    const now = Date.now();
+    await api!.providers.db.insert(sessionGitAttributionSnapshots).values({
+      sessionId, generation: 1, mode: "valet_app_signed", coAuthoredBy: true, correlationTrailers: true,
+      ownerType: "team", ownerId: TEAM.id, counterpartUserId: null, counterpartName: null, counterpartEmail: null,
+      valetName: "Valet", valetEmail: "valet@example.com", settingsFingerprint: "test", createdBy: "local-user", createdAt: now,
+    });
+    await api!.providers.db.insert(sessionGitAttributionHeads).values({ sessionId, activeGeneration: 1, updatedAt: now });
+  }
+
+  async function bindMirroredWorkflow(runId: string, repoFullName = "tkhq/docs"): Promise<void> {
+    const now = Date.now(); const sourceId = `source_${runId}`;
+    await api!.providers.db.insert(contentSources).values({
+      id: sourceId, orgId: ORG, ownerType: "team", ownerId: TEAM.id, repoFullName, ref: "", subpath: "",
+      kinds: ["workflows"], enabled: true, status: "ok", attempts: 0, nextAttemptAt: now, createdAt: now, updatedAt: now,
+    });
+    await api!.providers.db.update(workflowDefinitions)
+      .set({ origin: "repo", sourceId, upstreamPath: ".valet/workflows/test.yaml" })
+      .where(eq(workflowDefinitions.id, `wf_def_${runId}`));
+  }
+
   /** An App with one installation, on `accountLogin`, that mints `INSTALLATION_TOKEN`. */
   async function installApp(accountLogin: string): Promise<void> {
     fixture = startGithubFixture({
@@ -366,6 +389,87 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
       updatedAt: now,
     });
   }
+
+  it("downscopes an App-signed workflow to its explicit mirrored repository", async () => {
+    api = await bootTestApi();
+    await installApp("tkhq");
+    const runId = "wfrun_signed_bound";
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId, orgId: ORG, owner: TEAM, actorUserId: "local-user" });
+    await bindMirroredWorkflow(runId);
+    await activateAppSigned(sessionId);
+    await saveUserCredential("ghp_must_not_be_used");
+    await saveOrgPat("ghp_org_must_not_be_used");
+    const token = await tokenFor(sessionId, "local-user");
+
+    const git = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(git.status).toBe(200);
+    expect(await git.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+    const gitMint = fixture!.calls.filter((call) => call.path.endsWith("/access_tokens")).at(-1);
+    expect(gitMint?.body).toEqual({ permissions: { contents: "read", metadata: "read" }, repositories: ["docs"] });
+
+    const gh = await post(token, { host: "github.com", owner: "tkhq", repo: "docs", purpose: "api" });
+    expect(gh.status).toBe(200);
+    const apiMint = fixture!.calls.filter((call) => call.path.endsWith("/access_tokens")).at(-1);
+    expect(apiMint?.body).toEqual({ permissions: { metadata: "read", pull_requests: "write", issues: "write" }, repositories: ["docs"] });
+    expect(apiMint?.body).not.toMatchObject({ permissions: { contents: "write" } });
+
+    const replay = await fetch(`${api.baseUrl}/api/sandbox/git-push`, {
+      method: "POST", headers: { ...HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ repoFullName: "tkhq/docs", targetRef: "refs/heads/feature", expectedRemoteSha: "old", createRef: true, commits: [{ localSha: "local", treeSha: "tree", parents: [], message: "Subject" }] }),
+    });
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toMatchObject({ error: expect.stringContaining("GitHub Git Database API") });
+    const replayMint = fixture!.calls.filter((call) => call.path.endsWith("/access_tokens")).at(-1);
+    expect(replayMint?.body).toEqual({ permissions: { contents: "write", metadata: "read" }, repositories: ["docs"] });
+  });
+
+  it("rejects App-signed workflows without an explicit repository before minting", async () => {
+    api = await bootTestApi();
+    await installApp("tkhq");
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId: "wfrun_signed_unbound", orgId: ORG, owner: TEAM });
+    await activateAppSigned(sessionId);
+    await saveUserCredential("ghp_must_not_be_used");
+    await saveOrgPat("ghp_org_must_not_be_used");
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const response = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "app_signed_repo_binding_required" });
+    expect(fixture!.calls.filter((call) => call.path.endsWith("/access_tokens"))).toHaveLength(0);
+  });
+
+  it("rejects another repository for an App-signed workflow without credential fallback", async () => {
+    api = await bootTestApi();
+    await installApp("tkhq");
+    const runId = "wfrun_signed_other";
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId, orgId: ORG, owner: TEAM });
+    await bindMirroredWorkflow(runId);
+    await activateAppSigned(sessionId);
+    await api.providers.engineCredentials.save(TEAM, "github", { type: "oauth2", accessToken: "ghp_team_must_not_be_used" });
+    await saveUserCredential("ghp_user_must_not_be_used");
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const response = await post(token, { host: "github.com", owner: "tkhq", repo: "other" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "app_signed_repo_not_authorized" });
+    expect(fixture!.calls.filter((call) => call.path.endsWith("/access_tokens"))).toHaveLength(0);
+  });
+
+  it("does not fall back to OAuth or PAT for an authorized App-signed workflow", async () => {
+    api = await bootTestApi();
+    const runId = "wfrun_signed_no_app";
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId, orgId: ORG, owner: TEAM });
+    await bindMirroredWorkflow(runId);
+    await activateAppSigned(sessionId);
+    await api.providers.engineCredentials.save(TEAM, "github", { type: "oauth2", accessToken: "ghp_team_must_not_be_used" });
+    await saveUserCredential("ghp_user_must_not_be_used");
+    await saveOrgPat("ghp_org_must_not_be_used");
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const response = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "app_signed_credential_unavailable" });
+  });
 
   it("a team run a member started never resolves that member's credential or the org PAT", async () => {
     api = await bootTestApi();

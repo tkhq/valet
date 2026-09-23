@@ -61,6 +61,7 @@
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
+import type { AppQueryable } from "../lib/drizzle.js";
 import { credentialSecret } from "@valet/engine";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { sessionGitAttributionHeads, sessionGitAttributionSnapshots, sessionRepos } from "../schema/index.js";
@@ -68,10 +69,19 @@ import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-
 import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
 import { getTeamInOrg } from "../services/teams.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
-import { workflowSessionOwner } from "../workflows/session-owner.js";
+import { workflowSessionOwner, workflowSessionRepo } from "../workflows/session-owner.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
 
 export const sandboxGitCredentialRouter = new Hono<AppEnv>();
+
+type RepoBinding = Pick<typeof sessionRepos.$inferSelect, "fullName" | "cloneUrl" | "auth">;
+
+async function sessionRepoBindings(db: AppQueryable, sessionId: string, orgId: string): Promise<RepoBinding[]> {
+  const rows = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sessionId));
+  if (rows.length > 0) return rows;
+  const workflowRepo = await workflowSessionRepo(db, sessionId, orgId);
+  return workflowRepo ? [workflowRepo] : [];
+}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -114,6 +124,32 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
 
   const { db, engineCredentials, encryptionKey, onePassword, plugins } = c.var.providers;
   const anonymous: PostSandboxGitCredentialResponse = { anonymous: true };
+
+  const bindings = await sessionRepoBindings(db, sandbox.sessionId, sandbox.orgId);
+  const heads = await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1);
+  const active = heads[0] ? (await db.select({ mode: sessionGitAttributionSnapshots.mode }).from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, sandbox.sessionId), eq(sessionGitAttributionSnapshots.generation, heads[0].activeGeneration))).limit(1))[0] : undefined;
+  const appSignedCapability = active?.mode === "valet_app_signed" ? (purpose === "git" ? "sandbox_git_read" : "sandbox_api_limited") : undefined;
+
+  if (appSignedCapability) {
+    const exactBinding = owner && wantRepo
+      ? bindings.find((binding) => binding.fullName.toLowerCase() === `${owner}/${wantRepo}`.toLowerCase())
+      : undefined;
+    if (!exactBinding) {
+      const code = bindings.length === 0 ? "app_signed_repo_binding_required" : "app_signed_repo_not_authorized";
+      const error = bindings.length === 0
+        ? "App-signed Git requires an explicit repository binding. Use a repository-backed workflow or select unsigned Git."
+        : "This repository is not authorized for App-signed Git. Use the repository bound to this session.";
+      return c.json({ error, code }, 409);
+    }
+    const repoHost = repoHostForUrl(exactBinding.cloneUrl);
+    if (!repoHost) return c.json({ error: "No credential host supports the bound repository. Select unsigned Git." }, 409);
+    const result = await repoHost.resolveGitToken(
+      { orgId: sandbox.orgId, userId: sandbox.userId, deps: { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) } },
+      { owner: ownerOf(exactBinding.fullName), repo: repoOf(exactBinding.fullName), purpose, auth: "app", capability: appSignedCapability },
+    );
+    if (!result || "anonymous" in result) return c.json({ error: "The App credential for this repository is unavailable. Reinstall the GitHub App or select unsigned Git.", code: "app_signed_credential_unavailable" }, 409);
+    return c.json({ username: result.username, password: result.token } satisfies PostSandboxGitCredentialResponse);
+  }
 
   // A workflow session acts as its run's owner. Its token carries the run
   // actor instead: the member who clicked Run, or a synthetic `team:{id}` /
@@ -179,11 +215,6 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     return c.json(cred);
   }
 
-  const bindings = await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId));
-  const heads = await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1);
-  const active = heads[0] ? (await db.select({ mode: sessionGitAttributionSnapshots.mode }).from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, sandbox.sessionId), eq(sessionGitAttributionSnapshots.generation, heads[0].activeGeneration))).limit(1))[0] : undefined;
-  const appSignedCapability = active?.mode === "valet_app_signed" ? (purpose === "git" ? "sandbox_git_read" : "sandbox_api_limited") : undefined;
-
   const wantOwner = owner?.toLowerCase();
   const binding =
     wantOwner === undefined
@@ -214,8 +245,7 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
       owner: owner ?? "",
       repo: wantRepo ?? "",
       purpose,
-      auth: appSignedCapability ? "app" : "auto",
-      capability: appSignedCapability,
+      auth: "auto",
     });
     if (result === null || "anonymous" in result) {
       const anon: PostSandboxGitCredentialResponse = { anonymous: true };
@@ -234,8 +264,7 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     owner: ownerOf(binding.fullName),
     repo: repoOf(binding.fullName),
     purpose,
-    auth: appSignedCapability ? "app" : binding.auth,
-    capability: appSignedCapability,
+    auth: binding.auth,
   });
 
   if (result === null) {
@@ -267,7 +296,7 @@ sandboxGitCredentialRouter.post("/git-push", async (c) => {
   if (body.force) return c.json({ error: "App-signed history cannot be force-pushed in V1. Create a new branch." }, 409);
   if (!body.repoFullName || !body.targetRef || !body.expectedRemoteSha || !Array.isArray(body.commits)) return c.json({ error: "repoFullName, targetRef, expectedRemoteSha, and commits are required." }, 400);
   const { db, engineCredentials, encryptionKey } = c.var.providers;
-  const binding = (await db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId)))
+  const binding = (await sessionRepoBindings(db, sandbox.sessionId, sandbox.orgId))
     .find((row) => row.fullName.toLowerCase() === body.repoFullName.toLowerCase());
   if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
   const head = (await db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1))[0];
@@ -339,7 +368,7 @@ sandboxGitCredentialRouter.post("/git-push/observe", async (c) => {
     return c.json({ error: "Send a repository, branch ref, and head SHA." }, 400);
   }
   const repoFullName = body.repoFullName; const targetRef = body.targetRef; const headSha = body.headSha;
-  const binding = (await c.var.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId)))
+  const binding = (await sessionRepoBindings(c.var.providers.db, sandbox.sessionId, sandbox.orgId))
     .find((row) => row.fullName.toLowerCase() === repoFullName.toLowerCase());
   if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
   const { sessionGitBranches } = await import("../schema/index.js");
@@ -357,7 +386,7 @@ sandboxGitCredentialRouter.post("/git-pr/observe", async (c) => {
     return c.json({ error: "Send the repository and pull request result." }, 400);
   }
   const { repoFullName, prNumber, prUrl, headRef, headSha } = body;
-  const binding = (await c.var.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId)))
+  const binding = (await sessionRepoBindings(c.var.providers.db, sandbox.sessionId, sandbox.orgId))
     .find((row) => row.fullName.toLowerCase() === repoFullName.toLowerCase());
   if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
   const { sessionPullRequests } = await import("../schema/index.js"); const now = Date.now();
