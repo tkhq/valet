@@ -13,15 +13,15 @@ Replace the 13 current `gmail.*` actions in `packages/plugin-gmail/` with 13 act
 
 | Action ID | Params (summary) | Description | Risk |
 |-----------|------------------|-------------|------|
-| `gmail.send_email` | `to`, `cc?`, `bcc?`, `subject`, `body`, `bodyHtml?`, `threadId?`, `replyTo?` | Send a new email | high |
+| `gmail.send_email` | `to`, `cc?`, `bcc?`, `subject`, `body`, `threadId?`, `replyTo?` | Send a new email | high |
 | `gmail.list_messages` | `query?`, `maxResults?`, `labelIds?`, `pageToken?` | List emails with optional query filter | low |
 | `gmail.get_message` | `messageId` | Get a single email with full content | low |
 | `gmail.modify_labels` | `messageId`, `addLabelIds?`, `removeLabelIds?` | Add or remove labels (subsumes archive, star, mark-read) | medium |
 | `gmail.trash_message` | `messageId` | Move a message to trash | high |
-| `gmail.create_draft` | `to`, `cc?`, `bcc?`, `subject`, `body`, `bodyHtml?`, `threadId?`, `replyTo?` | Create a draft email | medium |
+| `gmail.create_draft` | `to`, `cc?`, `bcc?`, `subject`, `body`, `threadId?`, `replyTo?` | Create a draft email | medium |
 | `gmail.list_drafts` | `maxResults?`, `pageToken?` | List all drafts | low |
 | `gmail.get_draft` | `draftId` | Get a single draft with full content | low |
-| `gmail.update_draft` | `draftId`, `to`, `cc?`, `bcc?`, `subject`, `body`, `bodyHtml?` | Update an existing draft | medium |
+| `gmail.update_draft` | `draftId`, `to`, `cc?`, `bcc?`, `subject`, `body` | Update an existing draft | medium |
 | `gmail.send_draft` | `draftId` | Send an existing draft | high |
 | `gmail.delete_draft` | `draftId` | Permanently delete a draft | medium |
 | `gmail.list_labels` | (none) | List all labels | low |
@@ -43,7 +43,7 @@ Same pattern as the Docs port (see `2026-04-23-google-workspace-docs-port-design
 
 - **Gmail API base URL:** `https://gmail.googleapis.com/gmail/v1`
 - **RFC 2822 email construction:** Both the reference repo and our current code build raw emails with base64url encoding. The reference repo uses the `googleapis` client but the email construction is pure string manipulation -- ports directly.
-- **HTML email bodies:** `gmail.send_email`, `gmail.create_draft`, and `gmail.update_draft` accept optional `bodyHtml`. When present, the MIME message uses `multipart/alternative` with `body` as `text/plain` and `bodyHtml` as `text/html`. `bodyHtml` must contain non-whitespace content: mail clients prefer the HTML alternative, so a blank one renders an empty email. The schemas reject empty and whitespace-only strings, and the builder falls back to plain-text MIME for any blank value. Multipart part bodies are normalized to CRLF line endings so multiline input cannot emit bare LF. Caller-supplied header values (`to`, `cc`, `bcc`, `subject`) are sanitized: CR/LF runs fold to a single space and remaining control characters are stripped, so crafted input cannot inject header lines into the raw MIME message.
+- **Markdown email bodies:** `gmail.send_email`, `gmail.create_draft`, and `gmail.update_draft` compile `body` with markdown-it 14.1.1. The parser follows the Docs configuration: raw HTML is disabled, linkification is enabled, typographer replacements are disabled, and standard line breaks are retained. Gmail overrides only the soft-break renderer to emit `<br>` for a single newline. This preserves existing plain-text signatures and multiline prose without changing Markdown block semantics. Each action sends `multipart/alternative`: the original Markdown source is `text/plain`, and rendered HTML is `text/html`. The plugin removes `bodyHtml` so `body` remains the only message source. Multipart part bodies are normalized to CRLF line endings. Caller-supplied header values (`to`, `cc`, `bcc`, `subject`) are sanitized: CR/LF runs fold to one space and remaining control characters are stripped. These controls prevent header injection.
 - **`triage_inbox` is the interesting new tool:** It fetches unread messages, applies heuristic categorization (newsletter detection via `List-Unsubscribe`/`List-Id` headers, meeting keyword matching, question detection, action-requested detection), and returns aggregate stats (total unread, top senders, category breakdown). This is a composite read-only tool designed for AI inbox triage workflows.
 - **`list_messages` response shape changes:** The reference repo fetches full message content for each listed message (N+1 pattern: list IDs then batch-get each). Our current implementation does the same. The reference repo uses `Promise.allSettled` for resilience; the port should adopt this.
 - **`update_draft` is new:** Allows modifying a draft's content before sending. Our current implementation only supports create and send.
