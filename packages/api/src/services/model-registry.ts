@@ -60,6 +60,7 @@ import { bundledModel, bundledModels } from "@valet/engine/model-catalog";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { PgModelsStore } from "./models-store-pg.js";
+import { recordModelDiscoveries } from "./model-discoveries.js";
 import { parseLastModified, parseRemoteCatalog, type RegistryModel } from "./model-registry-parse.js";
 
 /** The providers Valet reads a catalog for. These are exactly the kinds the
@@ -205,7 +206,10 @@ export class ModelRegistry {
         // Unchanged. Re-stamp `checkedAt` so the status surface can tell
         // "verified fresh just now" from "never checked", and keep the
         // stored models and validators exactly as they are.
-        if (stored) await this.store.write(providerId, { ...stored, checkedAt: Date.now() });
+        if (stored) {
+          await recordModelDiscoveries(this.db, providerId, stored.models);
+          await this.store.write(providerId, { ...stored, checkedAt: Date.now() });
+        }
         if (state) {
           state.lastError = null;
           state.fetchedCount = stored?.models.length ?? 0;
@@ -221,6 +225,16 @@ export class ModelRegistry {
       const parsed = parseRemoteCatalog(providerId, await res.json());
       if (parsed.length === 0) {
         this.recordError(providerId, "upstream catalog held no readable models");
+        return keepStored();
+      }
+
+      // Discovery is an additive audit write. A database failure must not
+      // discard a valid refresh or interrupt active turns.
+      try {
+        await recordModelDiscoveries(this.db, providerId, parsed);
+      } catch (err) {
+        this.recordError(providerId, "could not persist discovery review state");
+        console.error(`model-registry: could not persist ${providerId} discoveries:`, err);
         return keepStored();
       }
 
@@ -285,6 +299,14 @@ export class ModelRegistry {
     // Cache-only pass: pi-ai reads the store and publishes it as the
     // current list, so a cold process serves the last known catalog at once.
     await this.models.refresh({ allowNetwork: false, providers: [...REGISTRY_PROVIDERS] });
+    for (const providerId of REGISTRY_PROVIDERS) {
+      try {
+        await recordModelDiscoveries(this.db, providerId, this.listModels(providerId));
+      } catch (err) {
+        this.recordError(providerId, "could not restore discovery review state");
+        console.error(`model-registry: could not restore ${providerId} discoveries:`, err);
+      }
+    }
     if (!modelRegistryUrl()) return;
     void this.refresh();
     this.timer = startSweepTimer("model-registry", REFRESH_INTERVAL_MS, () => this.refresh());

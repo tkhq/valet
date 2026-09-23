@@ -37,6 +37,8 @@
 import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import { registryModels } from "./model-registry.js";
+import { bundledModels } from "@valet/engine/model-catalog";
+import { approvedDiscoveredModelIds } from "./model-discoveries.js";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
@@ -99,8 +101,9 @@ function knownKindEntries(
   providerId: string,
   providerName: string,
   approvedList: string[] | null,
+  eligibleModelIds: ReadonlySet<string>,
 ): CatalogEntry[] {
-  return registryModels(kind).map((m) => {
+  return registryModels(kind).filter((m) => eligibleModelIds.has(m.id)).map((m) => {
     const id = `${namespace}/${m.id}`;
     return {
       id,
@@ -143,12 +146,18 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
   const entries: CatalogEntry[] = [];
 
   for (const kind of KNOWN_KINDS) {
+    // Bundled models remain eligible. Upstream-only models require an
+    // explicit org review before any model-writing path can select them.
+    const eligibleModelIds = new Set(bundledModels(kind).map((model) => model.id));
+    for (const modelId of await approvedDiscoveredModelIds(db, orgId, kind)) {
+      eligibleModelIds.add(modelId);
+    }
     const row = rows.find((r) => r.kind === kind);
     if (row) {
       const orgKey = await hasOrgKey(credentials, orgId, row.id);
       const resolvable = orgKey || Boolean(getEnvApiKey(kind));
       const active = row.enabled && resolvable;
-      entries.push(...knownKindEntries(kind, providerNamespace(row), active, resolvable, row.id, row.name, approvedList));
+      entries.push(...knownKindEntries(kind, providerNamespace(row), active, resolvable, row.id, row.name, approvedList, eligibleModelIds));
     } else {
       // No row for this kind — zero-config back-compat: synthesize a
       // registry entry only when the deployment env can resolve a key for
@@ -158,7 +167,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       // `providerNamespace` would give a known-kind row).
       const envKey = getEnvApiKey(kind);
       if (!envKey) continue;
-      entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind], approvedList));
+      entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind], approvedList, eligibleModelIds));
     }
   }
 
@@ -191,8 +200,11 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       active = true;
       selection = curatedOpenrouterModels();
     }
+    const bundledOpenrouterIds = new Set(bundledModels("openrouter").map((model) => model.id));
+    const approvedDiscoveryIds = await approvedDiscoveredModelIds(db, orgId, "openrouter");
     for (const sel of selection ?? []) {
       const reg = registry.get(sel.id);
+      if (reg && !bundledOpenrouterIds.has(sel.id) && !approvedDiscoveryIds.has(sel.id)) continue;
       const m = reg ? toProviderModel(reg) : sel;
       const id = `${namespace}/${m.id}`;
       entries.push({
