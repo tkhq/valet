@@ -72,7 +72,7 @@ describeDocker("buildWorkspacePrep (docker)", () => {
       // Base alpine has neither git nor curl — a real valet sandbox image
       // ships both; install them here to isolate this test from image
       // drift.
-      const install = await sandbox.exec("apk add --no-cache git curl");
+      const install = await sandbox.exec("apk add --no-cache git curl nodejs");
       expect(install.exitCode).toBe(0);
 
       const repos = [

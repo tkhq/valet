@@ -14,7 +14,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript, REAL_GIT_PATH } from "./git-credential-helper.js";
+import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript, observedGitWrapperScript, REAL_GIT_PATH } from "./git-credential-helper.js";
 
 const API_URL = "http://valet-api.example.com";
 
@@ -159,6 +159,45 @@ describe("ghWrapperScript", () => {
   });
 });
 
+
+describe.each([
+  ["unsigned", observedGitWrapperScript],
+  ["App-signed", appSignedGitWrapperScript],
+] as const)("%s Git wrapper passthrough", (_mode, generate) => {
+  function runtime() {
+    const dir = mkdtempSync(join(tmpdir(), "valet-git-passthrough-"));
+    const real = join(dir, "real-git"); const wrapper = join(dir, "git"); const capture = join(dir, "capture.json");
+    writeFileSync(real, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.CAPTURE) fs.writeFileSync(process.env.CAPTURE, JSON.stringify(args));
+if (args[0] === "stdin") process.stdout.write(fs.readFileSync(0));
+if (args[0]?.startsWith("exit-")) process.exit(Number(args[0].slice(5)));
+if (args[0] === "signal") process.kill(process.pid, "SIGTERM");
+`, { mode: 0o755 });
+    const script = generate(API_URL).replace(
+      `const real = ${JSON.stringify(REAL_GIT_PATH)};`,
+      `const real = ${JSON.stringify(real)};`,
+    );
+    writeFileSync(wrapper, script, { mode: 0o755 });
+    return { dir, wrapper, capture };
+  }
+
+  it("preserves stdin, argv boundaries, child status, and signals", () => {
+    const { dir, wrapper, capture } = runtime(); const env = { ...process.env, CAPTURE: capture };
+    try {
+      const input = "stdin remains attached\n";
+      const stdinResult = spawnSync(wrapper, ["stdin", "two words", "quote'and\"slash"], { input, encoding: "utf8", env });
+      expect(stdinResult).toMatchObject({ status: 0, stdout: input });
+      expect(JSON.parse(readFileSync(capture, "utf8"))).toEqual(["stdin", "two words", "quote'and\"slash"]);
+      for (const status of [1, 2, 37, 125]) expect(spawnSync(wrapper, [`exit-${status}`], { env }).status).toBe(status);
+      expect(spawnSync(wrapper, ["signal"], { env }).signal).toBe("SIGTERM");
+      const large = "x".repeat(129_000);
+      expect(spawnSync(wrapper, ["sentinel", large, "tail"], { env }).status).toBe(0);
+      expect(JSON.parse(readFileSync(capture, "utf8"))).toEqual(["sentinel", large, "tail"]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
 
 describe("appSignedGitWrapperScript", () => {
   it("executes typed refusal paths before guessing a destination", () => {

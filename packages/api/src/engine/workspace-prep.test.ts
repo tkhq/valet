@@ -793,7 +793,7 @@ describe("Git attribution hook execution", () => {
   });
 
   it.each([
-    ["unsigned", (git: string) => observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`)],
+    ["unsigned", (git: string) => observedGitWrapperScript(API_URL).replace(`const real = ${JSON.stringify(REAL_GIT_PATH)};`, `const real = ${JSON.stringify(git)};`)],
     ["App-signed", (git: string) => appSignedGitWrapperScript(API_URL).replace(`const real = ${JSON.stringify(REAL_GIT_PATH)};`, `const real = ${JSON.stringify(git)};`)],
   ])("preserves every commit hook through the %s wrapper after a late hooksPath change", async (_mode, wrapperScript) => {
     const { enrichment, dispatcher } = await hookScripts();
@@ -853,7 +853,7 @@ describe("Git attribution hook execution", () => {
       writeFileSync(join(dir, "file"), "content\n");
       expect(spawnSync(git, ["add", "file"], { cwd: dir }).status).toBe(0);
       const wrapper = join(dir, "git-wrapper");
-      writeFileSync(wrapper, observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`), { mode: 0o755 });
+      writeFileSync(wrapper, observedGitWrapperScript(API_URL).replace(`const real = ${JSON.stringify(REAL_GIT_PATH)};`, `const real = ${JSON.stringify(git)};`), { mode: 0o755 });
       expect(spawnSync(wrapper, ["-C", dir, "-c", "color.ui=false", "commit", "-m", "Subject"]).status).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
