@@ -44,6 +44,8 @@ export interface PullRef {
 export interface GithubFixtureHandlers {
   /** `GET /repos/:owner/:repo` */
   getRepo?: (owner: string, repo: string) => GithubFixtureResponse;
+  /** `POST /repos/:owner/:repo/pulls` */
+  createPull?: (owner: string, repo: string, body: unknown) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/pulls/:pull_number` */
   getPull?: (ref: PullRef) => GithubFixtureResponse;
   /** `PATCH /repos/:owner/:repo/pulls/:pull_number` */
@@ -96,6 +98,10 @@ export interface GithubFixture {
 
 const DEFAULTS: Required<GithubFixtureHandlers> = {
   getRepo: (owner, repo) => ({ body: { full_name: `${owner}/${repo}`, default_branch: "main" } }),
+  createPull: (owner, repo) => ({
+    status: 201,
+    body: { number: 42, title: "fixture pull request", state: "open", draft: false, html_url: `https://github.com/${owner}/${repo}/pull/42`, head: { ref: "feature", sha: "fixture-head-sha" }, base: { ref: "main" } },
+  }),
   getPull: (ref) => ({
     body: {
       number: Number(ref.pullNumber),
@@ -208,6 +214,15 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
   function asParams(ref: PullRef): Record<string, string> {
     return { owner: ref.owner, repo: ref.repo, pull_number: ref.pullNumber };
   }
+
+  app.post("/repos/:owner/:repo/pulls", async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const body = await readJson(c);
+    record(c, { owner, repo }, body);
+    const { status, body: respBody } = handlers.createPull(owner, repo, body);
+    return c.json(respBody as object, status ?? 201);
+  });
 
   app.get("/repos/:owner/:repo/pulls/:pull_number/files", (c) => {
     const ref = pullRef(c);

@@ -107,14 +107,15 @@ export function buildPrepSteps(
             }
           }
 
-          if (snap.gitAttribution) {
-            const userMode = snap.gitAttribution.mode.startsWith("user_");
-            const counterpart = userMode
-              ? { name: snap.gitAttribution.valetName, email: snap.gitAttribution.valetEmail }
-              : snap.gitAttribution.counterpartName && snap.gitAttribution.counterpartEmail
-                ? { name: snap.gitAttribution.counterpartName, email: snap.gitAttribution.counterpartEmail } : undefined;
-            await installGitAttributionHook(sandbox, targetDir, { coAuthor: snap.gitAttribution.coAuthoredBy ? counterpart : undefined, correlationTrailers: snap.gitAttribution.correlationTrailers });
-          }
+          const userMode = snap.gitAttribution?.mode.startsWith("user_");
+          const counterpart = userMode
+            ? { name: snap.gitAttribution!.valetName, email: snap.gitAttribution!.valetEmail }
+            : snap.gitAttribution?.counterpartName && snap.gitAttribution.counterpartEmail
+              ? { name: snap.gitAttribution.counterpartName, email: snap.gitAttribution.counterpartEmail } : undefined;
+          await installGitAttributionHook(sandbox, targetDir, {
+            coAuthor: snap.gitAttribution?.coAuthoredBy ? counterpart : undefined,
+            correlationTrailers: snap.gitAttribution?.correlationTrailers ?? false,
+          });
 
           // Start-ref capture for the primary binding — best-effort.
           if (isPrimary && onStartRef) {

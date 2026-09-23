@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, gitPushOperations, githubInstallations, orgs, sessionGitBranches, sessionPullRequests, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { saveAppConfig } from "../services/github-app.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
@@ -277,6 +277,7 @@ describe("POST /api/sandbox/git-credential", () => {
     expect(res.status).toBe(400);
   });
 });
+
 
 // ── Workflow sessions act as their run's owner ─────────────────────────────
 //
@@ -628,5 +629,45 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ anonymous: true });
+
+  });
+});
+
+
+describe("sandbox Git attribution observations", () => {
+  it("records only bound ordinary pushes and pull requests for the authenticated session", async () => {
+    api = await bootTestApi();
+    await bindRepo();
+    const token = await mintToken();
+    const otherToken = await mintToken("session-other");
+    const request = (path: string, auth: string, body: unknown) => fetch(`${api!.baseUrl}/api/sandbox/${path}`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": auth },
+      body: JSON.stringify(body),
+    });
+
+    const push = await request("git-push/observe", token, { repoFullName: "ACME/WIDGETS", targetRef: "refs/heads/feature", headSha: "abc123" });
+    expect(push.status).toBe(200);
+    expect(await api.providers.db.select().from(sessionGitBranches)).toMatchObject([{ sessionId: SESSION_ID, repoFullName: "acme/widgets", ref: "refs/heads/feature", headSha: "abc123" }]);
+
+    const pull = await request("git-pr/observe", token, { repoFullName: "acme/widgets", prNumber: 7, prUrl: "https://github.com/acme/widgets/pull/7", headRef: "feature", headSha: "abc123" });
+    expect(pull.status).toBe(200);
+    expect(await api.providers.db.select().from(sessionPullRequests)).toMatchObject([{ sessionId: SESSION_ID, repoFullName: "acme/widgets", prNumber: 7, headRef: "feature", headSha: "abc123" }]);
+
+    expect((await request("git-push/observe", otherToken, { repoFullName: "acme/widgets", targetRef: "refs/heads/feature", headSha: "abc123" })).status).toBe(403);
+    expect((await request("git-pr/observe", otherToken, { repoFullName: "acme/widgets", prNumber: 8, prUrl: "https://github.com/acme/widgets/pull/8", headRef: "feature", headSha: "abc123" })).status).toBe(403);
+  });
+
+  it("rejects reconciliation through a token for another session", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(gitPushOperations).values({ id: "gpo-test", sessionId: SESSION_ID, generation: 1, repoFullName: "acme/widgets", targetRef: "refs/heads/feature", expectedRemoteSha: "old", localHeadSha: "local", signedHeadSha: "signed", state: "reconciling", createdAt: now, updatedAt: now });
+    const wrong = await mintToken("session-other");
+    const denied = await fetch(`${api!.baseUrl}/api/sandbox/git-push/gpo-test/reconcile`, { method: "POST", headers: { "x-valet-sandbox": wrong } });
+    expect(denied.status).toBe(409);
+    const right = await mintToken();
+    const accepted = await fetch(`${api!.baseUrl}/api/sandbox/git-push/gpo-test/reconcile`, { method: "POST", headers: { "x-valet-sandbox": right } });
+    expect(accepted.status).toBe(200);
+
   });
 });

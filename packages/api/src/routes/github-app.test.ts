@@ -11,7 +11,7 @@ import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, eventSubscriptions, githubInstallations, contentSources } from "../schema/index.js";
+import { eventDeliveries, events, eventSubscriptions, githubInstallations, contentSources, sessionGitBranches, sessionPullRequests } from "../schema/index.js";
 import { createContentSource } from "../services/content-sources.js";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
@@ -889,6 +889,34 @@ describe("POST /webhooks/github-app", () => {
     repository: { full_name: "acme/widgets" },
     sender: { id: 1234, login: "octocat" },
   };
+
+  it("attributes duplicate and squash-head pull request webhooks without commit trailers", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await api.providers.db.insert(sessionGitBranches).values({
+      sessionId: "session-pr", generation: 1, repoFullName: "acme/widgets",
+      ref: "refs/heads/feature", headSha: "pre-squash-sha", pushOperationId: null, observedAt: Date.now(),
+    });
+    const payload = {
+      action: "synchronize",
+      pull_request: {
+        number: 7, html_url: "https://github.com/acme/widgets/pull/7", state: "open",
+        head: { ref: "feature", sha: "squash-head-with-no-trailers" },
+        base: { ref: "main", sha: "base-sha" },
+      },
+      repository: { full_name: "acme/widgets" },
+      sender: { id: 1234, login: "octocat" },
+    };
+
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", payload, webhookSecret, "gh-pr-observe-1")).status).toBe(204);
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", payload, webhookSecret, "gh-pr-observe-1")).status).toBe(204);
+    const rows = await api.providers.db.select().from(sessionPullRequests);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      sessionId: "session-pr", repoFullName: "acme/widgets", prNumber: 7,
+      headRef: "feature", headSha: "squash-head-with-no-trailers", baseRef: "main", state: "open",
+    });
+  });
 
   it("forwards a pull_request webhook into the event pipeline: events row + matched pending delivery", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });

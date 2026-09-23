@@ -729,6 +729,16 @@ export interface ToolContext {
    * hosts (and tests) that wire no store.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /** Persist a pull request created by a same-process plugin action. */
+  observePullRequest?: (pullRequest: {
+    repoFullName: string;
+    number: number;
+    url: string;
+    headRef: string;
+    headSha: string;
+    baseRef: string;
+    state: string;
+  }) => Promise<void>;
   /**
    * Host-provided text extraction for a document the model cannot read on
    * its own. A PDF is the case that matters: no sandbox image carries a PDF
@@ -2357,6 +2367,16 @@ export interface CreateSessionOptions {
    * `buildToolContext`. Absent === no `pluginStore` on plugin actions.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /** Persist a pull request created by a same-process plugin action. */
+  observePullRequest?: (pullRequest: {
+    repoFullName: string;
+    number: number;
+    url: string;
+    headRef: string;
+    headSha: string;
+    baseRef: string;
+    state: string;
+  }) => Promise<void>;
   /**
    * Threaded onto `ToolContext.extractDocument` via `buildToolContext`.
    * Absent === plugin actions get no document extraction.

@@ -651,6 +651,13 @@ describe("github-app service", () => {
       expect(row.cachedTokenExpiresAt).not.toBeNull();
     });
 
+    it("downscopes a capability token to one repository", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig); await seedInstallation();
+      fixture = startGithubFixture({ createInstallationToken: () => ({ body: { token: "scoped", expires_at: new Date(Date.now() + 3600_000).toISOString() } }) });
+      await mintInstallationToken(deps(), orgId, "acme", { contents: "read" }, ["widgets"]);
+      expect(fixture.calls[0].body).toEqual({ permissions: { contents: "read" }, repositories: ["widgets"] });
+    });
+
     it("returns the cached token without re-minting while more than 5 minutes remain", async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
       fixture = startGithubFixture();

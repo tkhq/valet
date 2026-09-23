@@ -1240,3 +1240,28 @@ describe("github.update_pull_request", () => {
     expect(server.calls[0].body).toEqual({ assignees: [] });
   });
 });
+
+describe("github.create_pull_request attribution", () => {
+  it("reports canonical pull request facts through the host seam", async () => {
+    useFixture();
+    const observed: unknown[] = [];
+    const ctx = fakeActionContext("test-token");
+    ctx.observePullRequest = async (pullRequest) => { observed.push(pullRequest); };
+
+    const result = await findAction("github.create_pull_request").execute(
+      { owner: "acme", repo: "widgets", title: "Change", head: "feature", base: "main" },
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    expect(observed).toEqual([{
+      repoFullName: "acme/widgets",
+      number: 42,
+      url: "https://github.com/acme/widgets/pull/42",
+      headRef: "feature",
+      headSha: "fixture-head-sha",
+      baseRef: "main",
+      state: "open",
+    }]);
+  });
+});

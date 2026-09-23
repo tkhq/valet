@@ -143,7 +143,8 @@ export async function ensureGitSnapshot(
   fallback?: { userId: string; orgId: string; ownerType?: string; ownerId?: string },
 ) {
   return db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`git-attribution:${sessionId}`}))`);
+    const workflowRun = sessionId.startsWith("wf:") ? sessionId.split(":").slice(0, 2).join(":") : undefined;
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`git-attribution:${workflowRun ?? sessionId}`}))`);
     const sessions = await tx.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
     const session = sessions[0] ?? (fallback ? { ...fallback, id: sessionId, ownerType: fallback.ownerType ?? "user", ownerId: fallback.ownerId ?? fallback.userId, gitAttributionSnapshotPending: true } : undefined);
     if (!session) throw new Error("Session not found.");
@@ -155,14 +156,19 @@ export async function ensureGitSnapshot(
     const generation = (heads[0]?.activeGeneration ?? 0) + 1;
     const parentRows = await tx.select({ parentSessionId: childWatches.parentSessionId }).from(childWatches).where(eq(childWatches.childSessionId, sessionId)).limit(1);
     const parentHead = parentRows[0] ? (await tx.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, parentRows[0].parentSessionId)).limit(1))[0] : undefined;
-    const parentSnapshot = parentHead && generation === 1 ? (await tx.select().from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, parentRows[0]!.parentSessionId), eq(sessionGitAttributionSnapshots.generation, parentHead.activeGeneration))).limit(1))[0] : undefined;
+    const workflowHead = workflowRun && generation === 1
+      ? (await tx.select().from(sessionGitAttributionHeads).where(sql`${sessionGitAttributionHeads.sessionId} like ${`${workflowRun}:%`} and ${sessionGitAttributionHeads.sessionId} <> ${sessionId}`).limit(1))[0]
+      : undefined;
+    const inheritedHead = parentHead ?? workflowHead;
+    const inheritedSessionId = parentHead ? parentRows[0]!.parentSessionId : workflowHead?.sessionId;
+    const parentSnapshot = inheritedHead && inheritedSessionId && generation === 1 ? (await tx.select().from(sessionGitAttributionSnapshots).where(and(eq(sessionGitAttributionSnapshots.sessionId, inheritedSessionId), eq(sessionGitAttributionSnapshots.generation, inheritedHead.activeGeneration))).limit(1))[0] : undefined;
     const scope = session.ownerType === "team" ? "team" : session.ownerType === "org" ? "organization" : "user";
     const settings = parentSnapshot
       ? { values: { mode: parentSnapshot.mode, coAuthoredBy: parentSnapshot.coAuthoredBy, correlationTrailers: parentSnapshot.correlationTrailers } }
       : session.gitAttributionSnapshotPending
         ? await readSettingsForScope(tx, { scope, id: session.ownerId || session.userId, orgId: session.orgId })
         : { values: DEFAULT_GIT_ATTRIBUTION };
-    const people = await tx.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, session.userId)).limit(1);
+    const people = await tx.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, createdBy)).limit(1);
     const person = people[0];
     const valetName = process.env.VALET_GIT_NAME?.trim() || DEFAULT_VALET_IDENTITY.name;
     const valetEmail = process.env.VALET_GIT_EMAIL?.trim() || DEFAULT_VALET_IDENTITY.email;
@@ -177,6 +183,7 @@ export async function ensureGitSnapshot(
 }
 
 export function opaqueCorrelationIds(key: string, sessionId: string, queueItemId: string) {
+  // v1 is stable while operators retain VALET_CORRELATION_KEY_V1 during key rotation.
   const digest = (kind: "session" | "queue", input: string) => createHmac("sha256", key).update(`${kind}\0${input}`).digest("base64url").slice(0, 32);
   return { session: `v1s_${digest("session", sessionId)}`, queueItem: `v1q_${digest("queue", `${sessionId}\0${queueItemId}`)}` };
 }
@@ -221,9 +228,9 @@ export async function replaySignedCommits(db: AppDb, client: GitHubReplayClient,
   const inserted = await db.insert(gitPushOperations).values({ id, sessionId: args.sessionId, generation: args.generation, repoFullName: args.repoFullName, targetRef: args.targetRef, expectedRemoteSha: args.expectedRemoteSha, localHeadSha: localHead, state: "replaying", createdAt: now, updatedAt: now }).onConflictDoNothing().returning({ id: gitPushOperations.id });
   const operation = (await db.select().from(gitPushOperations).where(eq(gitPushOperations.id, id)).limit(1))[0];
   if (!operation) throw new Error("The signed push operation could not be persisted.");
-  if (operation.expectedRemoteSha !== args.expectedRemoteSha) throw new Error("This signed push was already recorded against a different remote head.");
+  if (operation.expectedRemoteSha !== args.expectedRemoteSha && operation.signedHeadSha !== args.expectedRemoteSha) throw new Error("This signed push was already recorded against a different remote head.");
   if (operation.state === "complete" && operation.signedHeadSha) return { operationId: id, signedHeadSha: operation.signedHeadSha };
-  if (!inserted.length && operation.state !== "reconciling" && now - operation.updatedAt < 5 * 60_000) throw new Error("This branch already has a signed push in progress.");
+  if (!inserted.length && ["replaying", "publishing"].includes(operation.state) && now - operation.updatedAt < 5 * 60_000) throw new Error("This branch already has a signed push in progress.");
   await db.update(gitPushOperations).set({ state: "replaying", errorCode: null, updatedAt: now }).where(eq(gitPushOperations.id, id));
 
   await client.refresh();
@@ -231,6 +238,10 @@ export async function replaySignedCommits(db: AppDb, client: GitHubReplayClient,
   const mapped = new Map(existing.map((row) => [row.localSha, row.signedSha]));
   try {
     const initialRemote = await client.getRef(args.targetRef);
+    if (operation.signedHeadSha && initialRemote === operation.signedHeadSha) {
+      await db.update(gitPushOperations).set({ state: "reconciling", errorCode: null, updatedAt: Date.now() }).where(eq(gitPushOperations.id, id));
+      return { operationId: id, signedHeadSha: operation.signedHeadSha };
+    }
     if (args.createRef ? initialRemote !== null : initialRemote !== args.expectedRemoteSha && initialRemote !== mapped.get(localHead)) throw new Error("The remote branch changed before replay. Fetch it and retry without force.");
     if (args.lfsObjects?.length) {
       if (!client.uploadLfs) throw new Error("The replay client cannot publish Git LFS objects.");
@@ -277,12 +288,20 @@ export async function replaySignedCommits(db: AppDb, client: GitHubReplayClient,
     }
     if (await client.getRef(args.targetRef) !== signedHead) throw new Error("GitHub did not publish the verified head. Reconcile the operation before retrying.");
     await db.transaction(async (tx) => {
-      await tx.update(gitPushOperations).set({ signedHeadSha: signedHead, state: "complete", errorCode: null, updatedAt: Date.now() }).where(eq(gitPushOperations.id, id));
+      await tx.update(gitPushOperations).set({ signedHeadSha: signedHead, state: "reconciling", errorCode: null, updatedAt: Date.now() }).where(eq(gitPushOperations.id, id));
       await tx.insert(sessionGitBranches).values({ sessionId: args.sessionId, generation: args.generation, repoFullName: args.repoFullName, ref: args.targetRef, headSha: signedHead, pushOperationId: id, observedAt: Date.now() }).onConflictDoUpdate({ target: [sessionGitBranches.sessionId, sessionGitBranches.repoFullName, sessionGitBranches.ref], set: { generation: args.generation, headSha: signedHead, pushOperationId: id, observedAt: Date.now() } });
     });
     return { operationId: id, signedHeadSha: signedHead };
   } catch (error) {
-    await db.update(gitPushOperations).set({ state: "reconciling", errorCode: error instanceof Error ? error.message.slice(0, 200) : "unknown", updatedAt: Date.now() }).where(eq(gitPushOperations.id, id));
+    await db.update(gitPushOperations).set({ state: "failed", errorCode: error instanceof Error ? error.message.slice(0, 200) : "unknown", updatedAt: Date.now() }).where(eq(gitPushOperations.id, id));
     throw error;
   }
+}
+
+/** Mark a published operation complete after the sandbox reconciles its local refs. */
+export async function completeSignedPushReconciliation(db: AppDb, args: { operationId: string; sessionId: string }): Promise<{ signedHeadSha: string }> {
+  const operation = (await db.select().from(gitPushOperations).where(and(eq(gitPushOperations.id, args.operationId), eq(gitPushOperations.sessionId, args.sessionId))).limit(1))[0];
+  if (!operation?.signedHeadSha || operation.state !== "reconciling") throw new Error("The signed push operation is not ready for reconciliation.");
+  await db.update(gitPushOperations).set({ state: "complete", errorCode: null, updatedAt: Date.now() }).where(eq(gitPushOperations.id, operation.id));
+  return { signedHeadSha: operation.signedHeadSha };
 }

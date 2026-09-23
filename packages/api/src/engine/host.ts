@@ -103,6 +103,7 @@ import {
   securityCells,
   securityEngagements,
   sessionRepos,
+  sessionPullRequests,
   teams,
   users,
   type SecurityCellRow,
@@ -1192,8 +1193,25 @@ export class EngineHost {
     const executionEnv = meta.gitAttribution?.correlationTrailers && this.opts.githubTokenDeps?.key
       ? (queueItemId: string | undefined) => {
           if (!queueItemId) return undefined;
-          const ids = opaqueCorrelationIds(this.opts.githubTokenDeps!.key.toString("base64"), sessionId, queueItemId);
+          const correlationKeyV1 = process.env.VALET_CORRELATION_KEY_V1 ?? this.opts.githubTokenDeps!.key.toString("base64");
+          const ids = opaqueCorrelationIds(correlationKeyV1, sessionId, queueItemId);
           return { VALET_SESSION_CORRELATION_ID: ids.session, VALET_QUEUE_ITEM_CORRELATION_ID: ids.queueItem };
+        }
+      : undefined;
+    const observePullRequest = this.opts.db
+      ? async (pullRequest: { repoFullName: string; number: number; url: string; headRef: string; headSha: string; baseRef: string; state: string }) => {
+          const binding = (await this.opts.db!.select({ fullName: sessionRepos.fullName }).from(sessionRepos).where(eq(sessionRepos.sessionId, sessionId)))
+            .find((row) => row.fullName.toLowerCase() === pullRequest.repoFullName.toLowerCase());
+          if (!binding) throw new Error("The pull request repository is not bound to this session.");
+          const now = Date.now();
+          await this.opts.db!.insert(sessionPullRequests).values({
+            sessionId, repoFullName: binding.fullName, prNumber: pullRequest.number, prUrl: pullRequest.url,
+            headRef: pullRequest.headRef, headSha: pullRequest.headSha, baseRef: pullRequest.baseRef,
+            state: pullRequest.state, firstObservedAt: now, updatedAt: now,
+          }).onConflictDoUpdate({
+            target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId],
+            set: { prUrl: pullRequest.url, headRef: pullRequest.headRef, headSha: pullRequest.headSha, baseRef: pullRequest.baseRef, state: pullRequest.state, updatedAt: now },
+          });
         }
       : undefined;
     const session = existing
@@ -1222,6 +1240,7 @@ export class EngineHost {
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...(observePullRequest ? { observePullRequest } : {}),
             extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
@@ -1250,6 +1269,7 @@ export class EngineHost {
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+          ...(observePullRequest ? { observePullRequest } : {}),
           extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });

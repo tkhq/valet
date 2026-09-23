@@ -86,7 +86,7 @@ gitAttributionRouter.post("/sessions/:id/git-attribution/apply", async (c) => {
   if (!row) return c.json({ error: "session not found" }, 404);
   const unsettled = await c.var.providers.engineStore.listUnsettledSubmissions(id);
   const operations = await c.var.providers.db.select({ id: gitPushOperations.id }).from(gitPushOperations)
-    .where(and(eq(gitPushOperations.sessionId, id), inArray(gitPushOperations.state, ["capturing", "replaying", "publishing", "reconciling"]))).limit(1);
+    .where(and(eq(gitPushOperations.sessionId, id), inArray(gitPushOperations.state, ["capturing", "replaying", "publishing"]))).limit(1);
   if (unsettled.length || operations.length) return c.json({ error: "Wait for the current queue item or Git operation to finish, then apply the settings." }, 409);
   await ensureGitSnapshot(c.var.providers.db, id, c.var.user.id, true);
   c.var.providers.engineHost.evictCache(id);

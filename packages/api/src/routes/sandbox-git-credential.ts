@@ -316,3 +316,52 @@ sandboxGitCredentialRouter.post("/git-push", async (c) => {
     return c.json(await replaySignedCommits(db, client, { sessionId: sandbox.sessionId, generation: snapshot.generation, repoFullName: binding.fullName, targetRef: body.targetRef, expectedRemoteSha: body.expectedRemoteSha, createRef: body.createRef, blobs: body.blobs, trees: body.trees, lfsObjects: body.lfsObjects, commits: body.commits }));
   } catch (error) { return c.json({ error: error instanceof Error ? error.message : "Signed replay failed." }, 409); }
 });
+
+sandboxGitCredentialRouter.post("/git-push/:operationId/reconcile", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  try {
+    const { completeSignedPushReconciliation } = await import("../services/git-attribution.js");
+    return c.json(await completeSignedPushReconciliation(c.var.providers.db, {
+      operationId: c.req.param("operationId"),
+      sessionId: sandbox.sessionId,
+    }));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "The signed push could not be reconciled." }, 409);
+  }
+});
+
+sandboxGitCredentialRouter.post("/git-push/observe", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+  if (!body || typeof body.repoFullName !== "string" || typeof body.targetRef !== "string" || typeof body.headSha !== "string" || !body.targetRef.startsWith("refs/heads/")) {
+    return c.json({ error: "Send a repository, branch ref, and head SHA." }, 400);
+  }
+  const repoFullName = body.repoFullName; const targetRef = body.targetRef; const headSha = body.headSha;
+  const binding = (await c.var.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId)))
+    .find((row) => row.fullName.toLowerCase() === repoFullName.toLowerCase());
+  if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
+  const { sessionGitBranches } = await import("../schema/index.js");
+  const head = (await c.var.providers.db.select().from(sessionGitAttributionHeads).where(eq(sessionGitAttributionHeads.sessionId, sandbox.sessionId)).limit(1))[0];
+  await c.var.providers.db.insert(sessionGitBranches).values({ sessionId: sandbox.sessionId, generation: head?.activeGeneration ?? 1, repoFullName: binding.fullName, ref: targetRef, headSha, pushOperationId: null, observedAt: Date.now() })
+    .onConflictDoUpdate({ target: [sessionGitBranches.sessionId, sessionGitBranches.repoFullName, sessionGitBranches.ref], set: { generation: head?.activeGeneration ?? 1, headSha, pushOperationId: null, observedAt: Date.now() } });
+  return c.json({ ok: true });
+});
+
+sandboxGitCredentialRouter.post("/git-pr/observe", async (c) => {
+  const sandbox = c.var.sandbox;
+  if (!sandbox) return c.json({ error: "sandbox principal required" }, 401);
+  const body = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+  if (!body || typeof body.repoFullName !== "string" || typeof body.prNumber !== "number" || typeof body.prUrl !== "string" || typeof body.headRef !== "string" || typeof body.headSha !== "string") {
+    return c.json({ error: "Send the repository and pull request result." }, 400);
+  }
+  const { repoFullName, prNumber, prUrl, headRef, headSha } = body;
+  const binding = (await c.var.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, sandbox.sessionId)))
+    .find((row) => row.fullName.toLowerCase() === repoFullName.toLowerCase());
+  if (!binding) return c.json({ error: "This repository is not bound to the session." }, 403);
+  const { sessionPullRequests } = await import("../schema/index.js"); const now = Date.now();
+  await c.var.providers.db.insert(sessionPullRequests).values({ sessionId: sandbox.sessionId, repoFullName: binding.fullName, prNumber, prUrl, headRef, headSha, baseRef: "", state: "open", firstObservedAt: now, updatedAt: now })
+    .onConflictDoUpdate({ target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId], set: { prUrl, headRef, headSha, state: "open", updatedAt: now } });
+  return c.json({ ok: true });
+});

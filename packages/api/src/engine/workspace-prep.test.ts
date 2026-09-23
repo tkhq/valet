@@ -9,6 +9,10 @@
  * only the call shape changed from a single closure to per-step function calls.
  */
 import { describe, it, expect, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExecOpts, ExecResult, Sandbox, WorkspaceGrowth } from "@valet/engine";
 import {
   installCredentialHelper,
@@ -18,6 +22,7 @@ import {
   prepPrebuiltBinding,
   computeTargetDirs,
   resolveStartRef,
+  installGitAttributionHook,
 } from "./workspace-prep.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import type { RepoBinding } from "../wire/types.js";
@@ -30,7 +35,7 @@ const STAGED_GH = ".valet-prep/valet-gh";
 const STAGED_SECRETS = ".valet-prep/valet-secrets";
 const STAGED_OP_SHIM = ".valet-prep/op";
 const INSTALL_CMD =
-  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && cp '.valet-prep/op' /usr/local/bin/op && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets /usr/local/bin/op";
+  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && cp '.valet-prep/op' /usr/local/bin/op && rm -f /usr/local/bin/git && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets /usr/local/bin/op";
 
 interface ExecCall {
   command: string;
@@ -557,7 +562,7 @@ describe("prepPrebuiltBinding", () => {
     const commands = sandbox.execCalls.map((c) => c.command);
     // Preserves untracked node_modules the baked install produced — a local
     // git clone would drop them.
-    expect(commands).toContain("mkdir -p '.' && cp -a /prebuilt/repo/. '.'");
+    expect(commands).toContain(`owner=$(stat -c '%u:%g' .) && mkdir -p '.' && cp -a /prebuilt/repo/. '.' && if [ "$(id -u)" = 0 ]; then chown -R "$owner" '.'; fi`);
     expect(commands.some((c) => c.startsWith("git clone"))).toBe(false);
     expect(commands).toContain("git remote set-url origin 'https://github.com/acme/widgets.git'");
     expect(commands).toContain("git fetch origin");
@@ -642,7 +647,7 @@ describe("prepPrebuiltBinding", () => {
 
   it("cp staging failure THROWS", async () => {
     const sandbox = new RecordingSandbox();
-    sandbox.setResult("mkdir -p '.' && cp -a /prebuilt/repo/. '.'", { stdout: "", stderr: "no space", exitCode: 1 });
+    sandbox.setResult(`owner=$(stat -c '%u:%g' .) && mkdir -p '.' && cp -a /prebuilt/repo/. '.' && if [ "$(id -u)" = 0 ]; then chown -R "$owner" '.'; fi`, { stdout: "", stderr: "no space", exitCode: 1 });
     await expect(
       prepPrebuiltBinding(sandbox, ".", binding(), { bakedSha: "bakedsha", recipe: [] }),
     ).rejects.toThrow(/staging prebuilt repo/);
@@ -676,7 +681,7 @@ describe("prepPrebuiltBinding", () => {
     await prepBinding(sandbox, dirs[1], repos[1]);
     const commands = sandbox.execCalls.map((c) => c.command);
     // primary staged from the image (into its subdir), secondary cloned.
-    expect(commands).toContain("mkdir -p 'widgets' && cp -a /prebuilt/repo/. 'widgets'");
+    expect(commands).toContain(`owner=$(stat -c '%u:%g' .) && mkdir -p 'widgets' && cp -a /prebuilt/repo/. 'widgets' && if [ "$(id -u)" = 0 ]; then chown -R "$owner" 'widgets'; fi`);
     expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/gadgets.git' 'gadgets'");
     expect(commands.some((c) => c.startsWith("git clone --filter=blob:none 'https://github.com/acme/widgets.git'"))).toBe(false);
   });
@@ -737,5 +742,35 @@ describe("resolveStartRef", () => {
     await resolveStartRef(sandbox, dirs[0]);
     const call = sandbox.execCalls.find((c) => c.command === RESOLVE_CMD);
     expect(call?.opts?.cwd).toBe("widgets");
+  });
+});
+
+
+describe("Git attribution hook execution", () => {
+  it("preserves human co-authors and deduplicates only the managed counterpart", async () => {
+    const sandbox = new RecordingSandbox();
+    await installGitAttributionHook(sandbox, "repo", { coAuthor: { name: "Valet", email: "valet@example.com" }, correlationTrailers: true });
+    const script = sandbox.writes.get("repo/.git/hooks/prepare-commit-msg");
+    expect(script).toBeDefined();
+    const dir = mkdtempSync(join(tmpdir(), "valet-hook-"));
+    try {
+      const hook = join(dir, "prepare-commit-msg"); const message = join(dir, "message");
+      writeFileSync(hook, script!, { mode: 0o755 });
+      writeFileSync(message, "Subject\n\nCo-authored-by: Human <human@example.com>\nCo-authored-by: Valet <valet@example.com>\nValet-Session: stale\n");
+      const result = spawnSync(hook, [message], { env: { ...process.env, VALET_SESSION_CORRELATION_ID: "v1s_new", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_new" } });
+      expect(result.status).toBe(0);
+      const enriched = readFileSync(message, "utf8");
+      expect(enriched).toContain("Co-authored-by: Human <human@example.com>");
+      expect(enriched.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
+      expect(enriched).toContain("Valet-Session: v1s_new");
+      expect(enriched).not.toContain("Valet-Session: stale");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("installs in an existing core.hooksPath and chains its hook", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.setResult("git config --path --get core.hooksPath", { stdout: ".husky/_\n", stderr: "", exitCode: 0 });
+    await installGitAttributionHook(sandbox, "repo", { coAuthor: { name: "Valet", email: "valet@example.com" }, correlationTrailers: false });
+    expect(sandbox.writes.get("repo/.husky/_/prepare-commit-msg")).toContain("prepare-commit-msg.valet-original");
   });
 });

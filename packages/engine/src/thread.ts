@@ -4953,6 +4953,7 @@ export class Thread {
       owner: session.owner,
       policyResolver: session.options.policyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
+      observePullRequest: session.options.observePullRequest,
       extractDocument: session.options.extractDocument,
       queueItemId: this.runningItem?.id,
       executionEnv: session.options.executionEnv?.(this.runningItem?.id),

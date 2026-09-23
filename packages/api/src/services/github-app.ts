@@ -812,6 +812,7 @@ export async function mintInstallationToken(
   orgId: string,
   accountLogin: string,
   permissions?: Record<string, "read" | "write">,
+  repositories?: string[],
 ): Promise<string | null> {
   const nowMs = (deps.now ?? Date.now)();
 
@@ -857,7 +858,7 @@ export async function mintInstallationToken(
       "User-Agent": "Valet-App",
       "Content-Type": "application/json",
     },
-    ...(permissions ? { body: JSON.stringify({ permissions }) } : {}),
+    ...(permissions ? { body: JSON.stringify({ permissions, ...(repositories?.length ? { repositories } : {}) }) } : {}),
   });
   if (!res.ok) {
     throw new Error(`GitHub API POST /app/installations/${row.installationId}/access_tokens returned ${res.status}`);

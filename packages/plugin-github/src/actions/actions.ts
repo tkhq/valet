@@ -1389,6 +1389,15 @@ const createPullRequest = action(Type.Object({
         body: args.body || undefined,
         draft: args.draft,
       });
+      await ctx.observePullRequest?.({
+        repoFullName: `${args.owner}/${args.repo}`,
+        number: pr.number,
+        url: pr.html_url,
+        headRef: pr.head.ref,
+        headSha: pr.head.sha,
+        baseRef: pr.base.ref,
+        state: pr.state,
+      });
       return {
         success: true,
         data: {
