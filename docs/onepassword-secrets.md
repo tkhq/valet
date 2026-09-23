@@ -299,10 +299,16 @@ scope, and you see `nothing resolved <ref>` (exit 3) when no scope answers.
 `valet-secrets` exists only in a sandbox that ran credential prep.
 
 - **A coding session** has it, at `/usr/local/bin/valet-secrets`.
-- **A workflow session node** has no sandbox prep, so it has no
-  `valet-secrets`. Its prompt says so: "This sandbox has no secrets command."
-  Give that node the credential through a workflow tool node instead, which
-  resolves references on the API side under the same scope rule.
+- **A workflow session node** has it on a deployed Valet, where sandboxes
+  are isolated. It reads with the scopes of the run's owner. A team
+  workflow reads the team and org scopes. A workflow you own reads the
+  personal and org scopes, for every run, scheduled and triggered runs
+  included. An org workflow reads the org scope. A manual run of an org
+  workflow is owned by the member who started it, so it reads that member's
+  personal and org scopes. On a local non-isolated sandbox the node has no
+  `valet-secrets`, and its prompt says so. In that case, give the node the
+  credential through a workflow tool node, which resolves references on the
+  API side under the same scope rule.
 - **Your orchestrator** has no `valet-secrets` either. Ask it for a credential
   and it starts a child session that does have one, and reports what the child
   reports.

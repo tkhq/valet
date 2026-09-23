@@ -14,9 +14,13 @@
  * anonymous when nothing resolves; unrecognized hosts 403.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { sessionRepos } from "../schema/index.js";
+import { agentSessions, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { saveAppConfig } from "../services/github-app.js";
+import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
+import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
 import type { PostSandboxGitCredentialResponse, SandboxGitCredential } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -271,5 +275,358 @@ describe("POST /api/sandbox/git-credential", () => {
     const token = await mintToken();
     const res = await post(token, { owner: "acme" });
     expect(res.status).toBe(400);
+  });
+});
+
+// ── Workflow sessions act as their run's owner ─────────────────────────────
+//
+// A `session` node's sandbox token carries the run actor: the member who
+// clicked Run, or a synthetic `team:{id}` for a scheduled start. Credential
+// resolution must follow the run's owner instead (`workflow_runs.actor_user_id`
+// is display and audit only), and a team or org owner must resolve the way
+// that session's own `github.*` tools do: the team's row, then the App
+// installation, never a member credential and never the org PAT.
+describe("POST /api/sandbox/git-credential for workflow sessions", () => {
+  const ORG = "local-org";
+  const TEAM = { type: "team" as const, id: "team-1" };
+  const INSTALLATION_TOKEN = "ghs_fixture_installation_77";
+  let fixture: GithubFixture | undefined;
+  const prevGithubApiUrl = process.env.GITHUB_API_URL;
+
+  afterEach(async () => {
+    await fixture?.close();
+    fixture = undefined;
+    if (prevGithubApiUrl === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = prevGithubApiUrl;
+  });
+
+  async function tokenFor(sessionId: string, userId: string): Promise<string> {
+    await api!.providers.db.insert(teams).values({
+      id: TEAM.id,
+      orgId: ORG,
+      name: "Test team",
+      createdAt: Date.now(),
+    }).onConflictDoNothing();
+    const { token } = await mintSandboxToken(api!.providers.db, { sessionId, userId, orgId: ORG });
+    return token;
+  }
+
+  async function saveSyntheticUserCredential(userId: string, accessToken: string): Promise<void> {
+    await api!.providers.engineCredentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken,
+    });
+  }
+
+  async function saveOrgPat(accessToken: string): Promise<void> {
+    await api!.providers.engineCredentials.save({ type: "org", id: ORG }, "github", {
+      type: "oauth2",
+      accessToken,
+      metadata: { login: "org-pat-bot" },
+    });
+  }
+
+  /** An App with one installation, on `accountLogin`, that mints `INSTALLATION_TOKEN`. */
+  async function installApp(accountLogin: string): Promise<void> {
+    fixture = startGithubFixture({
+      createInstallationToken: () => ({
+        body: { token: INSTALLATION_TOKEN, expires_at: new Date(Date.now() + 3_600_000).toISOString() },
+      }),
+    });
+    // The route builds its token deps from the providers, with no API base
+    // override, so the installation mint reads this variable.
+    process.env.GITHUB_API_URL = fixture.url;
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    await saveAppConfig({ credentials: api!.providers.engineCredentials }, ORG, {
+      appId: "1",
+      appSlug: "valet-app",
+      oauthClientId: "Iv1.abc",
+      htmlUrl: "https://github.com/apps/valet-app",
+      oauthClientSecret: "client-secret",
+      webhookSecret: "webhook-secret",
+      privateKeyPem: privateKey,
+    });
+    const now = Date.now();
+    await api!.providers.db.insert(githubInstallations).values({
+      id: "ghi_77",
+      orgId: ORG,
+      installationId: 77,
+      accountLogin,
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  it("a team run a member started never resolves that member's credential or the org PAT", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    await saveOrgPat("ghp_org_pat");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_manual", orgId: ORG, owner: TEAM, actorUserId: "local-user",
+    });
+    const token = await tokenFor(sessionId, "local-user");
+
+    const git = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(git.status).toBe(200);
+    expect(await git.json()).toEqual({ anonymous: true });
+    const gh = await post(token, { host: "github.com", owner: "someone-else", repo: "docs", purpose: "api" });
+    expect(await gh.json()).toEqual({ anonymous: true });
+  });
+
+  it("a scheduled team run never reaches a synthetic user credential or the org PAT", async () => {
+    api = await bootTestApi();
+    await saveSyntheticUserCredential(`team:${TEAM.id}`, "ghp_synthetic_team_user");
+    await saveOrgPat("ghp_org_pat");
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId: "wfrun_sched", orgId: ORG, owner: TEAM });
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("a team owner outside the sandbox org fails closed", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(orgs).values({ id: "other-org", name: "Other org", createdAt: Date.now() });
+    await api.providers.db.insert(teams).values({
+      id: "team-foreign",
+      orgId: "other-org",
+      name: "Foreign team",
+      createdAt: Date.now(),
+    });
+    await api.providers.engineCredentials.save({ type: "team", id: "team-foreign" }, "github", {
+      type: "oauth2",
+      accessToken: "ghp_foreign_team",
+    });
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_foreign_team",
+      orgId: ORG,
+      owner: { type: "team", id: "team-foreign" },
+    });
+    const token = await tokenFor(sessionId, "team:team-foreign");
+
+    const res = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("an org-owned run never reaches a synthetic user credential or the org PAT", async () => {
+    api = await bootTestApi();
+    await saveSyntheticUserCredential(`org:${ORG}`, "ghp_synthetic_org_user");
+    await saveOrgPat("ghp_org_pat");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_org", orgId: ORG, owner: { type: "org", id: ORG },
+    });
+    const token = await tokenFor(sessionId, `org:${ORG}`);
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs", purpose: "api" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("a team run uses the team's own github row first", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    await api.providers.engineCredentials.save(TEAM, "github", {
+      type: "oauth2",
+      accessToken: "ghp_team_row",
+      metadata: { login: "team-bot" },
+    });
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_teamrow", orgId: ORG, owner: TEAM, actorUserId: "local-user",
+    });
+    const token = await tokenFor(sessionId, "local-user");
+
+    const git = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await git.json()).toEqual({ username: "x-access-token", password: "ghp_team_row" });
+    const gh = await post(token, { host: "github.com", purpose: "api" });
+    expect(await gh.json()).toEqual({ username: "team-bot", password: "ghp_team_row" });
+  });
+
+  it("a team run a member started pushes with the App installation for the repository owner", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    await installApp("tkhq");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_install", orgId: ORG, owner: TEAM, actorUserId: "local-user",
+    });
+    const token = await tokenFor(sessionId, "local-user");
+
+    const git = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(await git.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+    // `gh` would put the member's credential first on the coding-session
+    // ladder. A team run's `gh` gets the installation too.
+    const gh = await post(token, { host: "github.com", owner: "tkhq", repo: "docs", purpose: "api" });
+    expect(await gh.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+  });
+
+  it("a team run's gh outside a repository gets the org's sole installation", async () => {
+    api = await bootTestApi();
+    await installApp("tkhq");
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId: "wfrun_ghsole", orgId: ORG, owner: TEAM });
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const res = await post(token, { host: "github.com", purpose: "api" });
+    expect(await res.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+  });
+
+  it("a user-owned run resolves its owner's own credentials", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_owner_personal");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_user", orgId: ORG, owner: { type: "user", id: "local-user" }, actorUserId: "local-user",
+    });
+    const token = await tokenFor(sessionId, "local-user");
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await res.json()).toEqual({ username: "x-access-token", password: "ghp_owner_personal" });
+  });
+
+  it("a user-owned run resolves its owner's credentials, not the token holder's", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_token_holder");
+    await api.providers.engineCredentials.save({ type: "user", id: "user-b" }, "github", {
+      type: "oauth2",
+      accessToken: "ghp_run_owner",
+      metadata: { login: "owner-b" },
+    });
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_owner_b", orgId: ORG, owner: { type: "user", id: "user-b" },
+    });
+    const token = await tokenFor(sessionId, "local-user");
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await res.json()).toEqual({ username: "x-access-token", password: "ghp_run_owner" });
+  });
+
+  it("an org-owned run pushes with the App installation", async () => {
+    api = await bootTestApi();
+    await saveOrgPat("ghp_org_pat");
+    await installApp("tkhq");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_org_app", orgId: ORG, owner: { type: "org", id: ORG },
+    });
+    const token = await tokenFor(sessionId, `org:${ORG}`);
+
+    const res = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(await res.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
+  });
+
+  it("a synthetic team:{id} user owner resolves as the team, never as a user or org PAT", async () => {
+    api = await bootTestApi();
+    await saveSyntheticUserCredential(`team:${TEAM.id}`, "ghp_synthetic_team_user");
+    await api.providers.engineCredentials.save(TEAM, "github", {
+      type: "oauth2",
+      accessToken: "ghp_team_row",
+    });
+    await saveOrgPat("ghp_org_pat");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_synthetic_team",
+      orgId: ORG,
+      owner: { type: "user", id: `team:${TEAM.id}` },
+    });
+    const token = await tokenFor(sessionId, `team:${TEAM.id}`);
+
+    const res = await post(token, { host: "github.com", owner: "tkhq", repo: "docs", purpose: "api" });
+    expect(await res.json()).toEqual({ username: "x-access-token", password: "ghp_team_row" });
+  });
+
+  it("a synthetic org:{id} user owner resolves as the org, never as a user or org PAT", async () => {
+    api = await bootTestApi();
+    await saveSyntheticUserCredential(`org:${ORG}`, "ghp_synthetic_org_user");
+    await saveOrgPat("ghp_org_pat");
+    // `workflows.start_run` inside an unattended org run stamps the child
+    // run as owned by a user named after the parent's synthetic actor.
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_synthetic", orgId: ORG, owner: { type: "user", id: `org:${ORG}` },
+    });
+    const token = await tokenFor(sessionId, `org:${ORG}`);
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs", purpose: "api" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("a run whose workflow belongs to another org answers anonymous", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_other_org", orgId: "other-org", owner: { type: "user", id: "local-user" },
+    });
+    const token = await tokenFor(sessionId, "local-user");
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("a malformed workflow session id answers anonymous", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    const token = await tokenFor("wf:not-a-valid-id", "local-user");
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("a run with no recognizable stored owner answers anonymous", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    const now = Date.now();
+    const definition = { version: "dag/v1", nodes: [], edges: [] };
+    await api.providers.db.insert(workflowDefinitions).values({
+      id: "wf_def_noowner", orgId: ORG, ownerType: "user", ownerId: "local-user",
+      name: "no owner", definition, createdAt: now, updatedAt: now,
+    });
+    // The column defaults a run gets when its start path never stamped an owner.
+    await api.providers.db.insert(workflowRuns).values({
+      id: "wfrun_noowner", workflowId: "wf_def_noowner", definitionVersionId: "v1", definition,
+      params: { workflowId: "wf_def_noowner", definitionVersionId: "v1" }, createdAt: now, updatedAt: now,
+    });
+    const token = await tokenFor("wf:wfrun_noowner:sync", "local-user");
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("403s an unrecognized host for a workflow session", async () => {
+    api = await bootTestApi();
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId: "wfrun_host", orgId: ORG, owner: TEAM });
+    const token = await tokenFor(sessionId, "team:team-1");
+
+    const res = await post(token, { host: "gitlab.example", owner: "acme", repo: "widgets" });
+    expect(res.status).toBe(403);
+  });
+
+  it("a wf:-prefixed session with an app row is not treated as a workflow session", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    // A run owned by a team whose row the session must not borrow.
+    await api.providers.engineCredentials.save(TEAM, "github", { type: "oauth2", accessToken: "ghp_team_row" });
+    const sessionId = await seedWorkflowRun(api.providers.db, { runId: "wfrun_spoof", orgId: ORG, owner: TEAM });
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({
+      id: sessionId, userId: "local-user", orgId: ORG, workspace: "/workspace",
+      ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    const token = await tokenFor(sessionId, "local-user");
+
+    // It resolves as the coding session it is: its own user's credential.
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(await res.json()).toEqual({ username: "x-access-token", password: "ghp_member_personal" });
+  });
+
+  it("a workflow session whose run is gone answers anonymous, never the token's actor", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_member_personal");
+    const token = await tokenFor("wf:wfrun_missing:sync", "local-user");
+
+    const res = await post(token, { host: "github.com", owner: "someone-else", repo: "docs" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ anonymous: true });
   });
 });

@@ -12,6 +12,9 @@ import { isUsableGithubUserRow } from "./github-tokens.js";
 import { credentialSecret, type StoredCredential } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { sessionRepos } from "../schema/index.js";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
+import { resolveTeamCredentialRead, type CredentialReadDeps, type OrgFallback } from "./credential-resolution.js";
+import type { OnePasswordScope } from "./onepassword.js";
 import {
   resolveGitHubToken,
   type GitHubAuthMode,
@@ -77,6 +80,29 @@ export function isUsableGithubRow(row: StoredCredential | null | undefined): row
     },
     Date.now(),
   );
+}
+
+/**
+ * A team's own `github` row, direct or delegated, when it can back a call.
+ * The session's `github.*` tools (`engine/host.ts`) and the sandbox git
+ * credential route both read a team owner's GitHub credential through here,
+ * so git inside a team-owned sandbox and the tools of the same session
+ * resolve alike. An unhealthy row, and a delegation whose member left the
+ * team, read as `null`: the caller falls through to the App installation,
+ * whose answer names the corrective step.
+ */
+export async function usableTeamGithubRow(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string; teamId: string; userId?: string; scopes?: readonly OnePasswordScope[] },
+  orgFallback: OrgFallback,
+): Promise<StoredCredential | null> {
+  let row: StoredCredential | null = null;
+  try {
+    row = await resolveTeamCredentialRead(deps, ctx, "github", orgFallback);
+  } catch (err) {
+    if (!(err instanceof CredentialReferenceBrokenError)) throw err;
+  }
+  return isUsableGithubRow(row) ? row : null;
 }
 
 /**

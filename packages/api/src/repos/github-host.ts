@@ -252,7 +252,12 @@ export const githubHost: RepoHost = {
         orgId: ctx.orgId,
         userId: ctx.userId,
         purpose: req.purpose,
-        repo: { owner: req.owner, name: req.repo },
+        // An empty owner names no repository. Passing it would make an
+        // explicit `app` selection look up an installation for "" and fail,
+        // where the token service's own no-repo rule picks the org's sole
+        // installation. `auto` resolves the same either way: "" matches no
+        // installation row, and the no-repo ladder skips that tier.
+        ...(req.owner ? { repo: { owner: req.owner, name: req.repo } } : {}),
         auth: req.auth,
       });
     } catch (err) {

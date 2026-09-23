@@ -1,6 +1,7 @@
 /**
- * Verifies that `EngineHost.buildSession` wires the correct `specProvider`
- * (sandbox-reconciliation plan, Task 6) for different session shapes.
+ * Verifies that `EngineHost.buildSession` and `buildWorkflowSession` wire the
+ * correct `specProvider` (sandbox-reconciliation plan, Task 6) for different
+ * session shapes.
  *
  * Tests drive sessions to `ready` via `ensureReady` so the engine calls the
  * specProvider closure and applies steps — recording sandbox providers capture
@@ -468,5 +469,103 @@ describe("EngineHost buildSpecProvider", () => {
     // The sandbox was created with the prebuild image, not the stock image.
     expect(provider.createCalls.length).toBeGreaterThan(0);
     expect(provider.createCalls[0].image).toBe("valet-prebuild/acme-widgets:sha1");
+  });
+
+  it("workflow sessions run credential-only prep on an isolated provider", async () => {
+    const provider = makeIsolatedProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+
+    // The shape a scheduled team run builds: no app row, no repo bindings,
+    // and a synthesized `team:<id>` actor (workflows/engine-deps.ts).
+    const session = await api.providers.engineHost.workflowSessionFor("wf:wfrun_prep:sync", {
+      actorUserId: "team:team-1",
+      orgId: ORG,
+      owner: { type: "team", id: "team-1" },
+      workspace: "/tmp/wf-prep-sync",
+    });
+    expect(session.options.specProvider).toBeDefined();
+
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    expect(session.attachment.state).toBe("ready");
+
+    // The credential helper, its hard prerequisite, and the generic git
+    // identity are installed so `git push` authenticates; nothing clones.
+    expect(provider.execs).toContain("git config --global credential.helper '/usr/local/bin/git-credential-valet'");
+    expect(provider.execs).toContain("git config --global credential.useHttpPath true");
+    expect(provider.execs).toContain("git config --global user.name 'Valet Agent'");
+    expect(provider.execs).toContain("git config --global user.email 'agent@valet.local'");
+    expect(provider.execs.some((c) => c.includes("git clone"))).toBe(false);
+    // Prep installed valet-secrets, so the prompt names it.
+    expect(session.options.systemPrompt).toContain("valet-secrets run");
+  });
+
+  it("a team run a member started commits under the generic identity, not the member's", async () => {
+    const provider = makeIsolatedProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+
+    // A manual run of a team-owned workflow carries the member who clicked
+    // Run as its actor. The identity follows the owner.
+    const session = await api.providers.engineHost.workflowSessionFor("wf:wfrun_manual:sync", {
+      actorUserId: USER,
+      orgId: ORG,
+      owner: { type: "team", id: "team-1" },
+      workspace: "/tmp/wf-manual-sync",
+    });
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    expect(provider.execs).toContain("git config --global user.name 'Valet Agent'");
+    expect(provider.execs).toContain("git config --global user.email 'agent@valet.local'");
+    expect(provider.execs.some((c) => c.includes("local@dev") || c.includes("Local Dev"))).toBe(false);
+  });
+
+  it("a user-owned workflow run commits under its owner's identity", async () => {
+    const provider = makeIsolatedProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+
+    const session = await api.providers.engineHost.workflowSessionFor("wf:wfrun_user:sync", {
+      actorUserId: USER,
+      orgId: ORG,
+      owner: { type: "user", id: USER },
+      workspace: "/tmp/wf-user-sync",
+    });
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    expect(provider.execs).toContain("git config --global user.name 'Local Dev'");
+    expect(provider.execs).toContain("git config --global user.email 'local@dev'");
+  });
+
+  it("a workflow session's spec provider writes nothing to agent_sessions", async () => {
+    api = await bootTestApi({ sandboxProvider: makeIsolatedProvider() });
+    const session = await api.providers.engineHost.workflowSessionFor("wf:wfrun_noflags:sync", {
+      actorUserId: "team:team-1",
+      orgId: ORG,
+      owner: { type: "team", id: "team-1" },
+      workspace: "/tmp/wf-noflags-sync",
+    });
+    // A workflow session has no row and no repository, so the repo-flag
+    // read must not issue its UPDATE: the write could only fail provisioning.
+    const update = vi.spyOn(api.providers.db, "update");
+
+    await session.options.specProvider!();
+
+    expect(update.mock.calls.some(([table]) => table === agentSessions)).toBe(false);
+  });
+
+  it("workflow sessions skip prep on a non-isolated provider", async () => {
+    const provider = makeNonIsolatedProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+
+    const session = await api.providers.engineHost.workflowSessionFor("wf:wfrun_noprep:sync", {
+      actorUserId: USER,
+      orgId: ORG,
+      owner: { type: "user", id: USER },
+      workspace: "/tmp/wf-noprep-sync",
+    });
+    expect(session.options.specProvider).toBeUndefined();
+    expect(session.options.systemPrompt).toContain("This sandbox has no secrets command.");
+
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    expect(session.attachment.state).toBe("ready");
+    expect(provider.execs).toHaveLength(0);
   });
 });
