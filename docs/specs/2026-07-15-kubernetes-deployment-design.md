@@ -131,9 +131,9 @@ Three additive changes to the manifest builder and provider config:
    values `sandbox.ephemeralStorageRequest` / `sandbox.ephemeralStorageLimit`.
    The defaults land on `K8sProviderConfig.defaultResources` and the manifest
    merges them PER-FIELD under `SandboxCreateOpts.resources`, so the disk
-   protection survives a caller that only picks cpu/memory. cpu/memory keep
-   the request-equals-limit shape; ephemeral-storage request and limit differ
-   on purpose.
+   protection survives a caller that only picks cpu/memory. cpu keeps the
+   request-equals-limit shape; memory and ephemeral-storage request and
+   limit differ on purpose (memory since 2026-09-23, below).
 2. **DinD docker-state `emptyDir` gets `sizeLimit`** equal to the resolved
    ephemeral-storage limit (emptyDir usage counts against the container
    limit, so a larger sizeLimit is unreachable). No limit configured →
@@ -283,3 +283,28 @@ An exec failure without a valid process exit code preserves the Kubernetes statu
 ### Exec stdin completion
 
 Exec bounds provided stdin by its UTF-8 byte count inside the pod. A `head -c` pipe delivers EOF to the command. The client keeps stdin open until the command returns its status. This prevents older WebSocket protocols from closing the transport before the pod consumes the payload. Empty input produces immediate EOF. Command exit codes and output remain intact. Regression tests cover empty input, Unicode input, and a live 1 MB binary round trip.
+
+## Update (2026-09-23): sandbox memory burst limit
+
+A memory limit equal to the request cgroup-OOM-kills the sandbox the moment
+its own workload peaks, regardless of free node memory. On 2026-09-23 a full
+`pnpm test` run OOM-killed a 4Gi sandbox on agents-dev three times on an
+otherwise idle node.
+
+Chart 0.10.16 changes the manifest builder: the sandbox container memory
+LIMIT is now `MEMORY_LIMIT_FACTOR` (3) times the merged memory request. The
+request is unchanged and stays the scheduling unit. The limit is only a
+runaway backstop. Transient bursts ride on free node memory. Under real node
+pressure the kubelet evicts the pod furthest over its request first, so a
+bursting sandbox is still the first casualty when it matters.
+
+The builder computes the limit from parsed bytes and formats it with the
+largest binary suffix that divides evenly. An unparseable request keeps
+limit = request, so admission rejects the same values it rejected before.
+CPU keeps request = limit. The Docker provider is unchanged: `docker run
+--memory` has one knob, and dev machines self-recover from an OOM kill.
+
+Rollout matches the TKAI-349 note above: existing pods keep their old shape
+until their next `create()` adoption, where the resource fingerprint
+mismatch rolls the pod ("CPU/memory changed"). Deploys should pair this
+with a monitoring alert on sandboxes sustained above their memory request.

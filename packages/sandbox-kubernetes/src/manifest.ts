@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { homeInitContainer, persistentHomeMounts, withHomeLinks, WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import { NESTED_KUBERNETES_IDENTITY, type SandboxCreateOpts } from "@valet/engine";
-import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, parseStorageQuantity } from "./quantity.js";
+import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, formatStorageQuantity, parseStorageQuantity } from "./quantity.js";
 import type {
   K8sProviderConfig,
   ResourceList,
@@ -158,13 +158,35 @@ function mergeResourceOpts(
   return merged;
 }
 
-/** Maps merged resource opts to `corev1.ResourceRequirements`. cpu/memory
- * request equals limit (Guaranteed-style, unchanged). ephemeral-storage
- * request and limit are independent and differ on purpose: the request caps
- * how many sandboxes the scheduler stacks per node; the limit makes the
- * kubelet evict one runaway sandbox instead of the node going NotReady. An
- * absent side is omitted — no fallback from one to the other, so an
- * operator can disable either knob ("0" in sandbox-backend.ts) alone. */
+/** Memory limit as a multiple of the request. The request stays the
+ * scheduling unit (how many sandboxes stack per node); the limit is only a
+ * runaway backstop. A limit equal to the request cgroup-OOM-kills the
+ * sandbox the moment its own workload peaks — even on a node with free
+ * memory (observed 2026-09-23: a full `pnpm test` run OOM-killed a 4Gi
+ * sandbox three times on an otherwise idle node). At 3x, transient bursts
+ * ride on free node memory; under real node pressure the kubelet still
+ * evicts the pod furthest over its request first. */
+export const MEMORY_LIMIT_FACTOR = 3;
+
+/** 3x the memory request, formatted as a Kubernetes quantity. An
+ * unparseable request falls back to itself (request = limit), so a value
+ * this module cannot scale is still rejected at admission the same way it
+ * was before, never silently unbounded. */
+function memoryLimitFor(request: string): string {
+  const bytes = parseStorageQuantity(request);
+  if (bytes === null || bytes <= 0) return request;
+  return formatStorageQuantity(bytes * MEMORY_LIMIT_FACTOR);
+}
+
+/** Maps merged resource opts to `corev1.ResourceRequirements`. cpu request
+ * equals limit (unchanged). The memory limit is `MEMORY_LIMIT_FACTOR` x the
+ * request — the request schedules, the limit only stops a runaway.
+ * ephemeral-storage request and limit are independent and differ on
+ * purpose: the request caps how many sandboxes the scheduler stacks per
+ * node; the limit makes the kubelet evict one runaway sandbox instead of
+ * the node going NotReady. An absent side is omitted — no fallback from one
+ * to the other, so an operator can disable either knob ("0" in
+ * sandbox-backend.ts) alone. */
 function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequirements | undefined {
   const requests: ResourceList = {};
   const limits: ResourceList = {};
@@ -174,7 +196,7 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
   }
   if (resources.memory !== undefined) {
     requests.memory = resources.memory;
-    limits.memory = resources.memory;
+    limits.memory = memoryLimitFor(resources.memory);
   }
   if (resources.ephemeralStorage !== undefined) {
     requests["ephemeral-storage"] = resources.ephemeralStorage;
