@@ -163,12 +163,37 @@ describe("buildSandboxManifest", () => {
     );
   });
 
-  it("maps opts.resources cpu (number) and memory (string) to requests/limits", () => {
+  it("maps opts.resources cpu (number) and memory (string) to requests/limits, with the memory limit at 3x the request", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
     const container = manifest.spec.podTemplate.spec.containers[0];
     expect(container?.resources).toEqual({
       requests: { cpu: "2", memory: "4Gi" },
-      limits: { cpu: "2", memory: "4Gi" },
+      limits: { cpu: "2", memory: "12Gi" },
+    });
+  });
+
+  it.each([
+    // The burst limit scales the parsed byte count, so decimal and
+    // non-power-of-two requests stay exact instead of round-tripping
+    // through a lossy suffix multiply.
+    ["512Mi", "1536Mi"],
+    ["1.5Gi", "4608Mi"],
+    ["3G", "9000000000"],
+  ])("memory request %s gets limit %s (3x, largest even binary suffix)", (request, limit) => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-1", { resources: { memory: request } });
+    const container = manifest.spec.podTemplate.spec.containers[0];
+    expect(container?.resources).toEqual({
+      requests: { memory: request },
+      limits: { memory: limit },
+    });
+  });
+
+  it("keeps limit = request for a memory quantity it cannot parse, so admission still rejects it", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-1", { resources: { memory: "lots" } });
+    const container = manifest.spec.podTemplate.spec.containers[0];
+    expect(container?.resources).toEqual({
+      requests: { memory: "lots" },
+      limits: { memory: "lots" },
     });
   });
 
@@ -181,7 +206,7 @@ describe("buildSandboxManifest", () => {
     const container = manifest.spec.podTemplate.spec.containers[0];
     expect(container?.resources).toEqual({
       requests: { cpu: "1", memory: "1Gi" },
-      limits: { cpu: "1", memory: "1Gi" },
+      limits: { cpu: "1", memory: "3Gi" },
     });
   });
 
@@ -199,7 +224,7 @@ describe("buildSandboxManifest", () => {
     const container = manifest.spec.podTemplate.spec.containers[0];
     expect(container?.resources).toEqual({
       requests: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "2Gi" },
-      limits: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "8Gi" },
+      limits: { cpu: "2.5", memory: "6Gi", "ephemeral-storage": "8Gi" },
     });
   });
 
@@ -254,7 +279,7 @@ describe("buildSandboxManifest", () => {
       const container = manifest.spec.podTemplate.spec.containers[0];
       expect(container?.resources).toEqual({
         requests: { cpu: "2", memory: "4Gi", "ephemeral-storage": "2Gi" },
-        limits: { cpu: "2", memory: "4Gi", "ephemeral-storage": "8Gi" },
+        limits: { cpu: "2", memory: "12Gi", "ephemeral-storage": "8Gi" },
       });
     });
 

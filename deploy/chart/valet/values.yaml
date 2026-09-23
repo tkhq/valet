@@ -165,6 +165,11 @@ sandbox:
   # CPU is a positive number, including fractions such as 0.5. Memory is a
   # positive Kubernetes quantity such as 2Gi or 500Mi. Empty means no
   # deployment default for that field.
+  # Memory is the container's REQUEST; the provider sets the container
+  # memory LIMIT to 3x this value. The request controls scheduling density,
+  # and the burst headroom lets a test suite or build peak on free node
+  # memory instead of the cgroup OOM-killing the sandbox. Under real node
+  # pressure the kubelet evicts the pod furthest over its request first.
   resources:
     cpu: ""
     memory: ""
