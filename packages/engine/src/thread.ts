@@ -10,7 +10,7 @@ import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
-import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
+import type { Api, JsonObject, JsonValue, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
@@ -6050,6 +6050,23 @@ export function renderReplyContext(
   ].join("\n");
 }
 
+/** True when a value can be sent as a pi-ai tool argument object. */
+function isJsonObject(value: unknown): value is JsonObject {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.values(value).every(isJsonValue)
+  );
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) return true;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isJsonObject(value);
+}
+
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
@@ -6147,7 +6164,7 @@ export function entriesToAgentMessages(
             type: "toolCall",
             id: p.callId,
             name: p.toolName,
-            arguments: (p.args as Record<string, unknown>) ?? {},
+            arguments: isJsonObject(p.args) ? p.args : {},
           });
         }
       }
