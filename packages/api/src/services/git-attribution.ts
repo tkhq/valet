@@ -207,10 +207,10 @@ export async function replaySignedCommits(db: AppDb, client: GitHubReplayClient,
   if (!inserted.length && ["replaying", "publishing"].includes(operation.state) && now - operation.updatedAt < 5 * 60_000) throw new Error("This branch already has a signed push in progress.");
   await db.update(gitPushOperations).set({ state: "replaying", errorCode: null, updatedAt: now }).where(eq(gitPushOperations.id, id));
 
-  await client.refresh();
-  const existing = await db.select().from(gitPushCommitMap).where(eq(gitPushCommitMap.operationId, id));
-  const mapped = new Map(existing.map((row) => [row.localSha, row.signedSha]));
   try {
+    await client.refresh();
+    const existing = await db.select().from(gitPushCommitMap).where(eq(gitPushCommitMap.operationId, id));
+    const mapped = new Map(existing.map((row) => [row.localSha, row.signedSha]));
     const initialRemote = await client.getRef(args.targetRef);
     if (operation.signedHeadSha && initialRemote === operation.signedHeadSha) {
       await db.update(gitPushOperations).set({ state: "reconciling", errorCode: null, updatedAt: Date.now() }).where(eq(gitPushOperations.id, id));

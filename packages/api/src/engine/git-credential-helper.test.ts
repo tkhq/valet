@@ -179,6 +179,7 @@ describe("appSignedGitWrapperScript", () => {
     ["feature:refs/heads/stale-lock", "refs/heads/stale-lock", true, "stale"],
     ["feature:refs/heads/live-lock", "refs/heads/live-lock", true, "live"],
     ["feature:refs/heads/api-error", "refs/heads/api-error", true, "error"],
+    ["feature:refs/heads/amend-race", "refs/heads/amend-race", true, "race"],
   ] as const)("executes push parsing and lock hygiene for %s (%s)", async (refspec, expectedRef, createRef, lockMode) => {
     const dir = mkdtempSync(join(tmpdir(), "valet-app-git-success-"));
     const requests: Array<Record<string, unknown>> = [];
@@ -200,6 +201,7 @@ describe("appSignedGitWrapperScript", () => {
       if (!address || typeof address === "string") throw new Error("test server did not bind");
       const fakeGit = join(dir, "git-real");
       writeFileSync(fakeGit, `#!/bin/sh
+while [ "$1" = -C ] || [ "$1" = -c ]; do shift 2; done
 printf '%s\\n' "$*" >> "$TEST_GIT_LOG"
 case "$1" in
   rev-parse)
@@ -212,6 +214,7 @@ case "$1" in
       *"^{tree}"*) echo tree1 ;;
       *--absolute-git-dir*) echo "$TEST_GIT_DIR" ;;
       *refs/heads/main*) echo mainsha ;;
+      *refs/heads/feature*) [ "$TEST_RACE" = 1 ] && [ -e "$TEST_RACE_FILE" ] && echo amendedsha || echo localsha ;;
       *HEAD*) [ "$TEST_SOURCE_MAIN" = 1 ] && echo featuresha || echo localsha ;;
       *) echo localsha ;;
     esac ;;
@@ -220,7 +223,7 @@ case "$1" in
   ls-remote) [ "$TEST_NEW_BRANCH" = 1 ] || printf 'oldsha\\t%s\\n' "$3" ;;
   fetch|update-ref|reset|branch|status) ;;
   write-tree) echo tree1 ;;
-  rev-list) echo localsha ;;
+  rev-list) [ "$TEST_RACE" = 1 ] && [ "$2" = --objects ] && : > "$TEST_RACE_FILE"; echo localsha ;;
   cat-file)
     case "$2" in
       commit) printf 'tree tree1\\nparent oldsha\\n\\nMessage\\n' ;;
@@ -238,8 +241,8 @@ esac
       if (lockMode === "stale") writeFileSync(lockPath, JSON.stringify({ pid: 2_147_483_647, createdAt: 0, token: "stale" }));
       if (lockMode === "live") writeFileSync(lockPath, JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "peer" }));
       const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
-        const child = spawn(process.execPath, [wrapper, "push", "origin", refspec], {
-          env: { ...process.env, VALET_SANDBOX_TOKEN: "test-token", TEST_NEW_BRANCH: createRef ? "1" : "0", TEST_SOURCE_MAIN: refspec.startsWith("main:") ? "1" : "0", TEST_GIT_DIR: dir, TEST_GIT_LOG: join(dir, "git.log") },
+        const child = spawn(process.execPath, [wrapper, "-C", dir, "-c", "color.ui=false", "push", "origin", refspec], {
+          env: { ...process.env, VALET_SANDBOX_TOKEN: "test-token", TEST_NEW_BRANCH: createRef ? "1" : "0", TEST_SOURCE_MAIN: refspec.startsWith("main:") ? "1" : "0", TEST_RACE: lockMode === "race" ? "1" : "0", TEST_RACE_FILE: join(dir, "race"), TEST_GIT_DIR: dir, TEST_GIT_LOG: join(dir, "git.log") },
         });
         let stderr = "";
         child.stderr.setEncoding("utf8");
@@ -252,6 +255,13 @@ esac
         expect(result.stderr).toContain(`remove ${lockPath} and retry`);
         expect(JSON.parse(readFileSync(lockPath, "utf8"))).toMatchObject({ token: "peer" });
         expect(requests).toHaveLength(0);
+        return;
+      }
+      if (lockMode === "race") {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("source branch changed during replay");
+        expect(readFileSync(join(dir, "git.log"), "utf8")).not.toContain("update-ref refs/heads/feature");
+        expect(existsSync(lockPath)).toBe(false);
         return;
       }
       if (lockMode === "error") {
@@ -288,7 +298,8 @@ esac
 
   it("chains non-push commands and routes pushes through host replay without write credentials", () => {
     const script = appSignedGitWrapperScript(`${API_URL}/`);
-    expect(script).toContain('args[0] !== "push"');
+    expect(script).toContain('invocation.command !== "push"');
+    expect(script).toContain('VALUE_GLOBAL_OPTIONS');
     expect(script).toContain(`${API_URL}/api/sandbox/git-push`);
     expect(script).toContain("force, delete, tags, mirror, atomic");
     expect(script).toContain("lfsObjects");

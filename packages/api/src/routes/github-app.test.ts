@@ -11,7 +11,7 @@ import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, eventSubscriptions, githubInstallations, contentSources, sessionGitBranches, sessionPullRequests } from "../schema/index.js";
+import { eventDeliveries, events, eventSubscriptions, githubInstallations, contentSources, agentSessions, sessionGitBranches, sessionPullRequests } from "../schema/index.js";
 import { createContentSource } from "../services/content-sources.js";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
@@ -893,10 +893,19 @@ describe("POST /webhooks/github-app", () => {
   it("attributes duplicate and squash-head pull request webhooks without commit trailers", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await api.providers.db.insert(agentSessions).values({ id: "session-pr", userId: "local-user", orgId: "local-org", workspace: "/tmp/session-pr", status: "active", ownerType: "user", ownerId: "local-user", createdAt: Date.now(), updatedAt: Date.now() });
     await api.providers.db.insert(sessionGitBranches).values({
       sessionId: "session-pr", generation: 1, repoFullName: "acme/widgets",
-      ref: "refs/heads/feature", headSha: "pre-squash-sha", pushOperationId: null, observedAt: Date.now(),
+      ref: "refs/heads/feature", headSha: "squash-head-with-no-trailers", pushOperationId: null, observedAt: 1,
     });
+    await api.providers.db.insert(agentSessions).values([
+      { id: "session-historical", userId: "local-user", orgId: "local-org", workspace: "/tmp/session-historical", status: "active", ownerType: "user", ownerId: "local-user", createdAt: 2, updatedAt: 2 },
+      { id: "session-foreign", userId: "foreign-user", orgId: "foreign-org", workspace: "/tmp/session-foreign", status: "active", ownerType: "user", ownerId: "foreign-user", createdAt: 3, updatedAt: 3 },
+    ]);
+    await api.providers.db.insert(sessionGitBranches).values([
+      { sessionId: "session-historical", generation: 1, repoFullName: "acme/widgets", ref: "refs/heads/feature", headSha: "old-head", pushOperationId: null, observedAt: 20 },
+      { sessionId: "session-foreign", generation: 1, repoFullName: "acme/widgets", ref: "refs/heads/feature", headSha: "squash-head-with-no-trailers", pushOperationId: null, observedAt: 30 },
+    ]);
     const payload = {
       action: "synchronize",
       pull_request: {

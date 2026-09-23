@@ -203,6 +203,27 @@ exec "\$real" "\$@"
 `;
 }
 
+function gitInvocationParserScript(strict: boolean): string {
+  return `const VALUE_GLOBAL_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]);
+const FLAG_GLOBAL_OPTIONS = new Set(["--bare", "--no-pager", "--paginate", "-p", "-P", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice", "--version", "--help"]);
+function parseGitInvocation(argv) {
+  const globalArgs = []; let index = 0;
+  while (index < argv.length) {
+    const arg = argv[index];
+    if (arg === "--") { index += 1; break; }
+    if (!arg.startsWith("-") || arg === "-") break;
+    if (VALUE_GLOBAL_OPTIONS.has(arg)) {
+      if (index + 1 >= argv.length) throw new Error("Git global option " + arg + " requires a value.");
+      globalArgs.push(arg, argv[index + 1]); index += 2; continue;
+    }
+    if (/^-C.+/u.test(arg) || /^-c.+/u.test(arg) || /^(?:--git-dir|--work-tree|--namespace|--super-prefix|--config-env)=/u.test(arg)) { globalArgs.push(arg); index += 1; continue; }
+    if (FLAG_GLOBAL_OPTIONS.has(arg)) { globalArgs.push(arg); index += 1; continue; }
+    ${strict ? 'throw new Error("Unsupported or ambiguous Git global option: " + arg + ".");' : "return null;"}
+  }
+  return { globalArgs, command: argv[index], commandArgs: argv.slice(index + 1) };
+}`;
+}
+
 /** Transparent git shim for App-signed mode. Non-push commands chain to the image's git. */
 export function appSignedGitWrapperScript(apiUrl: string): string {
   return String.raw`#!/usr/bin/env node
@@ -211,28 +232,34 @@ const { execFileSync, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const real = "__REAL_GIT__";
 const args = process.argv.slice(2);
-function argsWithManagedHooks(gitArgs) {
-  if (gitArgs[0] !== "commit") return { args: gitArgs, env: process.env };
-  const gitDirResult = spawnSync(real, ["rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
-  if (gitDirResult.status !== 0) return { args: gitArgs, env: process.env };
+${gitInvocationParserScript(true)}
+let releaseOwnedLock = () => {};
+function fail(message) { releaseOwnedLock(); console.error("git push (Valet App signing): " + message); process.exit(2); }
+let invocation;
+try { invocation = parseGitInvocation(args); } catch (error) { fail(error.message); }
+const globalArgs = invocation.globalArgs;
+const gitExec = (gitArgs, options) => execFileSync(real, [...globalArgs, ...gitArgs], options);
+const gitSpawn = (gitArgs, options) => spawnSync(real, [...globalArgs, ...gitArgs], options);
+function argsWithManagedHooks() {
+  if (invocation.command !== "commit") return { args, env: process.env };
+  const gitDirResult = gitSpawn(["rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
+  if (gitDirResult.status !== 0) return { args, env: process.env };
   const gitDir = gitDirResult.stdout.trim(); const managedDir = gitDir + "/valet-hooks";
-  if (!fs.existsSync(managedDir + "/valet-prepare-commit-msg")) return { args: gitArgs, env: process.env };
+  if (!fs.existsSync(managedDir + "/valet-prepare-commit-msg")) return { args, env: process.env };
   if (process.env.VALET_HOOK_DISPATCH_ACTIVE === "1") {
     const original = process.env.VALET_REPO_HOOKS_DIR;
-    return original ? { args: ["-c", "core.hooksPath=" + original, ...gitArgs], env: process.env } : { args: gitArgs, env: process.env };
+    return original ? { args: [...globalArgs, "-c", "core.hooksPath=" + original, invocation.command, ...invocation.commandArgs], env: process.env } : { args, env: process.env };
   }
-  const top = execFileSync(real, ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-  const configured = spawnSync(real, ["config", "--path", "--get", "core.hooksPath"], { encoding: "utf8" });
+  const top = gitExec(["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+  const configured = gitSpawn(["config", "--path", "--get", "core.hooksPath"], { encoding: "utf8" });
   const configuredDir = configured.status === 0 ? configured.stdout.trim() : gitDir + "/hooks";
   const path = require("node:path");
   const original = path.isAbsolute(configuredDir) ? configuredDir : path.resolve(top, configuredDir);
-  if (original === managedDir) return { args: gitArgs, env: process.env };
-  return { args: ["-c", "core.hooksPath=" + managedDir, ...gitArgs], env: { ...process.env, VALET_REPO_HOOKS_DIR: original } };
+  if (original === managedDir) return { args, env: process.env };
+  return { args: [...globalArgs, "-c", "core.hooksPath=" + managedDir, invocation.command, ...invocation.commandArgs], env: { ...process.env, VALET_REPO_HOOKS_DIR: original } };
 }
-if (args[0] !== "push") { const call = argsWithManagedHooks(args); process.exit(spawnSync(real, call.args, { stdio: "inherit", env: call.env }).status ?? 1); }
-let releaseOwnedLock = () => {};
-function fail(message) { releaseOwnedLock(); console.error("git push (Valet App signing): " + message); process.exit(2); }
-const rest = args.slice(1); const upstream = rest.includes("-u") || rest.includes("--set-upstream");
+if (invocation.command !== "push") { const call = argsWithManagedHooks(); process.exit(spawnSync(real, call.args, { stdio: "inherit", env: call.env }).status ?? 1); }
+const rest = invocation.commandArgs; const upstream = rest.includes("-u") || rest.includes("--set-upstream");
 if (rest.some((arg) => arg.startsWith("-") && arg !== "-u" && arg !== "--set-upstream")) fail("force, delete, tags, mirror, atomic, and custom push options are not supported in V1.");
 const positional = rest.filter((arg) => arg !== "-u" && arg !== "--set-upstream");
 if (positional.length > 2) fail("push exactly one branch at a time in V1.");
@@ -240,39 +267,7 @@ const remote = positional[0] || "origin"; const spec = positional[1] || "HEAD";
 if (spec.startsWith(":") || spec.endsWith(":")) fail("branch deletion and empty refspec sides are not supported in V1.");
 if (spec.includes("*") || spec.startsWith("+") || spec.includes("^")) fail("wildcard, forced, and exclusion refspecs are not supported in V1.");
 const pieces = spec.split(":"); if (pieces.length > 2) fail("use one standard source:destination refspec.");
-const src = pieces[0] || "HEAD";
-const sourceRef = src === "HEAD"
-  ? execFileSync(real, ["symbolic-ref", "HEAD"], { encoding: "utf8" }).trim()
-  : execFileSync(real, ["rev-parse", "--symbolic-full-name", src], { encoding: "utf8" }).trim();
-if (!sourceRef.startsWith("refs/heads/")) fail("the source must resolve to a local branch in V1.");
-const localSha = execFileSync(real, ["rev-parse", "--verify", sourceRef + "^{commit}"], { encoding: "utf8" }).trim();
-let destination = pieces[1];
-if (!destination) destination = sourceRef.slice("refs/heads/".length);
-if (destination.startsWith("refs/tags/") || (!destination.startsWith("refs/heads/") && destination.startsWith("refs/"))) fail("only branch destinations are supported in V1.");
-const branch = destination.replace(/^refs\/heads\//, "");
-if (!branch || branch === "HEAD" || branch.includes("..") || branch.startsWith("/") || branch.endsWith("/")) fail("the destination branch is invalid.");
-const targetRef = "refs/heads/" + branch;
-const remoteUrl = execFileSync(real, ["remote", "get-url", remote], { encoding: "utf8" }).trim();
-const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/i);
-if (!match) fail("App-signed replay supports GitHub remotes only.");
-const repoFullName = match[1] + "/" + match[2];
-const ls = execFileSync(real, ["ls-remote", remote, targetRef], { encoding: "utf8" }).trim();
-const createRef = !ls;
-if (execFileSync(real, ["rev-parse", "--is-shallow-repository"], { encoding: "utf8" }).trim() === "true") fail("agent-created shallow clones cannot be App-signed. Fetch the complete parent history first.");
-const expectedRemoteSha = createRef ? localSha : ls.split(/\s+/)[0];
-const remoteRef = "refs/valet/remote/" + branch;
-if (!createRef) execFileSync(real, ["fetch", "--quiet", remote, targetRef + ":" + remoteRef]);
-const range = createRef ? [localSha, "--not", "--remotes=" + remote] : [localSha, "^" + remoteRef];
-const commitIds = execFileSync(real, ["rev-list", "--reverse", ...range], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
-if (!commitIds.length) { console.log("Everything up-to-date"); process.exit(0); }
-const commits = commitIds.map((sha) => { const raw = execFileSync(real, ["cat-file", "commit", sha]); const split = raw.indexOf(Buffer.from("\n\n")); const headers = raw.subarray(0, split).toString("utf8").split("\n"); const parents = headers.filter((line) => line.startsWith("parent ")).map((line) => line.slice(7)); for (const parent of parents) if (spawnSync(real, ["cat-file", "-e", parent + "^{commit}"]).status !== 0) fail("commit " + sha + " has missing parent " + parent + "; fetch the complete parent history before App signing."); return { localSha: sha, treeSha: headers.find((line) => line.startsWith("tree ")).slice(5), parents, message: raw.subarray(split + 2).toString("utf8") }; });
-const objectLines = execFileSync(real, ["rev-list", "--objects", ...range], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
-const ids = [...new Set(objectLines.map((line) => line.split(" ")[0]))]; const blobs = []; const trees = []; const lfsObjects = []; const gitDir = execFileSync(real, ["rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
-const MAX_BLOB_BYTES = 100 * 1024 * 1024; const paths = new Map(objectLines.map((line) => { const space = line.indexOf(" "); return [line.slice(0, space < 0 ? line.length : space), space < 0 ? "(unknown path)" : line.slice(space + 1)]; }));
-for (const sha of ids) { const type = execFileSync(real, ["cat-file", "-t", sha], { encoding: "utf8" }).trim(); if (type === "blob") { const size = Number(execFileSync(real, ["cat-file", "-s", sha], { encoding: "utf8" }).trim()); if (!Number.isSafeInteger(size) || size > MAX_BLOB_BYTES) fail("tracked blob " + paths.get(sha) + " is " + size + " bytes; GitHub Git Database accepts at most " + MAX_BLOB_BYTES + " bytes."); const content = execFileSync(real, ["cat-file", "blob", sha], { maxBuffer: MAX_BLOB_BYTES + 1 }); blobs.push({ sha, contentBase64: content.toString("base64") }); const pointer = content.toString("utf8").match(/^version https:\/\/git-lfs.github.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize ([0-9]+)\n?$/); if (pointer) { const file = gitDir + "/lfs/objects/" + pointer[1].slice(0, 2) + "/" + pointer[1].slice(2, 4) + "/" + pointer[1]; if (!fs.existsSync(file)) fail("LFS object " + pointer[1] + " is missing locally."); lfsObjects.push({ oid: pointer[1], size: Number(pointer[2]), contentBase64: fs.readFileSync(file).toString("base64") }); } } if (type === "tree") { const raw = execFileSync(real, ["ls-tree", "-z", sha]); const entries = raw.toString("utf8").split("\0").filter(Boolean).map((line) => { const tab = line.indexOf("\t"); const [mode, entryType, entrySha] = line.slice(0, tab).split(" "); return { path: line.slice(tab + 1), mode, type: entryType, sha: entrySha }; }); trees.push({ sha, entries }); } }
-const tok = (() => { try { return fs.readFileSync("/etc/valet/creds/token", "utf8").trim(); } catch { return process.env.VALET_SANDBOX_TOKEN || ""; } })();
-if (!tok) fail("the sandbox credential is unavailable; restart the session.");
-(async () => {
+const gitDir = gitExec(["rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
 const lockPath = gitDir + "/valet-reconcile.lock"; const lockToken = process.pid + "-" + Date.now() + "-" + Math.random().toString(16).slice(2); let ownsLock = false;
 function lockOwner() { try { return JSON.parse(fs.readFileSync(lockPath, "utf8")); } catch { return null; } }
 function ownerIsLive(owner) { if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) return false; try { process.kill(owner.pid, 0); return true; } catch (error) { return error && error.code === "EPERM"; } }
@@ -293,17 +288,51 @@ function acquireLock() {
   fail("could not acquire reconcile lock " + lockPath + ". Verify that no signed push is active, remove the stale lock, and retry.");
 }
 acquireLock();
+const src = pieces[0] || "HEAD";
+const sourceRef = src === "HEAD"
+  ? gitExec(["symbolic-ref", "HEAD"], { encoding: "utf8" }).trim()
+  : gitExec(["rev-parse", "--symbolic-full-name", src], { encoding: "utf8" }).trim();
+if (!sourceRef.startsWith("refs/heads/")) fail("the source must resolve to a local branch in V1.");
+const localSha = gitExec(["rev-parse", "--verify", sourceRef + "^{commit}"], { encoding: "utf8" }).trim();
+const startSource = localSha; const startHead = gitExec(["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); const checkedOutSource = gitSpawn(["symbolic-ref", "--quiet", "HEAD"], { encoding: "utf8" }).stdout.trim() === sourceRef; const startStatus = gitExec(["status", "--porcelain=v1", "-z"]); const startIndex = gitExec(["write-tree"], { encoding: "utf8" }).trim();
+let destination = pieces[1];
+if (!destination) destination = sourceRef.slice("refs/heads/".length);
+if (destination.startsWith("refs/tags/") || (!destination.startsWith("refs/heads/") && destination.startsWith("refs/"))) fail("only branch destinations are supported in V1.");
+const branch = destination.replace(/^refs\/heads\//, "");
+if (!branch || branch === "HEAD" || branch.includes("..") || branch.startsWith("/") || branch.endsWith("/")) fail("the destination branch is invalid.");
+const targetRef = "refs/heads/" + branch;
+const remoteUrl = gitExec(["remote", "get-url", remote], { encoding: "utf8" }).trim();
+const match = remoteUrl.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/i);
+if (!match) fail("App-signed replay supports GitHub remotes only.");
+const repoFullName = match[1] + "/" + match[2];
+const ls = gitExec(["ls-remote", remote, targetRef], { encoding: "utf8" }).trim();
+const createRef = !ls;
+if (gitExec(["rev-parse", "--is-shallow-repository"], { encoding: "utf8" }).trim() === "true") fail("agent-created shallow clones cannot be App-signed. Fetch the complete parent history first.");
+const expectedRemoteSha = createRef ? localSha : ls.split(/\s+/)[0];
+const remoteRef = "refs/valet/remote/" + branch;
+if (!createRef) gitExec(["fetch", "--quiet", remote, targetRef + ":" + remoteRef]);
+const range = createRef ? [localSha, "--not", "--remotes=" + remote] : [localSha, "^" + remoteRef];
+const commitIds = gitExec(["rev-list", "--reverse", ...range], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+if (!commitIds.length) { console.log("Everything up-to-date"); process.exit(0); }
+const commits = commitIds.map((sha) => { const raw = gitExec(["cat-file", "commit", sha]); const split = raw.indexOf(Buffer.from("\n\n")); const headers = raw.subarray(0, split).toString("utf8").split("\n"); const parents = headers.filter((line) => line.startsWith("parent ")).map((line) => line.slice(7)); for (const parent of parents) if (gitSpawn(["cat-file", "-e", parent + "^{commit}"]).status !== 0) fail("commit " + sha + " has missing parent " + parent + "; fetch the complete parent history before App signing."); return { localSha: sha, treeSha: headers.find((line) => line.startsWith("tree ")).slice(5), parents, message: raw.subarray(split + 2).toString("utf8") }; });
+const objectLines = gitExec(["rev-list", "--objects", ...range], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+const ids = [...new Set(objectLines.map((line) => line.split(" ")[0]))]; const blobs = []; const trees = []; const lfsObjects = [];
+const MAX_BLOB_BYTES = 100 * 1024 * 1024; const paths = new Map(objectLines.map((line) => { const space = line.indexOf(" "); return [line.slice(0, space < 0 ? line.length : space), space < 0 ? "(unknown path)" : line.slice(space + 1)]; }));
+for (const sha of ids) { const type = gitExec(["cat-file", "-t", sha], { encoding: "utf8" }).trim(); if (type === "blob") { const size = Number(gitExec(["cat-file", "-s", sha], { encoding: "utf8" }).trim()); if (!Number.isSafeInteger(size) || size > MAX_BLOB_BYTES) fail("tracked blob " + paths.get(sha) + " is " + size + " bytes; GitHub Git Database accepts at most " + MAX_BLOB_BYTES + " bytes."); const content = gitExec(["cat-file", "blob", sha], { maxBuffer: MAX_BLOB_BYTES + 1 }); blobs.push({ sha, contentBase64: content.toString("base64") }); const pointer = content.toString("utf8").match(/^version https:\/\/git-lfs.github.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize ([0-9]+)\n?$/); if (pointer) { const file = gitDir + "/lfs/objects/" + pointer[1].slice(0, 2) + "/" + pointer[1].slice(2, 4) + "/" + pointer[1]; if (!fs.existsSync(file)) fail("LFS object " + pointer[1] + " is missing locally."); lfsObjects.push({ oid: pointer[1], size: Number(pointer[2]), contentBase64: fs.readFileSync(file).toString("base64") }); } } if (type === "tree") { const raw = gitExec(["ls-tree", "-z", sha]); const entries = raw.toString("utf8").split("\0").filter(Boolean).map((line) => { const tab = line.indexOf("\t"); const [mode, entryType, entrySha] = line.slice(0, tab).split(" "); return { path: line.slice(tab + 1), mode, type: entryType, sha: entrySha }; }); trees.push({ sha, entries }); } }
+const tok = (() => { try { return fs.readFileSync("/etc/valet/creds/token", "utf8").trim(); } catch { return process.env.VALET_SANDBOX_TOKEN || ""; } })();
+if (!tok) fail("the sandbox credential is unavailable; restart the session.");
+(async () => {
 try {
-const startHead = execFileSync(real, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); const startSource = execFileSync(real, ["rev-parse", sourceRef], { encoding: "utf8" }).trim(); const checkedOutSource = spawnSync(real, ["symbolic-ref", "--quiet", "HEAD"], { encoding: "utf8" }).stdout.trim() === sourceRef; const startStatus = execFileSync(real, ["status", "--porcelain=v1", "-z"]); const startIndex = execFileSync(real, ["write-tree"], { encoding: "utf8" }).trim();
+
 const response = await fetch("__API__/api/sandbox/git-push", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok }, body: JSON.stringify({ repoFullName, targetRef, expectedRemoteSha, createRef, blobs, trees, lfsObjects, commits }) }); const body = await response.json(); if (!response.ok) fail(body.error || "host replay failed");
-if (execFileSync(real, ["rev-parse", sourceRef], { encoding: "utf8" }).trim() !== startSource) fail("the pushed source branch changed during replay; the signed ref is published. Retry to reconcile it.");
-if (checkedOutSource && (execFileSync(real, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() !== startHead || !execFileSync(real, ["status", "--porcelain=v1", "-z"]).equals(startStatus) || execFileSync(real, ["write-tree"], { encoding: "utf8" }).trim() !== startIndex)) fail("local HEAD, index, or working tree changed during replay; the signed ref is published. Retry to reconcile it.");
-const signedRef = "refs/valet/signed/" + branch; execFileSync(real, ["fetch", "--quiet", remote, targetRef + ":" + signedRef]);
-if (execFileSync(real, ["rev-parse", signedRef], { encoding: "utf8" }).trim() !== body.signedHeadSha) fail("the published signed head changed before local reconciliation.");
-const localTree = execFileSync(real, ["rev-parse", startSource + "^{tree}"], { encoding: "utf8" }).trim(); const signedTree = execFileSync(real, ["rev-parse", body.signedHeadSha + "^{tree}"], { encoding: "utf8" }).trim(); if (localTree !== signedTree) fail("the signed commit tree differs from the pushed source branch; local history was not changed.");
-execFileSync(real, ["update-ref", "refs/valet/backup/" + sourceRef.slice("refs/heads/".length), startSource]); execFileSync(real, ["update-ref", sourceRef, body.signedHeadSha, startSource]); execFileSync(real, ["update-ref", "refs/remotes/" + remote + "/" + branch, body.signedHeadSha]);
+if (gitExec(["rev-parse", sourceRef], { encoding: "utf8" }).trim() !== startSource) fail("the pushed source branch changed during replay; the signed ref is published. Retry to reconcile it.");
+if (checkedOutSource && (gitExec(["rev-parse", "HEAD"], { encoding: "utf8" }).trim() !== startHead || !gitExec(["status", "--porcelain=v1", "-z"]).equals(startStatus) || gitExec(["write-tree"], { encoding: "utf8" }).trim() !== startIndex)) fail("local HEAD, index, or working tree changed during replay; the signed ref is published. Retry to reconcile it.");
+const signedRef = "refs/valet/signed/" + branch; gitExec(["fetch", "--quiet", remote, targetRef + ":" + signedRef]);
+if (gitExec(["rev-parse", signedRef], { encoding: "utf8" }).trim() !== body.signedHeadSha) fail("the published signed head changed before local reconciliation.");
+const localTree = gitExec(["rev-parse", startSource + "^{tree}"], { encoding: "utf8" }).trim(); const signedTree = gitExec(["rev-parse", body.signedHeadSha + "^{tree}"], { encoding: "utf8" }).trim(); if (localTree !== signedTree) fail("the signed commit tree differs from the pushed source branch; local history was not changed.");
+gitExec(["update-ref", "refs/valet/backup/" + sourceRef.slice("refs/heads/".length), startSource]); gitExec(["update-ref", sourceRef, body.signedHeadSha, startSource]); gitExec(["update-ref", "refs/remotes/" + remote + "/" + branch, body.signedHeadSha]);
 const reconciled = await fetch("__API__/api/sandbox/git-push/" + encodeURIComponent(body.operationId) + "/reconcile", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok } }); if (!reconciled.ok) fail("the signed push was published locally, but operation reconciliation failed. Retry the push.");
-if (upstream) spawnSync(real, ["branch", "--set-upstream-to", remote + "/" + branch, sourceRef], { stdio: "ignore" }); console.log("To " + remoteUrl + "\n   " + expectedRemoteSha.slice(0, 7) + ".." + body.signedHeadSha.slice(0, 7) + "  " + sourceRef.slice("refs/heads/".length) + " -> " + branch);
+if (upstream) gitSpawn(["branch", "--set-upstream-to", remote + "/" + branch, sourceRef], { stdio: "ignore" }); console.log("To " + remoteUrl + "\n   " + expectedRemoteSha.slice(0, 7) + ".." + body.signedHeadSha.slice(0, 7) + "  " + sourceRef.slice("refs/heads/".length) + " -> " + branch);
 } finally { releaseLock(); }
 })().catch((error) => fail(error.message));
 `.replace("__REAL_GIT__", REAL_GIT_PATH).replaceAll("__API__", apiUrl.replace(/\/$/u, ""));
@@ -312,64 +341,71 @@ if (upstream) spawnSync(real, ["branch", "--set-upstream-to", remote + "/" + bra
 /** Git shim for unsigned modes. It records a successful ordinary branch push. */
 export function observedGitWrapperScript(apiUrl: string): string {
   return `#!/bin/sh
-# Valet Git wrapper. Run the preserved image Git. The managed dispatcher keeps working if a
-# repository changes core.hooksPath after workspace prep.
+# Valet Git wrapper. Common global options are parsed before commit/push detection.
 real=${REAL_GIT_PATH}
-if [ "\${1:-}" = commit ]; then
-  git_dir=$("$real" rev-parse --absolute-git-dir 2>/dev/null) || git_dir=
+orig_file=\$(mktemp) || exit 1
+trap 'rm -f "$orig_file"' EXIT
+printf '%s\\0' "$@" > "$orig_file"
+run_original() { xargs -0 "$real" < "$orig_file"; }
+git_cwd= c1= c2= c3= c4= c_count=0
+while [ \$# -gt 0 ]; do
+  case "$1" in
+    -C) [ \$# -ge 2 ] || { run_original; exit $?; }; git_cwd=$2; shift 2 ;;
+    -C?*) git_cwd=\${1#-C}; shift ;;
+    -c) [ \$# -ge 2 ] || { run_original; exit $?; }; c_count=\$((c_count + 1)); case \$c_count in 1) c1=$2 ;; 2) c2=$2 ;; 3) c3=$2 ;; 4) c4=$2 ;; *) run_original; exit $? ;; esac; shift 2 ;;
+    -c?*) c_count=\$((c_count + 1)); value=\${1#-c}; case \$c_count in 1) c1=$value ;; 2) c2=$value ;; 3) c3=$value ;; 4) c4=$value ;; *) run_original; exit $? ;; esac; shift ;;
+    --no-pager|--paginate|-p|-P|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice) shift ;;
+    --) shift; break ;;
+    -*) run_original; exit $? ;;
+    *) break ;;
+  esac
+done
+command=\${1:-}; shift || true
+real_git() {
+  if [ -n "$git_cwd" ]; then set -- -C "$git_cwd" "$@"; fi
+  case \$c_count in
+    0) "$real" "$@" ;;
+    1) "$real" -c "$c1" "$@" ;;
+    2) "$real" -c "$c1" -c "$c2" "$@" ;;
+    3) "$real" -c "$c1" -c "$c2" -c "$c3" "$@" ;;
+    *) "$real" -c "$c1" -c "$c2" -c "$c3" -c "$c4" "$@" ;;
+  esac
+}
+if [ "$command" = commit ]; then
+  git_dir=\$(real_git rev-parse --absolute-git-dir 2>/dev/null) || git_dir=
   managed="$git_dir/valet-hooks"
   if [ -n "$git_dir" ] && [ -x "$managed/valet-prepare-commit-msg" ]; then
     if [ "\${VALET_HOOK_DISPATCH_ACTIVE:-}" = 1 ]; then
-      [ -n "\${VALET_REPO_HOOKS_DIR:-}" ] && exec "$real" -c core.hooksPath="$VALET_REPO_HOOKS_DIR" "$@"
+      [ -n "\${VALET_REPO_HOOKS_DIR:-}" ] && { xargs -0 "$real" -c core.hooksPath="$VALET_REPO_HOOKS_DIR" < "$orig_file"; exit \$?; }
     else
-      configured=$("$real" config --path --get core.hooksPath 2>/dev/null) || configured="$git_dir/hooks"
-      case "$configured" in /*) original="$configured" ;; *) top=$("$real" rev-parse --show-toplevel); original="$top/$configured" ;; esac
-      [ "$original" = "$managed" ] || { VALET_REPO_HOOKS_DIR="$original" "$real" -c core.hooksPath="$managed" "$@"; exit $?; }
+      configured=\$(real_git config --path --get core.hooksPath 2>/dev/null) || configured="$git_dir/hooks"
+      case "$configured" in /*) original="$configured" ;; *) top=\$(real_git rev-parse --show-toplevel); original="$top/$configured" ;; esac
+      [ "$original" = "$managed" ] || { VALET_REPO_HOOKS_DIR="$original" xargs -0 "$real" -c core.hooksPath="$managed" < "$orig_file"; exit \$?; }
     fi
   fi
 fi
-# Observation must never change the push result.
-"$real" "$@"
-status=$?
-[ $status -eq 0 ] || exit $status
-[ "\${1:-}" = "push" ] || exit 0
-shift
-
-# V1 observes one ordinary branch refspec. Unsupported forms still push, but
-# they do not create an attribution record.
-remote=origin
-spec=HEAD
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -u|--set-upstream) shift ;;
-    -*) exit 0 ;;
-    *) remote=$1; shift; [ $# -eq 0 ] || { spec=$1; shift; }; break ;;
-  esac
+run_original
+status=\$?
+[ \$status -eq 0 ] || exit \$status
+[ "$command" = push ] || exit 0
+remote=origin; spec=HEAD
+while [ \$# -gt 0 ]; do
+  case "$1" in -u|--set-upstream) shift ;; -*) exit 0 ;; *) remote=$1; shift; [ \$# -eq 0 ] || { spec=$1; shift; }; break ;; esac
 done
-[ $# -eq 0 ] || exit 0
+[ \$# -eq 0 ] || exit 0
 case "$spec" in :*|*:|*\\**|+*|*^*) exit 0 ;; esac
-case "$spec" in
-  *:*) src=\${spec%%:*}; dst=\${spec#*:} ;;
-  *) src=$spec; dst= ;;
-esac
+case "$spec" in *:*) src=\${spec%%:*}; dst=\${spec#*:} ;; *) src=$spec; dst= ;; esac
 [ -n "$src" ] || src=HEAD
-if [ -z "$dst" ]; then
-  if [ "$src" = HEAD ]; then dst=$("$real" symbolic-ref --short HEAD 2>/dev/null) || exit 0
-  else dst=\${src#refs/heads/}
-  fi
-fi
+if [ -z "$dst" ]; then if [ "$src" = HEAD ]; then dst=\$(real_git symbolic-ref --short HEAD 2>/dev/null) || exit 0; else dst=\${src#refs/heads/}; fi; fi
 case "$dst" in refs/tags/*|refs/*) case "$dst" in refs/heads/*) ;; *) exit 0 ;; esac ;; esac
 case "$dst" in refs/heads/*) target_ref=$dst ;; *) target_ref=refs/heads/$dst ;; esac
-head_sha=$("$real" rev-parse --verify "$src^{commit}" 2>/dev/null) || exit 0
-url=$("$real" remote get-url "$remote" 2>/dev/null) || exit 0
-repo=$(printf '%s' "$url" | sed -n 's#.*github\\.com[/:]\\([^/]*\\)/\\([^/]*\\)\\(.git\\)\\?$#\\1/\\2#p')
-repo=\${repo%.git}
+head_sha=\$(real_git rev-parse --verify "$src^{commit}" 2>/dev/null) || exit 0
+url=\$(real_git remote get-url "$remote" 2>/dev/null) || exit 0
+repo=\$(printf '%s' "$url" | sed -n 's#.*github\\.com[/:]\\([^/]*\\)/\\([^/]*\\)\\(.git\\)\\?$#\\1/\\2#p'); repo=\${repo%.git}
 [ -n "$repo" ] || exit 0
 ${SANDBOX_TOKEN_READ_SH}
 [ -n "$tok" ] || exit 0
-curl --max-time 10 -fsS -X POST "${apiUrl.replace(/\/$/u, "")}/api/sandbox/git-push/observe" \\
-  -H "x-valet-sandbox: $tok" -H "Content-Type: application/json" \\
-  -d "{\\"repoFullName\\":\\"$repo\\",\\"targetRef\\":\\"$target_ref\\",\\"headSha\\":\\"$head_sha\\"}" >/dev/null 2>&1 || true
+curl --max-time 10 -fsS -X POST "${apiUrl.replace(/\/$/u, "")}/api/sandbox/git-push/observe" -H "x-valet-sandbox: $tok" -H "Content-Type: application/json" -d "{\\"repoFullName\\":\\"$repo\\",\\"targetRef\\":\\"$target_ref\\",\\"headSha\\":\\"$head_sha\\"}" >/dev/null 2>&1 || true
 exit 0
 `;
 }

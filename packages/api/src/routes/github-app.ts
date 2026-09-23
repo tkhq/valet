@@ -51,7 +51,7 @@
  */
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, eq, or } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
@@ -78,7 +78,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { ingestEvent } from "../events/ingest.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { parseContentPushPayload } from "../services/content-sync/push.js";
-import { credentials, githubInstallations, orgs, sessionGitBranches, sessionPullRequests } from "../schema/index.js";
+import { agentSessions, credentials, githubInstallations, orgs, sessionGitBranches, sessionPullRequests } from "../schema/index.js";
 import type {
   GetGithubAppResponse,
   GithubAppInstallationSummary,
@@ -697,15 +697,21 @@ async function handleInstallationRepositoriesEvent(db: AppQueryable, orgId: stri
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
 }
 
-async function reconcilePullRequest(db: AppQueryable, payload: unknown): Promise<void> {
+async function reconcilePullRequest(db: AppQueryable, orgId: string, payload: unknown): Promise<void> {
   if (!isRecord(payload) || !isRecord(payload.pull_request) || !isRecord(payload.repository)) return;
   const pr = payload.pull_request; const repository = payload.repository;
   if (typeof repository.full_name !== "string" || typeof pr.number !== "number" || typeof pr.html_url !== "string" || !isRecord(pr.head) || !isRecord(pr.base)) return;
   const headRef = pr.head.ref, headSha = pr.head.sha, baseRef = pr.base.ref;
   if (typeof headRef !== "string" || typeof headSha !== "string" || typeof baseRef !== "string") return;
-  const branches = await db.select().from(sessionGitBranches).where(and(eq(sessionGitBranches.repoFullName, repository.full_name), or(eq(sessionGitBranches.ref, headRef), eq(sessionGitBranches.ref, `refs/heads/${headRef}`), eq(sessionGitBranches.headSha, headSha))));
+  const branches = await db.select({ sessionId: sessionGitBranches.sessionId })
+    .from(sessionGitBranches)
+    .innerJoin(agentSessions, eq(agentSessions.id, sessionGitBranches.sessionId))
+    .where(and(eq(agentSessions.orgId, orgId), eq(sessionGitBranches.repoFullName, repository.full_name), or(eq(sessionGitBranches.ref, headRef), eq(sessionGitBranches.ref, `refs/heads/${headRef}`), eq(sessionGitBranches.headSha, headSha))))
+    .orderBy(desc(sql`CASE WHEN ${sessionGitBranches.headSha} = ${headSha} THEN 1 ELSE 0 END`), desc(sessionGitBranches.observedAt))
+    .limit(1);
+  const branch = branches[0]; if (!branch) return;
   const now = Date.now(); const state = pr.merged === true ? "merged" : typeof pr.state === "string" ? pr.state : "open";
-  for (const branch of branches) await db.insert(sessionPullRequests).values({ sessionId: branch.sessionId, repoFullName: repository.full_name, prNumber: pr.number, prUrl: pr.html_url, headRef, headSha, baseRef, state, firstObservedAt: now, updatedAt: now }).onConflictDoUpdate({ target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId], set: { prUrl: pr.html_url, headRef, headSha, baseRef, state, updatedAt: now } });
+  await db.insert(sessionPullRequests).values({ sessionId: branch.sessionId, repoFullName: repository.full_name, prNumber: pr.number, prUrl: pr.html_url, headRef, headSha, baseRef, state, firstObservedAt: now, updatedAt: now }).onConflictDoUpdate({ target: [sessionPullRequests.repoFullName, sessionPullRequests.prNumber, sessionPullRequests.sessionId], set: { prUrl: pr.html_url, headRef, headSha, baseRef, state, updatedAt: now } });
 }
 
 githubAppWebhookRouter.post("/", async (c) => {
@@ -766,7 +772,7 @@ githubAppWebhookRouter.post("/", async (c) => {
         });
     }
   }
-  if (event === "pull_request") await reconcilePullRequest(db, payload);
+  if (event === "pull_request") await reconcilePullRequest(db, orgId, payload);
   if (event === "installation") {
     await handleInstallationEvent(deps, orgId, payload);
   } else if (event === "installation_repositories") {

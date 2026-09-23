@@ -824,16 +824,16 @@ describe("Git attribution hook execution", () => {
       const env = { ...process.env, VALET_SESSION_CORRELATION_ID: "v1s_test", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_test" };
 
       writeFileSync(join(dir, "block-pre"), "");
-      expect(spawnSync(wrapper, ["commit", "-m", "Blocked by pre"], { cwd: dir, env }).status).not.toBe(0);
+      expect(spawnSync(wrapper, ["-C", dir, "-c", "color.ui=false", "commit", "-m", "Blocked by pre"], { env }).status).not.toBe(0);
       expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("pre-commit\n");
       rmSync(join(dir, "block-pre"));
 
       writeFileSync(join(dir, "hook-count"), "");
-      expect(spawnSync(wrapper, ["commit", "-m", "BLOCK"], { cwd: dir, env }).status).not.toBe(0);
+      expect(spawnSync(wrapper, ["-C", dir, "-c", "color.ui=false", "commit", "-m", "BLOCK"], { env }).status).not.toBe(0);
       expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("pre-commit\nprepare-commit-msg\ncommit-msg\n");
 
       writeFileSync(join(dir, "hook-count"), "");
-      expect(spawnSync(wrapper, ["commit", "-m", "Subject"], { cwd: dir, env }).status).toBe(0);
+      expect(spawnSync(wrapper, ["-C", dir, "-c", "color.ui=false", "commit", "-m", "Subject"], { env }).status).toBe(0);
       expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("pre-commit\nprepare-commit-msg\ncommit-msg\npost-commit\n");
       const message = spawnSync(git, ["log", "-1", "--format=%B"], { cwd: dir, encoding: "utf8" }).stdout;
       expect(message.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
@@ -854,7 +854,7 @@ describe("Git attribution hook execution", () => {
       expect(spawnSync(git, ["add", "file"], { cwd: dir }).status).toBe(0);
       const wrapper = join(dir, "git-wrapper");
       writeFileSync(wrapper, observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`), { mode: 0o755 });
-      expect(spawnSync(wrapper, ["commit", "-m", "Subject"], { cwd: dir }).status).toBe(0);
+      expect(spawnSync(wrapper, ["-C", dir, "-c", "color.ui=false", "commit", "-m", "Subject"]).status).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

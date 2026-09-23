@@ -3,6 +3,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { canAdministerTeam, canViewTeam } from "../services/teams.js";
+import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import {
   ensureGitSnapshot,
   readSettingsForScope,
@@ -60,12 +61,14 @@ gitAttributionRouter.patch("/org/git-settings", async (c) => {
   catch (error) { return c.json({ error: error instanceof Error ? error.message : "Git settings could not be saved." }, 400); }
 });
 
-async function accessibleSession(c: Context<AppEnv>, id: string) {
+async function accessibleSession(c: Context<AppEnv>, id: string, administer = false) {
   const { db } = c.var.providers; const user = c.var.user;
   const rows = await db.select().from(agentSessions).where(and(eq(agentSessions.id, id), eq(agentSessions.orgId, user.orgId))).limit(1);
   const row = rows[0]; if (!row) return null;
-  if (row.ownerType === "user" && row.ownerId && row.ownerId !== user.id) return null;
-  if (row.ownerType === "team" && !(await canViewTeam(db, row.ownerId, user.id))) return null;
+  const allowed = administer
+    ? await canAdministerSession(db, row, c.var.principal)
+    : await canViewSession(db, row, c.var.principal);
+  if (!allowed) return null;
   return row;
 }
 
@@ -82,7 +85,7 @@ gitAttributionRouter.get("/sessions/:id/git-attribution", async (c) => {
   return value ? c.json(value) : c.json({ error: "session not found" }, 404);
 });
 gitAttributionRouter.post("/sessions/:id/git-attribution/apply", async (c) => {
-  const id = c.req.param("id"); const row = await accessibleSession(c, id);
+  const id = c.req.param("id"); const row = await accessibleSession(c, id, true);
   if (!row) return c.json({ error: "session not found" }, 404);
   const unsettled = await c.var.providers.engineStore.listUnsettledSubmissions(id);
   const operations = await c.var.providers.db.select({ id: gitPushOperations.id }).from(gitPushOperations)

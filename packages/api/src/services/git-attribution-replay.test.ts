@@ -16,13 +16,14 @@ afterEach(async () => {
   api = undefined;
 });
 
-function replayClient(initialHead: string, options: { failAfterPublish?: boolean } = {}) {
+function replayClient(initialHead: string, options: { failAfterPublish?: boolean; failRefresh?: boolean } = {}) {
   let remoteHead = initialHead;
   let commitNumber = 0;
   let failAfterPublish = options.failAfterPublish ?? false;
   const commits = new Map<string, GitHubCreatedCommit>();
+  let failRefresh = options.failRefresh ?? false;
   const client: GitHubReplayClient = {
-    refresh: async () => {},
+    refresh: async () => { if (failRefresh) { failRefresh = false; throw new Error("refresh failed"); } },
     createCommit: async ({ message, tree, parents }) => {
       commitNumber += 1;
       const commit: GitHubCreatedCommit = {
@@ -84,6 +85,16 @@ describe("signed push crash recovery and convergence", () => {
     });
     expect(second.signedHeadSha).toBe("signed-2");
     expect(replay.remote()).toBe("signed-2");
+  });
+
+  it("marks an initial refresh failure terminal and permits a later retry", async () => {
+    api = await bootTestApi();
+    const replay = replayClient("remote-0", { failRefresh: true });
+    await expect(replaySignedCommits(api.providers.db, replay.client, firstPush)).rejects.toThrow(/refresh failed/u);
+    const failed = (await api.providers.db.select().from(gitPushOperations))[0];
+    expect(failed.state).toBe("failed");
+    expect(failed.errorCode).toContain("refresh failed");
+    await expect(replaySignedCommits(api.providers.db, replay.client, firstPush)).resolves.toMatchObject({ signedHeadSha: "signed-1" });
   });
 
   it("recovers when publication succeeds before the response is persisted", async () => {
