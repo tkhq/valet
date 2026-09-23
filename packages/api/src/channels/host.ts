@@ -44,7 +44,6 @@ import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engi
 import { agentSessions, users, workflowDefinitions } from "../schema/index.js";
 import {
   ArchivedAssistantError,
-  assistantSenderIdentity as senderIdentityForAssistant,
   ensureDefaultAssistantSession,
   loadAssistant,
   loadAssistantBySessionId,
@@ -684,11 +683,7 @@ export class ChannelHost {
     this.markDelivered(dedupeKey);
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
-    const sender = await this.assistantSenderIdentity(sessionId);
-    await transport.send(target.conversationKey, {
-      markdown: first.content,
-      ...(sender !== undefined ? { sender } : {}),
-    });
+    await transport.send(target.conversationKey, { markdown: first.content });
   }
 
   /**
@@ -729,27 +724,6 @@ export class ChannelHost {
   }
 
   /**
-   * Per-assistant outbound identity for a session's channel posts
-   * (TKAI-387): the assistant's `name` and `avatarUrl`, read from the row
-   * on every delivery so an edit takes effect on the next post. `undefined`
-   * when the session is not an assistant's, or when the assistant has no
-   * override set — the transport then posts under the bot's own identity.
-   * Best-effort: a lookup failure must not stop the delivery.
-   */
-  private async assistantSenderIdentity(
-    sessionId: string,
-  ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
-    try {
-      const row = await loadAssistantBySessionId(this.deps.db, sessionId);
-      return row ? senderIdentityForAssistant(row) : undefined;
-    } catch (err) {
-      // Identity is decoration on the post; the text must still land.
-      console.error("[channels] assistant identity lookup failed", err);
-      return undefined;
-    }
-  }
-
-  /**
    * Rule 6: command_result → send the result markdown to the channel the
    * command came from. A slash command sent from Telegram or Slack must
    * answer there — the web UI reads the same entry over REST/WS. Dedup on
@@ -782,11 +756,7 @@ export class ChannelHost {
     if (!transport) return;
 
     const markdown = `\`${entry.command}\`\n${entry.output}`;
-    const sender = await this.assistantSenderIdentity(sessionId);
-    await transport.send(mapped.conversationKey, {
-      markdown,
-      ...(sender !== undefined ? { sender } : {}),
-    });
+    await transport.send(mapped.conversationKey, { markdown });
   }
 
   /** Rule 3: decision_gate → sendGatePrompt, record refs for the inbound gate_callback path. */
@@ -846,14 +816,7 @@ export class ChannelHost {
     },
     sessionId: string,
   ): Promise<void> {
-    // The card carries the asking assistant's identity. In a channel with
-    // several assistants, the reader must see who asks for approval.
-    // Resolution edits keep the posted identity.
-    const sender = await this.assistantSenderIdentity(sessionId);
-    const ref = await transport.sendGatePrompt(conversationKey, {
-      ...prompt,
-      ...(sender !== undefined ? { sender } : {}),
-    });
+    const ref = await transport.sendGatePrompt(conversationKey, prompt);
     this.gateActions.set(prompt.gateId, prompt.actions);
     this.recordGatePrompt(prompt.gateId, ref, sessionId);
     const settled = this.settledGates.get(prompt.gateId);
@@ -1461,13 +1424,7 @@ export class ChannelHost {
             }
             // No gate, a recipient who cannot resolve it, or a lookup that
             // failed: fall through to the plain summary with the web link.
-            const sender = event.sessionId
-              ? await this.assistantSenderIdentity(event.sessionId)
-              : undefined;
-            await transport.send(conversationKey, {
-              markdown: this.attentionMarkdown(event),
-              ...(sender !== undefined ? { sender } : {}),
-            });
+            await transport.send(conversationKey, { markdown: this.attentionMarkdown(event) });
           } catch (err) {
             console.error(`[channels] ${channelType}: attention delivery failed`, err);
           }

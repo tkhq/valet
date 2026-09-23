@@ -1339,8 +1339,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
   },
   {
-    // Per-assistant avatar for outbound channel posts (TKAI-387).
-    // Null = the bot's own icon.
+    // Per-assistant profile avatar.
     describe: "assistants.avatar_url column",
     probe: { kind: "column", table: "assistants", column: "avatar_url" },
     sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "avatar_url" text',

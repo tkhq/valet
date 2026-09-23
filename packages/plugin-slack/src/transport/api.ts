@@ -133,12 +133,6 @@ export class SlackApi {
     text: string;
     threadTs?: string;
     blocks?: Record<string, unknown>[];
-    /** Per-assistant display name override (`chat:write.customize` scope).
-     * Absent = the app's own name. */
-    username?: string;
-    /** Per-assistant avatar override (`chat:write.customize` scope).
-     * Absent = the app's own icon. */
-    iconUrl?: string;
   }): Promise<{ ts: string }> {
     const body: Record<string, unknown> = {
       channel: opts.channel,
@@ -148,8 +142,6 @@ export class SlackApi {
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
-    if (opts.username !== undefined) body.username = opts.username;
-    if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
     const res = await this.call("chat.postMessage", body);
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");

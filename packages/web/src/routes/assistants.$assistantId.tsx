@@ -510,7 +510,7 @@ function AssistantEditorForm({
         </FieldRow>
         <FieldRow
           label="Profile picture"
-          hint="Slack uses this image for outbound posts when the app has chat:write.customize."
+          hint="This image appears in the assistant profile."
         >
           <ProfilePictureUpload
             avatarUrl={assistant.avatarUrl}

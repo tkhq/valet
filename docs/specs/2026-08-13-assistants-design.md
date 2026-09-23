@@ -151,7 +151,7 @@ assistants
   owner_type   text not null      -- user | team | org
   owner_id     text not null
   name         text
-  avatar_url   text               -- outbound-post avatar (TKAI-387); null = the bot's own icon
+  avatar_url   text               -- assistant profile avatar
   session_id   text not null      -- assistant:{id}; migrated rows keep legacy orchestrator:* ids
   is_default   boolean not null
   created_at   bigint not null
@@ -204,7 +204,7 @@ URL fetching are not part of the upload path.
 
 The configured `BlobStore` holds the bytes. The `avatar_url` column holds an
 absolute `/avatars/...` URL with a cache version. Public reads need no Valet
-session because Slack fetches `icon_url` itself. The path contains a
+session because assistant profile images can appear outside an authenticated page. Assistant names and avatars are profile-only. They do not affect Slack sender identity. The path contains a
 server-derived SHA-256 value over the owner and a fresh random version instead
 of an owner id. A new key for each upload keeps the prior persisted URL valid
 if a later database write fails. Only authenticated upload routes can write a

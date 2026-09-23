@@ -29,8 +29,8 @@ import type { AssistantBehavior, AssistantSummary } from "../wire/types.js";
 import { parseAssistantBehavior, serializeAssistantBehavior , validateAssistantBehavior } from "./behavior.js";
 import { PERSONALITY_INJECT_CAP } from "./persona.js";
 
-/** Server cap on `avatarUrl` length. Slack truncates nothing here; the cap
- * only keeps a pathological value out of the row. */
+/** Server cap on profile `avatarUrl` length. The cap keeps a pathological
+ * value out of the row. Profile avatars do not affect Slack sender identity. */
 export const AVATAR_URL_CAP = 2048;
 
 /** Raised when a request would leave a principal with no default assistant. */
@@ -117,19 +117,6 @@ export async function checkAssistantForOwner(
     return `unknown assistant: ${assistantId}`;
   }
   return null;
-}
-
-export function assistantSenderIdentity(
-  row: Pick<AssistantRow, "name" | "avatarUrl">,
-): { displayName?: string; avatarUrl?: string } | undefined {
-  const displayName = row.name ?? undefined;
-  const avatarUrl = row.avatarUrl ?? undefined;
-  return displayName === undefined && avatarUrl === undefined
-    ? undefined
-    : {
-        ...(displayName !== undefined ? { displayName } : {}),
-        ...(avatarUrl !== undefined ? { avatarUrl } : {}),
-      };
 }
 
 /**
@@ -479,9 +466,7 @@ export async function applyProfilePatch(
   row: AssistantRow,
   patch: {
     name?: string | null;
-    /** Outbound-post avatar (TKAI-387). Not part of the eviction check
-     * below: channel delivery reads it from the row on every post, so a
-     * cached session bakes nothing in. */
+    /** Profile avatar. It does not affect a cached session. */
     avatarUrl?: string | null;
     isDefault?: true;
     personality?: string | null;

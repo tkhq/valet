@@ -162,26 +162,7 @@ and `signal` records engine-routed admissions.
 - **Sender.** `#441` renders a sender line for user messages. Confirm the
   channel-origin signal carries an author (1.2 sets it from `event.actor`) so
   the same line renders. If a gap remains on the events path, close it here.
-- **Outbound identity (TKAI-387).** Every gate card, command result,
-  attention summary, and Slack outbound action carries the sending assistant's
-  identity. This includes `reply_to_origin`, `send_message`, `dm_owner`, and
-  `dm_user`. `ChannelHost` resolves the session's `assistants` row for host
-  deliveries. The engine gives session actions a dynamic
-  `resolveOutboundSender` callback. Headless workflow actions and workflow
-  session nodes resolve the run owner's default assistant when they post.
-  Child-agent sessions resolve the assistant that owns their parent session,
-  then use the owner's default assistant when the parent has no assistant.
-  Both paths read the current row, so profile edits apply without a
-  cached-session rebuild. The Slack
-  paths map `name` and `avatar_url` to `username` and `icon_url` on
-  `chat.postMessage` with the `chat:write.customize` scope. They sanitize the
-  name to Slack's 80-character limit and omit malformed avatar URLs. If Slack
-  rejects an identity override, they retry once without it. A network failure
-  does not retry because Slack might have accepted the first request. An
-  assistant with neither field set posts under the bot's own identity.
-  Resolution edits (`chat.update`) keep the identity the card posted with.
-  File attachments keep the app identity because Slack's upload API has no
-  equivalent override.
+- **Outbound identity.** Slack sends every Valet-generated message with the installed Valet bot identity. Assistant names, persona labels, and avatars remain internal configuration and UI profile data. They do not set Slack `username`, `icon_url`, or another mentionable bot identity. This applies to replies, gate cards, command results, attention summaries, and Slack actions such as `reply_to_origin`, `send_message`, `dm_owner`, and `dm_user`. The channel transport does not add persona attribution metadata because Slack has no established non-identity field for it. File attachments continue to use the installed app identity.
 
 ### Part 2 — one routing wizard, names not ids
 

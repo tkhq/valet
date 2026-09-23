@@ -20,7 +20,6 @@ import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
 import { buildContentBlocks, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
-import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn } from "../transport/format.js";
 
 /**
@@ -44,49 +43,17 @@ function action<TParams extends TSchema>(parameters: TParams) {
 
 type SlackPostData = { ok: boolean; error?: string; ts?: string; channel?: string };
 
-async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: string; iconUrl?: string }> {
-  if (!ctx.resolveOutboundSender) {
-    return slackIdentityOverride(ctx.actor?.name ? { displayName: ctx.actor.name } : undefined);
-  }
-  try {
-    return slackIdentityOverride(await ctx.resolveOutboundSender());
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Post with the current assistant identity. If Slack rejects cosmetic override
- * fields, retry once without them so the message body still lands.
- */
+/** Post a Slack action message with the installed bot identity. */
 async function postActionMessage(
   token: string,
   body: Record<string, unknown>,
-  ctx: PluginActionContext,
 ): Promise<{ res: Response; data: SlackPostData }> {
-  const override = await actionIdentity(ctx);
-  const post = async (postBody: Record<string, unknown>) => {
-    const res = await slackFetch('chat.postMessage', token, postBody);
-    try {
-      const data = (await res.json()) as SlackPostData;
-      return { res, data, providerRejected: res.ok && data.ok === false };
-    } catch {
-      return {
-        res,
-        data: { ok: false, error: 'invalid_response' },
-        providerRejected: false,
-      };
-    }
-  };
-  const { iconUrl, ...rest } = override;
-  const first = await post({ ...body, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
-  if (
-    !first.providerRejected ||
-    (override.username === undefined && override.iconUrl === undefined)
-  ) {
-    return first;
+  const res = await slackFetch('chat.postMessage', token, body);
+  try {
+    return { res, data: (await res.json()) as SlackPostData };
+  } catch {
+    return { res, data: { ok: false, error: 'invalid_response' } };
   }
-  return post(body);
 }
 
 /** Build a descriptive error from a Slack API response. */
@@ -333,7 +300,7 @@ async function openAndSendDM(
     body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
 
-  const { res, data } = await postActionMessage(token, body, ctx);
+  const { res, data } = await postActionMessage(token, body);
   if (!res.ok) return slackError(res);
   if (!data.ok) return slackError(res, data);
 
@@ -1054,7 +1021,7 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
-    const { res, data } = await postActionMessage(token, body, ctx);
+    const { res, data } = await postActionMessage(token, body);
     if (!res.ok || !data.ok) {
       return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
     }
@@ -1108,7 +1075,7 @@ const replyToOrigin = action(Type.Object({
       thread_ts: o.threadTs,
       text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
-    }, ctx);
+    });
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
     return { success: true, data: { channel: o.channelId, ts: data.ts } };

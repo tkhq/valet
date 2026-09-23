@@ -50,7 +50,6 @@ import {
 } from "../message-chunking.js";
 import { SKIP_SUBTYPES } from "../subtypes.js";
 import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
-import { slackIdentityOverride } from "../sender-identity.js";
 import { DirectoryCache } from "./directory-cache.js";
 import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
@@ -808,34 +807,6 @@ export class SlackTransport implements ChannelTransport {
 
   // ─── Discrete-message egress ──────────────────────────────────────────
 
-  /**
-   * chat.postMessage, retried once without a rejected identity override.
-   * Provider error responses are safe to retry because Slack rejected them.
-   * Network errors and malformed success responses remain single-attempt.
-   */
-  private async postMessageAs(
-    opts: Parameters<SlackApi["postMessage"]>[0],
-  ): Promise<{ ts: string }> {
-    try {
-      return await this.api.postMessage(opts);
-    } catch (err) {
-      const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
-      if (
-        hadOverride &&
-        err instanceof SlackApiError &&
-        err.method === "chat.postMessage" &&
-        err.providerRejected &&
-        err.status !== undefined &&
-        err.status >= 200 &&
-        err.status < 300
-      ) {
-        const { username: _u, iconUrl: _i, ...rest } = opts;
-        return this.api.postMessage(rest);
-      }
-      throw err;
-    }
-  }
-
   async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
     const target = this.mustParse(conversationKey);
     const threadTs = this.replyThreadTs(conversationKey);
@@ -848,12 +819,11 @@ export class SlackTransport implements ChannelTransport {
       blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
       text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
     }
-    const res = await this.postMessageAs({
+    const res = await this.api.postMessage({
       channel: target.channelId,
       text,
       threadTs,
       blocks,
-      ...slackIdentityOverride(message.sender),
     });
     return { conversationKey, messageId: res.ts };
   }
@@ -932,12 +902,11 @@ export class SlackTransport implements ChannelTransport {
       })),
     });
     const threadTs = this.replyThreadTs(conversationKey);
-    const res = await this.postMessageAs({
+    const res = await this.api.postMessage({
       channel: target.channelId,
       text,
       threadTs,
       blocks,
-      ...slackIdentityOverride(gate.sender),
     });
     // The returned ref must round-trip through the inbound click:
     // `parseBlockActions` rebuilds the conversationKey from
