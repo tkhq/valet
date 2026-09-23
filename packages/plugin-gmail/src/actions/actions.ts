@@ -70,6 +70,11 @@ function encodeHeader(value: string): string {
   return `=?UTF-8?B?${btoa(binary)}?=`;
 }
 
+/** Normalize bare LF/CR to CRLF so multipart part bodies stay RFC 5322 clean. */
+function toCrlf(value: string): string {
+  return value.replace(/\r\n|\r|\n/g, '\r\n');
+}
+
 function buildMimeMessage(opts: {
   to: string[];
   cc?: string[];
@@ -87,7 +92,11 @@ function buildMimeMessage(opts: {
   lines.push(`Subject: ${encodeHeader(opts.subject)}`);
   lines.push('MIME-Version: 1.0');
 
-  if (opts.bodyHtml === undefined) {
+  // An empty bodyHtml would emit a blank text/html alternative, which mail
+  // clients prefer over the plain-text part — the recipient would see an
+  // empty email. The schemas reject empty bodyHtml; this guard also keeps
+  // the builder itself safe.
+  if (!opts.bodyHtml) {
     lines.push('Content-Type: text/plain; charset="UTF-8"');
     lines.push('Content-Transfer-Encoding: 8bit');
     if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
@@ -106,12 +115,12 @@ function buildMimeMessage(opts: {
   lines.push('Content-Type: text/plain; charset="UTF-8"');
   lines.push('Content-Transfer-Encoding: 8bit');
   lines.push('');
-  lines.push(opts.body);
+  lines.push(toCrlf(opts.body));
   lines.push(`--${boundary}`);
   lines.push('Content-Type: text/html; charset="UTF-8"');
   lines.push('Content-Transfer-Encoding: 8bit');
   lines.push('');
-  lines.push(opts.bodyHtml);
+  lines.push(toCrlf(opts.bodyHtml));
   lines.push(`--${boundary}--`);
   return lines.join('\r\n');
 }
@@ -282,7 +291,11 @@ const sendEmail = action(
     subject: Type.String({ description: 'Email subject line.' }),
     body: Type.String({ description: 'Plain-text body of the email.' }),
     bodyHtml: Type.Optional(
-      Type.String({ description: 'Optional HTML body. Gmail receives plain-text and HTML MIME alternatives.' }),
+      Type.String({
+        minLength: 1,
+        description:
+          'Optional HTML body; must be non-empty when provided. Gmail receives plain-text and HTML MIME alternatives.',
+      }),
     ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
@@ -597,7 +610,11 @@ const createDraft = action(
     subject: Type.String({ description: 'Email subject line.' }),
     body: Type.String({ description: 'Plain-text body of the draft.' }),
     bodyHtml: Type.Optional(
-      Type.String({ description: 'Optional HTML body. Gmail receives plain-text and HTML MIME alternatives.' }),
+      Type.String({
+        minLength: 1,
+        description:
+          'Optional HTML body; must be non-empty when provided. Gmail receives plain-text and HTML MIME alternatives.',
+      }),
     ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
@@ -780,7 +797,11 @@ const updateDraft = action(
     subject: Type.String({ description: 'Email subject line.' }),
     body: Type.String({ description: 'New plain-text body of the draft.' }),
     bodyHtml: Type.Optional(
-      Type.String({ description: 'Optional HTML body. Gmail receives plain-text and HTML MIME alternatives.' }),
+      Type.String({
+        minLength: 1,
+        description:
+          'Optional HTML body; must be non-empty when provided. Gmail receives plain-text and HTML MIME alternatives.',
+      }),
     ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),

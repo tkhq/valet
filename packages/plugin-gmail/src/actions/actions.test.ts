@@ -145,6 +145,47 @@ describe('gmail actions', () => {
     expect(result.success).toBe(true);
   });
 
+  it('send_email falls back to plain-text MIME when bodyHtml is empty', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'm1', threadId: 't1', labelIds: ['SENT'] }),
+    );
+
+    const result = await action('gmail.send_email').execute(
+      { to: 'a@example.com', subject: 'Hi', body: 'hello', bodyHtml: '' },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expectPlainTextMime(rawMime(init), 'hello');
+    expect(result.success).toBe(true);
+  });
+
+  it('send_email normalizes bare LF to CRLF in multipart part bodies', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'm1', threadId: 't1', labelIds: ['SENT'] }),
+    );
+
+    const result = await action('gmail.send_email').execute(
+      {
+        to: 'a@example.com',
+        subject: 'Hi',
+        body: 'line one\nline two',
+        bodyHtml: '<p>line one</p>\n<p>line two</p>',
+      },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const mime = rawMime(init);
+    expectMultipartAlternativeMime(
+      mime,
+      'line one\r\nline two',
+      '<p>line one</p>\r\n<p>line two</p>',
+    );
+    expect(mime).not.toMatch(/[^\r]\n/);
+    expect(result.success).toBe(true);
+  });
+
   it('send_email maps a 401 response to a Gmail API error', async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ error: { message: 'Invalid Credentials' } }), { status: 401 }),

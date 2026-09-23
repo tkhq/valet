@@ -10,7 +10,7 @@ Use these actions to read, compose, and manage Gmail messages and drafts on beha
 ## Messages
 
 ### `gmail.send_email`
-Send an email. Set optional `bodyHtml` to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. Supports `cc`, `bcc`, and threading via `replyToMessageId` (which sets `In-Reply-To`/`References` and places the reply in the original thread).
+Send an email. Set optional `bodyHtml` (must be non-empty) to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. Supports `cc`, `bcc`, and threading via `replyToMessageId` (which sets `In-Reply-To`/`References` and places the reply in the original thread).
 
 ```json
 {
@@ -94,7 +94,7 @@ Risk: **high**.
 ## Drafts
 
 ### `gmail.create_draft`
-Create a draft without sending. Set optional `bodyHtml` to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. Prefer this over `send_email` when the user should review before sending. Supports threading via `replyToMessageId`.
+Create a draft without sending. Set optional `bodyHtml` (must be non-empty) to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. Prefer this over `send_email` when the user should review before sending. Supports threading via `replyToMessageId`.
 
 ```json
 {
@@ -133,7 +133,7 @@ Risk: **low**.
 ---
 
 ### `gmail.update_draft`
-Fully replace a draft's contents (subject, body, recipients). Set optional `bodyHtml` to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. This is a full overwrite, not a patch.
+Fully replace a draft's contents (subject, body, recipients). Set optional `bodyHtml` (must be non-empty) to include an HTML version. Gmail receives `body` and `bodyHtml` as MIME alternatives. This is a full overwrite, not a patch.
 
 ```json
 {
