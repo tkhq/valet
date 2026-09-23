@@ -95,6 +95,7 @@ function buildMimeMessage(opts: {
   bcc?: string[];
   subject: string;
   body: string;
+  bodyHtml?: string;
   inReplyTo?: string | null;
   references?: string | null;
 }): string {
@@ -107,7 +108,10 @@ function buildMimeMessage(opts: {
   lines.push(`Subject: ${encodeHeader(sanitizeHeaderValue(opts.subject))}`);
   lines.push('MIME-Version: 1.0');
 
-  const bodyHtml = renderMarkdownToHtml(opts.body);
+  // An explicit non-blank bodyHtml overrides Markdown rendering. The schemas
+  // reject blank bodyHtml, but preserve the safe Markdown path if a caller
+  // bypasses validation.
+  const bodyHtml = opts.bodyHtml?.trim() ? opts.bodyHtml : renderMarkdownToHtml(opts.body);
   const boundary = `valet-${crypto.randomUUID()}`;
   lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
   if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
@@ -160,6 +164,7 @@ async function prepareMimeRequest(
     to: string | string[];
     subject: string;
     body: string;
+    bodyHtml?: string;
     cc?: string[];
     bcc?: string[];
     replyToMessageId?: string;
@@ -185,6 +190,7 @@ async function prepareMimeRequest(
       bcc: args.bcc,
       subject: args.subject,
       body: args.body,
+      bodyHtml: args.bodyHtml,
       inReplyTo,
       references,
     }),
@@ -289,7 +295,12 @@ const sendEmail = action(
       description: 'Recipient email address, or an array of recipient email addresses.',
     }),
     subject: Type.String({ description: 'Email subject line.' }),
-    body: Type.String({ description: 'Markdown body of the email. Gmail receives it as text/plain and rendered text/html MIME alternatives.' }),
+    body: Type.String({ description: 'Markdown body of the email. Gmail receives it as text/plain and rendered text/html MIME alternatives unless bodyHtml is provided.' }),
+    bodyHtml: Type.Optional(Type.String({
+      minLength: 1,
+      pattern: '\\S',
+      description: 'Optional HTML body. It must contain non-whitespace content. When provided, it replaces the rendered Markdown HTML alternative.',
+    })),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -303,7 +314,7 @@ const sendEmail = action(
   id: 'gmail.send_email',
   name: 'Send Email',
   description:
-    'Sends an email from the authenticated Gmail account. Gmail preserves body as text/plain and renders Markdown as text/html. Supports cc/bcc and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
+    'Sends an email from the authenticated Gmail account. Gmail sends Markdown body as text/plain and safe rendered HTML unless non-blank bodyHtml overrides the HTML part. Supports cc/bcc and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
@@ -601,7 +612,12 @@ const createDraft = action(
       description: 'Recipient email address, or an array of recipient email addresses.',
     }),
     subject: Type.String({ description: 'Email subject line.' }),
-    body: Type.String({ description: 'Markdown body of the draft. Gmail receives it as text/plain and rendered text/html MIME alternatives.' }),
+    body: Type.String({ description: 'Markdown body of the draft. Gmail receives it as text/plain and rendered text/html MIME alternatives unless bodyHtml is provided.' }),
+    bodyHtml: Type.Optional(Type.String({
+      minLength: 1,
+      pattern: '\\S',
+      description: 'Optional HTML body. It must contain non-whitespace content. When provided, it replaces the rendered Markdown HTML alternative.',
+    })),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -614,7 +630,7 @@ const createDraft = action(
   id: 'gmail.create_draft',
   name: 'Create Draft',
   description:
-    'Creates a Gmail draft (does NOT send). Gmail preserves body as text/plain and renders Markdown as text/html. Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, or deleted with delete_draft. Supports threading via replyToMessageId.',
+    'Creates a Gmail draft (does NOT send). Gmail sends Markdown body as text/plain and safe rendered HTML unless non-blank bodyHtml overrides the HTML part. Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, or deleted with delete_draft. Supports threading via replyToMessageId.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -781,7 +797,12 @@ const updateDraft = action(
       description: 'Recipient email address, or an array of recipient email addresses.',
     }),
     subject: Type.String({ description: 'Email subject line.' }),
-    body: Type.String({ description: 'Markdown body of the draft. Gmail receives it as text/plain and rendered text/html MIME alternatives.' }),
+    body: Type.String({ description: 'Markdown body of the draft. Gmail receives it as text/plain and rendered text/html MIME alternatives unless bodyHtml is provided.' }),
+    bodyHtml: Type.Optional(Type.String({
+      minLength: 1,
+      pattern: '\\S',
+      description: 'Optional HTML body. It must contain non-whitespace content. When provided, it replaces the rendered Markdown HTML alternative.',
+    })),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -792,7 +813,7 @@ const updateDraft = action(
   id: 'gmail.update_draft',
   name: 'Update Draft',
   description:
-    'Replaces the contents of an existing Gmail draft. Gmail preserves body as text/plain and renders Markdown as text/html. The new contents fully overwrite the old draft (this is a full replace, not a patch). Use this when iterating on an AI-composed draft before sending.',
+    'Replaces the contents of an existing Gmail draft. Gmail sends Markdown body as text/plain and safe rendered HTML unless non-blank bodyHtml overrides the HTML part. The new contents fully overwrite the old draft (this is a full replace, not a patch). Use this when iterating on an AI-composed draft before sending.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;

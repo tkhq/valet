@@ -142,16 +142,51 @@ describe('gmail actions', () => {
   });
 
   it.each(['gmail.send_email', 'gmail.create_draft', 'gmail.update_draft'])(
-    '%s rejects removed bodyHtml so body remains the only source',
+    '%s accepts non-blank bodyHtml and rejects blank bodyHtml',
     (id) => {
       const schema = action(id).parameters;
       const args = id === 'gmail.update_draft'
         ? { draftId: 'd1', to: 'a@example.com', subject: 'Hi', body: 'hello' }
         : { to: 'a@example.com', subject: 'Hi', body: 'hello' };
-      expect(Value.Check(schema, args)).toBe(true);
-      expect(Value.Check(schema, { ...args, bodyHtml: '<p>ignored</p>' })).toBe(false);
+      expect(Value.Check(schema, { ...args, bodyHtml: '<p>HTML</p>' })).toBe(true);
+      expect(Value.Check(schema, { ...args, bodyHtml: '' })).toBe(false);
+      expect(Value.Check(schema, { ...args, bodyHtml: ' \n\t ' })).toBe(false);
     },
   );
+
+  it.each([
+    ['gmail.send_email', { id: 'm1', threadId: 't1', labelIds: ['SENT'] }],
+    ['gmail.create_draft', { id: 'd1', message: { id: 'm1', threadId: 't1' } }],
+    ['gmail.update_draft', { id: 'd1', message: { id: 'm1', threadId: 't1' } }],
+  ])('%s uses non-blank bodyHtml verbatim instead of rendering Markdown', async (id, response) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, response));
+    const args = id === 'gmail.update_draft'
+      ? { draftId: 'd1', to: 'a@example.com', subject: 'Hi', body: '# Markdown <em>source</em>', bodyHtml: '<section>Explicit HTML</section>' }
+      : { to: 'a@example.com', subject: 'Hi', body: '# Markdown <em>source</em>', bodyHtml: '<section>Explicit HTML</section>' };
+
+    await action(id).execute(args, pluginCtx());
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const mime = rawMime(init);
+    expectMultipartAlternativeMime(mime, '# Markdown <em>source</em>', '<section>Explicit HTML</section>');
+    expect(mime).not.toContain('&lt;em&gt;source');
+  });
+
+  it.each([
+    ['gmail.send_email', { id: 'm1', threadId: 't1', labelIds: ['SENT'] }],
+    ['gmail.create_draft', { id: 'd1', message: { id: 'm1', threadId: 't1' } }],
+    ['gmail.update_draft', { id: 'd1', message: { id: 'm1', threadId: 't1' } }],
+  ])('%s falls back to safe Markdown rendering for blank bodyHtml', async (id, response) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, response));
+    const args = id === 'gmail.update_draft'
+      ? { draftId: 'd1', to: 'a@example.com', subject: 'Hi', body: '<script>unsafe</script>', bodyHtml: ' \n\t ' }
+      : { to: 'a@example.com', subject: 'Hi', body: '<script>unsafe</script>', bodyHtml: ' \n\t ' };
+
+    await action(id).execute(args, pluginCtx());
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expectMultipartAlternativeMime(rawMime(init), '<script>unsafe</script>', '<p>&lt;script&gt;unsafe&lt;/script&gt;</p>\n');
+  });
 
   it.each([
     ['gmail.send_email', { id: 'm1', threadId: 't1', labelIds: ['SENT'] }],
@@ -211,6 +246,7 @@ describe('gmail actions', () => {
         to: 'a@example.com',
         subject: 'Hi',
         body: 'line one\nline two',
+        bodyHtml: '<p>line one</p>\n<p>line two</p>',
       },
       pluginCtx(),
     );
@@ -220,7 +256,7 @@ describe('gmail actions', () => {
     expectMultipartAlternativeMime(
       mime,
       'line one\r\nline two',
-      '<p>line one<br>\r\nline two</p>\r\n',
+      '<p>line one</p>\r\n<p>line two</p>',
     );
     expect(mime).not.toMatch(/(^|[^\r])\n/);
     expect(result.success).toBe(true);
