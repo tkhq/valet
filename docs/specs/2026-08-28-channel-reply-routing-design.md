@@ -139,15 +139,21 @@ context. The agent must call a channel action to post.
 **Dropped-reply feedback (TKAI-553).** When a terminal manual-delivery turn
 contains assistant text but no successful channel action, the host submits one
 `channel.reply_dropped` signal on the same assistant thread. The signal uses
-manual delivery, bypasses overheard digests, and tells the agent to call the
-origin service's `reply_to_origin` action. A successful origin reply,
-reaction, same-origin send, or DM suppresses the signal. The submission ID
-makes duplicate terminal events idempotent. A feedback-triggered turn cannot
-submit another feedback signal.
+manual delivery and bypasses overheard digests. It tells the agent to do nothing
+for intentional silence. It tells the agent to call `reply_to_origin` only
+when it intended to reply. The thread-scoped submission ID limits this reminder
+to one per assistant thread. A feedback-triggered turn cannot submit another
+feedback signal.
+
+A successful text or file origin reply, reaction, send, or DM suppresses the
+signal. A successful same-service send suppresses it for every destination.
+For a Slack origin, successful personal Slack posts, DMs, file uploads, and
+reactions also suppress it.
 
 If an addressed first-response send fails before text lands, the host submits
-the same feedback signal with a bounded, redacted reason. It does not change
-the existing first-response selection or delivery rules.
+a queue-item-scoped feedback signal with an allowlisted public reason. A
+transient feedback-admission failure remains retryable without a second normal
+send. This path does not change first-response selection or delivery rules.
 
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the
@@ -287,7 +293,7 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
 ## Testing
 
 - **Engine.** Channel-signal origins reach the tool context.
-- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. A swallowed manual-delivery response submits one feedback signal. Successful channel actions suppress it. Failed addressed delivery submits one actionable signal. Duplicate terminal events and feedback turns do not create extra signals.
+- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. Swallowed manual turns submit at most one feedback signal per assistant thread. Successful bot and connected-user delivery actions suppress it. Failed addressed delivery submits one actionable signal. Admission retries do not repeat the normal send. Duplicate terminal events and feedback turns do not create extra signals.
   Command results and gate cards retain their existing surface checks.
 - **Slack.** `reply_to_origin` posts text exactly once.
   `reply_file_to_origin` uploads a sandbox file exactly once.
@@ -300,9 +306,11 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
 ## Deviations (Part 1, as built)
 
 - **Only the first addressed response posts automatically.** Final-message fallback delivery remains removed. A successful explicit origin reply anywhere in the submission suppresses the automatic copy. A pending call anywhere in the submission defers it. When all calls fail, the host falls back to the original first text.
-- **`child.settled` inherits the spawning submission's origin.** The parent
-  can post the child result with `reply_to_origin`. The settlement itself does
-  not post.
+- **`child.settled` inherits the spawning submission's origin.** A manual
+  settlement does not post automatically. It uses the same once-per-thread
+  silence reminder as other manual turns. PR #772 is the complementary owner
+  for durable automatic child replies. Its dispatcher must bypass this live
+  feedback path and retain provider send errors for retry.
 - **Telegram has an explicit text reply action.** `telegram.reply_to_origin`
   sends text to the origin DM through the organization bot credential.
 - **Slack text uses the CommonMark converter.** The channel transport,

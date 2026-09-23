@@ -196,6 +196,12 @@ function successfulToolCall(
   );
 }
 
+function isOriginReplyAction(toolId: string, channelType?: string): boolean {
+  const prefix = channelType === undefined ? toolId.slice(0, toolId.lastIndexOf(".") + 1) : `${channelType}.`;
+  if (!prefix || !toolId.startsWith(prefix)) return false;
+  return /^reply(?:_[a-z0-9]+)*_to_origin$/.test(toolId.slice(prefix.length));
+}
+
 /** Classify explicit origin delivery across every assistant entry in a submission. */
 function originReplyState(entries: SessionEntry[], queueItemId: string): OriginReplyState {
   const calls = entries.flatMap((entry) => {
@@ -203,31 +209,44 @@ function originReplyState(entries: SessionEntry[], queueItemId: string): OriginR
     return (entry.parts ?? []).filter((part) => {
       if (part.type !== "tool_call" || !isRecord(part.args)) return false;
       const toolId = part.args.tool_id;
-      return typeof toolId === "string" && toolId.endsWith(".reply_to_origin");
+      return typeof toolId === "string" && isOriginReplyAction(toolId);
     });
   });
   if (calls.length === 0) return "none";
-  if (
-    calls.some(
-      (part) =>
-        part.type === "tool_call" && successfulToolCall(part),
-    )
-  ) {
+  if (calls.some((part) => part.type === "tool_call" && successfulToolCall(part))) {
     return "succeeded";
   }
   if (calls.some((part) => part.type === "tool_call" && part.status === "running")) return "pending";
   return "failed";
 }
 
-function sameOriginSend(toolId: string, args: Record<string, unknown>, origin: ChannelOrigin): boolean {
-  if (toolId !== `${origin.channelType}.send_message`) return false;
-  const params = isRecord(args.params) ? args.params : undefined;
-  if (!params || typeof params.channel !== "string") return false;
-  const prefix = `${origin.channelType}:`;
-  if (!origin.threadKey.startsWith(prefix)) return false;
-  const [channel, threadTs] = origin.threadKey.slice(prefix.length).split(":", 2);
-  if (params.channel !== channel) return false;
-  return threadTs === undefined || params.thread_ts === threadTs;
+const SLACK_USER_DELIVERY_ACTIONS = new Set([
+  "add_reaction",
+  "post_message",
+  "send_dm",
+  "send_message",
+  "upload_file",
+]);
+
+function isChannelDeliveryAction(toolId: string, origin: ChannelOrigin): boolean {
+  const separator = toolId.lastIndexOf(".");
+  if (separator === -1) return false;
+  const service = toolId.slice(0, separator);
+  const action = toolId.slice(separator + 1);
+  if (service === origin.channelType) {
+    return (
+      isOriginReplyAction(toolId, origin.channelType) ||
+      action === "react_to_origin" ||
+      action === "send_message" ||
+      action === "dm_owner" ||
+      action === "dm_user"
+    );
+  }
+  return (
+    origin.channelType === "slack" &&
+    (service === "slack_user" || service === "slack-user") &&
+    SLACK_USER_DELIVERY_ACTIONS.has(action)
+  );
 }
 
 /** True when this submission successfully posted, reacted, or sent a DM. */
@@ -241,14 +260,7 @@ function turnCompletedChannelAction(
     return (entry.parts ?? []).some((part) => {
       if (part.type !== "tool_call" || !successfulToolCall(part) || !isRecord(part.args)) return false;
       const toolId = part.args.tool_id;
-      if (typeof toolId !== "string" || !toolId.startsWith(`${origin.channelType}.`)) return false;
-      return (
-        toolId.endsWith(".reply_to_origin") ||
-        toolId.endsWith(".react_to_origin") ||
-        toolId.endsWith(".dm_owner") ||
-        toolId.endsWith(".dm_user") ||
-        sameOriginSend(toolId, part.args, origin)
-      );
+      return typeof toolId === "string" && isChannelDeliveryAction(toolId, origin);
     });
   });
 }
@@ -263,14 +275,22 @@ function turnPromptIsFeedback(entries: SessionEntry[], queueItemId: string): boo
   );
 }
 
-function boundedDeliveryReason(error: unknown): string {
-  const reason = error instanceof Error ? error.message : String(error);
-  const safe = reason
-    .replace(/https?:\/\/\S+/gi, "[redacted-url]")
-    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, "[redacted-value]")
-    .replace(/\s+/g, " ")
-    .trim();
-  return safe.slice(0, 160) || "unknown transport error";
+const PUBLIC_DELIVERY_REASONS = [
+  "channel_archived", "channel_not_found", "invalid_auth", "not_authed",
+  "not_in_channel", "rate_limited", "ratelimited",
+] as const;
+
+/** Convert an untrusted provider error into a public, allowlisted reason. */
+function publicDeliveryReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const normalized = message.toLowerCase();
+  const code = PUBLIC_DELIVERY_REASONS.find((candidate) =>
+    new RegExp(`(^|[^a-z0-9_])${candidate}([^a-z0-9_]|$)`).test(normalized),
+  );
+  if (code === "ratelimited") return "rate_limited";
+  if (code !== undefined) return code;
+  if (/\b(?:e?timedout|timed out|timeout)\b/.test(normalized)) return "provider_timeout";
+  return "provider_error";
 }
 
 /** Feature-detects the telegram-shaped `getMe()` probe without a broad cast. */
@@ -353,6 +373,8 @@ export class ChannelHost {
   private outboundChains = new Map<string, Promise<void>>();
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
+  /** Failed addressed sends whose recovery signal is not admitted yet. */
+  private firstReplyFailures = new Map<string, string>();
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
    * (Task 8's locked decision), never persisted. */
   private webhookSecrets = new Map<string, string>();
@@ -746,10 +768,12 @@ export class ChannelHost {
         !turnPromptIsFeedback(entries, queueItemId)
       ) {
         await this.submitReplyFeedback(sessionId, thread.key, origin, {
-          dispatchId: `feedback:reply-dropped:${queueItemId}`,
+          dispatchId: `feedback:overheard-dropped:${threadId}`,
           body:
             `Your response was not posted to ${origin.threadKey}. ` +
-            `Call ${origin.channelType}.reply_to_origin with the response text to post it.`,
+            "If you intended to stay silent, do nothing. " +
+            `Only call ${origin.channelType}.reply_to_origin if you intended to reply. ` +
+            "This reminder is sent once per assistant thread.",
         });
       }
       return;
@@ -761,7 +785,14 @@ export class ChannelHost {
     const target = this.channelThreadFor(origin.threadKey);
     if (!target) return;
     if (this.delivered.has(dedupeKey)) return;
-    this.markDelivered(dedupeKey);
+    const priorFailure = this.firstReplyFailures.get(dedupeKey);
+    if (priorFailure !== undefined) {
+      if (await this.submitFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, priorFailure)) {
+        this.forgetFirstReplyFailure(dedupeKey);
+        this.markDelivered(dedupeKey);
+      }
+      return;
+    }
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.assistantSenderIdentity(sessionId);
@@ -770,21 +801,39 @@ export class ChannelHost {
         markdown: first.content,
         ...(sender !== undefined ? { sender } : {}),
       });
+      this.markDelivered(dedupeKey);
     } catch (error) {
-      const reason = boundedDeliveryReason(error);
+      // This is the live first-response path. A durable child dispatcher must
+      // keep provider errors observable so it can retain and retry its intent.
+      const reason = publicDeliveryReason(error);
+      console.error("[channels] addressed reply send failed", error);
+      this.rememberFirstReplyFailure(dedupeKey, reason);
       try {
         const orgId = this.orgId ?? (await this.deps.resolveOrgId());
         await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, reason);
       } catch (dropError) {
         console.error("[channels] reply failure drop-log failed", dropError);
       }
-      await this.submitReplyFeedback(sessionId, thread.key, origin, {
-        dispatchId: `feedback:reply-failed:${queueItemId}`,
-        body:
-          `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. ` +
-          `Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
-      });
+      if (await this.submitFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason)) {
+        this.forgetFirstReplyFailure(dedupeKey);
+        this.markDelivered(dedupeKey);
+      }
     }
+  }
+
+  private async submitFailedReplyFeedback(
+    sessionId: string,
+    threadKey: string,
+    queueItemId: string,
+    origin: ChannelOrigin,
+    reason: string,
+  ): Promise<boolean> {
+    return this.submitReplyFeedback(sessionId, threadKey, origin, {
+      dispatchId: `feedback:reply-failed:${queueItemId}`,
+      body:
+        `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. ` +
+        `Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
+    });
   }
 
   /** Submit one manual, digest-exempt recovery turn on the same assistant thread. */
@@ -793,10 +842,10 @@ export class ChannelHost {
     threadKey: string,
     origin: ChannelOrigin,
     feedback: { dispatchId: string; body: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const session = this.deps.engineHost.liveSession(sessionId);
-      if (!session) return;
+      if (!session) return false;
       await session.thread(threadKey).submitPrompt(
         {
           kind: "signal",
@@ -812,8 +861,10 @@ export class ChannelHost {
         },
         { dispatchId: feedback.dispatchId },
       );
+      return true;
     } catch (error) {
       console.error("[channels] reply-dropped feedback failed", error);
+      return false;
     }
   }
 
@@ -843,6 +894,18 @@ export class ChannelHost {
       return { channelType, conversationKey: rebuilt };
     }
     return { channelType, conversationKey: `${channelType}:dm:${rest}` };
+  }
+
+  private forgetFirstReplyFailure(dedupeKey: string): void {
+    this.firstReplyFailures.delete(dedupeKey);
+  }
+
+  private rememberFirstReplyFailure(dedupeKey: string, reason: string): void {
+    if (!this.firstReplyFailures.has(dedupeKey) && this.firstReplyFailures.size >= DELIVERED_CAP) {
+      const evict = this.firstReplyFailures.keys().next().value;
+      if (evict !== undefined) this.firstReplyFailures.delete(evict);
+    }
+    this.firstReplyFailures.set(dedupeKey, reason);
   }
 
   private markDelivered(dedupeKey: string): void {

@@ -253,15 +253,25 @@ check; the follow-router swallows that `ConflictError` as a clean dedup.
 
 A terminal manual-delivery turn that writes assistant text without a successful
 channel action submits one `channel.reply_dropped` signal on the same assistant
-thread. The signal tells the agent to call `slack.reply_to_origin`. It uses
-manual delivery and bypasses overheard digests. Its submission ID deduplicates
-terminal-event redelivery. A feedback-triggered turn cannot submit more
-feedback. Successful origin replies, reactions, same-origin sends, and DMs
-suppress the signal.
+thread. The thread-scoped submission ID limits the reminder to one per
+assistant thread. The signal uses manual delivery and bypasses overheard
+digests. It tells the agent to do nothing for intentional silence. It tells the
+agent to call `slack.reply_to_origin` only when it intended to reply. A
+feedback-triggered turn cannot submit more feedback.
 
-An addressed automatic send failure submits equivalent feedback when no text
-lands. The feedback includes a bounded, redacted transport reason. Addressed
-first-response behavior does not otherwise change.
+Successful Slack text replies, file replies, reactions, sends, and DMs suppress
+the signal for every destination. Successful personal Slack posts, DMs, file
+uploads, and reactions also suppress it.
+
+An addressed automatic send failure submits queue-item-scoped feedback when no
+text lands. The feedback includes an allowlisted public transport reason. A
+transient admission failure can retry the feedback without repeating the normal
+send. Addressed first-response behavior does not otherwise change.
+
+Manual `child.settled` turns use the same once-per-thread reminder and remain
+non-automatic. PR #772 separately owns durable automatic child completion. Its
+dispatcher must retain send errors and must not route automatic failures through
+this live best-effort feedback path.
 
 ### First-turn seed hardening (TKAI-284, added 2026-09-01)
 
