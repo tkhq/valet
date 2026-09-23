@@ -266,7 +266,7 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   afterEach(async () => {
-    host.stopOutbound();
+    await host.stop();
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
@@ -280,7 +280,6 @@ describe("ChannelHost outbound delivery", () => {
     origin: { channelType: string; threadKey: string; reply: "auto" | "manual" };
     content?: string;
     parts?: Extract<SessionEntry, { type: "message" }>["parts"];
-    beforeEvent?: () => void;
   }) {
     const session = await defaultAssistantSessionFor(
       { db: testDb.appDb, engineHost },
@@ -301,12 +300,17 @@ describe("ChannelHost outbound delivery", () => {
         queueItemId: args.queueItemId, stopReason: "end_turn", parts: args.parts,
       },
     ]);
-    args.beforeEvent?.();
     await eventStream.append(
       { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId, reason: "end_turn" } },
       `terminal-${randomUUID()}`,
     );
     return { session, threadId };
+  }
+
+  async function replyFeedbackEntries(sessionId: string, threadId: string) {
+    return (await engineStore.getEntries(sessionId, threadId)).filter(
+      (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
+    );
   }
 
   async function seedWorkflowGate(args: {
@@ -605,15 +609,12 @@ describe("ChannelHost outbound delivery", () => {
     await eventStream.append(terminal, `overheard-duplicate-${randomUUID()}`);
 
     await vi.waitFor(async () => {
-      const entries = await engineStore.getEntries(session.id, threadId);
-      const feedback = entries.filter(
-        (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-      );
+      const feedback = await replyFeedbackEntries(session.id, threadId);
       expect(feedback).toHaveLength(1);
       expect(feedback[0]?.type === "message" ? feedback[0].content : "").toContain("was not posted");
       const body = feedback[0]?.type === "message" ? feedback[0].content : "";
       expect(body).toContain("If you intended to stay silent, do nothing");
-      expect(body).toContain("Only call keyed.reply_to_origin if you intended to reply");
+      expect(body).toContain("current signal origin service's reply_to_origin action");
       expect(body).not.toContain("with the response text to post it");
       expect(feedback[0]?.type === "message" ? feedback[0].signal : undefined).toMatchObject({
         tagName: "delivery_failure",
@@ -623,10 +624,24 @@ describe("ChannelHost outbound delivery", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(keyedTransport.sent).toHaveLength(0);
-    const entries = await engineStore.getEntries(session.id, threadId);
-    expect(entries.filter(
-      (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-    )).toHaveLength(1);
+    expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(1);
+  });
+
+  it("deduplicates manual reminders cleanly across two origins on one assistant thread", async () => {
+    faux.setResponses([fauxAssistantMessage("noted")]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const first = await emitTerminalTurn({
+      queueItemId: "qi-origin-one",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+    });
+    await emitTerminalTurn({
+      queueItemId: "qi-origin-two",
+      origin: { channelType: "fake", threadKey: "fake:99", reply: "manual" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(await replyFeedbackEntries(first.session.id, first.threadId)).toHaveLength(1);
+    expect(error.mock.calls.some(([message]) => message === "[channels] reply-dropped feedback failed")).toBe(false);
   });
 
   it("keeps manual child settlements off-channel and nudges only once per assistant thread", async () => {
@@ -658,10 +673,7 @@ describe("ChannelHost outbound delivery", () => {
     }
 
     await vi.waitFor(async () => {
-      const entries = await engineStore.getEntries(session.id, threadId);
-      expect(entries.filter(
-        (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-      )).toHaveLength(1);
+      expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(1);
     });
     expect(keyedTransport.sent).toHaveLength(0);
   });
@@ -699,17 +711,14 @@ describe("ChannelHost outbound delivery", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(keyedTransport.sent.map((sent) => sent.message.markdown)).toEqual(["Recovered reply"]);
-    const entries = await engineStore.getEntries(session.id, threadId);
-    expect(entries.filter(
-      (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-    )).toHaveLength(1);
+    expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(1);
   });
 
   it.each([
     { toolId: "keyed.reply_to_origin", params: { text: "done" } },
     { toolId: "keyed.reply_file_to_origin", params: { path: "/workspace/report.pdf" } },
     { toolId: "keyed.react_to_origin", params: { emoji: "eyes" } },
-    { toolId: "keyed.send_message", params: { channel: "D100", text: "done" } },
+    { toolId: "keyed.send_message", params: { channel: "D999", text: "done" } },
     { toolId: "keyed.dm_owner", params: { text: "done" } },
     { toolId: "keyed.dm_user", params: { user: "U1", text: "done" } },
   ])("successful $toolId suppresses manual-turn feedback", async ({ toolId, params }) => {
@@ -724,27 +733,7 @@ describe("ChannelHost outbound delivery", () => {
     });
 
     await new Promise((resolve) => setTimeout(resolve, 200));
-    const entries = await engineStore.getEntries(session.id, threadId);
-    expect(entries.some(
-      (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-    )).toBe(false);
-  });
-
-  it("a successful same-service send suppresses feedback regardless of destination", async () => {
-    const { session, threadId } = await emitTerminalTurn({
-      queueItemId: "qi-other-send",
-      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
-      parts: [{
-        type: "tool_call", callId: "tc-other-send", toolName: "call_tool", status: "completed",
-        args: { tool_id: "keyed.send_message", params: { channel: "D999", text: "done" } },
-        result: { text: "sent", details: { ok: true } },
-      }],
-    });
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const entries = await engineStore.getEntries(session.id, threadId);
-    expect(entries.some(
-      (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-    )).toBe(false);
+    expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(0);
   });
 
   it.each(["slack_user.post_message", "slack_user.send_dm", "slack_user.upload_file", "slack_user.add_reaction", "slack-user.send_message"])("successful connected-user action %s suppresses Slack feedback", async (toolId) => {
@@ -759,10 +748,7 @@ describe("ChannelHost outbound delivery", () => {
       }],
     });
     await new Promise((resolve) => setTimeout(resolve, 200));
-    const entries = await engineStore.getEntries(session.id, threadId);
-    expect(entries.some(
-      (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-    )).toBe(false);
+    expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(0);
   });
 
   it("creates one actionable feedback turn when addressed delivery fails", async () => {
@@ -810,44 +796,54 @@ describe("ChannelHost outbound delivery", () => {
       content: "first response",
     });
     await vi.waitFor(async () => {
-      const entries = await engineStore.getEntries(session.id, threadId);
-      const feedback = entries.find(
-        (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-      );
+      const feedback = (await replyFeedbackEntries(session.id, threadId))[0];
       expect(feedback?.type === "message" ? feedback.content : "").toContain(`Delivery failed: ${reason}`);
       expect(feedback?.type === "message" ? feedback.content : "").not.toContain(forbidden);
     });
   });
 
-  it("retries feedback admission without retrying the failed normal send", async () => {
+  it("retries feedback admission without another terminal event or normal send", async () => {
     faux.setResponses([fauxAssistantMessage("retrying")]);
     const send = vi.spyOn(keyedTransport, "send").mockRejectedValueOnce(new Error("rate_limited"));
     const admit = vi.spyOn(engineStore, "admitSubmission").mockRejectedValueOnce(new Error("database unavailable"));
-    const messageId = "feedback-admission-retry";
     const { session, threadId } = await emitTerminalTurn({
       queueItemId: "qi-feedback-admission-retry",
-      messageId,
       origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
       content: "first response",
     });
-    const terminal = {
-      sessionId: session.id, threadId, timestamp: Date.now(),
-      event: { type: "message_end" as const, threadId, messageId, reason: "end_turn" as const },
-    };
-    await vi.waitFor(() => {
-      expect(send).toHaveBeenCalledTimes(1);
-      expect(admit).toHaveBeenCalledTimes(1);
-    });
 
-    await eventStream.append(terminal, `feedback-admission-redelivery-${randomUUID()}`);
     await vi.waitFor(async () => {
-      const entries = await engineStore.getEntries(session.id, threadId);
-      expect(entries.filter(
-        (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",
-      )).toHaveLength(1);
+      expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(1);
     });
     expect(send).toHaveBeenCalledTimes(1);
     expect(admit).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps feedback admission and cancels backoff without retrying the normal send", async () => {
+    const send = vi.spyOn(keyedTransport, "send").mockRejectedValueOnce(new Error("rate_limited"));
+    const admit = vi.spyOn(engineStore, "admitSubmission").mockRejectedValue(new Error("database unavailable"));
+    await emitTerminalTurn({
+      queueItemId: "qi-feedback-admission-cap",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+      content: "first response",
+    });
+
+    await vi.waitFor(() => expect(admit).toHaveBeenCalledTimes(3));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(admit).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    admit.mockClear();
+    send.mockRejectedValueOnce(new Error("rate_limited"));
+    await emitTerminalTurn({
+      queueItemId: "qi-feedback-admission-shutdown",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+    });
+    await vi.waitFor(() => expect(admit).toHaveBeenCalledTimes(1), { interval: 1 });
+    await host.stop();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it("a web-UI submission's gate card stays off the channel (TKAI-323)", async () => {
@@ -885,10 +881,10 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it.each([
-    { behavior: "suppresses auto-post after a successful explicit reply", toolId: "slack.reply_to_origin", ok: true, expected: [] },
-    { behavior: "suppresses auto-post after a successful explicit file reply", toolId: "slack.reply_file_to_origin", ok: true, expected: [] },
-    { behavior: "falls back to auto-post after a failed explicit reply", toolId: "slack.reply_to_origin", ok: false, expected: ["internal copy of explicit reply"] },
-  ])("$behavior in production event order", async ({ toolId, ok, expected }) => {
+    { behavior: "suppresses auto-post after a successful explicit reply", toolId: "slack.reply_to_origin", ok: true, beforeToolEnd: [], expected: [] },
+    { behavior: "auto-posts first text after a successful explicit file reply", toolId: "slack.reply_file_to_origin", ok: true, beforeToolEnd: ["internal copy of explicit reply"], expected: ["internal copy of explicit reply"] },
+    { behavior: "falls back to auto-post after a failed explicit reply", toolId: "slack.reply_to_origin", ok: false, beforeToolEnd: [], expected: ["internal copy of explicit reply"] },
+  ])("$behavior in production event order", async ({ toolId, ok, beforeToolEnd, expected }) => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const assistantEntry: SessionEntry = {
@@ -932,7 +928,7 @@ describe("ChannelHost outbound delivery", () => {
     };
     await eventStream.append(messageEnd, `explicit-message-${ok}-${randomUUID()}`);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent).toHaveLength(0);
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(beforeToolEnd);
 
     const part = assistantEntry.type === "message" ? assistantEntry.parts?.[0] : undefined;
     if (!part || part.type !== "tool_call") throw new Error("missing reply tool call");

@@ -254,19 +254,21 @@ check; the follow-router swallows that `ConflictError` as a clean dedup.
 A terminal manual-delivery turn that writes assistant text without a successful
 channel action submits one `channel.reply_dropped` signal on the same assistant
 thread. The thread-scoped submission ID limits the reminder to one per
-assistant thread. The signal uses manual delivery and bypasses overheard
-digests. It tells the agent to do nothing for intentional silence. It tells the
-agent to call `slack.reply_to_origin` only when it intended to reply. A
-feedback-triggered turn cannot submit more feedback.
+assistant thread, even if later turns use another channel origin. The signal
+uses manual delivery and bypasses overheard digests. Its origin-agnostic body
+tells the agent to do nothing for intentional silence. It names the current
+signal origin's `reply_to_origin` action only when the agent intended to reply.
+A feedback-triggered turn cannot submit more feedback.
 
 Successful Slack text replies, file replies, reactions, sends, and DMs suppress
-the signal for every destination. Successful personal Slack posts, DMs, file
-uploads, and reactions also suppress it.
+the manual signal for every destination. Successful personal Slack posts, DMs,
+file uploads, and reactions also suppress the manual signal. An addressed file
+reply does not suppress the first assistant text. Only a text
+`reply_to_origin` call suppresses addressed automatic posting.
 
-An addressed automatic send failure submits queue-item-scoped feedback when no
-text lands. The feedback includes an allowlisted public transport reason. A
-transient admission failure can retry the feedback without repeating the normal
-send. Addressed first-response behavior does not otherwise change.
+An addressed automatic send failure submits queue-item-scoped feedback with an allowlisted public reason.
+The host makes three process-local admission attempts with bounded backoff. Shutdown cancels the retry.
+Attempts use one dispatch ID, never repeat the normal send, and do not survive process shutdown.
 
 Manual `child.settled` turns use the same once-per-thread reminder and remain
 non-automatic. PR #772 separately owns durable automatic child completion. Its

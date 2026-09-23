@@ -121,13 +121,14 @@ or the final result. The agent uses `reply_to_origin` for progress updates
 and results. Slack also provides `reply_file_to_origin` for sandbox files.
 The `react_to_origin` action remains the explicit reaction path.
 
-**One delivery.** The host evaluates origin-reply calls across every
-assistant entry in the submission, including text-less entries before the first
-eligible text. Any completed call with persisted `details.ok=true` owns
-delivery. Otherwise, any running call defers automatic delivery. Only after all
-attempted origin replies become terminal failures does the host post the
-original first eligible text once as a fallback. An aborted submission never
-posts this fallback. Event redelivery cannot post it twice.
+**One delivery.** The host evaluates text `reply_to_origin` calls across
+every assistant entry in the submission. This includes text-less entries before
+the first eligible text. Any completed text reply with persisted
+`details.ok=true` owns delivery. Otherwise, any running text reply defers
+automatic delivery. Only after all attempted text replies become terminal
+failures does the host post the original first eligible text once as a fallback.
+A file reply does not suppress this addressed first text. An aborted submission
+never posts this fallback. Event redelivery cannot post it twice.
 
 **Manual delivery and overheard turns.** A turn with `reply="manual"` has no
 automatic reply. Manual delivery does not itself mean the message is
@@ -141,19 +142,21 @@ contains assistant text but no successful channel action, the host submits one
 `channel.reply_dropped` signal on the same assistant thread. The signal uses
 manual delivery and bypasses overheard digests. It tells the agent to do nothing
 for intentional silence. It tells the agent to call `reply_to_origin` only
-when it intended to reply. The thread-scoped submission ID limits this reminder
-to one per assistant thread. A feedback-triggered turn cannot submit another
-feedback signal.
+when it intended to reply. The origin-agnostic body uses the signal's structured
+origin for that action. The thread-scoped submission ID limits this reminder to
+one per assistant thread, even if later turns use another channel origin. A
+feedback-triggered turn cannot submit another feedback signal.
 
 A successful text or file origin reply, reaction, send, or DM suppresses the
-signal. A successful same-service send suppresses it for every destination.
-For a Slack origin, successful personal Slack posts, DMs, file uploads, and
-reactions also suppress it.
+manual signal. A successful same-service send suppresses it for every
+destination. For a Slack origin, successful personal Slack posts, DMs, file
+uploads, and reactions also suppress it. These manual suppression rules do not
+change addressed first-response selection.
 
-If an addressed first-response send fails before text lands, the host submits
-a queue-item-scoped feedback signal with an allowlisted public reason. A
-transient feedback-admission failure remains retryable without a second normal
-send. This path does not change first-response selection or delivery rules.
+If an addressed first-response send fails before text lands, the host submits queue-item-scoped feedback.
+The feedback contains an allowlisted public reason. The host makes at most three process-local admission attempts.
+It waits 50 ms and then 100 ms between attempts. Shutdown cancels either wait.
+Attempts keep one dispatch ID and never repeat the normal send. This best-effort path does not survive shutdown.
 
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the

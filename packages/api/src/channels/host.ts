@@ -15,6 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
+  ConflictError,
   parseAssistantSessionId,
   SANDBOX_READY_TIMEOUT_MS,
   type ActionPlugin,
@@ -100,6 +101,7 @@ const DEDUP_CAP = 2048;
 const UNLINKED_REPLY_COOLDOWN_MS = 60 * 60_000;
 const DELIVERED_CAP = 2048;
 const VERIFY_FAILED_LOG_COOLDOWN_MS = 60_000;
+const FEEDBACK_RETRY_DELAYS_MS = [0, 50, 100] as const;
 
 /** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️.
  * `resolvedByName` (the resolver's display name, when known) turns the line
@@ -196,6 +198,8 @@ function successfulToolCall(
   );
 }
 
+const isTextOriginReplyAction = (toolId: string): boolean => toolId.endsWith(".reply_to_origin");
+
 function isOriginReplyAction(toolId: string, channelType?: string): boolean {
   const prefix = channelType === undefined ? toolId.slice(0, toolId.lastIndexOf(".") + 1) : `${channelType}.`;
   if (!prefix || !toolId.startsWith(prefix)) return false;
@@ -209,7 +213,7 @@ function originReplyState(entries: SessionEntry[], queueItemId: string): OriginR
     return (entry.parts ?? []).filter((part) => {
       if (part.type !== "tool_call" || !isRecord(part.args)) return false;
       const toolId = part.args.tool_id;
-      return typeof toolId === "string" && isOriginReplyAction(toolId);
+      return typeof toolId === "string" && isTextOriginReplyAction(toolId);
     });
   });
   if (calls.length === 0) return "none";
@@ -373,8 +377,8 @@ export class ChannelHost {
   private outboundChains = new Map<string, Promise<void>>();
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
-  /** Failed addressed sends whose recovery signal is not admitted yet. */
-  private firstReplyFailures = new Map<string, string>();
+  /** Cancels bounded feedback-admission backoff during shutdown. */
+  private feedbackRetryController = new AbortController();
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
    * (Task 8's locked decision), never persisted. */
   private webhookSecrets = new Map<string, string>();
@@ -456,6 +460,9 @@ export class ChannelHost {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    if (this.feedbackRetryController.signal.aborted) {
+      this.feedbackRetryController = new AbortController();
+    }
     this.orgId = await this.deps.resolveOrgId();
     const orgId = this.orgId;
     for (const plugin of this.deps.plugins) {
@@ -584,6 +591,10 @@ export class ChannelHost {
 
   private sleepOrAbort(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
       const timer = setTimeout(() => {
         signal.removeEventListener("abort", onAbort);
         resolve();
@@ -597,6 +608,7 @@ export class ChannelHost {
   }
 
   async stop(): Promise<void> {
+    this.feedbackRetryController.abort();
     for (const controller of this.pollControllers.values()) controller.abort();
     await Promise.all(this.pollLoops);
     this.pollControllers.clear();
@@ -770,10 +782,11 @@ export class ChannelHost {
         await this.submitReplyFeedback(sessionId, thread.key, origin, {
           dispatchId: `feedback:overheard-dropped:${threadId}`,
           body:
-            `Your response was not posted to ${origin.threadKey}. ` +
+            "Your response was not posted to the channel origin. " +
             "If you intended to stay silent, do nothing. " +
-            `Only call ${origin.channelType}.reply_to_origin if you intended to reply. ` +
+            "Only call the current signal origin service's reply_to_origin action if you intended to reply. " +
             "This reminder is sent once per assistant thread.",
+          acceptDispatchConflict: true,
         });
       }
       return;
@@ -785,14 +798,6 @@ export class ChannelHost {
     const target = this.channelThreadFor(origin.threadKey);
     if (!target) return;
     if (this.delivered.has(dedupeKey)) return;
-    const priorFailure = this.firstReplyFailures.get(dedupeKey);
-    if (priorFailure !== undefined) {
-      if (await this.submitFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, priorFailure)) {
-        this.forgetFirstReplyFailure(dedupeKey);
-        this.markDelivered(dedupeKey);
-      }
-      return;
-    }
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.assistantSenderIdentity(sessionId);
@@ -807,33 +812,35 @@ export class ChannelHost {
       // keep provider errors observable so it can retain and retry its intent.
       const reason = publicDeliveryReason(error);
       console.error("[channels] addressed reply send failed", error);
-      this.rememberFirstReplyFailure(dedupeKey, reason);
       try {
         const orgId = this.orgId ?? (await this.deps.resolveOrgId());
         await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, reason);
       } catch (dropError) {
         console.error("[channels] reply failure drop-log failed", dropError);
       }
-      if (await this.submitFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason)) {
-        this.forgetFirstReplyFailure(dedupeKey);
-        this.markDelivered(dedupeKey);
-      }
+      await this.retryFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason);
+      this.markDelivered(dedupeKey);
     }
   }
 
-  private async submitFailedReplyFeedback(
+  private async retryFailedReplyFeedback(
     sessionId: string,
     threadKey: string,
     queueItemId: string,
     origin: ChannelOrigin,
     reason: string,
   ): Promise<boolean> {
-    return this.submitReplyFeedback(sessionId, threadKey, origin, {
+    const signal = this.feedbackRetryController.signal;
+    const feedback = {
       dispatchId: `feedback:reply-failed:${queueItemId}`,
-      body:
-        `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. ` +
-        `Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
-    });
+      body: `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
+    };
+    for (const delay of FEEDBACK_RETRY_DELAYS_MS) {
+      if (delay > 0) await this.sleepOrAbort(delay, signal);
+      if (signal.aborted) return false;
+      if (await this.submitReplyFeedback(sessionId, threadKey, origin, feedback)) return true;
+    }
+    return false;
   }
 
   /** Submit one manual, digest-exempt recovery turn on the same assistant thread. */
@@ -841,7 +848,7 @@ export class ChannelHost {
     sessionId: string,
     threadKey: string,
     origin: ChannelOrigin,
-    feedback: { dispatchId: string; body: string },
+    feedback: { dispatchId: string; body: string; acceptDispatchConflict?: boolean },
   ): Promise<boolean> {
     try {
       const session = this.deps.engineHost.liveSession(sessionId);
@@ -863,6 +870,14 @@ export class ChannelHost {
       );
       return true;
     } catch (error) {
+      if (
+        feedback.acceptDispatchConflict === true &&
+        error instanceof ConflictError &&
+        error.details?.dispatchId === feedback.dispatchId &&
+        typeof error.details.existingItemId === "string"
+      ) {
+        return true;
+      }
       console.error("[channels] reply-dropped feedback failed", error);
       return false;
     }
@@ -894,18 +909,6 @@ export class ChannelHost {
       return { channelType, conversationKey: rebuilt };
     }
     return { channelType, conversationKey: `${channelType}:dm:${rest}` };
-  }
-
-  private forgetFirstReplyFailure(dedupeKey: string): void {
-    this.firstReplyFailures.delete(dedupeKey);
-  }
-
-  private rememberFirstReplyFailure(dedupeKey: string, reason: string): void {
-    if (!this.firstReplyFailures.has(dedupeKey) && this.firstReplyFailures.size >= DELIVERED_CAP) {
-      const evict = this.firstReplyFailures.keys().next().value;
-      if (evict !== undefined) this.firstReplyFailures.delete(evict);
-    }
-    this.firstReplyFailures.set(dedupeKey, reason);
   }
 
   private markDelivered(dedupeKey: string): void {
