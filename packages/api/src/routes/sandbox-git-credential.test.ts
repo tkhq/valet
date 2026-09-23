@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, githubInstallations, sessionRepos, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { saveAppConfig } from "../services/github-app.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
@@ -301,8 +301,21 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
   });
 
   async function tokenFor(sessionId: string, userId: string): Promise<string> {
+    await api!.providers.db.insert(teams).values({
+      id: TEAM.id,
+      orgId: ORG,
+      name: "Test team",
+      createdAt: Date.now(),
+    }).onConflictDoNothing();
     const { token } = await mintSandboxToken(api!.providers.db, { sessionId, userId, orgId: ORG });
     return token;
+  }
+
+  async function saveSyntheticUserCredential(userId: string, accessToken: string): Promise<void> {
+    await api!.providers.engineCredentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken,
+    });
   }
 
   async function saveOrgPat(accessToken: string): Promise<void> {
@@ -369,8 +382,9 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     expect(await gh.json()).toEqual({ anonymous: true });
   });
 
-  it("a scheduled team run never reaches the org PAT", async () => {
+  it("a scheduled team run never reaches a synthetic user credential or the org PAT", async () => {
     api = await bootTestApi();
+    await saveSyntheticUserCredential(`team:${TEAM.id}`, "ghp_synthetic_team_user");
     await saveOrgPat("ghp_org_pat");
     const sessionId = await seedWorkflowRun(api.providers.db, { runId: "wfrun_sched", orgId: ORG, owner: TEAM });
     const token = await tokenFor(sessionId, "team:team-1");
@@ -379,8 +393,33 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     expect(await res.json()).toEqual({ anonymous: true });
   });
 
-  it("an org-owned run never reaches the org PAT", async () => {
+  it("a team owner outside the sandbox org fails closed", async () => {
     api = await bootTestApi();
+    await api.providers.db.insert(orgs).values({ id: "other-org", name: "Other org", createdAt: Date.now() });
+    await api.providers.db.insert(teams).values({
+      id: "team-foreign",
+      orgId: "other-org",
+      name: "Foreign team",
+      createdAt: Date.now(),
+    });
+    await api.providers.engineCredentials.save({ type: "team", id: "team-foreign" }, "github", {
+      type: "oauth2",
+      accessToken: "ghp_foreign_team",
+    });
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_foreign_team",
+      orgId: ORG,
+      owner: { type: "team", id: "team-foreign" },
+    });
+    const token = await tokenFor(sessionId, "team:team-foreign");
+
+    const res = await post(token, { host: "github.com", owner: "tkhq", repo: "docs" });
+    expect(await res.json()).toEqual({ anonymous: true });
+  });
+
+  it("an org-owned run never reaches a synthetic user credential or the org PAT", async () => {
+    api = await bootTestApi();
+    await saveSyntheticUserCredential(`org:${ORG}`, "ghp_synthetic_org_user");
     await saveOrgPat("ghp_org_pat");
     const sessionId = await seedWorkflowRun(api.providers.db, {
       runId: "wfrun_org", orgId: ORG, owner: { type: "org", id: ORG },
@@ -479,8 +518,28 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
     expect(await res.json()).toEqual({ username: "x-access-token", password: INSTALLATION_TOKEN });
   });
 
-  it("a run owned by a synthetic org:{id} user resolves as that org, never the org PAT", async () => {
+  it("a synthetic team:{id} user owner resolves as the team, never as a user or org PAT", async () => {
     api = await bootTestApi();
+    await saveSyntheticUserCredential(`team:${TEAM.id}`, "ghp_synthetic_team_user");
+    await api.providers.engineCredentials.save(TEAM, "github", {
+      type: "oauth2",
+      accessToken: "ghp_team_row",
+    });
+    await saveOrgPat("ghp_org_pat");
+    const sessionId = await seedWorkflowRun(api.providers.db, {
+      runId: "wfrun_synthetic_team",
+      orgId: ORG,
+      owner: { type: "user", id: `team:${TEAM.id}` },
+    });
+    const token = await tokenFor(sessionId, `team:${TEAM.id}`);
+
+    const res = await post(token, { host: "github.com", owner: "tkhq", repo: "docs", purpose: "api" });
+    expect(await res.json()).toEqual({ username: "x-access-token", password: "ghp_team_row" });
+  });
+
+  it("a synthetic org:{id} user owner resolves as the org, never as a user or org PAT", async () => {
+    api = await bootTestApi();
+    await saveSyntheticUserCredential(`org:${ORG}`, "ghp_synthetic_org_user");
     await saveOrgPat("ghp_org_pat");
     // `workflows.start_run` inside an unattended org run stamps the child
     // run as owned by a user named after the parent's synthetic actor.

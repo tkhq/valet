@@ -19,10 +19,14 @@
  * and for a run a member started by hand, even when that member has a
  * profile and a personal GitHub credential of their own.
  *
- * Skipped when docker is unreachable or `CI` is set, same idiom as
- * `workspace-prep.docker.test.ts`. The container uses the provider's
- * default image (`node:20-bookworm`, which ships git and curl) and reaches
- * the API at `host.docker.internal`. No network beyond the host is needed.
+ * Skipped when docker is unreachable or `CI` is set, as
+ * `workspace-prep.docker.test.ts` requires. The shared GitHub runner does
+ * not preload the sandbox image or expose the host-gateway route that the
+ * container needs to call the test API. CI still runs the recording-provider
+ * prep tests and route tests. Those tests cover helper installation, the
+ * exact `tkhq/docs` request, scheduled owners, manual actors, and identity
+ * isolation without a Docker daemon. The container here uses the provider's
+ * default image (`node:20-bookworm`, which ships git and curl).
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -35,7 +39,7 @@ import { startGithubFixture, type GithubFixture } from "../test-helpers/github-f
 import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
-import { githubInstallations, orgs, users } from "../schema/index.js";
+import { githubInstallations, orgs, teams, users } from "../schema/index.js";
 
 function dockerAvailable(): boolean {
   const r = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe" });
@@ -131,6 +135,7 @@ async function bootWithApp(): Promise<TestApi> {
   const { db, engineCredentials } = booted.providers;
   const now = Date.now();
   await db.insert(orgs).values({ id: ORG, name: "Workflow Prep Org", createdAt: now });
+  await db.insert(teams).values({ id: TEAM, orgId: ORG, name: "DSE", createdAt: now });
   await saveAppConfig({ credentials: engineCredentials }, ORG, APP_CONFIG);
   await db.insert(githubInstallations).values({
     id: `ghi_${INSTALLATION_ID}`,

@@ -66,6 +66,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { sessionRepos } from "../schema/index.js";
 import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-resolution.js";
 import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
+import { getTeamInOrg } from "../services/teams.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { PostSandboxGitCredentialResponse } from "../wire/types.js";
@@ -124,8 +125,15 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     if (!repoHost) {
       return c.json({ error: "no credential host for this repo" }, 403);
     }
-    // No owner to act as: never fall back to the token's actor.
-    if (workflowOwner === null) return c.json(anonymous);
+    // No valid owner to act as: never fall back to the token's actor. Team
+    // ownership is valid only while that team belongs to the token's org.
+    if (
+      workflowOwner === null ||
+      (workflowOwner.type === "team" && !(await getTeamInOrg(db, sandbox.orgId, workflowOwner.id))) ||
+      (workflowOwner.type === "org" && workflowOwner.id !== sandbox.orgId)
+    ) {
+      return c.json(anonymous);
+    }
     const deps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
     if (workflowOwner.type === "user") {
       // The owner's own credentials, in the same order as an unbound
