@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
-import type { Context } from "@earendil-works/pi-ai/compat";
+import type { TranscriptContext } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
@@ -13,6 +13,7 @@ import {
   type SandboxProvider,
   type SandboxStatus,
 } from "../src/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 // ── Fake sandbox + provider (delayed create, matches sandbox-attachment.test.ts idiom) ──
 
@@ -210,8 +211,8 @@ describe("lazy sandbox attachment integration", () => {
   it("3. cold hint composes with role overlay and disappears once ready", async () => {
     const faux = registerFauxProvider({ provider: "lazy3" });
     const capturedPrompts: (string | undefined)[] = [];
-    const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+    const captureStep = (text: string) => async (context: TranscriptContext) => {
+      capturedPrompts.push(transcriptSystemPrompt(context));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("first (cold)"), captureStep("second (warm)")]);
@@ -408,8 +409,8 @@ describe("lazy sandbox attachment integration", () => {
   it("8. warmSandboxOnClaim:false — no-tool turn triggers zero creates and no cold hint", async () => {
     const faux = registerFauxProvider({ provider: "lazy8" });
     const capturedPrompts: (string | undefined)[] = [];
-    const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+    const captureStep = (text: string) => async (context: TranscriptContext) => {
+      capturedPrompts.push(transcriptSystemPrompt(context));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("no tools here")]);

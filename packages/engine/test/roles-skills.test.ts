@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { Type, fauxAssistantMessage, registerFauxProvider, type Context, type StreamOptions } from "@earendil-works/pi-ai/compat";
+import { Type, fauxAssistantMessage, registerFauxProvider, type TranscriptContext, type StreamOptions } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
@@ -9,6 +9,7 @@ import {
   loadSkillFromMarkdown,
   type BusEvent,
 } from "../src/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -40,8 +41,8 @@ describe("roles: per-prompt overlay reaches the LLM via systemPrompt", () => {
     // Capture the system prompt the LLM sees by inspecting context in a
     // response factory. The faux provider passes us the full Context.
     faux.setResponses([
-      (ctx: Context, _opts: StreamOptions | undefined, _state, model) => {
-        observed.systemPrompt = ctx.systemPrompt;
+      (ctx: TranscriptContext, _opts: StreamOptions | undefined, _state, model) => {
+        observed.systemPrompt = transcriptSystemPrompt(ctx);
         return {
           role: "assistant" as const,
           content: [{ type: "text", text: "ack" }],
@@ -87,8 +88,8 @@ You are a careful code reviewer. Always cite file paths.
     // Now a turn WITHOUT the role — base system prompt should be intact, no overlay.
     const observed2: { systemPrompt?: string } = {};
     faux.setResponses([
-      (ctx: Context, _opts, _state, model) => {
-        observed2.systemPrompt = ctx.systemPrompt;
+      (ctx: TranscriptContext, _opts, _state, model) => {
+        observed2.systemPrompt = transcriptSystemPrompt(ctx);
         return {
           role: "assistant" as const,
           content: [{ type: "text", text: "ack2" }],
@@ -128,8 +129,8 @@ You are a careful code reviewer. Always cite file paths.
     const observed: { systemPrompt?: string } = {};
     const faux = registerFauxProvider({ provider: "roles-unknown" });
     faux.setResponses([
-      (ctx: Context, _opts, _state, model) => {
-        observed.systemPrompt = ctx.systemPrompt;
+      (ctx: TranscriptContext, _opts, _state, model) => {
+        observed.systemPrompt = transcriptSystemPrompt(ctx);
         return {
           role: "assistant" as const,
           content: [{ type: "text", text: "ack" }],
@@ -186,7 +187,7 @@ describe("thread.skill: render template + submit as a normal prompt", () => {
     const captured: string[] = [];
     const faux = registerFauxProvider({ provider: "skills-render" });
     faux.setResponses([
-      (ctx: Context, _opts, _state, model) => {
+      (ctx: TranscriptContext, _opts, _state, model) => {
         const last = ctx.messages.at(-1);
         if (last?.role === "user") {
           const block = last.content;

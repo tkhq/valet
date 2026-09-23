@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import type { Context } from "@earendil-works/pi-ai/compat";
+import type { TranscriptContext } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
@@ -14,6 +14,7 @@ import {
   type SandboxProvider,
   type SandboxStatus,
 } from "../src/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 // ── Fake sandbox + provider (same idiom as lazy-attachment.test.ts) ──
 
@@ -171,8 +172,8 @@ describe("repo instructions turn overlay", () => {
   it("loads once ready and composes base → instructions → role; cold turn runs without it", async () => {
     const faux = registerFauxProvider({ provider: "agents1" });
     const capturedPrompts: (string | undefined)[] = [];
-    const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+    const captureStep = (text: string) => async (context: TranscriptContext) => {
+      capturedPrompts.push(transcriptSystemPrompt(context));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("first (cold)"), captureStep("second (warm)")]);
@@ -224,8 +225,8 @@ describe("repo instructions turn overlay", () => {
   it("snapshots at turn start: a new value lands only after an explicit refresh", async () => {
     const faux = registerFauxProvider({ provider: "agents2" });
     const capturedPrompts: (string | undefined)[] = [];
-    const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+    const captureStep = (text: string) => async (context: TranscriptContext) => {
+      capturedPrompts.push(transcriptSystemPrompt(context));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([
@@ -286,8 +287,8 @@ describe("repo instructions turn overlay", () => {
   it("tolerates a throwing provider, then retries on the next turn", async () => {
     const faux = registerFauxProvider({ provider: "agents3" });
     const capturedPrompts: (string | undefined)[] = [];
-    const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+    const captureStep = (text: string) => async (context: TranscriptContext) => {
+      capturedPrompts.push(transcriptSystemPrompt(context));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("t1"), captureStep("t2")]);

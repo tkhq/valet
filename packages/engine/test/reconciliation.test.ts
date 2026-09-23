@@ -21,6 +21,7 @@ import {
   type ToolDef,
   type WriteFence,
 } from "../src/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 // ── fixtures ────────────────────────────────────────────────────────
 
@@ -387,6 +388,59 @@ describe("entriesToAgentMessages — toolResult emission", () => {
     ]);
     // Trailing message is toolResult — continuation contract holds.
     expect(messages.at(-1)?.role).toBe("toolResult");
+  });
+
+  it("preserves valid tool argument keys while excluding invalid and cyclic values", async () => {
+    const deep: Record<string, unknown> = { leaf: "kept until the depth limit" };
+    let cursor = deep;
+    for (let depth = 0; depth < 3_300; depth++) {
+      const next: Record<string, unknown> = {};
+      cursor.next = next;
+      cursor = next;
+    }
+    const cyclic: Record<string, unknown> = {
+      valid: "value",
+      invalid: () => "not JSON",
+      nested: { valid: true, invalid: Symbol("not JSON") },
+      list: ["value", undefined, 3],
+      deep,
+    };
+    cyclic.cycle = cyclic;
+    const entries: MessageEntry[] = [
+      {
+        id: "e-args",
+        sessionId: SESSION,
+        threadId: THREAD,
+        parentId: null,
+        type: "message",
+        role: "assistant",
+        content: "",
+        parts: [{ type: "tool_call", callId: "call-args", toolName: "read_thing", status: "completed", args: cyclic }],
+        createdAt: Date.now(),
+      },
+    ];
+
+    const { entriesToAgentMessages } = await import("../src/thread.js");
+    const messages = entriesToAgentMessages(entries, { api: "a", provider: "p", id: "m" });
+    const assistant = messages[0];
+    if (assistant?.role !== "assistant") throw new Error("expected assistant message");
+    const call = assistant.content[0];
+    if (call?.type !== "toolCall") throw new Error("expected tool call");
+    expect(call.arguments).toMatchObject({
+      valid: "value",
+      nested: { valid: true },
+      list: ["value", null, 3],
+    });
+    expect(call.arguments).not.toHaveProperty("invalid");
+    expect(call.arguments).not.toHaveProperty("cycle");
+
+    let sanitized: unknown = call.arguments.deep;
+    let levels = 0;
+    while (sanitized !== null && typeof sanitized === "object" && "next" in sanitized) {
+      sanitized = Reflect.get(sanitized, "next");
+      levels++;
+    }
+    expect(levels).toBe(999);
   });
 
   it("leaves a still-running (suspended-gate) toolCall unanswered for replay to answer", async () => {
@@ -842,7 +896,7 @@ describe("reconciliation executor (integration)", () => {
       nextFaux.setResponses([
         (context) => {
           nextCalls += 1;
-          nextPromptSystem = context.systemPrompt;
+          nextPromptSystem = transcriptSystemPrompt(context);
           return fauxAssistantMessage("next prompt completed");
         },
       ]);
@@ -991,7 +1045,7 @@ describe("reconciliation executor (integration)", () => {
       nextFaux.setResponses([
         (context) => {
           nextCalls += 1;
-          nextPromptSystem = context.systemPrompt;
+          nextPromptSystem = transcriptSystemPrompt(context);
           return fauxAssistantMessage("next prompt completed");
         },
       ]);

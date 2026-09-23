@@ -1735,8 +1735,9 @@ describe("compaction: summarizer input covers the head", () => {
     });
 
     expect(result.summary).toBe(SUMMARY_RESPONSE);
-    // Providers reject a transcript that opens on an assistant message.
-    expect(roles[0]).toBe("user");
+    // Pi adds the summarizer system message first. The conversation must
+    // still start with a user message, not the assistant head entry.
+    expect(roles.slice(1, 3)).toEqual(["user", "assistant"]);
     faux.unregister();
   });
 

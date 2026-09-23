@@ -11,6 +11,7 @@ import {
   type ResolvedModel,
   type ToolDef,
 } from "../src/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -235,7 +236,7 @@ describe("attempt-fenced EventStream appends (decision 12)", () => {
     base.setResponses([
       (context) => {
         baseCalls += 1;
-        nextPromptSystem = context.systemPrompt;
+        nextPromptSystem = transcriptSystemPrompt(context);
         return fauxAssistantMessage("next prompt completed");
       },
     ]);

@@ -7,7 +7,6 @@ packages:
 # `Static<T>` stays the same type across plugin manifests. See CLAUDE.md
 # "Node & workspace traps".
 overrides:
-  '@earendil-works/pi-ai': 0.87.1
   typebox: 1.3.7
 
 # Dependencies allowed to run install scripts (native builds). pnpm 10 blocks

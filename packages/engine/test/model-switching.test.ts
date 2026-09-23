@@ -49,6 +49,7 @@ import {
   type ToolDef,
 } from "../src/index.js";
 import { switchModelTool, taskTool } from "../src/builtin-tools/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 const builtinToolNames = builtinTools.map((t) => t.name);
 
@@ -726,7 +727,7 @@ describe("engine: active submission model state", () => {
     let rolePrompt: string | undefined;
     roleFaux.setResponses([
       (context) => {
-        rolePrompt = context.systemPrompt;
+        rolePrompt = transcriptSystemPrompt(context);
         return fauxAssistantMessage("review completed");
       },
     ]);
@@ -735,7 +736,7 @@ describe("engine: active submission model state", () => {
       | undefined;
     baseFaux.setResponses([
       (context, _options, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: transcriptSystemPrompt(context) };
         return fauxAssistantMessage("plain follow-up completed");
       },
     ]);
@@ -835,7 +836,7 @@ Role-only instructions.
       | undefined;
     baseFaux.setResponses([
       (context, _options, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: transcriptSystemPrompt(context) };
         return fauxAssistantMessage("plain follow-up completed");
       },
     ]);
@@ -922,7 +923,7 @@ Role-only instructions.
       | undefined;
     baseFaux.setResponses([
       (ctx, _opts, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: ctx.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: transcriptSystemPrompt(ctx) };
         return fauxAssistantMessage("next prompt completed");
       },
     ]);

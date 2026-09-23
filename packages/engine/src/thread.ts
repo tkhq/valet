@@ -1,6 +1,6 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+import { getCurrentSystemPrompt, isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
 // utils and is only re-exported from the package root. It carries the
 // provider-maintained retryable/permanent taxonomy (incl. the quota
@@ -1496,7 +1496,7 @@ export class Thread {
       );
     } finally {
       this.agent.state.model = baselineModel;
-      this.agent.state.systemPrompt = baselinePrompt;
+      this.setAgentSystemPrompt(baselinePrompt);
       this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
@@ -2101,11 +2101,13 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.replaceActiveSkillInvocations(entries);
+    const systemPrompt = this.agent.state.systemPrompt;
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
       activeLeafEntryId: this.activeLeafEntryId,
     });
+    this.setAgentSystemPrompt(systemPrompt);
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
     // transcript directly (TKAI-305), so no usage seeding is needed and a
@@ -3429,6 +3431,7 @@ export class Thread {
           activeLeafEntryId: this.activeLeafEntryId,
         },
       );
+      this.setAgentSystemPrompt(baselinePrompt);
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
@@ -3446,7 +3449,7 @@ export class Thread {
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
     } finally {
       this.agent.state.model = baselineModel;
-      this.agent.state.systemPrompt = baselinePrompt;
+      this.setAgentSystemPrompt(baselinePrompt);
       this.turnApiKey = undefined;
     }
 
@@ -3921,6 +3924,15 @@ export class Thread {
     }
   }
 
+  /** Replace the leading system message while preserving the transcript. */
+  private setAgentSystemPrompt(systemPrompt: string): void {
+    const [first, ...rest] = this.agent.state.messages;
+    const system = { role: "system" as const, content: systemPrompt, timestamp: Date.now() };
+    this.agent.state.messages = first?.role === "system"
+      ? [{ ...first, content: systemPrompt }, ...rest]
+      : [system, ...this.agent.state.messages];
+  }
+
   /**
    * Cold-attachment model hint (spec decision 7): when the sandbox
    * attachment isn't ready at turn start, appends a hint to the
@@ -3944,12 +3956,12 @@ export class Thread {
     }
     const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
     const hint = `\n\n[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`;
-    this.agent.state.systemPrompt = preHintPrompt + hint;
+    this.setAgentSystemPrompt(preHintPrompt + hint);
     return preHintPrompt;
   }
 
   private restoreColdHintAfterTurn(preHintPrompt: string): void {
-    this.agent.state.systemPrompt = preHintPrompt;
+    this.setAgentSystemPrompt(preHintPrompt);
   }
 
   /** Add the shared Slack guidance only to manual-delivery message signals. */
@@ -3961,14 +3973,14 @@ export class Thread {
         item.content.origin.reply !== "manual") {
       return preGuidancePrompt;
     }
-    this.agent.state.systemPrompt = preGuidancePrompt
+    this.setAgentSystemPrompt(preGuidancePrompt
       ? `${preGuidancePrompt}\n\n${SLACK_OVERHEARD_REPLY_GUIDANCE}`
-      : SLACK_OVERHEARD_REPLY_GUIDANCE;
+      : SLACK_OVERHEARD_REPLY_GUIDANCE);
     return preGuidancePrompt;
   }
 
   private restoreSlackOverheardGuidanceAfterTurn(preGuidancePrompt: string): void {
-    this.agent.state.systemPrompt = preGuidancePrompt;
+    this.setAgentSystemPrompt(preGuidancePrompt);
   }
 
   /**
@@ -3986,14 +3998,14 @@ export class Thread {
     if (!instructions) return preOverlayPrompt;
     const fragment = buildRepoInstructionsFragment(instructions);
     if (!fragment) return preOverlayPrompt;
-    this.agent.state.systemPrompt = preOverlayPrompt
+    this.setAgentSystemPrompt(preOverlayPrompt
       ? `${preOverlayPrompt}\n\n${fragment}`
-      : fragment;
+      : fragment);
     return preOverlayPrompt;
   }
 
   private restoreRepoInstructionsAfterTurn(preOverlayPrompt: string): void {
-    this.agent.state.systemPrompt = preOverlayPrompt;
+    this.setAgentSystemPrompt(preOverlayPrompt);
   }
 
   private applyRoleForTurn(item: QueueItem): RoleOverlay {
@@ -4012,7 +4024,7 @@ export class Thread {
     const overlaid = baseSystemPrompt
       ? `${baseSystemPrompt}\n\n${role.content}`
       : role.content;
-    this.agent.state.systemPrompt = overlaid;
+    this.setAgentSystemPrompt(overlaid);
 
     let priorModel: PiModel | undefined;
     if (role.model) {
@@ -4046,7 +4058,7 @@ export class Thread {
     this.roleModelSpec = undefined;
     if (!overlay.restore) return;
     if (overlay.systemPrompt !== undefined) {
-      this.agent.state.systemPrompt = overlay.systemPrompt;
+      this.setAgentSystemPrompt(overlay.systemPrompt);
     }
     if (overlay.model !== undefined) {
       this.agent.state.model = overlay.model;
@@ -4364,8 +4376,8 @@ export class Thread {
     // appended since are estimated with the cut-point budget's char ruler.
     // This runs before the turn's finally-block restores the baseline
     // prompt, so the fallback estimate sees the overlays the turn used.
-    // Same role filter as `convertToLlm` — custom AgentMessage kinds never
-    // reach the LLM, so they must not count toward the context estimate.
+    // System messages are counted separately through the replayed prompt.
+    // Custom AgentMessage kinds never reach the LLM.
     const llmMessages = this.agent.state.messages.filter(
       (m): m is Message =>
         m.role === "user" || m.role === "assistant" || m.role === "toolResult",
@@ -4721,6 +4733,7 @@ export class Thread {
       // correct path is to rebuild from the now-augmented DAG.
       const updatedSnapshot = await this.transcriptSnapshot();
       const updatedEntries = updatedSnapshot.entries;
+      const systemPrompt = this.agent.state.systemPrompt;
       this.replaceActiveSkillInvocations(updatedEntries);
       this.agent.state.messages = entriesToAgentMessages(
         updatedEntries,
@@ -4735,6 +4748,7 @@ export class Thread {
           activeLeafEntryId: this.activeLeafEntryId,
         },
       );
+      this.setAgentSystemPrompt(systemPrompt);
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
@@ -4825,10 +4839,11 @@ export class Thread {
       // upstream knob forever.
       streamFn: async (model, context, options) => {
         await this.persistSkillContextAttributions();
-        return streamSimple(model, {
-          ...context,
-          systemPrompt: this.modelSystemPrompt(context.systemPrompt, model),
-        }, {
+        const [first, ...rest] = context.messages;
+        const messages = first?.role === "system"
+          ? [{ ...first, content: this.modelSystemPrompt(getCurrentSystemPrompt(context.messages), model) }, ...rest]
+          : context.messages;
+        return streamSimple(model, { ...context, messages }, {
           ...options,
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
@@ -4861,10 +4876,10 @@ export class Thread {
         });
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
-      // before the LLM sees them. They live in the engine DAG, not in LLM context.
+      // before the LLM sees them. System messages carry the prompt and tools.
       convertToLlm: (messages: AgentMessage[]): Message[] => {
         return messages.filter(
-          (m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+          (m) => m.role === "system" || m.role === "user" || m.role === "assistant" || m.role === "toolResult",
         ) as Message[];
       },
       // Re-read the live model between loop iterations (TKAI-338).
@@ -4879,7 +4894,7 @@ export class Thread {
       // A stale fenced publication means a successor owns this submission.
       // abort() is best-effort while a tool is executing, so also stop at the
       // turn boundary before the loop can start another provider request.
-      shouldStopAfterTurn: () => this.staleFenceDetected,
+      finishTurn: () => this.staleFenceDetected ? { action: "end" } : undefined,
       // Per-turn key delivery: pi-agent-core calls this with the turn's provider
       // and stamps the result onto StreamOptions.apiKey (undefined → env fallback).
       ...(hasResolver ? { getApiKey: (_provider: string) => this.turnApiKey } : {}),
@@ -6050,21 +6065,65 @@ export function renderReplyContext(
   ].join("\n");
 }
 
-/** True when a value can be sent as a pi-ai tool argument object. */
-function isJsonObject(value: unknown): value is JsonObject {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    Object.values(value).every(isJsonValue)
-  );
-}
+/**
+ * Convert persisted tool arguments to JSON without recursing through untrusted
+ * historical values. Invalid object properties are omitted. Invalid array
+ * items become null so their indexes remain stable.
+ */
+function sanitizeToolArguments(value: unknown): JsonObject {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
 
-function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null) return true;
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
-  if (Array.isArray(value)) return value.every(isJsonValue);
-  return isJsonObject(value);
+  const root: JsonObject = {};
+  const seen = new WeakSet<object>([value]);
+  type JsonFrame =
+    | { source: object; target: JsonObject; array: false; depth: number }
+    | { source: object; target: JsonValue[]; array: true; depth: number };
+  const work: JsonFrame[] = [{ source: value, target: root, array: false, depth: 0 }];
+  const maxDepth = 1_000;
+
+  while (work.length > 0) {
+    const frame = work.pop();
+    if (!frame) break;
+    let entries: Array<[string, unknown]>;
+    try {
+      entries = Object.entries(frame.source);
+    } catch {
+      continue;
+    }
+
+    for (const [key, child] of entries) {
+      const set = (json: JsonValue): void => {
+        if (frame.array) frame.target[Number(key)] = json;
+        else frame.target[key] = json;
+      };
+      if (child === null || typeof child === "string" || typeof child === "boolean") {
+        set(child);
+        continue;
+      }
+      if (typeof child === "number") {
+        if (Number.isFinite(child)) set(child);
+        else if (frame.array) set(null);
+        continue;
+      }
+      if (typeof child !== "object" || frame.depth >= maxDepth || seen.has(child)) {
+        if (frame.array) set(null);
+        continue;
+      }
+
+      seen.add(child);
+      if (Array.isArray(child)) {
+        const target: JsonValue[] = [];
+        set(target);
+        work.push({ source: child, target, array: true, depth: frame.depth + 1 });
+      } else {
+        const target: JsonObject = {};
+        set(target);
+        work.push({ source: child, target, array: false, depth: frame.depth + 1 });
+      }
+    }
+  }
+
+  return root;
 }
 
 export function entriesToAgentMessages(
@@ -6164,7 +6223,7 @@ export function entriesToAgentMessages(
             type: "toolCall",
             id: p.callId,
             name: p.toolName,
-            arguments: isJsonObject(p.args) ? p.args : {},
+            arguments: sanitizeToolArguments(p.args),
           });
         }
       }

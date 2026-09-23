@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { registerFauxProvider, type Context, type StreamOptions } from "@earendil-works/pi-ai/compat";
+import { registerFauxProvider, type TranscriptContext, type StreamOptions } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
@@ -8,6 +8,7 @@ import {
   type BusEvent,
   type PromptContent,
 } from "../src/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 const GUIDANCE = "## Slack overheard delivery";
 
@@ -15,8 +16,8 @@ async function promptSystemPrompt(content: PromptContent): Promise<string | unde
   const faux = registerFauxProvider({ provider: `slack-overheard-${crypto.randomUUID()}` });
   let systemPrompt: string | undefined;
   faux.setResponses([
-    (context: Context, _opts: StreamOptions | undefined, _state, model) => {
-      systemPrompt = context.systemPrompt;
+    (context: TranscriptContext, _opts: StreamOptions | undefined, _state, model) => {
+      systemPrompt = transcriptSystemPrompt(context);
       return {
         role: "assistant" as const,
         content: [{ type: "text" as const, text: "ack" }],

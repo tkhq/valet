@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
-import type { Context } from "@earendil-works/pi-ai/compat";
+import type { TranscriptContext } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
@@ -11,6 +11,7 @@ import {
   type ToolContext,
   type ToolDef,
 } from "../src/index.js";
+import { transcriptSystemPrompt } from "./transcript.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -57,8 +58,8 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
   it("systemContext fragments land sorted by (order, name), after base prompt and before role overlay", async () => {
     const faux = registerFauxProvider({ provider: "svc1" });
     const capturedPrompts: (string | undefined)[] = [];
-    const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+    const captureStep = (text: string) => async (context: TranscriptContext) => {
+      capturedPrompts.push(transcriptSystemPrompt(context));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("ok")]);
