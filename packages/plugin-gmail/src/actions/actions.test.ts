@@ -59,6 +59,33 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function rawMime(init: RequestInit): string {
+  const request = JSON.parse(init.body as string) as { raw?: string; message?: { raw: string } };
+  const raw = request.raw ?? request.message?.raw;
+  if (!raw) throw new Error('Expected a raw MIME message.');
+  const base64 = raw.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+  return new TextDecoder().decode(Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)));
+}
+
+function expectPlainTextMime(mime: string, plainText: string): void {
+  expect(mime).toContain('Content-Type: text/plain; charset="UTF-8"');
+  expect(mime).not.toContain('multipart/alternative');
+  expect(mime).toContain(`\r\n\r\n${plainText}`);
+}
+
+function expectMultipartAlternativeMime(mime: string, plainText: string, html: string): void {
+  const boundaryMatch = mime.match(/Content-Type: multipart\/alternative; boundary="([^"]+)"/);
+  expect(boundaryMatch).not.toBeNull();
+  if (!boundaryMatch) throw new Error('Expected a multipart boundary.');
+  const boundary = boundaryMatch[1];
+
+  expect(mime).toContain(`--${boundary}\r\nContent-Type: text/plain; charset="UTF-8"`);
+  expect(mime).toContain(`\r\n\r\n${plainText}\r\n--${boundary}`);
+  expect(mime).toContain(`--${boundary}\r\nContent-Type: text/html; charset="UTF-8"`);
+  expect(mime).toContain(`\r\n\r\n${html}\r\n--${boundary}--`);
+}
+
 describe('gmail actions', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -87,7 +114,7 @@ describe('gmail actions', () => {
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer test-token');
     const body = JSON.parse(init.body as string) as { raw: string; threadId?: string };
-    expect(body.raw).toBeTruthy();
+    expectPlainTextMime(rawMime(init), 'hello');
     expect(body.threadId).toBeUndefined();
 
     expect(result).toEqual({
@@ -101,6 +128,21 @@ describe('gmail actions', () => {
         message: 'Email sent to a@example.com.',
       },
     });
+  });
+
+  it('send_email sends plain-text and HTML MIME alternatives when bodyHtml is present', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'm1', threadId: 't1', labelIds: ['SENT'] }),
+    );
+
+    const result = await action('gmail.send_email').execute(
+      { to: 'a@example.com', subject: 'Hi', body: 'hello', bodyHtml: '<p>hello</p>' },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expectMultipartAlternativeMime(rawMime(init), 'hello', '<p>hello</p>');
+    expect(result.success).toBe(true);
   });
 
   it('send_email maps a 401 response to a Gmail API error', async () => {
@@ -278,6 +320,7 @@ describe('gmail actions', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://gmail.googleapis.com/gmail/v1/users/me/drafts');
     expect(init.method).toBe('POST');
+    expectPlainTextMime(rawMime(init), 'body');
     expect(result).toEqual({
       success: true,
       data: {
@@ -289,6 +332,21 @@ describe('gmail actions', () => {
         message: 'Draft created. Use send_draft with draftId="d1" to send it, or update_draft to edit it first.',
       },
     });
+  });
+
+  it('create_draft sends plain-text and HTML MIME alternatives when bodyHtml is present', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'd1', message: { id: 'm1', threadId: 't1' } }),
+    );
+
+    const result = await action('gmail.create_draft').execute(
+      { to: 'a@example.com', subject: 'Draft', body: 'body', bodyHtml: '<p>body</p>' },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expectMultipartAlternativeMime(rawMime(init), 'body', '<p>body</p>');
+    expect(result.success).toBe(true);
   });
 
   it('list_drafts fetches the list then draft metadata for each result', async () => {
@@ -371,6 +429,7 @@ describe('gmail actions', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://gmail.googleapis.com/gmail/v1/users/me/drafts/d1');
     expect(init.method).toBe('PUT');
+    expectPlainTextMime(rawMime(init), 'new body');
     expect(result).toEqual({
       success: true,
       data: {
@@ -382,6 +441,27 @@ describe('gmail actions', () => {
         message: 'Draft d1 updated.',
       },
     });
+  });
+
+  it('update_draft sends plain-text and HTML MIME alternatives when bodyHtml is present', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'd1', message: { id: 'm1', threadId: 't1' } }),
+    );
+
+    const result = await action('gmail.update_draft').execute(
+      {
+        draftId: 'd1',
+        to: 'a@example.com',
+        subject: 'Updated',
+        body: 'new body',
+        bodyHtml: '<p>new body</p>',
+      },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expectMultipartAlternativeMime(rawMime(init), 'new body', '<p>new body</p>');
+    expect(result.success).toBe(true);
   });
 
   it('send_draft posts the draft id', async () => {

@@ -43,6 +43,7 @@ Same pattern as the Docs port (see `2026-04-23-google-workspace-docs-port-design
 
 - **Gmail API base URL:** `https://gmail.googleapis.com/gmail/v1`
 - **RFC 2822 email construction:** Both the reference repo and our current code build raw emails with base64url encoding. The reference repo uses the `googleapis` client but the email construction is pure string manipulation -- ports directly.
+- **HTML email bodies:** `gmail.send_email`, `gmail.create_draft`, and `gmail.update_draft` accept optional `bodyHtml`. When present, the MIME message uses `multipart/alternative` with `body` as `text/plain` and `bodyHtml` as `text/html`.
 - **`triage_inbox` is the interesting new tool:** It fetches unread messages, applies heuristic categorization (newsletter detection via `List-Unsubscribe`/`List-Id` headers, meeting keyword matching, question detection, action-requested detection), and returns aggregate stats (total unread, top senders, category breakdown). This is a composite read-only tool designed for AI inbox triage workflows.
 - **`list_messages` response shape changes:** The reference repo fetches full message content for each listed message (N+1 pattern: list IDs then batch-get each). Our current implementation does the same. The reference repo uses `Promise.allSettled` for resilience; the port should adopt this.
 - **`update_draft` is new:** Allows modifying a draft's content before sending. Our current implementation only supports create and send.

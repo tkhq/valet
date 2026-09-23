@@ -76,6 +76,7 @@ function buildMimeMessage(opts: {
   bcc?: string[];
   subject: string;
   body: string;
+  bodyHtml?: string;
   inReplyTo?: string | null;
   references?: string | null;
 }): string {
@@ -85,12 +86,33 @@ function buildMimeMessage(opts: {
   if (opts.bcc && opts.bcc.length > 0) lines.push(`Bcc: ${opts.bcc.join(', ')}`);
   lines.push(`Subject: ${encodeHeader(opts.subject)}`);
   lines.push('MIME-Version: 1.0');
-  lines.push('Content-Type: text/plain; charset="UTF-8"');
-  lines.push('Content-Transfer-Encoding: 8bit');
+
+  if (opts.bodyHtml === undefined) {
+    lines.push('Content-Type: text/plain; charset="UTF-8"');
+    lines.push('Content-Transfer-Encoding: 8bit');
+    if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
+    if (opts.references) lines.push(`References: ${opts.references}`);
+    lines.push('');
+    lines.push(opts.body);
+    return lines.join('\r\n');
+  }
+
+  const boundary = `valet-${crypto.randomUUID()}`;
+  lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
   if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
   if (opts.references) lines.push(`References: ${opts.references}`);
   lines.push('');
+  lines.push(`--${boundary}`);
+  lines.push('Content-Type: text/plain; charset="UTF-8"');
+  lines.push('Content-Transfer-Encoding: 8bit');
+  lines.push('');
   lines.push(opts.body);
+  lines.push(`--${boundary}`);
+  lines.push('Content-Type: text/html; charset="UTF-8"');
+  lines.push('Content-Transfer-Encoding: 8bit');
+  lines.push('');
+  lines.push(opts.bodyHtml);
+  lines.push(`--${boundary}--`);
   return lines.join('\r\n');
 }
 
@@ -127,6 +149,7 @@ async function prepareMimeRequest(
     to: string | string[];
     subject: string;
     body: string;
+    bodyHtml?: string;
     cc?: string[];
     bcc?: string[];
     replyToMessageId?: string;
@@ -146,7 +169,16 @@ async function prepareMimeRequest(
   }
 
   const raw = encodeRawMessage(
-    buildMimeMessage({ to: toList, cc: args.cc, bcc: args.bcc, subject: args.subject, body: args.body, inReplyTo, references }),
+    buildMimeMessage({
+      to: toList,
+      cc: args.cc,
+      bcc: args.bcc,
+      subject: args.subject,
+      body: args.body,
+      bodyHtml: args.bodyHtml,
+      inReplyTo,
+      references,
+    }),
   );
   return { raw, threadId, toList };
 }
@@ -249,6 +281,9 @@ const sendEmail = action(
     }),
     subject: Type.String({ description: 'Email subject line.' }),
     body: Type.String({ description: 'Plain-text body of the email.' }),
+    bodyHtml: Type.Optional(
+      Type.String({ description: 'Optional HTML body. Gmail receives plain-text and HTML MIME alternatives.' }),
+    ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -262,7 +297,7 @@ const sendEmail = action(
   id: 'gmail.send_email',
   name: 'Send Email',
   description:
-    'Sends a plain-text email from the authenticated Gmail account. Supports cc/bcc and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
+    'Sends an email from the authenticated Gmail account. Add bodyHtml to send HTML with the plain-text body as an alternative. Supports cc/bcc and optional threading by passing replyToMessageId (which copies threadId and sets In-Reply-To/References so the reply lands in the same thread).',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
@@ -561,6 +596,9 @@ const createDraft = action(
     }),
     subject: Type.String({ description: 'Email subject line.' }),
     body: Type.String({ description: 'Plain-text body of the draft.' }),
+    bodyHtml: Type.Optional(
+      Type.String({ description: 'Optional HTML body. Gmail receives plain-text and HTML MIME alternatives.' }),
+    ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -573,7 +611,7 @@ const createDraft = action(
   id: 'gmail.create_draft',
   name: 'Create Draft',
   description:
-    'Creates a Gmail draft (does NOT send). Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, or deleted with delete_draft. Supports threading via replyToMessageId.',
+    'Creates a Gmail draft (does NOT send). Add bodyHtml to include an HTML alternative. Use this for AI-composed emails that the user should review before sending. The draft appears in the Gmail Drafts folder and can be sent later with send_draft, edited with update_draft, or deleted with delete_draft. Supports threading via replyToMessageId.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
@@ -741,6 +779,9 @@ const updateDraft = action(
     }),
     subject: Type.String({ description: 'Email subject line.' }),
     body: Type.String({ description: 'New plain-text body of the draft.' }),
+    bodyHtml: Type.Optional(
+      Type.String({ description: 'Optional HTML body. Gmail receives plain-text and HTML MIME alternatives.' }),
+    ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
     bcc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Bcc recipients.' })),
     replyToMessageId: Type.Optional(
@@ -751,7 +792,7 @@ const updateDraft = action(
   id: 'gmail.update_draft',
   name: 'Update Draft',
   description:
-    'Replaces the contents of an existing Gmail draft. The new contents fully overwrite the old draft (this is a full replace, not a patch). Use this when iterating on an AI-composed draft before sending.',
+    'Replaces the contents of an existing Gmail draft. Add bodyHtml to include an HTML alternative. The new contents fully overwrite the old draft (this is a full replace, not a patch). Use this when iterating on an AI-composed draft before sending.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
     const p = args;
