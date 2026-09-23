@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Value } from 'typebox/value';
 import type {
   Credential,
   CredentialProvider,
@@ -182,8 +183,83 @@ describe('gmail actions', () => {
       'line one\r\nline two',
       '<p>line one</p>\r\n<p>line two</p>',
     );
-    expect(mime).not.toMatch(/[^\r]\n/);
+    expect(mime).not.toMatch(/(^|[^\r])\n/);
     expect(result.success).toBe(true);
+  });
+
+  it('send_email falls back to plain-text MIME when bodyHtml is whitespace-only', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'm1', threadId: 't1', labelIds: ['SENT'] }),
+    );
+
+    const result = await action('gmail.send_email').execute(
+      { to: 'a@example.com', subject: 'Hi', body: 'hello', bodyHtml: ' \n\t ' },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expectPlainTextMime(rawMime(init), 'hello');
+    expect(result.success).toBe(true);
+  });
+
+  it.each(['gmail.send_email', 'gmail.create_draft', 'gmail.update_draft'])(
+    '%s schema rejects empty and whitespace-only bodyHtml',
+    (id) => {
+      const schema = action(id).parameters;
+      const base = { draftId: 'd1', to: 'a@example.com', subject: 'Hi', body: 'hello' };
+      expect(Value.Check(schema, { ...base, bodyHtml: '<p>ok</p>' })).toBe(true);
+      expect(Value.Check(schema, { ...base, bodyHtml: '' })).toBe(false);
+      expect(Value.Check(schema, { ...base, bodyHtml: '   ' })).toBe(false);
+      expect(Value.Check(schema, { ...base, bodyHtml: ' \n\t ' })).toBe(false);
+    },
+  );
+
+  it('send_email neutralizes CRLF header injection in the subject', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'm1', threadId: 't1', labelIds: ['SENT'] }),
+    );
+
+    await action('gmail.send_email').execute(
+      {
+        to: 'a@example.com',
+        subject: 'Hi\r\nBcc: mole@evil.com',
+        body: 'hello',
+        bodyHtml: '<p>hello</p>',
+      },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = rawMime(init).split('\r\n\r\n')[0];
+    // No injected header line: "Bcc:" must never start a line.
+    expect(headers).not.toMatch(/(^|\r\n)Bcc:/);
+    expect(headers).toContain('Subject: Hi Bcc: mole@evil.com');
+  });
+
+  it('send_email neutralizes header injection in recipient addresses', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { id: 'm1', threadId: 't1', labelIds: ['SENT'] }),
+    );
+
+    await action('gmail.send_email').execute(
+      {
+        to: 'a@example.com\r\nBcc: mole@evil.com',
+        subject: 'Hi\nX-Evil: 1',
+        body: 'hello',
+        cc: ['c@example.com\rReply-To: mole@evil.com'],
+      },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = rawMime(init).split('\r\n\r\n')[0];
+    // No injected header lines: the payloads survive only as inline text.
+    expect(headers).not.toMatch(/(^|\r\n)Bcc:/);
+    expect(headers).not.toMatch(/(^|\r\n)X-Evil:/);
+    expect(headers).not.toMatch(/(^|\r\n)Reply-To:/);
+    expect(headers).toContain('To: a@example.com Bcc: mole@evil.com');
+    expect(headers).toContain('Cc: c@example.com Reply-To: mole@evil.com');
+    expect(headers).toContain('Subject: Hi X-Evil: 1');
   });
 
   it('send_email maps a 401 response to a Gmail API error', async () => {

@@ -59,6 +59,19 @@ async function gmailError(res: Response): Promise<PluginActionResult> {
 
 // ─── MIME Helpers ─────────────────────────────────────────────────────────────
 
+/**
+ * Strip header-injection vectors from a caller-supplied header value: fold
+ * CR/LF runs (plus any folding whitespace after them) into a single space
+ * and drop the remaining control characters. Without this, a subject or
+ * recipient like "Hi\r\nBcc: mole@evil.com" would inject a Bcc header into
+ * the raw MIME message.
+ */
+function sanitizeHeaderValue(value: string): string {
+  return value
+    .replace(/[\r\n]+[ \t]*/g, ' ')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+}
+
 function encodeHeader(value: string): string {
   // RFC 2047 encoded-word for any non-ASCII content in headers.
   if (/^[\x00-\x7F]*$/.test(value)) return value;
@@ -85,18 +98,20 @@ function buildMimeMessage(opts: {
   inReplyTo?: string | null;
   references?: string | null;
 }): string {
+  const addressList = (addresses: string[]) =>
+    addresses.map(sanitizeHeaderValue).join(', ');
   const lines: string[] = [];
-  lines.push(`To: ${opts.to.join(', ')}`);
-  if (opts.cc && opts.cc.length > 0) lines.push(`Cc: ${opts.cc.join(', ')}`);
-  if (opts.bcc && opts.bcc.length > 0) lines.push(`Bcc: ${opts.bcc.join(', ')}`);
-  lines.push(`Subject: ${encodeHeader(opts.subject)}`);
+  lines.push(`To: ${addressList(opts.to)}`);
+  if (opts.cc && opts.cc.length > 0) lines.push(`Cc: ${addressList(opts.cc)}`);
+  if (opts.bcc && opts.bcc.length > 0) lines.push(`Bcc: ${addressList(opts.bcc)}`);
+  lines.push(`Subject: ${encodeHeader(sanitizeHeaderValue(opts.subject))}`);
   lines.push('MIME-Version: 1.0');
 
-  // An empty bodyHtml would emit a blank text/html alternative, which mail
+  // A blank bodyHtml would emit an empty text/html alternative, which mail
   // clients prefer over the plain-text part — the recipient would see an
-  // empty email. The schemas reject empty bodyHtml; this guard also keeps
-  // the builder itself safe.
-  if (!opts.bodyHtml) {
+  // empty email. The schemas reject blank bodyHtml; this trim-aware guard
+  // also keeps the builder itself safe for whitespace-only values.
+  if (!opts.bodyHtml?.trim()) {
     lines.push('Content-Type: text/plain; charset="UTF-8"');
     lines.push('Content-Transfer-Encoding: 8bit');
     if (opts.inReplyTo) lines.push(`In-Reply-To: ${opts.inReplyTo}`);
@@ -293,8 +308,9 @@ const sendEmail = action(
     bodyHtml: Type.Optional(
       Type.String({
         minLength: 1,
+        pattern: '\\S',
         description:
-          'Optional HTML body; must be non-empty when provided. Gmail receives plain-text and HTML MIME alternatives.',
+          'Optional HTML body; must contain non-whitespace content when provided. Gmail receives plain-text and HTML MIME alternatives.',
       }),
     ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
@@ -612,8 +628,9 @@ const createDraft = action(
     bodyHtml: Type.Optional(
       Type.String({
         minLength: 1,
+        pattern: '\\S',
         description:
-          'Optional HTML body; must be non-empty when provided. Gmail receives plain-text and HTML MIME alternatives.',
+          'Optional HTML body; must contain non-whitespace content when provided. Gmail receives plain-text and HTML MIME alternatives.',
       }),
     ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
@@ -799,8 +816,9 @@ const updateDraft = action(
     bodyHtml: Type.Optional(
       Type.String({
         minLength: 1,
+        pattern: '\\S',
         description:
-          'Optional HTML body; must be non-empty when provided. Gmail receives plain-text and HTML MIME alternatives.',
+          'Optional HTML body; must contain non-whitespace content when provided. Gmail receives plain-text and HTML MIME alternatives.',
       }),
     ),
     cc: Type.Optional(Type.Array(Type.String(), { description: 'Optional list of Cc recipients.' })),
