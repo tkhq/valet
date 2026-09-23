@@ -10,13 +10,14 @@ Use these actions to read, compose, and manage Gmail messages and drafts on beha
 ## Messages
 
 ### `gmail.send_email`
-Send an email with Markdown in `body`. Gmail preserves the Markdown source as `text/plain` and renders safe HTML as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML is escaped. Do not pass `bodyHtml`; `body` is the only message source. Supports `cc`, `bcc`, and threading via `replyToMessageId`.
+Send an email. Use `body` for Markdown. Gmail sends the source as `text/plain` and safe rendered Markdown as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML in `body` is escaped. To send trusted explicit HTML, set non-blank `bodyHtml`. Gmail then uses `body` verbatim as `text/plain` and `bodyHtml` verbatim as `text/html`. Do not use `bodyHtml` for blank content. Supports `cc`, `bcc`, and threading via `replyToMessageId`.
 
 ```json
 {
   "to": "alice@example.com",
   "subject": "Hello",
   "body": "# Hello\n\nHi Alice, ...",
+  "bodyHtml": "<p>Optional explicit HTML</p>",
   "cc": ["bob@example.com"],
   "replyToMessageId": "<optional gmail message id>"
 }
@@ -93,13 +94,14 @@ Risk: **high**.
 ## Drafts
 
 ### `gmail.create_draft`
-Create a draft without sending. Write Markdown in `body`. Gmail preserves it as `text/plain` and renders safe HTML as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML is escaped. Do not pass `bodyHtml`. Prefer this over `send_email` when the user should review before sending. Supports threading via `replyToMessageId`.
+Create a draft without sending. Use `body` for Markdown. Gmail sends the source as `text/plain` and safe rendered Markdown as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML in `body` is escaped. To send trusted explicit HTML, set non-blank `bodyHtml`. Gmail then uses `body` verbatim as `text/plain` and `bodyHtml` verbatim as `text/html`. Do not use `bodyHtml` for blank content. Prefer this over `send_email` when the user should review before sending. Supports threading via `replyToMessageId`.
 
 ```json
 {
   "to": "alice@example.com",
   "subject": "Proposal",
   "body": "Dear Alice, ...",
+  "bodyHtml": "<p>Optional explicit HTML</p>",
   "replyToMessageId": "<optional>"
 }
 ```
@@ -131,14 +133,15 @@ Risk: **low**.
 ---
 
 ### `gmail.update_draft`
-Fully replace a draft's contents (subject, body, recipients). Write Markdown in `body`. Gmail preserves it as `text/plain` and renders safe HTML as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML is escaped. Do not pass `bodyHtml`. This is a full overwrite, not a patch.
+Fully replace a draft's contents (subject, body, recipients). Use `body` for Markdown. Gmail sends the source as `text/plain` and safe rendered Markdown as `text/html`. Single newlines remain visible HTML line breaks. Raw HTML in `body` is escaped. To send trusted explicit HTML, set non-blank `bodyHtml`. Gmail then uses `body` verbatim as `text/plain` and `bodyHtml` verbatim as `text/html`. Do not use `bodyHtml` for blank content. This is a full overwrite, not a patch.
 
 ```json
 {
   "draftId": "r8765432109",
   "to": "alice@example.com",
   "subject": "Updated Proposal",
-  "body": "Dear Alice, revised text..."
+  "body": "Dear Alice, revised text...",
+  "bodyHtml": "<p>Optional explicit HTML</p>"
 }
 ```
 
