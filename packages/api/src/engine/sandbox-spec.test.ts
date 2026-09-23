@@ -160,17 +160,17 @@ describe("determinism", () => {
 describe("golden hashes", () => {
   it("repoBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithRepoBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"caa289da34099e4c7349b3ffae7533d7b8ac649dab51f1b2171360f5913eef4d"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"62ac56707340390769cc41c78e4c815cea6e222af7473257145d37ec9580c4d2"`);
   });
 
   it("baseBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithBaseBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"9eb4ec91c65fc2d9e62fa156ff220361b0e8e2fda0d4c74795320c0ae2e8cd48"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"b8932cbf389c97a3a248838b2ac1eb18277f611a7d8f6c227bffe96c9d93530d"`);
   });
 
   it("stock image spec has expected specHash", () => {
     const spec = computeSpec(snapWithStockOnly);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"244cede79d29d3dd0987ee958f6ca4cf9fc1237eac21141d4272b03beca8039f"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"a52fa07553cc7dad9e20106def58a198e53038109113593e558695a31901c958"`);
   });
 });
 
@@ -179,7 +179,7 @@ describe("resource opinion hashing", () => {
 
   it("preserves the existing hash when no resource opinion exists", () => {
     expect(specHash(spec, undefined)).toBe(specHash(spec));
-    expect(specHash(spec)).toBe("caa289da34099e4c7349b3ffae7533d7b8ac649dab51f1b2171360f5913eef4d");
+    expect(specHash(spec)).toBe("62ac56707340390769cc41c78e4c815cea6e222af7473257145d37ec9580c4d2");
   });
 
   it("uses fixed cpu then memory order independent of insertion order", () => {

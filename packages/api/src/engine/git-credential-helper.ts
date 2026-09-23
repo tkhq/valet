@@ -216,17 +216,22 @@ function argsWithManagedHooks(gitArgs) {
   const gitDirResult = spawnSync(real, ["rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
   if (gitDirResult.status !== 0) return { args: gitArgs, env: process.env };
   const gitDir = gitDirResult.stdout.trim(); const managedDir = gitDir + "/valet-hooks";
-  if (!fs.existsSync(managedDir + "/prepare-commit-msg")) return { args: gitArgs, env: process.env };
+  if (!fs.existsSync(managedDir + "/valet-prepare-commit-msg")) return { args: gitArgs, env: process.env };
+  if (process.env.VALET_HOOK_DISPATCH_ACTIVE === "1") {
+    const original = process.env.VALET_REPO_HOOKS_DIR;
+    return original ? { args: ["-c", "core.hooksPath=" + original, ...gitArgs], env: process.env } : { args: gitArgs, env: process.env };
+  }
   const top = execFileSync(real, ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
   const configured = spawnSync(real, ["config", "--path", "--get", "core.hooksPath"], { encoding: "utf8" });
   const configuredDir = configured.status === 0 ? configured.stdout.trim() : gitDir + "/hooks";
   const path = require("node:path");
-  const chain = path.isAbsolute(configuredDir) ? configuredDir + "/prepare-commit-msg" : path.resolve(top, configuredDir, "prepare-commit-msg");
-  const env = { ...process.env, ...(chain === managedDir + "/prepare-commit-msg" ? {} : { VALET_CHAIN_PREPARE_COMMIT_MSG: chain }) };
-  return { args: ["-c", "core.hooksPath=" + managedDir, ...gitArgs], env };
+  const original = path.isAbsolute(configuredDir) ? configuredDir : path.resolve(top, configuredDir);
+  if (original === managedDir) return { args: gitArgs, env: process.env };
+  return { args: ["-c", "core.hooksPath=" + managedDir, ...gitArgs], env: { ...process.env, VALET_REPO_HOOKS_DIR: original } };
 }
 if (args[0] !== "push") { const call = argsWithManagedHooks(args); process.exit(spawnSync(real, call.args, { stdio: "inherit", env: call.env }).status ?? 1); }
-function fail(message) { console.error("git push (Valet App signing): " + message); process.exit(2); }
+let releaseOwnedLock = () => {};
+function fail(message) { releaseOwnedLock(); console.error("git push (Valet App signing): " + message); process.exit(2); }
 const rest = args.slice(1); const upstream = rest.includes("-u") || rest.includes("--set-upstream");
 if (rest.some((arg) => arg.startsWith("-") && arg !== "-u" && arg !== "--set-upstream")) fail("force, delete, tags, mirror, atomic, and custom push options are not supported in V1.");
 const positional = rest.filter((arg) => arg !== "-u" && arg !== "--set-upstream");
@@ -268,8 +273,26 @@ for (const sha of ids) { const type = execFileSync(real, ["cat-file", "-t", sha]
 const tok = (() => { try { return fs.readFileSync("/etc/valet/creds/token", "utf8").trim(); } catch { return process.env.VALET_SANDBOX_TOKEN || ""; } })();
 if (!tok) fail("the sandbox credential is unavailable; restart the session.");
 (async () => {
-const lockPath = gitDir + "/valet-reconcile.lock"; let lockFd;
-try { lockFd = fs.openSync(lockPath, "wx"); } catch { fail("another signed push is reconciling this repository. Retry after it finishes."); }
+const lockPath = gitDir + "/valet-reconcile.lock"; const lockToken = process.pid + "-" + Date.now() + "-" + Math.random().toString(16).slice(2); let ownsLock = false;
+function lockOwner() { try { return JSON.parse(fs.readFileSync(lockPath, "utf8")); } catch { return null; } }
+function ownerIsLive(owner) { if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) return false; try { process.kill(owner.pid, 0); return true; } catch (error) { return error && error.code === "EPERM"; } }
+function releaseLock() { if (!ownsLock) return; const owner = lockOwner(); if (owner && owner.token === lockToken) { try { fs.unlinkSync(lockPath); } catch {} } ownsLock = false; }
+releaseOwnedLock = releaseLock;
+function acquireLock() {
+  const metadata = JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: lockToken });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { const fd = fs.openSync(lockPath, "wx"); try { fs.writeFileSync(fd, metadata); } finally { fs.closeSync(fd); } ownsLock = true; return; }
+    catch (error) {
+      if (!error || error.code !== "EEXIST") throw error;
+      const owner = lockOwner(); const age = Date.now() - fs.statSync(lockPath).mtimeMs;
+      if (ownerIsLive(owner)) fail("reconcile lock " + lockPath + " is held by live process " + owner.pid + ". Wait for that push to finish. If the process exits without cleanup, remove " + lockPath + " and retry.");
+      if (!owner && age < 15 * 60 * 1000) fail("reconcile lock " + lockPath + " has invalid recent metadata. Wait 15 minutes, or verify that no signed push is active, remove " + lockPath + ", and retry.");
+      try { fs.unlinkSync(lockPath); } catch (unlinkError) { if (!unlinkError || unlinkError.code !== "ENOENT") throw unlinkError; }
+    }
+  }
+  fail("could not acquire reconcile lock " + lockPath + ". Verify that no signed push is active, remove the stale lock, and retry.");
+}
+acquireLock();
 try {
 const startHead = execFileSync(real, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); const startSource = execFileSync(real, ["rev-parse", sourceRef], { encoding: "utf8" }).trim(); const checkedOutSource = spawnSync(real, ["symbolic-ref", "--quiet", "HEAD"], { encoding: "utf8" }).stdout.trim() === sourceRef; const startStatus = execFileSync(real, ["status", "--porcelain=v1", "-z"]); const startIndex = execFileSync(real, ["write-tree"], { encoding: "utf8" }).trim();
 const response = await fetch("__API__/api/sandbox/git-push", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok }, body: JSON.stringify({ repoFullName, targetRef, expectedRemoteSha, createRef, blobs, trees, lfsObjects, commits }) }); const body = await response.json(); if (!response.ok) fail(body.error || "host replay failed");
@@ -281,7 +304,7 @@ const localTree = execFileSync(real, ["rev-parse", startSource + "^{tree}"], { e
 execFileSync(real, ["update-ref", "refs/valet/backup/" + sourceRef.slice("refs/heads/".length), startSource]); execFileSync(real, ["update-ref", sourceRef, body.signedHeadSha, startSource]); execFileSync(real, ["update-ref", "refs/remotes/" + remote + "/" + branch, body.signedHeadSha]);
 const reconciled = await fetch("__API__/api/sandbox/git-push/" + encodeURIComponent(body.operationId) + "/reconcile", { method: "POST", headers: { "content-type": "application/json", "x-valet-sandbox": tok } }); if (!reconciled.ok) fail("the signed push was published locally, but operation reconciliation failed. Retry the push.");
 if (upstream) spawnSync(real, ["branch", "--set-upstream-to", remote + "/" + branch, sourceRef], { stdio: "ignore" }); console.log("To " + remoteUrl + "\n   " + expectedRemoteSha.slice(0, 7) + ".." + body.signedHeadSha.slice(0, 7) + "  " + sourceRef.slice("refs/heads/".length) + " -> " + branch);
-} finally { if (lockFd !== undefined) fs.closeSync(lockFd); try { fs.unlinkSync(lockPath); } catch {} }
+} finally { releaseLock(); }
 })().catch((error) => fail(error.message));
 `.replace("__REAL_GIT__", REAL_GIT_PATH).replaceAll("__API__", apiUrl.replace(/\/$/u, ""));
 }
@@ -295,11 +318,14 @@ real=${REAL_GIT_PATH}
 if [ "\${1:-}" = commit ]; then
   git_dir=$("$real" rev-parse --absolute-git-dir 2>/dev/null) || git_dir=
   managed="$git_dir/valet-hooks"
-  if [ -n "$git_dir" ] && [ -x "$managed/prepare-commit-msg" ]; then
-    configured=$("$real" config --path --get core.hooksPath 2>/dev/null) || configured="$git_dir/hooks"
-    case "$configured" in /*) chain="$configured/prepare-commit-msg" ;; *) top=$("$real" rev-parse --show-toplevel); chain="$top/$configured/prepare-commit-msg" ;; esac
-    VALET_CHAIN_PREPARE_COMMIT_MSG="$chain" "$real" -c core.hooksPath="$managed" "$@"
-    exit $?
+  if [ -n "$git_dir" ] && [ -x "$managed/valet-prepare-commit-msg" ]; then
+    if [ "\${VALET_HOOK_DISPATCH_ACTIVE:-}" = 1 ]; then
+      [ -n "\${VALET_REPO_HOOKS_DIR:-}" ] && exec "$real" -c core.hooksPath="$VALET_REPO_HOOKS_DIR" "$@"
+    else
+      configured=$("$real" config --path --get core.hooksPath 2>/dev/null) || configured="$git_dir/hooks"
+      case "$configured" in /*) original="$configured" ;; *) top=$("$real" rev-parse --show-toplevel); original="$top/$configured" ;; esac
+      [ "$original" = "$managed" ] || { VALET_REPO_HOOKS_DIR="$original" "$real" -c core.hooksPath="$managed" "$@"; exit $?; }
+    fi
   fi
 fi
 # Observation must never change the push result.

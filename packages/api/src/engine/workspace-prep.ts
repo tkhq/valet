@@ -751,7 +751,7 @@ export interface GitAttributionHookConfig {
   correlationTrailers: boolean;
 }
 
-/** Install an enrichment hook without replacing a repository's existing hook. */
+/** Install hook dispatchers that preserve the repository hooks and add Valet enrichment. */
 export async function installGitAttributionHook(
   sandbox: Sandbox,
   targetDir: string,
@@ -762,19 +762,18 @@ export async function installGitAttributionHook(
   const hookDir = resolvedHookDir
     ? resolvedHookDir.startsWith("/") || targetDir === "." ? resolvedHookDir : `${targetDir}/${resolvedHookDir}`
     : targetDir === "." ? ".git/valet-hooks" : `${targetDir}/.git/valet-hooks`;
-  const hook = `${hookDir}/prepare-commit-msg`;
+  const enrichment = `${hookDir}/valet-prepare-commit-msg`;
+  const dispatcher = `${hookDir}/dispatch`;
+  const hooks = "applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg commit-msg post-commit pre-rebase post-checkout post-merge pre-push pre-auto-gc post-rewrite sendemail-validate fsmonitor-watchman post-index-change reference-transaction proc-receive update pre-receive post-receive post-update push-to-checkout";
   if (!config.coAuthor && !config.correlationTrailers) {
-    await safeExec(sandbox, `rm -f ${shQuote(hook)}`);
+    await safeExec(sandbox, `rm -rf ${shQuote(hookDir)}`);
     return;
   }
   const coAuthor = config.coAuthor ? `${config.coAuthor.name} <${config.coAuthor.email}>` : "";
-  const script = `#!/bin/sh
-# Valet Git attribution hook. The Git wrapper selects this dispatcher.
+  const enrichmentScript = `#!/bin/sh
+# Valet Git attribution enrichment. The dispatcher runs the repository hook first.
 set -eu
 msg="$1"
-if [ -n "\${VALET_CHAIN_PREPARE_COMMIT_MSG:-}" ] && [ -x "$VALET_CHAIN_PREPARE_COMMIT_MSG" ]; then
-  "$VALET_CHAIN_PREPARE_COMMIT_MSG" "$@"
-fi
 # Remove only managed entries, then let Git create one final trailer block.
 sed -i '/^Valet-Session:/Id;/^Valet-Queue-Item:/Id' "$msg"
 ${coAuthor ? `managed_coauthor=${shQuote(`Co-authored-by: ${coAuthor}`)}\ntmp="$msg.valet.$$"\ngrep -Fivx -- "$managed_coauthor" "$msg" > "$tmp" || true\nmv "$tmp" "$msg"` : ""}
@@ -782,7 +781,19 @@ ${config.correlationTrailers ? ': "\${VALET_SESSION_CORRELATION_ID:?Valet correl
 git interpret-trailers --in-place --if-exists addIfDifferent --if-missing add \\
 ${coAuthor ? `  --trailer ${shQuote(`Co-authored-by: ${coAuthor}`)} \\\n` : ""}${config.correlationTrailers ? '  --trailer "Valet-Session: $VALET_SESSION_CORRELATION_ID" \\\n  --trailer "Valet-Queue-Item: $VALET_QUEUE_ITEM_CORRELATION_ID" \\\n' : ""}  "$msg"
 `;
+  const dispatcherScript = `#!/bin/sh
+# Valet Git hook dispatcher. Preserve every hook from the repository's effective hooksPath.
+set -eu
+hook=\${0##*/}
+repo=\${VALET_REPO_HOOKS_DIR:-}
+managed=\$(dirname "$0")
+if [ -n "$repo" ] && [ "$repo" != "$managed" ] && [ -x "$repo/$hook" ]; then
+  VALET_HOOK_DISPATCH_ACTIVE=1 "$repo/$hook" "$@"
+fi
+if [ "$hook" = prepare-commit-msg ]; then exec "$managed/valet-prepare-commit-msg" "$@"; fi
+`;
   await sandbox.exec(`mkdir -p ${shQuote(hookDir)}`);
-  await sandbox.writeFile(hook, script);
-  await sandbox.exec(`chmod 755 ${shQuote(hook)}`);
+  await sandbox.writeFile(enrichment, enrichmentScript);
+  await sandbox.writeFile(dispatcher, dispatcherScript);
+  await sandbox.exec(`chmod 755 ${shQuote(enrichment)} ${shQuote(dispatcher)} && for hook in ${hooks}; do ln -sf dispatch ${shQuote(hookDir)}/"$hook"; done`);
 }

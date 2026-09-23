@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExecOpts, ExecResult, Sandbox, WorkspaceGrowth } from "@valet/engine";
@@ -24,7 +24,7 @@ import {
   resolveStartRef,
   installGitAttributionHook,
 } from "./workspace-prep.js";
-import { gitCredentialHelperScript, ghWrapperScript, observedGitWrapperScript, REAL_GIT_PATH } from "./git-credential-helper.js";
+import { appSignedGitWrapperScript, gitCredentialHelperScript, ghWrapperScript, observedGitWrapperScript, REAL_GIT_PATH } from "./git-credential-helper.js";
 import type { RepoBinding } from "../wire/types.js";
 import { opShimScript } from "./secrets-cli-script.js";
 
@@ -749,15 +749,25 @@ describe("resolveStartRef", () => {
 
 
 describe("Git attribution hook execution", () => {
-  it("preserves human co-authors and deduplicates only the managed counterpart", async () => {
+  async function hookScripts(): Promise<{ enrichment: string; dispatcher: string }> {
     const sandbox = new RecordingSandbox();
-    await installGitAttributionHook(sandbox, "repo", { coAuthor: { name: "Valet", email: "valet@example.com" }, correlationTrailers: true });
-    const script = sandbox.writes.get("repo/.git/valet-hooks/prepare-commit-msg");
-    expect(script).toBeDefined();
+    await installGitAttributionHook(sandbox, ".", {
+      coAuthor: { name: "Valet", email: "valet@example.com" },
+      correlationTrailers: true,
+    });
+    return {
+      enrichment: sandbox.writes.get(".git/valet-hooks/valet-prepare-commit-msg")!,
+      dispatcher: sandbox.writes.get(".git/valet-hooks/dispatch")!,
+    };
+  }
+
+  it("preserves human co-authors and deduplicates only the managed counterpart", async () => {
+    const { enrichment } = await hookScripts();
     const dir = mkdtempSync(join(tmpdir(), "valet-hook-"));
     try {
-      const hook = join(dir, "prepare-commit-msg"); const message = join(dir, "message");
-      writeFileSync(hook, script!, { mode: 0o755 });
+      const hook = join(dir, "prepare-commit-msg");
+      const message = join(dir, "message");
+      writeFileSync(hook, enrichment, { mode: 0o755 });
       writeFileSync(message, "Subject\n\nCo-authored-by: Human <human@example.com>\nCo-authored-by: Valet <valet@example.com>\nValet-Session: stale\n");
       const env = { ...process.env, VALET_SESSION_CORRELATION_ID: "v1s_new", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_new" };
       expect(spawnSync(hook, [message], { env }).status).toBe(0);
@@ -777,35 +787,76 @@ describe("Git attribution hook execution", () => {
         "Valet-Session: v1s_new",
         "Valet-Queue-Item: v1q_new",
       ]);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  it("survives a later hooksPath change and runs both hooks exactly once", async () => {
-    const sandbox = new RecordingSandbox();
-    await installGitAttributionHook(sandbox, ".", { coAuthor: { name: "Valet", email: "valet@example.com" }, correlationTrailers: false });
-    const managed = sandbox.writes.get(".git/valet-hooks/prepare-commit-msg");
-    expect(managed).toBeDefined();
+  it.each([
+    ["unsigned", (git: string) => observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`)],
+    ["App-signed", (git: string) => appSignedGitWrapperScript(API_URL).replace(`const real = ${JSON.stringify(REAL_GIT_PATH)};`, `const real = ${JSON.stringify(git)};`)],
+  ])("preserves every commit hook through the %s wrapper after a late hooksPath change", async (_mode, wrapperScript) => {
+    const { enrichment, dispatcher } = await hookScripts();
     const dir = mkdtempSync(join(tmpdir(), "valet-hook-dispatch-"));
     try {
       const git = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
       expect(spawnSync(git, ["init", "-q", dir]).status).toBe(0);
-      const hookDir = join(dir, ".git", "valet-hooks");
-      spawnSync("mkdir", ["-p", hookDir]);
-      writeFileSync(join(hookDir, "prepare-commit-msg"), managed!, { mode: 0o755 });
-      const repoHooks = join(dir, ".repo-hooks");
-      spawnSync("mkdir", ["-p", repoHooks]);
-      writeFileSync(join(repoHooks, "prepare-commit-msg"), "#!/bin/sh\nprintf 'repo\\n' >> hook-count\n", { mode: 0o755 });
+      const managed = join(dir, ".git", "valet-hooks");
+      mkdirSync(managed);
+      writeFileSync(join(managed, "valet-prepare-commit-msg"), enrichment, { mode: 0o755 });
+      writeFileSync(join(managed, "dispatch"), dispatcher, { mode: 0o755 });
+      for (const hook of ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"]) {
+        symlinkSync("dispatch", join(managed, hook));
+      }
+      const repoHooks = join(dir, ".husky", "_");
+      mkdirSync(repoHooks, { recursive: true });
+      writeFileSync(join(repoHooks, "pre-commit"), "#!/bin/sh\nprintf 'pre-commit\\n' >> hook-count\n[ ! -e block-pre ]\n", { mode: 0o755 });
+      writeFileSync(join(repoHooks, "prepare-commit-msg"), "#!/bin/sh\nprintf 'prepare-commit-msg\\n' >> hook-count\n", { mode: 0o755 });
+      writeFileSync(join(repoHooks, "commit-msg"), "#!/bin/sh\nprintf 'commit-msg\\n' >> hook-count\n! grep -q BLOCK \"$1\"\n", { mode: 0o755 });
+      writeFileSync(join(repoHooks, "post-commit"), "#!/bin/sh\nprintf 'post-commit\\n' >> hook-count\n", { mode: 0o755 });
       writeFileSync(join(dir, "file"), "content\n");
       expect(spawnSync(git, ["config", "user.name", "Test"], { cwd: dir }).status).toBe(0);
       expect(spawnSync(git, ["config", "user.email", "test@example.com"], { cwd: dir }).status).toBe(0);
-      expect(spawnSync(git, ["config", "core.hooksPath", ".repo-hooks"], { cwd: dir }).status).toBe(0);
+      expect(spawnSync(git, ["config", "core.hooksPath", ".husky/_"], { cwd: dir }).status).toBe(0);
+      expect(spawnSync(git, ["add", "file"], { cwd: dir }).status).toBe(0);
+      const wrapper = join(dir, "git-wrapper");
+      writeFileSync(wrapper, wrapperScript(git), { mode: 0o755 });
+      const env = { ...process.env, VALET_SESSION_CORRELATION_ID: "v1s_test", VALET_QUEUE_ITEM_CORRELATION_ID: "v1q_test" };
+
+      writeFileSync(join(dir, "block-pre"), "");
+      expect(spawnSync(wrapper, ["commit", "-m", "Blocked by pre"], { cwd: dir, env }).status).not.toBe(0);
+      expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("pre-commit\n");
+      rmSync(join(dir, "block-pre"));
+
+      writeFileSync(join(dir, "hook-count"), "");
+      expect(spawnSync(wrapper, ["commit", "-m", "BLOCK"], { cwd: dir, env }).status).not.toBe(0);
+      expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("pre-commit\nprepare-commit-msg\ncommit-msg\n");
+
+      writeFileSync(join(dir, "hook-count"), "");
+      expect(spawnSync(wrapper, ["commit", "-m", "Subject"], { cwd: dir, env }).status).toBe(0);
+      expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("pre-commit\nprepare-commit-msg\ncommit-msg\npost-commit\n");
+      const message = spawnSync(git, ["log", "-1", "--format=%B"], { cwd: dir, encoding: "utf8" }).stdout;
+      expect(message.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
+      expect(message.match(/Valet-Session: v1s_test/gu)).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves commit behavior unchanged when no managed hook is installed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "valet-no-hooks-"));
+    try {
+      const git = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      expect(spawnSync(git, ["init", "-q", dir]).status).toBe(0);
+      expect(spawnSync(git, ["config", "user.name", "Test"], { cwd: dir }).status).toBe(0);
+      expect(spawnSync(git, ["config", "user.email", "test@example.com"], { cwd: dir }).status).toBe(0);
+      writeFileSync(join(dir, "file"), "content\n");
       expect(spawnSync(git, ["add", "file"], { cwd: dir }).status).toBe(0);
       const wrapper = join(dir, "git-wrapper");
       writeFileSync(wrapper, observedGitWrapperScript(API_URL).replace(`real=${REAL_GIT_PATH}`, `real=${git}`), { mode: 0o755 });
-      expect(spawnSync(wrapper, ["commit", "-m", "Subject"], { cwd: dir, encoding: "utf8" }).status).toBe(0);
-      const message = spawnSync(git, ["log", "-1", "--format=%B"], { cwd: dir, encoding: "utf8" }).stdout;
-      expect(message.match(/Co-authored-by: Valet <valet@example.com>/gu)).toHaveLength(1);
-      expect(readFileSync(join(dir, "hook-count"), "utf8")).toBe("repo\n");
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+      expect(spawnSync(wrapper, ["commit", "-m", "Subject"], { cwd: dir }).status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -8,7 +8,7 @@
  * interpolated value is `apiUrl`, which is not secret.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -171,12 +171,15 @@ describe("appSignedGitWrapperScript", () => {
   });
 
   it.each([
-    ["HEAD", "refs/heads/feature", false],
-    ["feature", "refs/heads/feature", false],
-    ["feature:refs/heads/review", "refs/heads/review", false],
-    ["feature:refs/heads/new-branch", "refs/heads/new-branch", true],
-    ["main:refs/heads/review", "refs/heads/review", false],
-  ] as const)("executes push parsing for %s", async (refspec, expectedRef, createRef) => {
+    ["HEAD", "refs/heads/feature", false, "normal"],
+    ["feature", "refs/heads/feature", false, "normal"],
+    ["feature:refs/heads/review", "refs/heads/review", false, "normal"],
+    ["feature:refs/heads/new-branch", "refs/heads/new-branch", true, "normal"],
+    ["main:refs/heads/review", "refs/heads/review", false, "normal"],
+    ["feature:refs/heads/stale-lock", "refs/heads/stale-lock", true, "stale"],
+    ["feature:refs/heads/live-lock", "refs/heads/live-lock", true, "live"],
+    ["feature:refs/heads/api-error", "refs/heads/api-error", true, "error"],
+  ] as const)("executes push parsing and lock hygiene for %s (%s)", async (refspec, expectedRef, createRef, lockMode) => {
     const dir = mkdtempSync(join(tmpdir(), "valet-app-git-success-"));
     const requests: Array<Record<string, unknown>> = [];
     const server = createServer((request, response) => {
@@ -185,8 +188,9 @@ describe("appSignedGitWrapperScript", () => {
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         if (request.url === "/api/sandbox/git-push") requests.push(JSON.parse(body) as Record<string, unknown>);
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(request.url?.endsWith("/reconcile") ? "{}" : '{"operationId":"gpo-test","signedHeadSha":"signedsha"}');
+        const failed = lockMode === "error" && request.url === "/api/sandbox/git-push";
+        response.writeHead(failed ? 500 : 200, { "content-type": "application/json" });
+        response.end(failed ? '{"error":"fixture replay failed"}' : request.url?.endsWith("/reconcile") ? "{}" : '{"operationId":"gpo-test","signedHeadSha":"signedsha"}');
       });
     });
     server.listen(0, "127.0.0.1");
@@ -230,6 +234,9 @@ esac
       const script = appSignedGitWrapperScript(`http://127.0.0.1:${address.port}`)
         .replace(`const real = ${JSON.stringify(REAL_GIT_PATH)};`, `const real = ${JSON.stringify(fakeGit)};`);
       writeFileSync(wrapper, script, { mode: 0o755 });
+      const lockPath = join(dir, "valet-reconcile.lock");
+      if (lockMode === "stale") writeFileSync(lockPath, JSON.stringify({ pid: 2_147_483_647, createdAt: 0, token: "stale" }));
+      if (lockMode === "live") writeFileSync(lockPath, JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "peer" }));
       const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
         const child = spawn(process.execPath, [wrapper, "push", "origin", refspec], {
           env: { ...process.env, VALET_SANDBOX_TOKEN: "test-token", TEST_NEW_BRANCH: createRef ? "1" : "0", TEST_SOURCE_MAIN: refspec.startsWith("main:") ? "1" : "0", TEST_GIT_DIR: dir, TEST_GIT_LOG: join(dir, "git.log") },
@@ -239,9 +246,24 @@ esac
         child.stderr.on("data", (chunk) => { stderr += chunk; });
         child.on("close", (status) => resolve({ status, stderr }));
       });
+      if (lockMode === "live") {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(`reconcile lock ${lockPath} is held by live process ${process.pid}`);
+        expect(result.stderr).toContain(`remove ${lockPath} and retry`);
+        expect(JSON.parse(readFileSync(lockPath, "utf8"))).toMatchObject({ token: "peer" });
+        expect(requests).toHaveLength(0);
+        return;
+      }
+      if (lockMode === "error") {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("fixture replay failed");
+        expect(existsSync(lockPath)).toBe(false);
+        return;
+      }
       expect(result.status, result.stderr).toBe(0);
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({ targetRef: expectedRef, createRef });
+      expect(existsSync(lockPath)).toBe(false);
       if (refspec.startsWith("main:")) {
         const calls = readFileSync(join(dir, "git.log"), "utf8");
         expect(calls).toContain("update-ref refs/heads/main signedsha mainsha");
