@@ -109,6 +109,13 @@ describe('renderMarkdownToHtml', () => {
     );
   });
 
+  it('preserves soft line breaks without changing block Markdown', () => {
+    expect(renderMarkdownToHtml('Best,\nAlice')).toBe('<p>Best,<br>\nAlice</p>\n');
+    expect(renderMarkdownToHtml('# Heading\n\nFirst paragraph.\n\n- one\n- two')).toBe(
+      '<h1>Heading</h1>\n<p>First paragraph.</p>\n<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n',
+    );
+  });
+
   it('escapes raw HTML, bare angle brackets, and preserves Unicode', () => {
     const html = renderMarkdownToHtml('<img src=x onerror=alert(1)> <script>alert(1)</script> <not-an-email> <user@example.com> café 👋');
 
@@ -145,6 +152,22 @@ describe('gmail actions', () => {
       expect(Value.Check(schema, { ...args, bodyHtml: '<p>ignored</p>' })).toBe(false);
     },
   );
+
+  it.each([
+    ['gmail.send_email', { id: 'm1', threadId: 't1', labelIds: ['SENT'] }],
+    ['gmail.create_draft', { id: 'd1', message: { id: 'm1', threadId: 't1' } }],
+    ['gmail.update_draft', { id: 'd1', message: { id: 'm1', threadId: 't1' } }],
+  ])('%s preserves multiline prose in both MIME alternatives', async (id, response) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, response));
+    const args = id === 'gmail.update_draft'
+      ? { draftId: 'd1', to: 'a@example.com', subject: 'Hi', body: 'Best,\nAlice' }
+      : { to: 'a@example.com', subject: 'Hi', body: 'Best,\nAlice' };
+
+    await action(id).execute(args, pluginCtx());
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expectMultipartAlternativeMime(rawMime(init), 'Best,\r\nAlice', '<p>Best,<br>\nAlice</p>\n');
+  });
 
   it('send_email posts a MIME message and returns the sent message', async () => {
     fetchMock.mockResolvedValueOnce(
@@ -197,7 +220,7 @@ describe('gmail actions', () => {
     expectMultipartAlternativeMime(
       mime,
       'line one\r\nline two',
-      '<p>line one\r\nline two</p>\r\n',
+      '<p>line one<br>\r\nline two</p>\r\n',
     );
     expect(mime).not.toMatch(/(^|[^\r])\n/);
     expect(result.success).toBe(true);
