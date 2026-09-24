@@ -30,11 +30,12 @@ describe("browser agent pointer", () => {
     const view = render(<BrowserPageImage frame={frame} alt="Page" />);
     fireEvent.load(screen.getByAltText("Page"));
     const pulse = view.container.querySelector("[data-agent-pulse]");
-    act(() => vi.advanceTimersByTime(1000));
+    act(() => vi.advanceTimersByTime(10000));
+    expect(view.container.querySelector<HTMLElement>("[data-agent-pointer]")?.style.opacity).toBe("1");
     view.rerender(<BrowserPageImage frame={{ ...frame, url: "blob:second" }} alt="Page" />);
     fireEvent.load(screen.getByAltText("Page"));
     expect(view.container.querySelector("[data-agent-pulse]")).toBe(pulse);
-    act(() => vi.advanceTimersByTime(1000));
+    act(() => vi.advanceTimersByTime(4500));
     expect(view.container.querySelector<HTMLElement>("[data-agent-pointer]")?.style.opacity).toBe("0");
   });
 
@@ -73,7 +74,7 @@ describe("browser agent pointer", () => {
 
   it("counts transfer and image decoding time toward activity expiry", () => {
     const view = render(<BrowserPageImage frame={{ ...frame, receivedAt: Date.now() }} alt="Page" />);
-    act(() => vi.advanceTimersByTime(2100));
+    act(() => vi.advanceTimersByTime(14600));
     fireEvent.load(screen.getByAltText("Page"));
     expect(view.container.querySelector("[data-agent-pointer]")).toBeNull();
   });

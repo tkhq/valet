@@ -1,6 +1,7 @@
 import {
   chromium,
   type BrowserContext,
+  type Frame,
   type Page,
   type Locator,
   type FrameLocator,
@@ -49,6 +50,10 @@ interface TabRecord {
   baselines: Map<string, BrowserObservation>;
   observedThreads: Set<string>;
   observationGeneration: number;
+  mainDocumentTimeOrigin?: number;
+  settledDocumentId: string;
+  navigationGeneration: number;
+  navigationTasks: Set<Promise<void>>;
 }
 export interface BrowserBackendOptions {
   runtimeId: string;
@@ -61,11 +66,51 @@ export interface BrowserBackendOptions {
     confinement: 'bubblewrap';
   };
   testOnlyUnconfined?: boolean;
+  onCrash?: () => void;
   onTabs?: (tabs: BrowserTabInfo[]) => void;
   onDialog?: (tabId: string, id: string, kind: string, message: string) => void;
 }
+
+const PLAYWRIGHT_DISABLED_FEATURES = [
+  'AvoidUnnecessaryBeforeUnloadCheckSync',
+  'DestroyProfileOnBrowserClose',
+  'DialMediaRouteProvider',
+  'GlobalMediaControls',
+  'HttpsUpgrades',
+  'LensOverlay',
+  'MediaRouter',
+  'PaintHolding',
+  'ThirdPartyStoragePartitioning',
+  'BlockOriginHeaderModificationOnRedirect',
+  'Translate',
+  'AutoDeElevate',
+  'OptimizationHints',
+  'msForceBrowserSignIn',
+  'msEdgeUpdateLaunchServicesPreferredVersion',
+] as const;
+
+/** Keep Playwright's safeguards when a user argument replaces its feature list. */
+export function chromiumLaunchArgs(args: string[]): string[] {
+  const prefix = '--disable-features=';
+  const disabled = new Set<string>([
+    ...PLAYWRIGHT_DISABLED_FEATURES,
+    'DownloadBubble',
+  ]);
+  for (const arg of args) {
+    if (!arg.startsWith(prefix)) continue;
+    for (const feature of arg.slice(prefix.length).split(',')) {
+      if (feature) disabled.add(feature);
+    }
+  }
+  return [
+    ...args.filter((arg) => !arg.startsWith(prefix)),
+    `${prefix}${[...disabled].join(',')}`,
+  ];
+}
+
 export class PlaywrightBackend {
   private context?: BrowserContext;
+  private intentionalClose = false;
   private records = new Map<string, TabRecord>();
   private selectedId?: string;
   private heldKeys = new Map<string, Set<string>>();
@@ -82,6 +127,9 @@ export class PlaywrightBackend {
   >();
   private quiet = false;
   private readonly cursor = new AgentCursorTracker();
+  private readonly frameDocumentTimeOrigins = new WeakMap<Frame, number>();
+  private readonly frameNavigationGenerations = new WeakMap<Frame, number>();
+  private readonly framesAwaitingFirstNavigation = new WeakSet<Frame>();
   readonly capabilities: Record<string, BrowserCapability> = {
     automation: { available: true },
     aria: { available: true },
@@ -122,6 +170,7 @@ export class PlaywrightBackend {
         'The browser network confinement launcher is missing.',
         'Install the verified Linux browser image.',
       );
+    this.intentionalClose = false;
     this.context = await chromium.launchPersistentContext(
       this.options.profile,
       {
@@ -136,12 +185,16 @@ export class PlaywrightBackend {
         ...(this.options.launch
           ? {
               executablePath: this.options.launch.executablePath,
-              args: this.options.launch.args,
+              args: chromiumLaunchArgs(this.options.launch.args ?? []),
               env: this.options.launch.env,
             }
           : {}),
       },
     );
+    this.context.on('close', () => {
+      this.context = undefined;
+      if (!this.intentionalClose) this.options.onCrash?.();
+    });
     await installViewerPage(this.context);
     await this.cursor.install(this.context).catch(() => {});
     this.context.setDefaultTimeout(15_000);
@@ -208,6 +261,9 @@ export class PlaywrightBackend {
       baselines: new Map(),
       observedThreads: new Set(),
       observationGeneration: 0,
+      settledDocumentId: info.documentId,
+      navigationGeneration: 0,
+      navigationTasks: new Set(),
     };
     this.records.set(info.id, record);
     this.selectedId = info.id;
@@ -240,27 +296,26 @@ export class PlaywrightBackend {
         timestamp: Date.now(),
       }),
     );
+    page.on('frameattached', (frame) => {
+      this.framesAwaitingFirstNavigation.add(frame);
+    });
     page.on('framenavigated', (frame) => {
-      this.clearCursor(page);
-      record.info.documentId = randomUUID();
-      this.clearRefs(record);
-      if (frame === page.mainFrame()) {
-        record.info.url = page.url();
-        this.history.push({
-          tabId: info.id,
-          url: sanitize(page.url()),
-          timestamp: Date.now(),
-        });
-        if (this.history.length > 200) this.history.shift();
-        void page
-          .title()
-          .then((title) => {
-            info.title = title;
-            this.changed();
-          })
-          .catch(() => {});
+      if (frame !== page.mainFrame()) {
+        const generation =
+          (this.frameNavigationGenerations.get(frame) ?? 0) + 1;
+        this.frameNavigationGenerations.set(frame, generation);
+        this.trackNavigation(
+          record,
+          this.childFrameNavigated(record, frame, generation),
+        );
+        return;
       }
-      this.changed();
+      const generation = ++record.navigationGeneration;
+      record.info.documentId = randomUUID();
+      this.trackNavigation(
+        record,
+        this.mainFrameNavigated(record, frame, generation),
+      );
     });
     page.on('popup', (popup) => {
       void this.register(popup, info.ownerThreadId, info.actorId);
@@ -328,6 +383,77 @@ export class PlaywrightBackend {
   private changed() {
     this.options.onTabs?.(this.tabs());
   }
+  private trackNavigation(record: TabRecord, task: Promise<void>) {
+    let tracked: Promise<void>;
+    tracked = task.finally(() => record.navigationTasks.delete(tracked));
+    record.navigationTasks.add(tracked);
+    void tracked;
+  }
+  private async settleNavigation(record: TabRecord) {
+    while (record.navigationTasks.size)
+      await Promise.all([...record.navigationTasks]);
+  }
+  private async mainFrameNavigated(
+    record: TabRecord,
+    frame: Frame,
+    generation: number,
+  ) {
+    const timeOrigin = await frame
+      .evaluate(() => performance.timeOrigin)
+      .catch(() => undefined);
+    if (!this.records.has(record.info.id)) return;
+    if (generation !== record.navigationGeneration) return;
+    const sameDocument =
+      timeOrigin !== undefined &&
+      timeOrigin === record.mainDocumentTimeOrigin;
+    if (sameDocument) record.info.documentId = record.settledDocumentId;
+    else {
+      this.clearCursor(record.page);
+      this.clearRefs(record);
+      record.settledDocumentId = record.info.documentId;
+    }
+    record.mainDocumentTimeOrigin = timeOrigin;
+    const nextUrl = record.page.url();
+    record.info.url = nextUrl;
+    this.history.push({
+      tabId: record.info.id,
+      url: sanitize(nextUrl),
+      timestamp: Date.now(),
+    });
+    if (this.history.length > 200) this.history.shift();
+    void record.page
+      .title()
+      .then((title) => {
+        record.info.title = title;
+        this.changed();
+      })
+      .catch(() => {});
+    this.changed();
+  }
+  private async childFrameNavigated(
+    record: TabRecord,
+    frame: Frame,
+    generation: number,
+  ) {
+    const timeOrigin = await frame
+      .evaluate(() => performance.timeOrigin)
+      .catch(() => undefined);
+    if (!this.records.has(record.info.id)) return;
+    if (generation !== this.frameNavigationGenerations.get(frame)) return;
+    const firstNavigationAfterAttach =
+      this.framesAwaitingFirstNavigation.delete(frame);
+    const previous = this.frameDocumentTimeOrigins.get(frame);
+    if (timeOrigin !== undefined) this.frameDocumentTimeOrigins.set(frame, timeOrigin);
+    if (
+      !firstNavigationAfterAttach &&
+      (previous === undefined ||
+        (timeOrigin !== undefined && timeOrigin === previous))
+    )
+      return;
+    this.clearCursor(record.page);
+    this.clearRefs(record);
+    this.changed();
+  }
   private clearRefs(record: TabRecord) {
     record.observationGeneration++;
     for (const item of record.refs.values())
@@ -388,8 +514,10 @@ export class PlaywrightBackend {
       );
     const page = await this.context.newPage();
     const info = await this.register(page, thread, actor);
-    if (destination)
+    if (destination) {
       await page.goto(destination, { waitUntil: 'domcontentloaded' });
+      await this.settleNavigation(this.record(info.id));
+    }
     return { ...info };
   }
   selected() {
@@ -407,7 +535,9 @@ export class PlaywrightBackend {
   }
   select(id: string) {
     this.record(id);
+    if (this.selectedId === id) return;
     this.selectedId = id;
+    this.changed();
   }
   async turnEnd(thread: string) {
     for (const r of [...this.records.values()])
@@ -418,7 +548,9 @@ export class PlaywrightBackend {
     this.changed();
   }
   async viewport(id: string): Promise<BrowserViewport> {
-    return this.record(id).page.evaluate(() => ({
+    const record = this.record(id);
+    await this.settleNavigation(record);
+    return record.page.evaluate(() => ({
       width: innerWidth,
       height: innerHeight,
       deviceScaleFactor: devicePixelRatio,
@@ -428,6 +560,7 @@ export class PlaywrightBackend {
   }
   async observe(id: string, thread: string): Promise<BrowserObservation> {
     const record = this.record(id);
+    await this.settleNavigation(record);
     const generation = record.observationGeneration;
     const snapshotId = randomUUID();
     const rawText = await record.page.ariaSnapshot({
@@ -547,6 +680,7 @@ export class PlaywrightBackend {
     thread?: string,
   ): Promise<BrowserArtifact> {
     const r = this.record(id);
+    await this.settleNavigation(r);
     const generation = r.observationGeneration;
     const viewport = await this.viewport(id);
     const fullPage = options.fullPage === true;
@@ -599,7 +733,9 @@ export class PlaywrightBackend {
     });
   }
   async frame(id: string) {
-    return this.record(id).page.screenshot({
+    const record = this.record(id);
+    await this.settleNavigation(record);
+    return record.page.screenshot({
       type: 'jpeg',
       quality: 70,
       timeout: 15_000,
@@ -607,6 +743,7 @@ export class PlaywrightBackend {
   }
   async dom(id: string) {
     const r = this.record(id);
+    await this.settleNavigation(r);
     const frames = [];
     const availableFrames = r.page.frames();
     for (const [index, frame] of availableFrames.slice(0, 8).entries()) {
@@ -929,6 +1066,7 @@ export class PlaywrightBackend {
           ? query.tabId
           : undefined;
     const r = tabId ? this.record(tabId) : undefined;
+    if (r) await this.settleNavigation(r);
     const url =
       typeof params.url === 'string' ? checkedURL(params.url) : r?.page.url();
     const state: {
@@ -997,12 +1135,17 @@ export class PlaywrightBackend {
       ? params.locator : undefined;
     const tabId: unknown = query ? Reflect.get(query, 'tabId') : params.tabId;
     const record = typeof tabId === 'string' ? this.records.get(tabId) : undefined;
+    if (record) {
+      await this.settleNavigation(record);
+      this.select(record.info.id);
+    }
     const endCapture = record &&
       (actor === 'human' || METHOD_REGISTRY[method]?.operationClass === 'mutation')
       ? this.captureCursor(record.page, actor === 'human') : undefined;
     try {
       return await this.executeCommand(method, params, thread, actor);
     } finally {
+      if (record) await this.settleNavigation(record);
       endCapture?.();
     }
   }
@@ -1012,10 +1155,25 @@ export class PlaywrightBackend {
     thread: string,
     actor: string,
   ): Promise<unknown> {
-    if (method === 'tabs.list') return this.tabs();
-    if (method === 'tabs.get') return this.info(string(params.id, 'tab ID'));
-    if (method === 'tabs.selected')
-      return this.selectedId ? this.info(this.selectedId) : undefined;
+    if (method === 'tabs.list') {
+      await Promise.all(
+        [...this.records.values()].map((record) =>
+          this.settleNavigation(record),
+        ),
+      );
+      return this.tabs();
+    }
+    if (method === 'tabs.get') {
+      const id = string(params.id, 'tab ID');
+      await this.settleNavigation(this.record(id));
+      this.select(id);
+      return this.info(id);
+    }
+    if (method === 'tabs.selected') {
+      if (!this.selectedId) return;
+      await this.settleNavigation(this.record(this.selectedId));
+      return this.info(this.selectedId);
+    }
     if (method === 'tabs.new')
       return this.newTab(
         thread,
@@ -1044,15 +1202,19 @@ export class PlaywrightBackend {
         await page.goto(checkedURL(string(params.url, 'URL')), {
           waitUntil: 'domcontentloaded',
         });
+        await this.settleNavigation(record);
         return;
       case 'tab.back':
         await page.goBack({ waitUntil: 'domcontentloaded' });
+        await this.settleNavigation(record);
         return;
       case 'tab.forward':
         await page.goForward({ waitUntil: 'domcontentloaded' });
+        await this.settleNavigation(record);
         return;
       case 'tab.reload':
         await page.reload({ waitUntil: 'domcontentloaded' });
+        await this.settleNavigation(record);
         return;
       case 'tab.close':
         await page.close();
@@ -1219,6 +1381,9 @@ export class PlaywrightBackend {
         return locator.isVisible();
       case 'isEnabled':
         return locator.isEnabled();
+      case 'hover':
+        await locator.hover();
+        return;
       case 'click':
         await locator.click();
         return;
@@ -1346,17 +1511,55 @@ export class PlaywrightBackend {
         await page.keyboard.press(string(args[1], 'key'));
         return;
       case 'tab.scroll':
-        if (point) await page.mouse.move(point.x, point.y);
-        else await handle?.hover();
         {
-          const direction = String(args[1]);
-          const amount =
-            800 *
-            (typeof args[2] === 'number' ? number(args[2], 'pages', 0, 20) : 1);
-          await page.mouse.wheel(
-            direction === 'left' ? -amount : direction === 'right' ? amount : 0,
-            direction === 'up' ? -amount : direction === 'down' ? amount : 0,
-          );
+          const deltaX =
+            target && typeof target === 'object'
+              ? Reflect.get(target, 'deltaX')
+              : undefined;
+          const deltaY =
+            target && typeof target === 'object'
+              ? Reflect.get(target, 'deltaY')
+              : undefined;
+          let wheelX: number;
+          let wheelY: number;
+          if (deltaX !== undefined || deltaY !== undefined) {
+            wheelX = number(deltaX ?? 0, 'deltaX', -10000, 10000);
+            wheelY = number(deltaY ?? 0, 'deltaY', -10000, 10000);
+            if (wheelX === 0 && wheelY === 0)
+              throw new BrowserFault(
+                'INVALID_REQUEST',
+                'The scroll delta is zero.',
+                'Provide a nonzero deltaX or deltaY.',
+              );
+          } else {
+            const direction = String(args[1]);
+            if (!['left', 'right', 'up', 'down'].includes(direction))
+              throw new BrowserFault(
+                'INVALID_REQUEST',
+                'The scroll direction is invalid.',
+                'Use up, down, left, or right, or provide deltaX and deltaY.',
+              );
+            const amount =
+              800 *
+              (args[2] === undefined
+                ? 1
+                : number(args[2], 'pages', 1, 20));
+            wheelX =
+              direction === 'left'
+                ? -amount
+                : direction === 'right'
+                  ? amount
+                  : 0;
+            wheelY =
+              direction === 'up'
+                ? -amount
+                : direction === 'down'
+                  ? amount
+                  : 0;
+          }
+          if (point) await page.mouse.move(point.x, point.y);
+          else await handle?.hover();
+          await page.mouse.wheel(wheelX, wheelY);
         }
         return;
       case 'tab.selectText':
@@ -1417,6 +1620,7 @@ export class PlaywrightBackend {
   }
   async humanInput(id: string, documentId: string, input: BrowserHumanInput) {
     const r = this.record(id);
+    await this.settleNavigation(r);
     this.clearCursor(r.page);
     if (r.info.documentId !== documentId)
       throw new BrowserFault(
@@ -1428,6 +1632,7 @@ export class PlaywrightBackend {
     const resumeCursor = this.captureCursor(r.page, true);
     try {
       await this.applyHumanInput(r, input);
+      await this.settleNavigation(r);
       if (input.type === 'pointer' || input.type === 'move' || input.type === 'click') {
         // Navigation and dialogs can invalidate cursor sampling after a successful effect.
         if (r.info.documentId !== documentId || r.dialog) return;
@@ -1667,6 +1872,7 @@ export class PlaywrightBackend {
     return { inventoryId: id, results };
   }
   async close() {
+    this.intentionalClose = true;
     await this.context?.close();
     this.context = undefined;
   }

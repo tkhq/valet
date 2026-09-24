@@ -18,9 +18,11 @@ export function BrowserPreviewFeed({
   threadId?: string;
   working: boolean;
   choice?: string;
-  onChoose: (id: string) => void;
+  onChoose: (id?: string) => void;
 }) {
-  const query = useBrowserStatus(sessionId);
+  const query = useBrowserStatus(sessionId, {
+    refetchInterval: working ? 500 : 2000,
+  });
   const actions = useBrowserActions(sessionId);
   const [controlError, setControlError] = useState<string | null>(null);
   const [decodeError, setDecodeError] = useState(false);
@@ -34,12 +36,8 @@ export function BrowserPreviewFeed({
   const privateMode = !!control?.privateMode;
   const selected =
     runtime?.tabs.find((tab) => tab.id === choice) ??
-    runtime?.tabs.find(
-      (tab) =>
-        tab.id === runtime.selectedTabId && tab.ownerThreadId === threadId,
-    ) ??
-    runtime?.tabs.find((tab) => !!threadId && tab.ownerThreadId === threadId) ??
     runtime?.tabs.find((tab) => tab.id === runtime.selectedTabId) ??
+    runtime?.tabs.find((tab) => !!threadId && tab.ownerThreadId === threadId) ??
     runtime?.tabs[0];
   const dialog = !!runtime?.dialogs?.length;
   const statusError = query.isError || !!data?.error;
@@ -106,6 +104,18 @@ export function BrowserPreviewFeed({
               </option>
             ))}
           </select>
+          {choice && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Follow active tab"
+              title="Follow active tab"
+              className="h-7 shrink-0 px-2 text-[10px]"
+              onClick={() => onChoose(undefined)}
+            >
+              Follow active
+            </Button>
+          )}
           <span className="shrink-0 text-[10px] text-muted">
             {control ? "Agent paused" : working ? "Working" : "Live"}
           </span>

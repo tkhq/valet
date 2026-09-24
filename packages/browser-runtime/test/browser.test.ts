@@ -2,10 +2,10 @@ import { existsSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PlaywrightBackend } from '../src/browser.js';
+import { chromiumLaunchArgs, PlaywrightBackend } from '../src/browser.js';
 import { FileBroker } from '../src/files.js';
 let backend: PlaywrightBackend;
 let dir: string;
@@ -59,6 +59,16 @@ const server = createServer((req, res) => {
   );
 });
 const browserInstalled = existsSync(chromium.executablePath());
+
+it('disables the headless download bubble without dropping Playwright safeguards', () => {
+  const args = chromiumLaunchArgs(['--proxy-server=http://127.0.0.1:8877']);
+  expect(args).toContain('--proxy-server=http://127.0.0.1:8877');
+  const disabled = args.find((arg) => arg.startsWith('--disable-features='));
+  expect(disabled).toContain('DownloadBubble');
+  expect(disabled).toContain('HttpsUpgrades');
+  expect(disabled).toContain('DestroyProfileOnBrowserClose');
+});
+
 if (!browserInstalled && process.env.VALET_BROWSER_REQUIRE_REAL === '1')
   throw Error(
     'Pinned Chromium is missing. Run playwright-core install chromium.',
@@ -96,6 +106,43 @@ describe.skipIf(!browserInstalled)('real Chromium fixtures', () => {
         'cleanup',
         'actor',
       );
+  });
+  it('reports unexpected context closure and ignores intentional closure', async () => {
+    const profile = join(dir, 'lifecycle-profile');
+    const files = new FileBroker(join(dir, 'lifecycle-files'), 's', 'lifecycle', dir);
+    await files.initialize();
+    const onCrash = vi.fn();
+    const lifecycle = new PlaywrightBackend({
+      runtimeId: 'lifecycle',
+      profile,
+      files,
+      testOnlyUnconfined: true,
+      launch: {
+        executablePath: chromium.executablePath(),
+        args: ['--remote-debugging-port=0'],
+        confinement: 'bubblewrap',
+      },
+      onCrash,
+    });
+    try {
+      await lifecycle.start();
+      await lifecycle.close();
+      expect(onCrash).not.toHaveBeenCalled();
+
+      await lifecycle.start();
+      const [port, browserPath] = (
+        await readFile(join(profile, 'DevToolsActivePort'), 'utf8')
+      ).trim().split('\n');
+      const socket = new WebSocket(`ws://127.0.0.1:${port}${browserPath}`);
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener('open', () => resolve(), { once: true });
+        socket.addEventListener('error', () => reject(Error('DevTools connection failed.')), { once: true });
+      });
+      socket.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
+      await expect.poll(() => onCrash.mock.calls.length).toBe(1);
+    } finally {
+      await lifecycle.close();
+    }
   });
   it('removes raw downloads when the broker rejects its session quota', async () => {
     const files = new FileBroker(join(dir, 'quota-files'), 's', 'quota', dir, 100, 4);

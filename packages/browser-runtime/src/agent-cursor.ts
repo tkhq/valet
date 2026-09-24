@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { BrowserContext, Frame, Page } from 'playwright-core';
-import type { BrowserAgentCursor } from '@valet/shared';
+import {
+  BROWSER_AGENT_CURSOR_LIFETIME_MS,
+  type BrowserAgentCursor,
+} from '@valet/shared';
 
 interface Capture {
   generation: number;
@@ -126,7 +129,9 @@ export class AgentCursorTracker {
     if (!this.enabled || !latest) return;
     const { recordedAt, ...cursor } = latest;
     const ageMs = Math.max(0, Date.now() - recordedAt);
-    return ageMs < 2500 ? { ...cursor, ageMs } : undefined;
+    return ageMs < BROWSER_AGENT_CURSOR_LIFETIME_MS
+      ? { ...cursor, ageMs }
+      : undefined;
   }
 }
 

@@ -146,6 +146,7 @@ export interface BrowserAgentCursor {
   sequence: number;
   ageMs: number;
 }
+export const BROWSER_AGENT_CURSOR_LIFETIME_MS = 15000;
 /** Ignore optional visual metadata that does not fit the captured viewport. */
 export function parseBrowserAgentCursor(
   value: unknown,
@@ -160,7 +161,7 @@ export function parseBrowserAgentCursor(
   if (typeof x !== 'number' || !Number.isFinite(x) || x < 0 || x >= viewport.width ||
       typeof y !== 'number' || !Number.isFinite(y) || y < 0 || y >= viewport.height ||
       typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 0 ||
-      typeof ageMs !== 'number' || !Number.isFinite(ageMs) || ageMs < 0 || ageMs > 2500 ||
+      typeof ageMs !== 'number' || !Number.isFinite(ageMs) || ageMs < 0 || ageMs > BROWSER_AGENT_CURSOR_LIFETIME_MS ||
       (kind !== 'move' && kind !== 'click' && kind !== 'type')) return;
   return { x, y, kind, sequence, ageMs };
 }

@@ -84,7 +84,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
         if (!sandbox) throw new Error("Browser sandbox is not attached");
         await sandbox.writeFile(
           "fixture.cjs",
-          `require('node:http').createServer((req,res)=>{if(req.url==='/download'){res.setHeader('content-disposition','attachment; filename=dogfood.txt');return res.end('Valet download fixture')}res.setHeader('content-type','text/html');res.end('<title>Browser fixture</title><a href="/download" download>Download fixture</a><h1>Before</h1><label>Name<input aria-label="Name"></label><button onclick="document.querySelector(\\'h1\\').textContent=\\'Saved \\'+document.querySelector(\\'input\\').value">Save</button>')}).listen(5173,'0.0.0.0')`,
+          `require('node:http').createServer((req,res)=>{if(req.url==='/download'){res.setHeader('content-disposition','attachment; filename=dogfood.txt');return res.end('Valet download fixture')}res.setHeader('content-type','text/html');res.end('<title>Browser fixture</title><a style="position:fixed;left:20px;top:20px" href="/download" download>Download fixture</a><h1>Before</h1><label>Name<input aria-label="Name"></label><button onclick="document.querySelector(\\'h1\\').textContent=\\'Saved \\'+document.querySelector(\\'input\\').value">Save</button>')}).listen(5173,'0.0.0.0')`,
         );
         expect(
           (
@@ -108,7 +108,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
                 "browser__execute",
                 {
                   title: "Verify form",
-                  code: 'var tab = await browser.tabs.new({url:"http://127.0.0.1:5173"}); await tab.reload(); await tab.playwright.getByLabel("Name").fill("Ada"); await tab.playwright.getByRole("button",{name:"Save",exact:true}).click(); await tab.playwright.getByRole("link",{name:"Download fixture",exact:true}).click(); await tab.markDeliverable(); output.write(await tab.getAXState()); output.image(await tab.getScreenshot()); await tab.content.export("text");',
+                  code: 'var tab = await browser.tabs.new({url:"http://127.0.0.1:5173"}); await tab.reload(); await tab.playwright.getByLabel("Name").fill("Ada"); await tab.playwright.getByRole("button",{name:"Save",exact:true}).click(); await tab.markDeliverable(); output.write(await tab.getAXState()); output.image(await tab.getScreenshot()); await tab.content.export("text");',
                 },
                 { id: "browser-fullstack-call" },
               ),
@@ -199,6 +199,24 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
         const tab = status.status?.tabs[0];
         if (!tab || !status.status)
           throw new Error("Deliverable tab was not retained");
+        const ticket = await json<{ ticket: string }>(
+          `${path}/ticket`,
+          "POST",
+          { scope: "view" },
+        );
+        const frameDuringDownload = fetch(
+          `${api.baseUrl}${path}/frame?runtimeId=${status.status.runtimeId}&tabId=${tab.id}`,
+          { headers: { "x-browser-ticket": ticket.ticket } },
+        );
+        for (const phase of ["down", "up"] as const) {
+          await json<BrowserResponse>(`${path}/input`, "POST", {
+            runtimeId: status.status.runtimeId,
+            tabId: tab.id,
+            documentId: tab.documentId,
+            input: { type: "pointer", phase, x: 60, y: 30, button: "left" },
+          });
+        }
+        expect((await frameDuringDownload).status).toBe(200);
         await expect
           .poll(async () => {
             const current = await json<SessionBrowserResponse>(path);
@@ -239,7 +257,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
           },
         );
         expect(annotation.stale).toBe(false);
-        const ticket = await json<{ ticket: string }>(
+        const laterTicket = await json<{ ticket: string }>(
           `${path}/ticket`,
           "POST",
           {
@@ -248,7 +266,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
         );
         const frame = await fetch(
           `${api.baseUrl}${path}/frame?runtimeId=${status.status.runtimeId}&tabId=${tab.id}`,
-          { headers: { "x-browser-ticket": ticket.ticket } },
+          { headers: { "x-browser-ticket": laterTicket.ticket } },
         );
         expect(frame.status).toBe(200);
         expect(frame.headers.get("content-type")).toBe("image/jpeg");

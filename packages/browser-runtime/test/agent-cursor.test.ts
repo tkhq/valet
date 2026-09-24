@@ -20,11 +20,17 @@ describe.skipIf(!installed)('agent cursor in Chromium', () => {
   let origin: string;
   const server = createServer((req, res) => {
     res.setHeader('Content-Type', 'text/html');
-    if (req.url === '/child') {
-      res.end('<style>button{position:absolute;left:20px;top:30px;width:100px;height:40px}input{position:absolute;left:20px;top:100px;width:140px;height:30px;box-sizing:border-box}</style><button>Frame button</button><input aria-label="Frame input">');
+    if (req.url === '/anchors') {
+      res.end(
+        '<style>nav{position:fixed;top:0}section{height:1600px}</style><nav><a href="#bottom">Bottom</a></nav><form method="post" action="/anchors#posted"><button>Replace document</button></form><section>Top</section><section id="bottom">Bottom section</section>',
+      );
       return;
     }
-    res.end(`<style>*{box-sizing:border-box}button{position:absolute;left:100px;top:60px;width:120px;height:40px}input[type=text]{position:absolute;left:100px;top:130px;width:200px;height:40px}input[type=checkbox]{position:absolute;left:100px;top:190px;width:30px;height:30px;margin:0}iframe{position:absolute;left:400px;top:200px;width:316px;height:216px;border:8px solid;transform:scale(.75);transform-origin:top left}</style><button onclick="document.querySelector('output').hidden=false">Save</button><input type=text aria-label="Name"><input type=checkbox aria-label="Ready"><output hidden>Revealed</output><iframe src="${origin.replace('127.0.0.1', 'localhost')}/child"></iframe>`);
+    if (req.url === '/child') {
+      res.end('<style>button{position:absolute;left:20px;top:30px;width:100px;height:40px}input{position:absolute;left:20px;top:100px;width:140px;height:30px;box-sizing:border-box}</style><button>Frame button</button><input aria-label="Frame input"><a href="#child-bottom">Child anchor</a><div style="height:1200px"></div><div id="child-bottom">Child bottom</div>');
+      return;
+    }
+    res.end(`<style>*{box-sizing:border-box}button{position:absolute;left:100px;top:60px;width:120px;height:40px}button.add-frame{top:240px}input[type=text]{position:absolute;left:100px;top:130px;width:200px;height:40px}input[type=checkbox]{position:absolute;left:100px;top:190px;width:30px;height:30px;margin:0}iframe{position:absolute;left:400px;top:200px;width:316px;height:216px;border:8px solid;transform:scale(.75);transform-origin:top left}</style><button onclick="document.querySelector('output').hidden=false">Save</button><button class="add-frame" onclick="const frame=document.createElement('iframe');frame.src='/child';document.body.append(frame)">Add frame</button><input type=text aria-label="Name"><input type=checkbox aria-label="Ready"><output hidden>Revealed</output><iframe src="${origin.replace('127.0.0.1', 'localhost')}/child"></iframe>`);
   });
   beforeAll(async () => {
     await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -84,6 +90,172 @@ describe.skipIf(!installed)('agent cursor in Chromium', () => {
     await expect.poll(() => backend.agentCursor(tab.id)).toMatchObject({ x: 320, y: 180, kind: 'move' });
   });
 
+  it('follows tab handles and actions on an existing tab', async () => {
+    const first = await loadedTab();
+    const second = await loadedTab();
+    expect(backend.selected()).toBe(second.id);
+    await backend.execute(
+      'tabs.get',
+      { id: first.id },
+      'thread',
+      'actor',
+    );
+    expect(backend.selected()).toBe(first.id);
+    await locator(second, save, 'click');
+    expect(backend.selected()).toBe(second.id);
+    await backend.execute(
+      'tab.goto',
+      { tabId: first.id, runtimeId: 'r', url: origin },
+      'thread',
+      'actor',
+    );
+    expect(backend.selected()).toBe(first.id);
+  });
+
+  it('tracks semantic locator hover and subsequent scrolling', async () => {
+    const tab = await loadedTab();
+    await locator(tab, save, 'hover');
+    await expect
+      .poll(() => backend.agentCursor(tab.id))
+      .toMatchObject({ x: 160, y: 80, kind: 'move' });
+    await backend.observe(tab.id, 'thread');
+    await backend.execute(
+      'tab.scroll',
+      {
+        tabId: tab.id,
+        runtimeId: 'r',
+        args: [{ x: 320, y: 180 }, 'down', 1],
+      },
+      'thread',
+      'actor',
+    );
+    await expect
+      .poll(() => backend.agentCursor(tab.id))
+      .toMatchObject({ x: 320, y: 180, kind: 'move' });
+  });
+
+  it('scrolls with viewport wheel deltas', async () => {
+    const tab = await backend.newTab('thread', 'actor', `${origin}/anchors`);
+    await backend.observe(tab.id, 'thread');
+    await backend.execute(
+      'tab.scroll',
+      {
+        tabId: tab.id,
+        runtimeId: 'r',
+        args: [{ x: 320, y: 180, deltaX: 0, deltaY: 800 }],
+      },
+      'thread',
+      'actor',
+    );
+    await expect
+      .poll(async () => (await backend.viewport(tab.id)).scrollY)
+      .toBeGreaterThan(0);
+    await expect
+      .poll(() => backend.agentCursor(tab.id))
+      .toMatchObject({ x: 320, y: 180, kind: 'move' });
+  });
+
+  it.each([
+    [{ x: 320, y: 180, deltaY: 0 }],
+    [{ x: 320, y: 180, deltaY: 10001 }],
+    [{ x: 320, y: 180 }, 'down', 0],
+    [{ x: 320, y: 180 }, 'sideways', 1],
+  ])('rejects invalid scroll before pointer activity', async (...args) => {
+    const tab = await backend.newTab('thread', 'actor', `${origin}/anchors`);
+    await backend.observe(tab.id, 'thread');
+    await expect(
+      backend.execute(
+        'tab.scroll',
+        { tabId: tab.id, runtimeId: 'r', args },
+        'thread',
+        'actor',
+      ),
+    ).rejects.toThrow(/scroll|delta|pages/i);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(backend.agentCursor(tab.id)).toBeUndefined();
+  });
+
+  it('preserves document identity and the click marker across anchor navigation', async () => {
+    const tab = await backend.newTab('thread', 'actor', `${origin}/anchors`);
+    const documentId = backend.info(tab.id).documentId;
+    await locator(
+      tab,
+      [{ kind: 'role', value: 'link', name: 'Bottom', exact: true }],
+      'click',
+    );
+    await expect
+      .poll(async () => (await backend.viewport(tab.id)).scrollY)
+      .toBeGreaterThan(1000);
+    expect(backend.info(tab.id).documentId).toBe(documentId);
+    await expect.poll(() => backend.agentCursor(tab.id)?.kind).toBe('click');
+    await backend.execute(
+      'tab.reload',
+      { tabId: tab.id, runtimeId: 'r' },
+      'thread',
+      'actor',
+    );
+    expect(backend.info(tab.id).documentId).not.toBe(documentId);
+    expect(backend.agentCursor(tab.id)).toBeUndefined();
+  });
+
+  it('preserves the click marker across child-frame anchor navigation', async () => {
+    const tab = await loadedTab();
+    const documentId = backend.info(tab.id).documentId;
+    await locator(
+      tab,
+      [
+        { kind: 'frame', value: 'iframe' },
+        { kind: 'role', value: 'link', name: 'Child anchor', exact: true },
+      ],
+      'click',
+    );
+    expect(backend.info(tab.id).documentId).toBe(documentId);
+    await expect.poll(() => backend.agentCursor(tab.id)?.kind).toBe('click');
+  });
+
+  it('clears the pointer when a dynamically attached frame loads', async () => {
+    const tab = await loadedTab();
+    const observation = await backend.observe(tab.id, 'thread');
+    await locator(
+      tab,
+      [{ kind: 'role', value: 'button', name: 'Add frame', exact: true }],
+      'click',
+    );
+    await expect.poll(() => backend.agentCursor(tab.id)).toBeUndefined();
+    await expect(
+      backend.execute(
+        'tab.click',
+        { tabId: tab.id, runtimeId: 'r', args: [observation.refs[0]] },
+        'thread',
+        'actor',
+      ),
+    ).rejects.toThrow(/reference/);
+  });
+
+  it('invalidates a replacement document at the same hashless URL', async () => {
+    const tab = await backend.newTab(
+      'thread',
+      'actor',
+      `${origin}/anchors#before`,
+    );
+    const documentId = backend.info(tab.id).documentId;
+    await locator(
+      tab,
+      [
+        {
+          kind: 'role',
+          value: 'button',
+          name: 'Replace document',
+          exact: true,
+        },
+      ],
+      'click',
+    );
+    expect(backend.info(tab.id).documentId).not.toBe(documentId);
+    expect(backend.info(tab.id).url).toBe(`${origin}/anchors#posted`);
+    expect(backend.agentCursor(tab.id)).toBeUndefined();
+  });
+
   it('maps cross-origin child frame events through borders and scale', async () => {
     const tab = await loadedTab();
     await locator(tab, [{ kind: 'frame', value: 'iframe' }, { kind: 'role', value: 'button', name: 'Frame button', exact: true }], 'click');
@@ -111,13 +283,16 @@ describe.skipIf(!installed)('agent cursor in Chromium', () => {
     expect(backend.agentCursor(tab.id)).toBeUndefined();
   });
 
-  it('clears on navigation and private transitions, and expires after 2500 ms', async () => {
+  it('clears on navigation and private transitions, and expires after 15000 ms', async () => {
     const tab = await loadedTab();
     await locator(tab, save, 'click');
     await expect.poll(() => backend.agentCursor(tab.id)?.kind).toBe('click');
     const first = backend.agentCursor(tab.id)!;
     const now = Date.now();
-    vi.spyOn(Date, 'now').mockReturnValue(now + 2500);
+    vi.spyOn(Date, 'now').mockReturnValue(now + 10000);
+    expect(backend.agentCursor(tab.id)?.sequence).toBe(first.sequence);
+    vi.restoreAllMocks();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 15000);
     expect(backend.agentCursor(tab.id)).toBeUndefined();
     vi.restoreAllMocks();
     await locator(tab, name, 'fill', ['next']);

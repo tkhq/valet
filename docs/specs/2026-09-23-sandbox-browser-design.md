@@ -1211,6 +1211,11 @@ Annotation panels refresh their stale-document status every two seconds while vi
 The real Docker integration verifies download metadata and the exact retrieved bytes.
 See `docs/research/2026-09-24-browser-dogfood.md` for manual control coverage.
 
+Headless Chromium crashed with `SIGSEGV` when its download bubble handled a viewer click.
+The runtime disables `DownloadBubble` and keeps Playwright's full disabled-feature list.
+An unexpected Chromium exit changes the runtime state to `crashed` and names the restart action.
+The restart action revokes the crashed daemon before it starts a new runtime generation.
+
 An interrupted frame capture can outlive its HTTP request. The viewer retries HTTP
 409 conflicts up to three times at 250 ms intervals. Other errors stop capture.
 A document change resets frame capture and clears the previous document's error.
@@ -1221,12 +1226,16 @@ Chat opens a read-only browser preview when the active thread executes a browser
 Users can also select Watch browser, move or resize the window, minimize it, or open the full Browser view.
 Closing suppresses automatic opening for that session and thread while the session view remains mounted.
 The preview shares the existing authenticated JPEG feed. It does not start the browser or take control.
-Minimizing retains page selection and stops frame requests. The full Browser view replaces the preview feed.
+Agent commands select their target tab. The preview follows that tab unless the person pins another tab.
+The preview refreshes tab selection twice per second while the agent works. A Follow active action clears a pin.
+Minimizing retains a pinned page selection and stops frame requests. The full Browser view replaces the preview feed.
 Private sign-in hides page images and metadata. Status and frame errors hide cached images.
 The window fits the transcript area above the composer and decision gates. A short area shows only its header.
 See [floating browser preview](2026-09-24-browser-overlay-design.md) for interaction and lifecycle details.
 
 Both browser views show agent activity with an animated pointer. The overlay follows actual pointer and editable-field events during agent commands.
+Semantic locators can hover. Same-document anchor navigation preserves the pointer and document identity.
+Viewport scrolling accepts wheel deltas in `{x, y, deltaX, deltaY}` and direction with page count.
 The API carries validated coordinates with each image. Human input, navigation, and private transitions clear old activity.
 The transparent input layer does not draw a focus border around the browser. Remote controls retain their native focus appearance.
 See [animated browser agent pointer](2026-09-24-browser-agent-pointer-design.md) for capture, animation, and expiry details.

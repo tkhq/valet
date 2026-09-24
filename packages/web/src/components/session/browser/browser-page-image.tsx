@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { BrowserAgentCursor } from "@valet/shared";
+import {
+  BROWSER_AGENT_CURSOR_LIFETIME_MS,
+  type BrowserAgentCursor,
+} from "@valet/shared";
 import type { BrowserFrame } from "~/api/browser";
 import { cn } from "~/lib/cn";
 
@@ -35,7 +38,7 @@ export function BrowserPageImage({ frame, alt, onLoad, onError, suppressedSequen
       className="absolute inset-0 h-full w-full select-none object-contain"
       onLoad={() => {
         const ageMs = (frame.agentCursor?.ageMs ?? 0) + Math.max(0, Date.now() - (frame.receivedAt ?? Date.now()));
-        setDecoded({ ...frame, agentCursor: frame.agentCursor && ageMs < 2500 ? { ...frame.agentCursor, ageMs } : undefined });
+        setDecoded({ ...frame, agentCursor: frame.agentCursor && ageMs < BROWSER_AGENT_CURSOR_LIFETIME_MS ? { ...frame.agentCursor, ageMs } : undefined });
         onLoad?.();
       }}
       onError={() => { setDecoded(null); onError?.(); }}
@@ -71,7 +74,7 @@ function BrowserAgentPointer({ cursor, viewport }: {
   useEffect(() => {
     if (sequence === undefined) return;
     if (expiry.current.sequence !== sequence) {
-      expiry.current = { sequence, at: Date.now() + Math.max(0, 2500 - ageMs) };
+      expiry.current = { sequence, at: Date.now() + Math.max(0, BROWSER_AGENT_CURSOR_LIFETIME_MS - ageMs) };
     }
     const timer = setTimeout(() => setExpired(sequence), Math.max(0, expiry.current.at - Date.now()));
     return () => clearTimeout(timer);

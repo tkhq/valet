@@ -309,6 +309,38 @@ async function status(c: Context<AppEnv>, start = false) {
               c.req.raw.signal,
             )
           ).status ?? null;
+        if (start && result.status?.state === "crashed") {
+          await browserRequest(
+            ctx.sandbox,
+            { ...ctx.identity, audience: "lifecycle", command: "revoke" },
+            c.req.raw.signal,
+          );
+          let socketRemoved = false;
+          for (let attempt = 0; attempt < 40; attempt++) {
+            c.req.raw.signal.throwIfAborted();
+            const socket = await ctx.attached.exec(
+              "test -S /var/lib/valet/browser/browser.sock",
+              { timeout: 5000, privileged: true },
+            );
+            if (socket.exitCode !== 0) {
+              socketRemoved = true;
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          if (!socketRemoved)
+            throw new Error(
+              "The browser did not stop. Restart the sandbox and try again.",
+            );
+          result.status =
+            (
+              await browserRequest(
+                ctx.sandbox,
+                { ...ctx.identity, command: "status" },
+                c.req.raw.signal,
+              )
+            ).status ?? null;
+        }
       }
     } catch (error) {
       result.error =

@@ -49,6 +49,7 @@ export function createFacade(rpc: Rpc) {
       'getAttribute',
       'isVisible',
       'isEnabled',
+      'hover',
       'click',
       'dblclick',
       'fill',

@@ -46,6 +46,7 @@ const groups: Record<BrowserOperationClass, string[]> = {
     'tab.dialogRespond',
     'locator.click',
     'locator.dblclick',
+    'locator.hover',
     'locator.fill',
     'locator.type',
     'locator.pressSequentially',
@@ -89,7 +90,10 @@ export function documentation() {
     '',
     'Bindings remain available in later cells:',
     'await tab.playwright.getByLabel("Name", {exact:true}).fill("Ada");',
+    'await tab.playwright.getByRole("button", {name:"Save", exact:true}).hover();',
     'await tab.playwright.getByRole("button", {name:"Save", exact:true}).click();',
+    'await tab.getScreenshot({emit:false});',
+    'await tab.scroll({x:640, y:400, deltaY:800});',
     'await tab.getAXState();',
     'await tab.getScreenshot();',
     '',
@@ -107,7 +111,7 @@ export function documentation() {
     'Export rendered content through the artifact broker:',
     'await tab.content.export("text");',
   ].join('\n');
-  return `Browser protocol 1.0. Persistent Node REPL bindings support top-level await. Lexical redeclarations fail; use the browser.reset tool to discard bindings. Observation methods emit by default; use {emit:false} to return without emitting. Use output.write for other reads. Locators are strict. People and agents share normal input. References expire after navigation, replacement, or human input. An explicit pause blocks agent mutations until the user resumes shared use. Coordinates use viewport CSS pixels. evaluate reads an immutable snapshot and cannot access live page globals. Approval waits preserve the cell. Never repeat a failed mutation before checking its receipt and the page.\n\n${examples}\n\nAvailable methods:\n${Object.entries(
+  return `Browser protocol 1.0. Persistent Node REPL bindings support top-level await. Lexical redeclarations fail; use a fresh variable name or reuse an existing binding. Use browser.reset only when you need to discard all bindings. Observation methods emit by default and also return their text. Use {emit:false} to return without emitting. Use output.write for other reads. Locators are strict. People and agents share normal input. References expire after navigation, replacement, reset, or human input. Keep an observation and its reference action in one cell when possible. An explicit pause blocks agent mutations until the user resumes shared use. Coordinates use viewport CSS pixels. evaluate reads an immutable snapshot and cannot access live page globals. Approval waits preserve the cell. Never repeat a failed mutation before checking its receipt and the page.\n\n${examples}\n\nAvailable methods:\n${Object.entries(
     METHOD_REGISTRY,
   )
     .map(([name, meta]) => `${name}: ${meta.operationClass}`)

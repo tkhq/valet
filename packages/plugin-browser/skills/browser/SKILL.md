@@ -11,12 +11,14 @@ description: Use a persistent sandbox Chromium browser with semantic page observ
 4. Verify the result after each consequential action.
 
 Each thread has a persistent Node REPL. Top-level bindings and top-level await survive across cells.
-Use fresh variable names or reuse existing bindings. Call `browser.reset` to discard this thread's bindings.
+Use fresh variable names or reuse existing bindings. Call `browser.reset` only when you must discard all thread bindings.
 Reset keeps the profile and tabs. Browser restart invalidates runtime, document, and element handles.
 
 The browser methods use structured RPC. Read-only evaluation operates on a captured DOM observation.
 It cannot access live page globals. Use the supported locator and input methods for page actions.
 A snapshot reference can expire after navigation or human input. Capture a new snapshot when that happens.
+Observation methods also return their text. Keep an observation and its reference action in one cell when possible.
+For viewport scrolling, observe first and call `tab.scroll({x, y, deltaY})`. Direction and page-count arguments also work.
 
 ## Task authorization and approvals
 

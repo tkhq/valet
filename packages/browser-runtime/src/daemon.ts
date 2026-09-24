@@ -89,6 +89,7 @@ export class BrowserDaemon {
   private waiters = new Set<() => void>();
   private restorableTabs: BrowserRuntimeStatus['tabs'] = [];
   private state: BrowserRuntimeStatus['state'] = 'starting';
+  private correctiveAction?: string;
   private closed = false;
   private effects = new Set<Promise<unknown>>();
   private deferredCleanup = new Set<string>();
@@ -124,6 +125,13 @@ export class BrowserDaemon {
       files: this.files,
       launch: this.options.browserLaunch,
       testOnlyUnconfined: this.options.testOnlyUnconfinedBrowser,
+      onCrash: () => {
+        if (this.closed) return;
+        this.state = 'crashed';
+        this.correctiveAction =
+          'Restart the browser. Your coding session stays open.';
+        this.wake();
+      },
       onTabs: (tabs) => {
         this.journal.setMetadata('tabs', tabs);
         this.emit({ type: 'tabs', tabs });
@@ -136,6 +144,7 @@ export class BrowserDaemon {
     try {
       await this.backend.start();
       this.state = 'ready';
+      this.correctiveAction = undefined;
     } catch (error) {
       this.state = 'crashed';
       throw error;
@@ -143,6 +152,9 @@ export class BrowserDaemon {
   }
   private emit(event: BrowserEventPayload, cellId?: string) {
     this.journal.emit(event, cellId);
+    this.wake();
+  }
+  private wake() {
     for (const wake of this.waiters) wake();
     this.waiters.clear();
   }
@@ -168,6 +180,7 @@ export class BrowserDaemon {
         : this.files
             .list()
             .filter((a) => a.mimeType === 'application/octet-stream'),
+      correctiveAction: this.correctiveAction,
     };
   }
   private receipt(invocation: string, identity: BrowserIdentity) {

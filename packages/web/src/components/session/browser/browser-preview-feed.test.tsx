@@ -41,6 +41,7 @@ const state = vi.hoisted(() => ({
   error: null as Error | null,
   frameError: null as string | null,
   frame: vi.fn(),
+  status: vi.fn(),
   retry: vi.fn(),
   control: vi.fn().mockResolvedValue({}),
   refetch: vi.fn(),
@@ -50,13 +51,16 @@ vi.mock("~/api/browser", () => ({
   useBrowserActions: () => ({
     control: { mutateAsync: state.control, isPending: false },
   }),
-  useBrowserStatus: () => ({
-    data: state.data,
-    isPending: !state.data,
-    isError: !!state.error,
-    error: state.error,
-    refetch: state.refetch,
-  }),
+  useBrowserStatus: (...args: unknown[]) => {
+    state.status(...args);
+    return {
+      data: state.data,
+      isPending: !state.data,
+      isError: !!state.error,
+      error: state.error,
+      refetch: state.refetch,
+    };
+  },
   useBrowserFrame: (...args: unknown[]) => {
     state.frame(...args);
     return {
@@ -88,15 +92,15 @@ function PreviewHarness() {
 }
 
 describe("read-only browser preview", () => {
-  it("prefers this thread's tab and allows local page selection without control", () => {
+  it("follows the active tab and allows a temporary pinned page", () => {
     state.data = ready();
     render(<PreviewHarness />);
     expect(state.frame).toHaveBeenLastCalledWith(
       "session",
       "runtime",
-      "thread",
+      "other",
       true,
-      "thread",
+      "other",
     );
     expect(
       screen
@@ -105,15 +109,32 @@ describe("read-only browser preview", () => {
     ).toBe("blob:frame");
     expect(screen.queryByRole("textbox")).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Preview page" }), {
-      target: { value: "other" },
+      target: { value: "thread" },
     });
     expect(state.frame).toHaveBeenLastCalledWith(
       "session",
       "runtime",
-      "other",
+      "thread",
       true,
-      "other",
+      "thread",
     );
+    fireEvent.click(screen.getByRole("button", { name: "Follow active tab" }));
+    expect(state.frame.mock.calls.at(-1)?.[2]).toBe("other");
+  });
+  it("follows changes to the active tab while the agent works", () => {
+    state.data = ready();
+    const view = render(<PreviewHarness />);
+    expect(state.frame.mock.calls.at(-1)?.[2]).toBe("other");
+    state.data.status!.selectedTabId = "thread";
+    view.rerender(<PreviewHarness />);
+    expect(state.frame.mock.calls.at(-1)?.[2]).toBe("thread");
+  });
+  it("refreshes active-tab status quickly while the agent works", () => {
+    state.data = ready();
+    render(<BrowserPreviewFeed {...props} working onChoose={() => {}} />);
+    expect(state.status).toHaveBeenLastCalledWith("session", {
+      refetchInterval: 500,
+    });
   });
   it.each(["viewer", "other-viewer"])(
     "shows live frames during explicit pause with resume limited to %s",

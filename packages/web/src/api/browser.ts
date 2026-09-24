@@ -1,6 +1,11 @@
 import { parseBrowserAgentCursor, type BrowserAgentCursor } from "@valet/shared";
 import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryOptions,
+} from "@tanstack/react-query";
 import type {
   BrowserAnnotation,
   BrowserAnnotationMark,
@@ -160,13 +165,17 @@ export function useSaveBrowserAnnotation(
   });
 }
 
-export function useBrowserStatus(sessionId: string) {
+export function useBrowserStatus(
+  sessionId: string,
+  opts?: Partial<UseQueryOptions<SessionBrowserResponse>>,
+) {
   return useQuery({
     queryKey: qkBrowser.session(sessionId),
     queryFn: ({ signal }) => browserApi.status(sessionId, signal),
     refetchInterval: 2000,
     refetchIntervalInBackground: false,
     retry: false,
+    ...opts,
   });
 }
 

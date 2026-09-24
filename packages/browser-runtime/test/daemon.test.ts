@@ -15,6 +15,65 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const fn of cleanup.splice(0)) await fn();
 });
+
+it('reports an unexpected Chromium exit as a crashed runtime', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-daemon-crash-'));
+  let crash: (() => void) | undefined;
+  const daemon = new BrowserDaemon({
+    stateDirectory: dir,
+    workingDirectory: dir,
+    sessionId: 's',
+    repl: {
+      testOnlyUnconfined: true,
+      childPath: new URL('../src/repl/child.ts', import.meta.url),
+      execArgv: ['--import', 'tsx'],
+    },
+    backendFactory: (options) => {
+      crash = options.onCrash;
+      return {
+        capabilities: {},
+        start: async () => {},
+        close: async () => {},
+        tabs: () => [],
+        invalidate: () => {},
+        setPrivate: () => {},
+        policyState: async () => ({ origin: 'about:blank' }),
+        execute: async () => undefined,
+        turnEnd: async () => {},
+        info: () => {
+          throw Error('no tab');
+        },
+        newTab: async () => {
+          throw Error('unused');
+        },
+        select: () => {},
+        frame: async () => Buffer.from(''),
+        viewport: async () => ({
+          width: 1,
+          height: 1,
+          deviceScaleFactor: 1,
+          scrollX: 0,
+          scrollY: 0,
+        }),
+        humanInput: async () => {},
+      };
+    },
+  });
+  await daemon.start();
+  cleanup.push(async () => {
+    await daemon.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  expect(crash).toBeTypeOf('function');
+  crash?.();
+  const status = (await daemon.handle({ ...identity, command: 'status' })).status;
+  expect(status?.state).toBe('crashed');
+  expect(status?.correctiveAction).toBe(
+    'Restart the browser. Your coding session stays open.',
+  );
+});
+
 it('pauses nested browser effects for policy and attaches a repeated invocation', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'browser-daemon-'));
   let effects = 0;

@@ -24,3 +24,19 @@ it('resolves an observed opaque reference into its full wire identity', async ()
   await Reflect.get(tab, 'click')('opaque');
   expect(requests.at(-1)?.params.args).toEqual([ref]);
 });
+
+it('exposes semantic hover through the RPC facade', async () => {
+  const requests: string[] = [];
+  const browser = createFacade(async (method) => {
+    requests.push(method);
+    if (method === 'tabs.get') return { id: 'tab', runtimeId: 'runtime' };
+    return undefined;
+  });
+  const tab = await browser.tabs.get('tab');
+  const locator = Reflect.get(tab, 'playwright').getByRole('button', {
+    name: 'Save',
+  });
+  expect(typeof locator.hover).toBe('function');
+  await locator.hover();
+  expect(requests.at(-1)).toBe('locator.hover');
+});

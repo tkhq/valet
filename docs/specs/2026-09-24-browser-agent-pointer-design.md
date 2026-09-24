@@ -8,13 +8,13 @@ The transparent keyboard input surface must not draw a border around the whole b
 
 ## Data
 
-Track actual pointer and editable-field input events during agent mutation commands. Locator actions, coordinate actions, typing, and child frames use the same tracker. Do not report observations or human input as agent activity. Clear tracking on human interaction, navigation, and private-mode transitions. Tracking is optional display metadata and must never change action results.
+Track actual pointer and editable-field input events during agent mutation commands. Locator actions, coordinate actions, typing, and child frames use the same tracker. Semantic locators support hover as a mutation. Do not report observations or human input as agent activity. Clear tracking on human interaction, document navigation, and private-mode transitions. Preserve tracking across same-document anchor navigation. Tracking is optional display metadata and must never change action results.
 
-Each inline frame can include `agentCursor`: viewport coordinates `x` and `y`, `kind` (`move`, `click`, or `type`), increasing `sequence`, and `ageMs`. Expire metadata after 2500 ms. Only numeric coordinates and activity kinds leave the page; do not collect keys or field values. Match the cursor to the frame's document identity. Existing private-view authorization applies to this metadata.
+Each inline frame can include `agentCursor`: viewport coordinates `x` and `y`, `kind` (`move`, `click`, or `type`), increasing `sequence`, and `ageMs`. Expire metadata after 15000 ms. This window keeps the pointer visible through normal tool narration. Only numeric coordinates and activity kinds leave the page; do not collect keys or field values. Match the cursor to the frame's document identity. Existing private-view authorization applies to this metadata.
 
 Sample activity before and after image capture. Omit the cursor if its sequence changes during capture. Each frame carries the latest event. Rapid actions between frames can skip intermediate movement or click pulses. Animation does not delay actions to make them visible.
 
-The API validates metadata and forwards it in an optional JPEG response header. Malformed metadata does not break the image feed. The web client maps coordinates through the same image scaling and letterboxing as input. A new document or page starts a new pointer animation. A repeated sequence must not replay click pulses or extend its lifetime.
+The API validates metadata and forwards it in an optional JPEG response header. Malformed metadata does not break the image feed. The web client maps coordinates through the same image scaling and letterboxing as input. Agent commands select their target tab. The floating preview follows that tab unless the person pins another tab. While the agent works, the preview refreshes tab status twice per second. A new document or page starts a new pointer animation. A repeated sequence must not replay click pulses or extend its lifetime.
 
 Image transfer and decoding count toward the local expiry. Private-mode entry permanently suppresses retained activity until a newer sequence arrives.
 Child-frame mapping supports borders and axis-aligned scaling. Rotated or skewed frames can place the pointer incorrectly.
