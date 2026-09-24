@@ -10,6 +10,7 @@
  * first match wins. The fallback MUST stay last.
  */
 import { bashRenderer } from "./bash";
+import { browserRenderer } from "./browser";
 import { editRenderer } from "./edit";
 import { fallbackRenderer } from "./fallback";
 import { findReplaceRenderer } from "./find-replace";
@@ -28,6 +29,7 @@ import { matches, type ToolRenderer } from "./types";
 
 const RENDERERS: ToolRenderer[] = [
   bashRenderer,
+  browserRenderer,
   readRenderer,
   writeRenderer,
   editRenderer,

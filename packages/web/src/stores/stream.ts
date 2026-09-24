@@ -474,7 +474,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const updatedPart: MessagePart = {
         ...old,
         status: ev.isError ? "error" : "completed",
-        result: ev.result,
+        result: ev.resultData ?? ev.result,
         error: ev.isError ? ev.result : undefined,
       };
       const parts = replaceAt(m.parts, pidx, updatedPart);

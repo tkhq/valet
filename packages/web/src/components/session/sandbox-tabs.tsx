@@ -3,32 +3,30 @@ import type { SandboxProfile } from "@valet/api/wire";
 import { useSandboxJwt } from "~/api/queries";
 import { Button, Spinner } from "~/components/primitives";
 import { SandboxChip } from "~/components/session/session-header";
+import { BrowserPane } from "~/components/session/browser/browser-pane";
 import { cn } from "~/lib/cn";
 
-export type SandboxTabId = "chat" | "terminal" | "vscode";
+export type SandboxTabId = "chat" | "browser" | "terminal" | "vscode";
+type GatewayTabId = "terminal" | "vscode";
 
 const TABS: { id: SandboxTabId; label: string }[] = [
   { id: "chat", label: "Chat" },
+  { id: "browser", label: "Browser" },
   { id: "terminal", label: "Terminal" },
   { id: "vscode", label: "VS Code" },
 ];
 
 /** `terminal`/`vscode` -> the gateway path segment those tabs proxy to
  * (`/api/sessions/:id/gateway/{ttyd|vscode}/…`, Task 6). */
-const GATEWAY_PATH: Record<Exclude<SandboxTabId, "chat">, string> = {
+const GATEWAY_PATH: Record<GatewayTabId, string> = {
   terminal: "ttyd",
   vscode: "vscode",
 };
 
 /**
- * Chat / Terminal / VS Code tab switch for "full"-profile sessions (sandbox
- * auth gateway plan, Task 7). Renders nothing for "headless" sessions — no
- * empty tab bar. The chat tab renders no body of its own (the caller keeps
- * showing `MessageList`/`Composer` for it); non-chat tabs render the
- * gateway iframe pane below the tab bar, gated on `sandbox.state ===
- * "ready"` — that's the only state under which `Session.attachment.current()`
- * (and therefore `gatewayEndpoint()`) is non-null on the server, see
- * `packages/engine/src/sandbox/attachment.ts`.
+ * Browser access is independent of terminal services. The Browser pane
+ * checks provider support and starts the runtime only on explicit request.
+ * Full sessions also expose the Terminal and VS Code gateway panes.
  */
 export interface SandboxTabsProps {
   sessionId: string;
@@ -45,18 +43,14 @@ export function SandboxTabs({
   onTabChange,
   sandbox,
 }: SandboxTabsProps) {
-  if (profile !== "full") return null;
-
-  // Grow to fill the pane ONLY when a gateway pane (Terminal/VS Code) renders
-  // below the tab strip. On the Chat tab the body is empty — the chat message
-  // list is a sibling in `session-view` — so a growing wrapper here would claim
-  // half the pane as dead space and squash the messages. `shrink-0` keeps it at
-  // the tab strip's natural height and lets the sibling MessageList fill the rest.
-  const showsGatewayPane = activeTab !== "chat";
+  // Chat renders its body in a sibling. Keep this wrapper at the tab strip's
+  // height so MessageList can use the remaining space.
+  const showsPane = activeTab !== "chat";
+  const tabs = profile === "full" ? TABS : TABS.filter((tab) => tab.id === "chat" || tab.id === "browser");
   return (
-    <div className={cn("flex min-h-0 flex-col", showsGatewayPane ? "flex-1" : "shrink-0")}>
+    <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
       <div role="tablist" aria-label="Session view" className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-3 sm:px-4">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
@@ -74,7 +68,8 @@ export function SandboxTabs({
           </button>
         ))}
       </div>
-      {showsGatewayPane && (
+      {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} />}
+      {(activeTab === "terminal" || activeTab === "vscode") && (
         <GatewayPane sessionId={sessionId} tab={activeTab} sandbox={sandbox} />
       )}
     </div>
@@ -95,7 +90,7 @@ function GatewayPane({
   sandbox,
 }: {
   sessionId: string;
-  tab: Exclude<SandboxTabId, "chat">;
+  tab: GatewayTabId;
   sandbox?: { state: string; epoch: number };
 }) {
   const jwt = useSandboxJwt(sessionId);

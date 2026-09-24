@@ -1,6 +1,6 @@
 # Sandbox browser design
 
-Status: proposed. This document specifies the feature; it does not claim implementation.
+Status: implemented first release. Section 16 records the delivered behavior and remaining capability limits.
 Date: 2026-09-23, America/Los_Angeles.
 Research: [harness observations and source notes](../research/2026-09-23-browser-harness.md).
 
@@ -1091,6 +1091,8 @@ See [browser deployment](../../deploy/browser.md) for installation and identity 
 The viewer polls bounded JPEG frames through authenticated API requests.
 It permits one request at a time, with a 250 ms delay after completion.
 It stops polling when hidden or unmounted.
+The Browser panel exposes audience settings, origin-grant revocation, and installed capability limits.
+Its availability is independent of the Terminal and VS Code profile.
 This implementation does not use a gateway WebSocket or CDP screencast.
 Each request rechecks authorization and a short-lived, purpose-separated viewer ticket.
 Frames do not enter the model transcript or refresh the human activity clock.
@@ -1137,7 +1139,7 @@ If required teardown fails, the delete API returns an error and preserves the se
 
 WebMCP reports an unavailable capability because the pinned browser contract has not been verified.
 HTML clipboard, operating-system dialogs, and privileged page evaluation also report explicit limitations.
-Evaluation reads a detached DOM snapshot. It cannot call live application globals.
+Evaluation reads a detached DOM snapshot. It returns `{ snapshotId, value }` and cannot call live application globals.
 The viewer uses a fixed browser viewport; responsive resizing is a later capability.
 Browser profiles are Chromium-specific and are not portable to another browser engine.
 
