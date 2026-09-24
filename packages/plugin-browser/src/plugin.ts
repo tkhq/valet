@@ -4,12 +4,19 @@ import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { browserPlugin } from "./actions.js";
 
 const browserMd = readFileSync(fileURLToPath(new URL("../skills/browser/SKILL.md", import.meta.url)), "utf8");
+const browserAdvancedMd = readFileSync(
+  fileURLToPath(new URL("../skills/browser-advanced/SKILL.md", import.meta.url)),
+  "utf8",
+);
 
 const plugin: ValetPlugin = {
   name: "browser",
   version: "0.1.0",
   actions: [browserPlugin],
-  skills: [loadSkillFromMarkdown(browserMd, "plugin", "browser")],
+  skills: [
+    loadSkillFromMarkdown(browserMd, "plugin", "browser"),
+    loadSkillFromMarkdown(browserAdvancedMd, "plugin", "browser-advanced"),
+  ],
 };
 
 export default plugin;

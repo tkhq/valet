@@ -128,7 +128,7 @@ flowchart LR
 | Runtime journal | SQLite through a pinned `better-sqlite3` build | Transactional operation receipts and a single local owner |
 | Human display | CDP screencast through authenticated WebSockets to a React canvas | Works with headless Chromium and the existing gateway |
 | Schemas | Existing TypeBox/JSON Schema conventions | Reuse Valet validation and model tool schemas |
-| Browser guidance | Versioned skill plus runtime-generated API reference | Instructions stay aligned with installed capabilities |
+| Browser guidance | Versioned base and advanced skills plus runtime-generated API reference | Instructions stay aligned with installed capabilities |
 
 Playwright 1.63.0 and Chromium revision 1243 were verified during research. Do not
 use a floating `latest` image or silently change the system browser. Resolve and
@@ -175,6 +175,10 @@ Extend `packages/plugin-browser` with `browser.execute`, `browser.reset`, and
 a fixed installed client command with JSON on stdin; never interpolate model
 code or URLs into shell commands. The client uses a local Unix socket and returns
 framed events and attachment references. The socket is not a public CDP endpoint.
+The plugin registers `browser` for the required workflow and policy rules. It
+registers `browser-advanced` for complex locators, frames, multi-tab flows,
+asynchronous pages, file transfer, diagnostics, and recovery. The base skill
+directs the agent to load the advanced skill when those conditions apply.
 
 The API owns user authorization, policy resolution, decision gates, durable media,
 browser tickets and metadata exposed to the web client. The daemon owns browser

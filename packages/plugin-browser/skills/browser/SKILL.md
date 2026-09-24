@@ -10,6 +10,10 @@ description: Use a persistent sandbox Chromium browser with semantic page observ
 3. Inspect the page snapshot before an action. Capture a screenshot when visual evidence helps.
 4. Verify the result after each consequential action.
 
+**Required sub-skill:** Load the `browser-advanced` skill before work that uses
+complex locators, frames, multiple tabs, asynchronous page state, virtualized
+content, file transfer, dialogs, diagnostics, or stale-reference recovery.
+
 Each thread has a persistent Node REPL. Top-level bindings and top-level await survive across cells.
 Use fresh variable names or reuse existing bindings. Call `browser.reset` only when you must discard all thread bindings.
 Reset keeps the profile and tabs. Browser restart invalidates runtime, document, and element handles.
@@ -17,8 +21,9 @@ Reset keeps the profile and tabs. Browser restart invalidates runtime, document,
 The browser methods use structured RPC. Read-only evaluation operates on a captured DOM observation.
 It cannot access live page globals. Use the supported locator and input methods for page actions.
 A snapshot reference can expire after navigation or human input. Capture a new snapshot when that happens.
-Observation methods also return their text. Keep an observation and its reference action in one cell when possible.
-For viewport scrolling, observe first and call `tab.scroll({x, y, deltaY})`. Direction and page-count arguments also work.
+`getAXState()` emits and returns observation text. Screenshot methods return
+artifact data, and combined capture returns an observation and an artifact. Keep
+an observation and its reference action in one cell when possible.
 
 ## Task authorization and approvals
 
