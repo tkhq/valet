@@ -363,6 +363,23 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "slack_interaction_unmatched"))).toHaveLength(1);
   });
 
+  it("diagnoses an external Slack form action that the channel host does not consume", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    const payload = encodeURIComponent(JSON.stringify({
+      type: "block_actions",
+      trigger_id: "TRIG-EXTERNAL",
+      user: { id: "U100", username: "someone" },
+      team: { id: TEAM_ID },
+      channel: { id: "C500" },
+      container: { message_ts: "1720000002.000100", thread_ts: "1720000002.000100" },
+      actions: [{ action_id: "approve_order", value: "order-42" }],
+    }));
+    const body = `payload=${payload}`;
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => (await api!.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "slack_interaction_unmatched"))).length, { timeout: 5_000 }).toBe(1);
+  });
+
   it("does not diagnose a Slack gate callback that the channel host consumes", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
