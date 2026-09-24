@@ -65,6 +65,13 @@ vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNod
 vi.mock("./composer", () => ({ Composer: () => <div data-testid="composer" /> }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
+vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMinimize, onRestore, onClose, onExpand }: {
+  minimized: boolean; onMinimize: () => void; onRestore: () => void; onClose: () => void; onExpand: () => void;
+}) => <section aria-label="Browser preview"><span>{minimized ? "minimized feed" : "visible feed"}</span>
+  <button onClick={onMinimize}>minimize preview</button><button onClick={onRestore}>restore preview</button>
+  <button onClick={onClose}>close preview</button><button onClick={onExpand}>expand preview</button></section> }));
+vi.mock("./browser/browser-pane", () => ({ BrowserPane: () => <section aria-label="Full browser" /> }));
+
 function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void) {
   const rootRoute = createRootRoute({
     component: () => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} />,
@@ -84,6 +91,24 @@ function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void)
 }
 
 describe("SessionView header chrome", () => {
+  it("watches from chat, suspends in the full pane, restores, and returns focus on close", async () => {
+    renderInRouter("sess-1", false);
+    fireEvent.click(await screen.findByRole("button", { name: "Watch browser" }));
+    expect(screen.getByText("visible feed")).toBeTruthy();
+    fireEvent.click(screen.getByText("minimize preview"));
+    expect(screen.getByText("minimized feed")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Watch browser" }));
+    expect(screen.getByText("visible feed")).toBeTruthy();
+    fireEvent.click(screen.getByText("expand preview"));
+    expect(screen.queryByRole("region", { name: "Browser preview" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Full browser" })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Browser" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    expect(screen.getByText("visible feed")).toBeTruthy();
+    fireEvent.click(screen.getByText("close preview"));
+    expect(screen.queryByRole("region", { name: "Browser preview" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Watch browser" }));
+  });
   it("without panel: renders the standard SessionHeader", async () => {
     renderInRouter("sess-1", false);
     expect(await screen.findByTestId("full-header")).toBeTruthy();

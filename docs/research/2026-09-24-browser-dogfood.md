@@ -75,3 +75,30 @@ The quota-rejection test failed on a retained raw file before the fix and passed
 The final image passed both `browser-runtime` and `browser-docker` scorecard rows: **2 passed, 0 failed**.
 That log is `/tmp/valet-browser-dogfood-e2e-image-final.log`.
 Independent review found no remaining issues in the dogfood diff.
+
+## Floating preview follow-up
+
+A real Anthropic turn opened the preview automatically in session `s_muf9wwyz95nzq0`.
+The agent filled Name, selected Green, submitted the synthetic form, and changed Notes while chat remained visible.
+The fixture reported `Saved Overlay dogfood; count 1; checked false; color Green`, then `Notes: Live preview works`.
+The agent's temporary page closed at turn completion. User-created pages provided persistent fixtures for the remaining checks.
+
+Manual checks passed:
+
+- Watch browser opened a read-only feed without starting the browser or taking control.
+- Header drag changed the position. Corner drag changed the size. Arrow keys, Shift, and Home controlled geometry.
+- Minimize removed the frame. Restore retained the selected page after a review fix.
+- Close returned focus to Watch browser. Watch browser restored the window.
+- Open full Browser view removed the floating feed and focused the Browser tab. Chat restored the preview.
+- The page selector switched between two user-created fixture pages.
+- Private sign-in removed the image, page selector, title, and URL from the preview. Releasing control restored the feed.
+- A 375 × 667 viewport contained every control. A multiline composer reduced the preview bounds without overlap.
+- A 375 × 500 viewport with that draft reduced the preview to its header and removed the frame.
+- The responsive test cleared its draft and restored the original viewport.
+
+Component tests also cover both status-error forms, expired frame permission, retry, failed image decoding, disabled access, dialogs, and thread isolation.
+
+The overlay validation run passed all 33 available e2e suites with zero failures and four environment-gated skips.
+The full log is `/tmp/valet-browser-overlay-e2e.log` on the test host.
+After the page-selection fix, all 68 browser/session regression tests passed. The production web build and TypeScript check also passed.
+Independent review found no remaining correctness issues. The browser console had no errors during the manual overlay checks.

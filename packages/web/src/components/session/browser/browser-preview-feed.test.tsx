@@ -1,0 +1,180 @@
+// @vitest-environment jsdom
+import { useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import type { SessionBrowserResponse } from "@valet/api/wire";
+import { BrowserPreviewFeed } from "./browser-preview-feed";
+
+function ready(): SessionBrowserResponse {
+  return {
+    enabled: true,
+    actorId: "viewer",
+    canAdminister: true,
+    settings: {
+      enabled: true,
+      audience: "owner",
+      grants: [],
+      policyVersion: "1",
+    },
+    status: {
+      state: "ready",
+      runtimeId: "runtime",
+      protocolVersion: "1.0",
+      control: null,
+      capabilities: { viewer: { available: true } },
+      selectedTabId: "other",
+      tabs: ["other", "thread"].map((id) => ({
+        id,
+        runtimeId: "runtime",
+        documentId: id,
+        title: id,
+        url: `https://${id}.example/`,
+        actorId: "agent",
+        ownerThreadId: id,
+        mark: "temporary",
+      })),
+    },
+  };
+}
+const state = vi.hoisted(() => ({
+  data: undefined as SessionBrowserResponse | undefined,
+  error: null as Error | null,
+  frameError: null as string | null,
+  frame: vi.fn(),
+  retry: vi.fn(),
+  refetch: vi.fn(),
+  visible: true,
+}));
+vi.mock("~/api/browser", () => ({
+  useBrowserStatus: () => ({
+    data: state.data,
+    isPending: !state.data,
+    isError: !!state.error,
+    error: state.error,
+    refetch: state.refetch,
+  }),
+  useBrowserFrame: (...args: unknown[]) => {
+    state.frame(...args);
+    return {
+      frame: {
+        url: "blob:frame",
+        runtimeId: "runtime",
+        tabId: "thread",
+        documentId: "thread",
+        viewport: { width: 1280, height: 720 },
+      },
+      error: state.frameError,
+      visible: state.visible,
+      retry: state.retry,
+    };
+  },
+}));
+afterEach(() => {
+  state.data = undefined;
+  state.error = null;
+  state.frameError = null;
+  state.visible = true;
+  vi.clearAllMocks();
+});
+const props = { sessionId: "session", threadId: "thread", working: false };
+
+function PreviewHarness() {
+  const [choice, onChoose] = useState<string>();
+  return <BrowserPreviewFeed {...props} choice={choice} onChoose={onChoose} />;
+}
+
+describe("read-only browser preview", () => {
+  it("prefers this thread's tab and allows local page selection without control", () => {
+    state.data = ready();
+    render(<PreviewHarness />);
+    expect(state.frame).toHaveBeenLastCalledWith(
+      "session",
+      "runtime",
+      "thread",
+      true,
+      "thread",
+    );
+    expect(
+      screen
+        .getByRole("img", { name: "Live browser page" })
+        .getAttribute("src"),
+    ).toBe("blob:frame");
+    expect(screen.queryByRole("textbox")).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "Preview page" }), {
+      target: { value: "other" },
+    });
+    expect(state.frame).toHaveBeenLastCalledWith(
+      "session",
+      "runtime",
+      "other",
+      true,
+      "other",
+    );
+  });
+  it.each([
+    "private",
+    "dialog",
+    "disabled",
+    "unsupported",
+    "sleeping",
+    "statusError",
+    "permission",
+    "frameError",
+    "hidden",
+  ])("hides cached frames when %s", (condition) => {
+    const data = ready();
+    const runtime = data.status!;
+    if (condition === "private")
+      runtime.control = {
+        id: "lease",
+        runtimeId: "runtime",
+        actorId: "viewer",
+        privateMode: true,
+        state: "active",
+        expiresAt: Date.now() + 1000,
+      };
+    if (condition === "dialog")
+      runtime.dialogs = [
+        {
+          tabId: "thread",
+          dialogId: "dialog",
+          kind: "alert",
+          message: "secret",
+        },
+      ];
+    if (condition === "disabled") data.settings.enabled = false;
+    if (condition === "unsupported")
+      runtime.capabilities.viewer = { available: false };
+    if (condition === "sleeping") runtime.state = "sleeping";
+    if (condition === "statusError") data.error = "Runtime unreachable";
+    if (condition === "permission") state.error = new Error("Access denied");
+    if (condition === "frameError")
+      state.frameError = "Permission expired. Retry to request access.";
+    if (condition === "hidden") state.visible = false;
+    state.data = data;
+    render(<PreviewHarness />);
+    expect(screen.queryByRole("img")).toBeNull();
+    if (
+      condition === "private" ||
+      condition === "permission" ||
+      condition === "statusError"
+    ) {
+      expect(screen.queryByRole("combobox")).toBeNull();
+      expect(screen.queryByText("https://thread.example/")).toBeNull();
+    }
+    if (!["frameError", "hidden"].includes(condition))
+      expect(state.frame.mock.calls.at(-1)?.[3]).toBe(false);
+  });
+  it("offers retry on a failed feed and clears failed image decoding", () => {
+    state.data = ready();
+    const view = render(<PreviewHarness />);
+    fireEvent.error(screen.getByRole("img"));
+    expect(screen.queryByRole("img")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry preview" }));
+    expect(state.retry).toHaveBeenCalledOnce();
+    expect(state.refetch).toHaveBeenCalledOnce();
+    state.frameError = "Permission expired. Retry to request access.";
+    view.rerender(<PreviewHarness />);
+    expect(screen.getByText(state.frameError)).toBeTruthy();
+  });
+});

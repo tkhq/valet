@@ -1171,3 +1171,14 @@ See `docs/research/2026-09-24-browser-dogfood.md` for manual control coverage.
 An interrupted frame capture can outlive its HTTP request. The viewer retries HTTP
 409 conflicts up to three times at 250 ms intervals. Other errors stop capture.
 A document change resets frame capture and clears the previous document's error.
+
+### Floating browser preview (2026-09-24)
+
+Chat opens a read-only browser preview when the active thread executes a browser tool.
+Users can also select Watch browser, move or resize the window, minimize it, or open the full Browser view.
+Closing suppresses automatic opening for that session and thread while the session view remains mounted.
+The preview shares the existing authenticated JPEG feed. It does not start the browser or take control.
+Minimizing retains page selection and stops frame requests. The full Browser view replaces the preview feed.
+Private sign-in hides page images and metadata. Status and frame errors hide cached images.
+The window fits the transcript area above the composer and decision gates. A short area shows only its header.
+See [floating browser preview](2026-09-24-browser-overlay-design.md) for interaction and lifecycle details.

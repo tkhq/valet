@@ -27,6 +27,8 @@ import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
+import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
+import { useBrowserWatch } from "~/components/session/browser/use-browser-watch";
 import { SessionHeader } from "~/components/session/session-header";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
@@ -178,6 +180,23 @@ export function SessionView({
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
 
+  const browserWatch = useBrowserWatch({
+    sessionId,
+    threadId: effectiveThreadId,
+    messages: stream.messages,
+    agentBusy,
+  });
+  function closeBrowserPreview() {
+    browserWatch.close();
+    viewRef.current
+      ?.querySelector<HTMLElement>('[aria-label="Watch browser"]')
+      ?.focus({ preventScroll: true });
+  }
+  function expandBrowserPreview() {
+    restoreTabFocus.current = true;
+    setTab("browser");
+  }
+
   // Composer publishes its intake pipeline into this ref. The page-level
   // drop target reads it on drop — SessionView is the closest common
   // ancestor of Composer and the chat body, so it owns the handshake. Ref,
@@ -240,12 +259,14 @@ export function SessionView({
       activeTab={tab}
       onTabChange={changeTab}
       sandbox={stream.sandbox}
+      onWatchBrowser={browserWatch.open}
+      browserPreviewOpen={browserWatch.mode === "open"}
     />
   );
 
   return (
     <ComposerDropContext.Provider value={dropChannel}>
-    <div ref={viewRef} className="flex-1 flex flex-col min-h-0">
+    <div ref={viewRef} className="flex-1 flex flex-col min-h-0 min-w-0">
       {(panel || tab !== "chat") && (
         <>
           {panel ? <PanelHeader sessionId={sessionId} title={session.data.title} onClose={onClose} /> : sessionHeader}
@@ -254,16 +275,31 @@ export function SessionView({
       )}
       {tab === "chat" ? (
         <PageDropTarget>
-          <MessageList
-            header={panel ? undefined : <>{sessionHeader}{sandboxTabs}</>}
-            messages={stream.messages}
-            threadId={effectiveThreadId}
-            onOpenChild={onOpenChild}
-            agentBusy={agentBusy}
-            pendingIds={threadQueueState?.pendingIds}
-            viewerId={me.data?.id}
-            onReply={enableReplies ? setReplyTarget : undefined}
-          />
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <MessageList
+              header={panel ? undefined : <>{sessionHeader}{sandboxTabs}</>}
+              messages={stream.messages}
+              threadId={effectiveThreadId}
+              onOpenChild={onOpenChild}
+              agentBusy={agentBusy}
+              pendingIds={threadQueueState?.pendingIds}
+              viewerId={me.data?.id}
+              onReply={enableReplies ? setReplyTarget : undefined}
+            />
+            {(browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
+              <BrowserOverlay
+                key={JSON.stringify([sessionId, effectiveThreadId])}
+                sessionId={sessionId}
+                threadId={effectiveThreadId}
+                working={browserWatch.working}
+                minimized={browserWatch.mode === "minimized"}
+                onMinimize={browserWatch.minimize}
+                onRestore={browserWatch.open}
+                onClose={closeBrowserPreview}
+                onExpand={expandBrowserPreview}
+              />
+            )}
+          </div>
           {compacting && (
             <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
               Compacting context…

@@ -34,6 +34,8 @@ export interface SandboxTabsProps {
   activeTab: SandboxTabId;
   onTabChange: (tab: SandboxTabId) => void;
   sandbox?: { state: string; epoch: number };
+  onWatchBrowser?: () => void;
+  browserPreviewOpen?: boolean;
 }
 
 export function SandboxTabs({
@@ -42,6 +44,8 @@ export function SandboxTabs({
   activeTab,
   onTabChange,
   sandbox,
+  onWatchBrowser,
+  browserPreviewOpen,
 }: SandboxTabsProps) {
   // Chat renders its body in a sibling. Keep this wrapper at the tab strip's
   // height so MessageList can use the remaining space.
@@ -49,24 +53,38 @@ export function SandboxTabs({
   const tabs = profile === "full" ? TABS : TABS.filter((tab) => tab.id === "chat" || tab.id === "browser");
   return (
     <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
-      <div role="tablist" aria-label="Session view" className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-3 sm:px-4">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === t.id}
-            onClick={() => onTabChange(t.id)}
-            className={cn(
-              "shrink-0 min-h-11 sm:min-h-0 px-2.5 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
-              activeTab === t.id
-                ? "border-moss text-ink"
-                : "border-transparent text-muted hover:text-ink",
-            )}
+      <div className="flex shrink-0 items-center border-b border-line px-3 sm:px-4">
+        <div role="tablist" aria-label="Session view" className="flex min-w-0 items-center gap-1 overflow-x-auto">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === t.id}
+              onClick={() => onTabChange(t.id)}
+              className={cn(
+                "shrink-0 min-h-11 sm:min-h-0 px-2.5 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
+                activeTab === t.id
+                  ? "border-moss text-ink"
+                  : "border-transparent text-muted hover:text-ink",
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {activeTab === "chat" && onWatchBrowser && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto shrink-0 text-muted"
+            aria-label="Watch browser"
+            aria-pressed={browserPreviewOpen}
+            onClick={onWatchBrowser}
           >
-            {t.label}
-          </button>
-        ))}
+            Watch browser
+          </Button>
+        )}
       </div>
       {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} />}
       {(activeTab === "terminal" || activeTab === "vscode") && (
