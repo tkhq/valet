@@ -139,7 +139,7 @@ export function BrowserViewport({
         autoComplete="off"
         autoCapitalize="off"
         spellCheck={false}
-        className="absolute inset-0 h-full w-full resize-none border-0 bg-transparent text-transparent caret-transparent outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-moss"
+        className="absolute inset-0 h-full w-full cursor-default resize-none border-0 bg-transparent text-transparent caret-transparent outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-moss"
         onPointerDown={(event) => pointer(event, "down")}
         onPointerMove={(event) => pointer(event, "move")}
         onPointerUp={(event) => pointer(event, "up")}

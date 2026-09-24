@@ -33,6 +33,7 @@ The preview explains when a person has explicitly paused agent actions. The owne
 Keep the preview image read-only. Opening the Browser panel enables shared page input without an extra handoff.
 A fresh document or explicit retry restores input after an error without replaying the failed mutation.
 Disposed input queues suppress late errors from a previous document.
+The keyboard input overlay uses the normal arrow cursor instead of its native text-selection cursor.
 
 ## Credentials
 
