@@ -12,20 +12,24 @@ import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ListEventsResponse, ListEventSubscriptionsResponse } from "@valet/api/wire";
+import type { ListEventDropsResponse, ListEventsResponse, ListEventSubscriptionsResponse } from "@valet/api/wire";
 
 // Every case here holds its query, so no request should be made. The mock
 // keeps a missed hold from reaching the network instead of failing loudly.
 const listEvents = vi.fn();
+const listEventDrops = vi.fn<() => Promise<ListEventDropsResponse>>(() =>
+  Promise.resolve({ drops: [], nextCursor: null, previousCursor: null, lastEventAt: null }),
+);
 const listEventSubscriptions = vi.fn();
 vi.mock("./client", () => ({
   api: {
     listEvents: () => listEvents(),
+    listEventDrops: () => listEventDrops(),
     listEventSubscriptions: () => listEventSubscriptions(),
   },
 }));
 
-import { qkEvents, useEvents, useEventSubscriptions } from "./events";
+import { eventDropsRefetchInterval, qkEvents, useEvents, useEventSubscriptions } from "./events";
 
 /** What a warm org-wide entry holds — the rows a held query must not show. */
 const ORG_FEED: ListEventsResponse = {
@@ -98,6 +102,16 @@ describe("held events queries", () => {
     expect(result.current.data).toBeUndefined();
     expect(result.current.isPending).toBe(true);
     expect(listEventSubscriptions).not.toHaveBeenCalled();
+  });
+});
+
+describe("Problems polling", () => {
+  it("polls unfiltered Problems", () => {
+    expect(eventDropsRefetchInterval()).toBe(30_000);
+  });
+
+  it("does not poll a non-empty Problems search", () => {
+    expect(eventDropsRefetchInterval("signature")).toBe(false);
   });
 });
 

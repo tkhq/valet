@@ -1372,6 +1372,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE INDEX IF NOT EXISTS "apikey_teamId_idx" ON "apikey" ("team_id")',
   },
   {
+    describe: "event_drop_log_page index",
+    probe: { kind: "index", index: "event_drop_log_page" },
+    sql: 'CREATE INDEX IF NOT EXISTS "event_drop_log_page" ON "event_drop_log" ("org_id","created_at","id")',
+  },
+  {
     // Whose credentials a team-owned session reads (team credentials
     // design, deviation 13). Nullable; the backfill below is the one-time stamp.
     describe: "agent_sessions.credential_owner_mode column",

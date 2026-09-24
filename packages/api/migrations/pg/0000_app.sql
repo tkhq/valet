@@ -391,6 +391,8 @@ CREATE TABLE "event_drop_log" (
 --> statement-breakpoint
 CREATE INDEX "event_drop_log_org" ON "event_drop_log" ("org_id");
 --> statement-breakpoint
+CREATE INDEX "event_drop_log_page" ON "event_drop_log" ("org_id","created_at","id");
+--> statement-breakpoint
 CREATE TABLE "channel_bindings" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
