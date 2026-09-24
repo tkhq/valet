@@ -8,4 +8,5 @@ export {
   type BuildDockerRunArgsOpts,
   type DockerSandboxCreateOpts,
   type DockerSandboxOptions,
+  type DockerSandboxProviderOptions,
 } from "./sandbox.js";

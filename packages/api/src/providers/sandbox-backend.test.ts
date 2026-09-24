@@ -8,6 +8,9 @@
  * here, it never invokes any of its methods.
  */
 import { describe, it, expect, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as k8s from "@kubernetes/client-node";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
@@ -65,6 +68,19 @@ describe("parseSandboxBackend", () => {
 });
 
 describe("buildSandboxProvider", () => {
+  it("keeps Docker private inventory inside the API data directory", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "valet-api-inventory-"));
+    // A failed boundary check must not contact a real Docker daemon.
+    vi.stubEnv("PATH", "");
+    try {
+      const provider = buildSandboxProvider({ VALET_DATA_DIR: dataDir });
+      await expect(provider.create({ workspace: dataDir })).rejects.toThrow(/overlaps private Docker session state/);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("builds a DockerSandboxProvider when VALET_SANDBOX_BACKEND is unset", () => {
     const provider = buildSandboxProvider({});
     expect(provider).toBeInstanceOf(DockerSandboxProvider);

@@ -102,6 +102,11 @@ const SETPRIV_PREFIX =
   "env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c ";
 
 describe("wrapAsWorkloadUser", () => {
+  it("scrubs the browser signing secret while still root, before switching to the workload UID", () => {
+    const command=wrapAsWorkloadUser("echo hi",true);
+    expect(command).toContain("exec /usr/bin/env -u VALET_SANDBOX_JWT_SECRET /usr/bin/setpriv --reuid dockerd");
+    expect(command).toContain("--no-new-privs /usr/bin/env");
+  });
   it("wraps the shell command in the exact setpriv prefix, single-quoted", () => {
     expect(wrapAsWorkloadUser("echo hi")).toBe(`${SETPRIV_PREFIX}${shQuote("echo hi")}`);
   });

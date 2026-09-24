@@ -150,7 +150,7 @@ assert_rule() {
 assert_rule sandboxes '"create", "get", "list", "update", "patch", "delete"'
 assert_rule pods '"get", "list", "delete"'
 assert_rule events '"list"'
-assert_rule persistentvolumeclaims '"get", "patch"'
+assert_rule persistentvolumeclaims '"get", "patch", "create", "list", "delete"'
 assert_rule pods/exec '"get", "create"'
 assert_rule pods/log '"get"'
 assert_rule jobs '"create", "get", "delete"'

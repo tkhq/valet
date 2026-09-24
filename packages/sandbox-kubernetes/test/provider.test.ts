@@ -10,7 +10,8 @@ import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandb
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
-import { buildSandboxManifest, credsSecretName, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
+import { buildSandboxManifest, credsSecretName, BROWSER_LABEL_KEY, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
+import { RUNTIME_STATE_ANNOTATION } from "../src/runtime-state.js";
 import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
 import type { K8sProviderConfig, ResourceRequirements, SandboxCR, SandboxCRRead } from "../src/types.js";
 import type {
@@ -471,7 +472,7 @@ describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
 /** FakeObjectsApi variant whose GET responses carry configurable labels and
  * the pod-name annotation, so restore() and resolvePodName both work. */
 class LabeledObjectsApi extends FakeObjectsApi {
-  constructor(private labels: Record<string, string> | undefined) {
+  constructor(private labels: Record<string, string> | undefined, private annotations: Record<string, string> = {}) {
     super();
   }
 
@@ -484,7 +485,7 @@ class LabeledObjectsApi extends FakeObjectsApi {
         uid: "cr-uid-123",
         resourceVersion: "1",
         labels: this.labels,
-        annotations: { "agents.x-k8s.io/pod-name": "pod-1" },
+        annotations: { ...this.annotations, "agents.x-k8s.io/pod-name": "pod-1" },
       },
       spec: { podTemplate: {}, volumeClaimTemplates: [] },
       status: { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] },
@@ -513,12 +514,12 @@ class RecordingExecApi implements PodExecApi {
   }
 }
 
-function makeExecProvider(labels: Record<string, string> | undefined) {
+function makeExecProvider(labels: Record<string, string> | undefined, annotations?: Record<string, string>) {
   const execApi = new RecordingExecApi();
   const livenessApi: PodLivenessApi = { getPodUid: async () => "pod-uid-1" };
   const provider = new KubernetesSandboxProvider(
     {
-      objectsApi: new LabeledObjectsApi(labels),
+      objectsApi: new LabeledObjectsApi(labels, annotations),
       podsApi: new FakePodsApi(),
       execApi,
       livenessApi,
@@ -529,6 +530,16 @@ function makeExecProvider(labels: Record<string, string> | undefined) {
 }
 
 describe("exec identity threading (docker flag → exec layer)", () => {
+  it.each([
+    { labels: undefined, annotations: { [RUNTIME_STATE_ANNOTATION]: "retained-browser-claim" } },
+    { labels: { [BROWSER_LABEL_KEY]: "true" }, annotations: undefined },
+  ])("restore() retains browser workload identity from either saved marker: %j", async ({ labels, annotations }) => {
+    const { provider, execApi } = makeExecProvider(labels, annotations);
+    const sandbox = await provider.restore("sb-browser");
+    await sandbox.exec("echo hi");
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", wrapAsWorkloadUser("echo hi", true)]);
+  });
+
   it("restore() of a docker-labeled CR runs non-privileged exec as dockerd", async () => {
     const { provider, execApi } = makeExecProvider({ [DOCKER_LABEL_KEY]: "true" });
     const sandbox = await provider.restore("sb-docker");
@@ -742,7 +753,7 @@ describe("create() resource adoption and pod rollout", () => {
       } }] },
     });
     expect(deletedPods).toEqual([]);
-    expect(objectsApi.calls.slice(0, 3)).toEqual(["create", "get", "replace"]);
+    expect(objectsApi.calls.slice(0, 4)).toEqual(["get", "create", "get", "replace"]);
   });
 
   it("partial authority applies CPU and preserves live memory on adoption", async () => {

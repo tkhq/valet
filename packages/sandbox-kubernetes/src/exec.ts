@@ -74,7 +74,8 @@ export function shQuote(value: string): string {
  * If the image ever adds `dockerd` to more groups, both providers pick the
  * change up together; that symmetry is why this is not `--clear-groups`.
  */
-export function wrapAsWorkloadUser(shellCommand: string): string {
+export function wrapAsWorkloadUser(shellCommand: string, browser = false): string {
+  if (browser) return "exec /usr/bin/env -u VALET_SANDBOX_JWT_SECRET /usr/bin/setpriv --reuid dockerd --regid dockerd --init-groups --no-new-privs /usr/bin/env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c " + shQuote(shellCommand);
   return (
     "exec setpriv --reuid dockerd --regid dockerd --init-groups " +
     "env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd /bin/sh -c " +
@@ -229,6 +230,7 @@ export interface ExecDeps {
    * every non-privileged exec is wrapped by `wrapAsWorkloadUser` so it runs
    * as the `dockerd` workload user (see `ExecOpts.privileged`). */
   docker?: boolean;
+  browser?: boolean;
 }
 
 /** Caps how long a forcibly-closed (timeout/abort) socket capture is given
@@ -264,7 +266,7 @@ export async function execInPod(
   // the dockerd workload user. Wrapping AFTER env/cwd folding means the
   // whole composed command (env exports, cd, the caller's command) executes
   // under the dropped identity, matching `docker exec -u dockerd`'s effect.
-  const shellCommand = deps.docker && !opts?.privileged ? wrapAsWorkloadUser(composed) : composed;
+  const shellCommand = deps.docker && !opts?.privileged ? wrapAsWorkloadUser(composed, deps.browser) : composed;
 
   const limit = opts?.maxOutputBytes;
   const stdoutBuffer = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;

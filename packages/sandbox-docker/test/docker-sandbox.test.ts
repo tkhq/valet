@@ -358,7 +358,7 @@ describeDocker("DockerSandbox", () => {
     // Cast to bypass the type guard — runtime validation is the contract.
     await expect(
       provider.create({} as DockerSandboxCreateOpts),
-    ).rejects.toThrow(/workspace is required/);
+    ).rejects.toThrow(/working directory is required/);
     const file = join(tmp, "not-a-dir.txt");
     await writeFile(file, "x");
     await expect(provider.create({ workspace: file })).rejects.toThrow(/not a directory/);
@@ -378,6 +378,8 @@ describeDocker("DockerSandbox", () => {
       customImage: true,
       isolated: true,
       coldStartEstimateMs: 8000,
+      browserAutomation: false,
+      browserViewer: false,
       credsMount: true,
       dockerSupport: true,
       nestedKubernetes: false,

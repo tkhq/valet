@@ -13,7 +13,8 @@
 # depending on profile:
 #   - `headless` (default): a non-terminating tail (mirroring sandbox-
 #     docker's default `node:20-bookworm` container) — agent-only, no
-#     interactive services. `docker/start-full.sh` mirrors this branch when
+#     interactive services. Browser-enabled headless sessions run preflight
+#     and can start the browser viewer gateway independently. `docker/start-full.sh` mirrors this branch when
 #     `VALET_SANDBOX_PROFILE` is unset/`headless`, so the sandbox-docker
 #     provider gets the same behavior from the same image/entrypoint.
 #   - `full`: `["/bin/bash", "/start-full.sh"]` — starts ttyd, code-server,
@@ -23,8 +24,8 @@
 # What matters either way: a shell, coreutils (incl. base64, used for
 # binary-safe file ops over `pods/exec` — see the design doc's "File ops
 # ride exec" section), git, ripgrep, ca-certificates, Node, and the
-# `agent-browser` CLI with its chromium (the engine's exec-based tool calls
-# and the bundled `browser` skill assume these are on PATH) — plus, for
+# managed browser runtime with pinned Chromium. The legacy `agent-browser`
+# CLI remains available for compatibility. The `full` profile also ships
 # `full` profile, ttyd + code-server + the bundled `@valet/sandbox-gateway`.
 #
 # Build with plain `docker build` (decision 2 — moby mode, not nerdctl):
@@ -49,7 +50,7 @@
 # providers always set `command`/entrypoint explicitly per profile.
 
 # ─── Base agent tooling (shared by both profiles) ──────────────────────
-FROM node:22-bookworm-slim AS base
+FROM node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -58,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     curl \
     procps \
+    bubblewrap util-linux \
     tini=0.19.0-1+b3 \
     bash \
     openssh-client \
@@ -70,7 +72,7 @@ WORKDIR /workspace
 # Builds @valet/sandbox-gateway's dist/ and produces a self-contained,
 # production-only package dir (workspace deps resolved to real files, no
 # devDependencies) at /out/gateway.
-FROM node:22-bookworm-slim AS gateway-build
+FROM node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS gateway-build
 
 # `prepare --activate` warms corepack's cache AND sets the default shim
 # version — but inside this repo the `packageManager` pin in package.json
@@ -86,11 +88,14 @@ WORKDIR /repo
 # pre-1.0 local/CI image.
 COPY . .
 
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 RUN pnpm install --frozen-lockfile
 
 RUN pnpm --filter @valet/sandbox-gateway run build
 # --legacy: pnpm 9 deploy semantics under pnpm 10+ (see Dockerfile.api).
 RUN pnpm --filter @valet/sandbox-gateway deploy --legacy --prod /out/gateway
+RUN pnpm --filter @valet/shared build && pnpm --filter @valet/browser-runtime build
+RUN pnpm --filter @valet/browser-runtime deploy --legacy --prod /out/browser
 
 # ─── Final image ────────────────────────────────────────────────────────
 FROM base
@@ -188,32 +193,29 @@ RUN chmod +x /usr/local/bin/sec-preflight
 # static scanners above.
 COPY docker/sec-fuzz-wordlist.txt /usr/local/share/valet/sec-fuzz-wordlist.txt
 
-# Browser automation. The bundled `browser` plugin skill tells the agent it
-# has `agent-browser`; without these two layers the agent follows the skill
-# and bash answers "command not found".
-#
-# Headless only. V1 ran the browser on an X display and showed it in a VNC
-# panel; V2 has no X server, no VNC panel, and no screenshot tool, so the
-# skill directs the agent to `agent-browser screenshot <path>` instead. Do
-# not add `--headed` support without also adding Xvfb and a viewer.
-#
-# Chromium comes from apt and is what Playwright (bundled inside
-# agent-browser since 0.30) launches, through AGENT_BROWSER_EXECUTABLE_PATH.
-# Playwright's own `chromium-headless-shell` was measured as an alternative:
-# it needs the same X/GTK shared libraries, so it saves under 40 MB and adds
-# a second browser-version axis to keep aligned.
-#
-# SIZE: these two layers add ~794 MB (chromium ~699 MB, agent-browser
-# ~94 MB) to a ~386 MB base. That is the price of the capability — the
-# browser binary is most of it and there is no smaller one that runs
-# Playwright.
+# Managed browser. Playwright selects this exact Chromium revision through channel "chromium".
+# The legacy CLI uses the same executable with its own unrelated profile.
+COPY --from=gateway-build /out/browser /opt/valet/browser
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/valet/playwright
+RUN cd /opt/valet/browser \
+    && node node_modules/playwright-core/cli.js install-deps chromium \
+    && node node_modules/playwright-core/cli.js install chromium --no-shell \
+    && chmod -R a+rX /opt/valet/playwright \
+    && rm -rf /var/lib/apt/lists/*
 ARG AGENT_BROWSER_VERSION=0.34.0
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      chromium fonts-liberation \
-    && rm -rf /var/lib/apt/lists/* \
-    && npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" \
-    && npm cache clean --force
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+RUN npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" && npm cache clean --force \
+    && node --input-type=module -e 'import {chromium} from "/opt/valet/browser/node_modules/playwright-core/index.mjs"; import {symlinkSync} from "node:fs"; symlinkSync(chromium.executablePath(),"/usr/local/bin/valet-chromium");'
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/valet-chromium
+COPY packages/sandbox-docker/seccomp/browser.json /opt/valet/browser/config/container-seccomp.json
+COPY packages/sandbox-docker/seccomp/LICENSE /opt/valet/browser/config/LICENSE.seccomp
+COPY docker/browser-manifest.mjs /opt/valet/browser/config/browser-manifest.mjs
+COPY docker/browser-preflight.sh /browser-preflight.sh
+COPY docker/valet-browser-client.sh /usr/local/bin/valet-browser-client
+RUN groupadd --gid 1501 valet-browser && useradd --uid 1501 --gid 1501 --home-dir /var/lib/valet/browser --no-create-home browser \
+    && mkdir -p /var/lib/valet/browser \
+    && chown -R 1501:1501 /var/lib/valet \
+    && chmod 0700 /var/lib/valet /var/lib/valet/browser \
+    && chmod 0755 /browser-preflight.sh /usr/local/bin/valet-browser-client
 
 # Bundled auth gateway (Task 2): `node /gateway/dist/bin.js` is what
 # docker/start-full.sh execs. Requires VALET_SESSION_ID +
@@ -283,7 +285,7 @@ RUN chmod +x /cgroup-bootstrap.sh /cgroup-delegation.sh /kubernetes-preflight.sh
     && chmod 0755 /usr/local/bin/valet-kubernetes
 
 COPY docker/start-full.sh /start-full.sh
-RUN chmod +x /start-full.sh
+RUN chmod +x /start-full.sh && node /opt/valet/browser/config/browser-manifest.mjs
 
 # Ports (full profile only — headless exposes none of these):
 #   7681  ttyd (bound to 127.0.0.1, reached only via the gateway proxy)
