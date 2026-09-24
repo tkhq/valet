@@ -16,6 +16,7 @@
   "files": [],
   "references": [
     { "path": "./packages/shared" },
+    { "path": "./packages/browser-runtime" },
     { "path": "./packages/engine" },
     { "path": "./packages/workflow" },
     { "path": "./packages/store-postgres" },

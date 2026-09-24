@@ -854,6 +854,12 @@ close user-created tabs or tabs controlled by another thread. Approval suspensio
 is not turn completion. Use an explicit engine turn-lifecycle hook, not a timeout,
 to trigger cleanup. A missing cleanup event is an observable invariant failure.
 
+The host records cleanup before it finalizes the submission, including recovered settlements.
+If compute is absent, the host keeps cleanup pending without waking the sandbox.
+The next attachment drains pending cleanup before admitting work.
+Replacement waits for the old execution to release its private state.
+Final deletion waits for an active release, then removes retained browser state from provider inventory before deleting engine history.
+
 Human input and active browser work count as sandbox activity. Passive frames,
 heartbeats and frame acknowledgments do not. A passive viewer can therefore see
 the sandbox sleep. Offer an explicit bounded Keep awake control if required.
@@ -1053,3 +1059,89 @@ The design is ready for implementation planning when the compatibility spike has
 resolved the platform-dependent gates. Browser performance, OS confinement, native
 WebMCP availability and provider resource sizing remain measurements to obtain;
 they are not established by inspecting the Codex interface.
+
+## 16. Implemented transport and platform decisions
+
+The first implementation uses `@valet/browser-runtime`, the browser plugin, API routes,
+and the web Browser panel. This section records differences from the proposed design.
+It takes precedence where the proposed transport or budget differs.
+
+### Runtime and confinement
+
+The image pins Node 22.23.3, Playwright Core 1.63.0, and matching Chromium revision 1243.
+It records package versions, the executable SHA256, and seccomp hashes in its runtime manifest.
+The same image supports both sandbox profiles.
+Browser automation is incompatible with Docker-in-sandbox and nested Kubernetes.
+
+Chromium retains its own namespace and seccomp sandbox.
+Bubblewrap separates the browser network and the REPL filesystem and network.
+A private Unix broker connects approved public HTTPS origins and configured development ports.
+The default development ports are 5173, 3000, and 8080.
+The workload, browser daemon, and confined REPL have separate authority.
+Ordinary shell and file tools cannot read the profile, journal, socket, or transfer files.
+The trusted host reads a validated transfer through a fixed privileged command and checks its SHA256.
+
+The Docker provider records durable container ownership and private-state paths.
+The Kubernetes provider uses a separate session-owned PVC.
+Deployment requires the Localhost seccomp profile on each Kubernetes node.
+See [browser deployment](../../deploy/browser.md) for installation and identity details.
+
+### Viewer and evidence
+
+The viewer polls bounded JPEG frames through authenticated API requests.
+It permits one request at a time, with a 250 ms delay after completion.
+It stops polling when hidden or unmounted.
+This implementation does not use a gateway WebSocket or CDP screencast.
+Each request rechecks authorization and a short-lived, purpose-separated viewer ticket.
+Frames do not enter the model transcript or refresh the human activity clock.
+
+Pointer, keyboard, text, paste, IME, wheel, and navigation input use ordered HTTP commands.
+Control requires an actor-bound lease, runtime ID, tab ID, and current document ID.
+Private sign-in hides agent observations, diagnostics, and evidence capture.
+The matching human viewer can continue to see the page.
+
+Agent screenshots and explicit viewer screenshots become durable BlobStore evidence.
+The model result contains at most two raster images and 8 MiB of decoded image bytes.
+Additional captures retain artifact links. The text result is bounded to 100,000 characters.
+Live events and saved tool results retain the selected image blocks as well as artifact references.
+Thus REST reload can reconstruct both the image and readable tool text.
+
+Annotations attach to an original screenshot and its document ID.
+Coordinates use screenshot-local CSS pixels, including full-page and clipped captures.
+Labels are optional. Exports embed the original raster in an SVG with escaped labels.
+The API recomputes staleness against the current runtime and document when annotations are read.
+
+### Policy and recovery
+
+Personal sessions default to owner-only access.
+A team administrator must select the team audience before shared browser use.
+Navigation, mutation, uploads, exports, and page tools require an applicable origin grant or an explicit decision.
+Observation and bounded diagnostics are permitted after session authorization.
+The browser daemon binds each decision to the actor, invocation, operation hash, runtime, policy version, and expiry.
+An API reconnect attaches to the same invocation. It does not evaluate the source again.
+
+A policy update closes the browser and its egress connections.
+The next authorized start launches a new runtime generation with fresh origin authority.
+A daemon crash marks outstanding cells lost and dispatched effects uncertain.
+Cookies and website storage remain in the private session profile.
+Old handles cannot target new documents.
+
+Audit records exclude page text, typed input, cookies, and result bodies.
+The lifecycle export includes the most recent 1,000 operation records, the total count, and an explicit truncation flag.
+Artifact and audit records currently remain with session storage; there is no independent timed-retention job.
+Stopped sandboxes require a verified export checkpoint or a provider audit reader before deletion.
+The host invalidates checkpoints on attachment. Retained browser flags remain authoritative when new browser allocations are disabled.
+If required teardown fails, the delete API returns an error and preserves the session before its deletion transaction.
+
+### Declared limitations
+
+WebMCP reports an unavailable capability because the pinned browser contract has not been verified.
+HTML clipboard, operating-system dialogs, and privileged page evaluation also report explicit limitations.
+Evaluation reads a detached DOM snapshot. It cannot call live application globals.
+The viewer uses a fixed browser viewport; responsive resizing is a later capability.
+Browser profiles are Chromium-specific and are not portable to another browser engine.
+
+Accessibility observations are bounded full snapshots. The runtime does not yet compute snapshot diffs.
+Browser history contains this runtime's visits; it does not import historical visits from Chromium storage.
+Navigation and selector waits are available. Event-armed download and file-chooser wait helpers are not part of this release.
+Capabilities and installed documentation describe these limits before an agent starts using the browser.
