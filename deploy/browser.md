@@ -12,8 +12,8 @@ The provider fails closed for that combination.
 4. Use an immutable registry digest for a deployment.
 5. Check `/opt/valet/browser/runtime-manifest.json` inside the image.
 
-The Helm chart enables the browser for its managed image through `sandbox.browserEnabled`.
-Disable that value when using an image without the browser runtime.
+Set Helm `sandbox.browserEnabled=true` after installing the managed image and node profile.
+The chart keeps this value disabled by default.
 Docker keeps browser support off until explicitly enabled, so plain coding images continue to work.
 
 The image pins Node 22.23.3 and Playwright Core 1.63.0.

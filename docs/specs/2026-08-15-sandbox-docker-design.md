@@ -380,6 +380,7 @@ kubernetes is degraded: the daemon runs, `docker pull`/`system df` work,
 ## Managed browser provider boundary (2026-09-23)
 
 Browser capabilities require explicit provider opt-in. Plain images retain their existing execution identity.
+Docker and Helm default to disabled until the managed image and required security profile are installed.
 A browser-enabled sandbox uses the separate reviewed seccomp profile in `packages/sandbox-docker/seccomp/browser.json`.
 It cannot combine that profile with Docker-in-sandbox or nested Kubernetes.
 

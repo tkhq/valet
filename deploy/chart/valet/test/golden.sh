@@ -40,6 +40,14 @@ echo "== helm template (bundled postgres, default values) =="
 helm template valet "$CHART_DIR" --kube-version 1.30.0 > "$TMP_DIR/bundled.yaml"
 pass "renders with default values"
 
+grep -q 'VALET_BROWSER_ENABLED: "0"' "$TMP_DIR/bundled.yaml" \
+  || fail "managed browser must remain opt-in until nodes have the seccomp profile"
+helm --kube-context rancher-desktop template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.browserEnabled=true > "$TMP_DIR/browser-enabled.yaml"
+grep -q 'VALET_BROWSER_ENABLED: "1"' "$TMP_DIR/browser-enabled.yaml" \
+  || fail "browser opt-in must enable the runtime in the API config"
+pass "browser deployment is opt-in"
+
 echo "== helm template (platform-owned sandbox namespace) =="
 helm template valet "$CHART_DIR" --kube-version 1.30.0 \
   --set sandbox.createNamespace=false \

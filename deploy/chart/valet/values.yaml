@@ -151,7 +151,8 @@ sandbox:
   fullBaseImage: ghcr.io/tkhq/valet-sandbox:latest
   # Install this Localhost seccomp profile on each sandbox node before use.
   browserSeccompProfile: valet/browser.json
-  browserEnabled: true
+  # Enable only after installing the image and node seccomp profile.
+  browserEnabled: false
   # Private browser profile, SQLite audit, and transfer storage per session.
   browserRuntimeStorage: 2Gi
 
