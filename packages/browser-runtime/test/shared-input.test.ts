@@ -312,3 +312,12 @@ it('answers an open dialog while takeover waits for the effect that opened it', 
   expect((await effect).ok).toBe(true);
   expect((await taking).status?.control?.actorId).toBe('person');
 });
+
+it('returns pointer feedback separately from the event journal cursor', async () => {
+  const f = await fixture();
+  f.backend.humanInput = async () => 'pointer';
+  const response = await f.input({ type: 'pointer', phase: 'move', x: 10, y: 10 });
+  expect(response.ok).toBe(true);
+  expect(response.pointerCursor).toBe('pointer');
+  expect(typeof response.cursor).toBe('number');
+});

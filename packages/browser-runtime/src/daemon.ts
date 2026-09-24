@@ -374,18 +374,19 @@ export class BrowserDaemon {
                 ? 'about:blank'
                 : new URL(request.input.url).origin,
             );
-          const operation = () => {
+          const operation = async () => {
             this.control.authorize(
               request.actorId,
               request.runtimeId,
               request.leaseId,
               request.input.type === 'dialog',
             );
-            return this.backend.humanInput(
+            const cursor = await this.backend.humanInput(
               request.tabId,
               request.documentId,
               request.input,
             );
+            if (cursor) response.pointerCursor = cursor;
           };
           if (request.input.type === 'dialog') await operation();
           else

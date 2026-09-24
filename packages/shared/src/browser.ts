@@ -321,6 +321,21 @@ export type BrowserHumanInput =
   | { type: 'back' | 'forward' | 'reload' }
   | { type: 'navigate'; url: string }
   | { type: 'dialog'; dialogId: string; accept: boolean; text?: string };
+/** Only CSS keywords cross the viewer boundary; custom cursor URLs stay in the sandbox. */
+export const BROWSER_POINTER_CURSORS = [
+  'default', 'none', 'context-menu', 'help', 'pointer', 'progress', 'wait',
+  'cell', 'crosshair', 'text', 'vertical-text', 'alias', 'copy', 'move',
+  'no-drop', 'not-allowed', 'grab', 'grabbing', 'all-scroll', 'col-resize',
+  'row-resize', 'n-resize', 'e-resize', 's-resize', 'w-resize', 'ne-resize',
+  'nw-resize', 'se-resize', 'sw-resize', 'ew-resize', 'ns-resize',
+  'nesw-resize', 'nwse-resize', 'zoom-in', 'zoom-out',
+] as const;
+export type BrowserPointerCursor = (typeof BROWSER_POINTER_CURSORS)[number];
+export function browserPointerCursor(value: unknown): BrowserPointerCursor {
+  // CSS cursor URLs end with a required keyword fallback.
+  const keyword = typeof value === 'string' ? value.split(',').at(-1)?.trim() : '';
+  return BROWSER_POINTER_CURSORS.find((cursor) => cursor === keyword) ?? 'default';
+}
 export interface BrowserResponse {
   protocolVersion: '1.0';
   runtimeId: string;
@@ -332,6 +347,7 @@ export interface BrowserResponse {
   status?: BrowserRuntimeStatus;
   artifact?: BrowserExportDescriptor;
   frame?: BrowserInlineFrame;
+  pointerCursor?: BrowserPointerCursor;
   description?: string;
   audit?: BrowserAuditEntry[];
   auditTotal?: number;

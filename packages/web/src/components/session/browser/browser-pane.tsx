@@ -12,6 +12,7 @@ import {
 import type {
   BrowserArtifact,
   BrowserHumanInput,
+  BrowserPointerCursor,
   BrowserRuntimeStatus,
 } from "@valet/shared";
 import {
@@ -119,12 +120,12 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
   async function send(
     input: BrowserHumanInput,
     documentId = selected?.documentId,
-  ): Promise<void> {
+  ): Promise<BrowserPointerCursor | void> {
     if (!canControl || !runtime || !selected || !documentId)
       throw new Error(
         "Browser input is unavailable. Refresh browser status or resume shared use.",
       );
-    await (
+    const response = await (
       input.type === "dialog" ? actions.dialog : actions.input
     ).mutateAsync({
       ...(lease ? { leaseId: lease.id } : {}),
@@ -137,6 +138,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
       ["navigate", "back", "forward", "reload", "dialog"].includes(input.type)
     )
       await query.refetch();
+    return response.pointerCursor;
   }
   function selectTab(tabId: string) {
     setChosenTab(tabId);

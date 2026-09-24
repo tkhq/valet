@@ -33,7 +33,7 @@ The preview explains when a person has explicitly paused agent actions. The owne
 Keep the preview image read-only. Opening the Browser panel enables shared page input without an extra handoff.
 A fresh document or explicit retry restores input after an error without replaying the failed mutation.
 Disposed input queues suppress late errors from a previous document.
-The keyboard input overlay uses the normal arrow cursor instead of its native text-selection cursor.
+The keyboard input overlay uses remote cursor feedback, with the normal arrow as its fallback.
 
 ## Credentials
 
@@ -48,3 +48,9 @@ Test stale runtime and document rejection, invalid explicit leases, explicit pau
 Test input ordering and cleanup of held human keys before agent mutations.
 Test web controls in shared mode and ownership checks for explicit pause and private mode.
 Dogfood alternating human and real-agent input while watching the preview. Run the full make e2e scorecard.
+
+## Native dropdowns and cursor feedback
+
+Chromium's external select popup does not appear in page screenshots. The runtime uses Chromium's in-page select picker for native single-select dropdowns. Chromium still handles option clicks, disabled options, keyboard input, and change events. The picker can change the platform-default appearance of these controls. Custom dropdowns and listboxes keep their own rendering. The hook applies to documents, child frames, and open shadow roots before a dropdown opens.
+
+Human pointer replies include the cursor at the remote point. Hit testing follows frames and open shadow roots. Closed shadow roots retain the host cursor and external native picker limitation. The viewer accepts standard cursor keywords only. It does not fetch custom cursor URLs. Automatic cursors resolve to text over editable fields or rendered text and to a pointer over links. The viewer discards feedback after a document change or pointer exit.

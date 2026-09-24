@@ -20,6 +20,7 @@ import type {
   BrowserViewport,
 } from '@valet/shared';
 import { FileBroker } from './files.js';
+import { cursorAt, installViewerPage } from './viewer-page.js';
 import {
   BrowserFault,
   canonicalHash,
@@ -138,6 +139,7 @@ export class PlaywrightBackend {
           : {}),
       },
     );
+    await installViewerPage(this.context);
     this.context.setDefaultTimeout(15_000);
     this.context.setDefaultNavigationTimeout(30_000);
     // HTTP routing is defense in depth. The network namespace and broker own network policy.
@@ -1368,7 +1370,12 @@ export class PlaywrightBackend {
       );
     this.clearRefs(r);
     try {
-      return await this.applyHumanInput(r, input);
+      await this.applyHumanInput(r, input);
+      if (input.type === 'pointer' || input.type === 'move' || input.type === 'click') {
+        // Navigation and dialogs can invalidate cursor sampling after a successful effect.
+        if (r.info.documentId !== documentId || r.dialog) return;
+        return await cursorAt(r.page, input.x, input.y).catch(() => 'default' as const);
+      }
     } finally {
       // Observations started during this effect cannot authorize later input.
       this.clearRefs(r);

@@ -177,4 +177,46 @@ describe("browser viewport", () => {
       }),
     );
   });
+  it("uses remote cursor feedback and resets in image margins", async () => {
+    const send = vi.fn().mockResolvedValue("pointer");
+    render(<BrowserViewport frame={frame} canControl send={send} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const surface = screen.getByRole("textbox", { name: "Browser page input" });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 1500, 720));
+    fireEvent(surface, new MouseEvent("pointermove", { bubbles: true, clientX: 200, clientY: 100 }));
+    await waitFor(() => expect(surface.style.cursor).toBe("pointer"));
+    fireEvent(surface, new MouseEvent("pointermove", { bubbles: true, clientX: 10, clientY: 100 }));
+    expect(surface.style.cursor).toBe("default");
+  });
+
+  it("discards cursor replies from an earlier pointer visit", async () => {
+    let finish: (cursor: "text") => void = () => {};
+    const send = vi.fn().mockImplementationOnce(() => new Promise<"text">((resolve) => { finish = resolve; }))
+      .mockResolvedValue("grab");
+    render(<BrowserViewport frame={frame} canControl send={send} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const surface = screen.getByRole("textbox", { name: "Browser page input" });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 1280, 720));
+    fireEvent(surface, new MouseEvent("pointermove", { bubbles: true, clientX: 200, clientY: 100 }));
+    fireEvent.pointerOut(surface);
+    finish("text");
+    await waitFor(() => expect(surface.style.cursor).toBe("default"));
+    fireEvent(surface, new MouseEvent("pointermove", { bubbles: true, clientX: 200, clientY: 100 }));
+    await waitFor(() => expect(surface.style.cursor).toBe("grab"));
+  });
+
+  it("clears the cursor when control or the document changes", async () => {
+    const send = vi.fn().mockResolvedValue("col-resize");
+    const view = render(<BrowserViewport frame={frame} canControl send={send} onError={() => {}} />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const surface = screen.getByRole("textbox", { name: "Browser page input" });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 1280, 720));
+    fireEvent(surface, new MouseEvent("pointermove", { bubbles: true, clientX: 200, clientY: 100 }));
+    await waitFor(() => expect(surface.style.cursor).toBe("col-resize"));
+    view.rerender(<BrowserViewport frame={frame} canControl={false} send={send} onError={() => {}} />);
+    expect(surface.style.cursor).toBe("default");
+    view.rerender(<BrowserViewport frame={{ ...frame, documentId: "new" }} canControl send={send} onError={() => {}} />);
+    expect(surface.style.cursor).toBe("default");
+  });
+
 });

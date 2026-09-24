@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
-import type { BrowserHumanInput } from "@valet/shared";
+import { browserPointerCursor, type BrowserHumanInput, type BrowserPointerCursor } from "@valet/shared";
 import type { BrowserFrame } from "~/api/browser";
 import { browserKey, browserPoint, browserWheel } from "./input";
 import { BrowserInputQueue } from "./input-queue";
@@ -12,7 +12,7 @@ export function BrowserViewport({
 }: {
   frame: BrowserFrame;
   canControl: boolean;
-  send: (input: BrowserHumanInput) => Promise<void>;
+  send: (input: BrowserHumanInput) => Promise<BrowserPointerCursor | void>;
   onError: (message: string) => void;
 }) {
   const surface = useRef<HTMLTextAreaElement>(null);
@@ -20,6 +20,9 @@ export function BrowserViewport({
   const callbacks = useRef({ send, onError });
   callbacks.current = { send, onError };
   const queue = useRef<BrowserInputQueue | null>(null);
+  const [cursor, setCursor] = useState<BrowserPointerCursor>("default");
+  const pointerVisit = useRef(0);
+  const pointerPoint = useRef<{ x: number; y: number } | null>(null);
   const composing = useRef(false);
   const typedKey = useRef(false);
   const composedText = useRef<string | null>(null);
@@ -33,14 +36,27 @@ export function BrowserViewport({
   const ready = canControl && loadedDocument === target;
 
   useEffect(() => {
+    let active = true;
+    setCursor("default");
+    pointerPoint.current = null;
+    pointerVisit.current++;
     const next = new BrowserInputQueue(
-      (input) => callbacks.current.send(input),
+      async (input) => {
+        const visit = pointerVisit.current;
+        const feedback = await callbacks.current.send(input);
+        const point = pointerPoint.current;
+        if (active && feedback && visit === pointerVisit.current && point &&
+            (input.type === "pointer" || input.type === "move" || input.type === "click") &&
+            point.x === input.x && point.y === input.y)
+          setCursor(browserPointerCursor(feedback));
+      },
       (error) => callbacks.current.onError(error),
     );
     queue.current = next;
     heldKeys.current.clear();
     heldPointer.current = null;
     return () => {
+      active = false;
       next.dispose();
     };
   }, [target, canControl]);
@@ -75,6 +91,11 @@ export function BrowserViewport({
       input({ type: "pointer", phase: "up", ...heldPointer.current });
     heldPointer.current = null;
   }
+  function leavePointer() {
+    if (pointerPoint.current) pointerVisit.current++;
+    pointerPoint.current = null;
+    setCursor("default");
+  }
   function pointer(
     event: PointerEvent<HTMLTextAreaElement>,
     phase: "down" | "up" | "move",
@@ -87,9 +108,11 @@ export function BrowserViewport({
       frame.viewport,
     );
     if (!point) {
+      leavePointer();
       if (phase === "up") releaseHeld();
       return;
     }
+    pointerPoint.current = point;
     const button =
       event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
     if (phase === "down") {
@@ -143,7 +166,9 @@ export function BrowserViewport({
         onPointerDown={(event) => pointer(event, "down")}
         onPointerMove={(event) => pointer(event, "move")}
         onPointerUp={(event) => pointer(event, "up")}
-        onPointerCancel={releaseHeld}
+        style={{ cursor: ready ? cursor : "default" }}
+        onPointerLeave={leavePointer}
+        onPointerCancel={() => { releaseHeld(); leavePointer(); }}
         onContextMenu={(event) => {
           if (ready) event.preventDefault();
         }}
