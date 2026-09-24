@@ -178,6 +178,25 @@ high-volume key like `slack.message` that is every message in the workspace, so
 logging it would re-flood the drop-log the privacy design keeps small. The "last
 event received" signal covers that case instead.
 
+### Slack form diagnostics
+
+The Problems tab continues to use `GET /api/events/drops`. It shows the existing
+categories and the last-event-received signal to every organization member.
+Matched Slack events continue to use the normal event feed, detail, and
+redelivery rules. A member can inspect a Slack event that their subscription
+received.
+
+For an unmatched `block_actions` or `view_submission` interaction, Slack writes
+one `slack_interaction_unmatched` drop row per organization and interaction type
+per minute. Only organization admins receive these rows from the drops API. The
+row contains the interaction type and a corrective action. It contains no raw
+payload, form values, headers, token, signing secret, or dedupe material.
+
+The diagnostic is not an event row. It cannot enter the activity feed, create a
+delivery, or be redelivered. Slack retries can run the normal channel consumer,
+but the one-minute diagnostic limit prevents retry traffic from growing the log.
+No Slack event is retained only for diagnostics.
+
 ## Mention scoping (TKAI-299, added 2026-09-01)
 
 A `slack.app_mention` subscription started with unsafe defaults: no user

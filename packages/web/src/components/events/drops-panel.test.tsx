@@ -23,12 +23,14 @@ describe("DropsPanel", () => {
             createdAt: now - 30_000,
           },
           { id: "d2", reason: "bad_signature", detail: "signature verification failed", createdAt: now - 120_000 },
+          { id: "d3", reason: "slack_interaction_unmatched", detail: "A Slack block_actions interaction arrived.", createdAt: now - 90_000 },
         ],
       },
     });
     render(<DropsPanel />);
     expect(screen.getByText("No subscription")).toBeTruthy();
     expect(screen.getByText("Bad signature")).toBeTruthy();
+    expect(screen.getByText("Slack form did not start a workflow")).toBeTruthy();
     expect(screen.getByText(/no enabled subscription names it/)).toBeTruthy();
     expect(screen.getByText(/Last event received/)).toBeTruthy();
   });

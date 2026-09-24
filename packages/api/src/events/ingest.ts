@@ -115,16 +115,10 @@ export async function ingestEvent(
   for (const sub of subs) {
     if (await authorizedSubscriptionMatchesEvent(deps.db, sub, event.key, event.payload, catalog)) matched.push(sub);
   }
-  if (matched.length === 0) {
-    // If a subscription NAMES this key but every one filtered this occurrence
-    // out, record it so "my trigger didn't fire" is answerable. An event no
-    // subscription names is ambient traffic and stays silent. Either way the
-    // event itself is never persisted.
-    if (subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
-      await logFilterExcludedDrop(deps.db, orgId, event.key);
-    }
-    return { eventId, duplicate: false, deliveries: 0, skipped: true };
+  if (matched.length === 0 && subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
+    await logFilterExcludedDrop(deps.db, orgId, event.key);
   }
+  if (matched.length === 0) return { eventId, duplicate: false, deliveries: 0, skipped: true };
 
   const result = await deps.db.transaction(async (tx) => {
     const inserted = await tx
@@ -146,17 +140,19 @@ export async function ingestEvent(
       .returning({ id: events.id });
     if (inserted.length === 0) return { eventId, duplicate: true, deliveries: 0 };
 
-    await tx.insert(eventDeliveries).values(
-      matched.map((sub) => ({
-        id: randomUUID(),
-        eventId,
-        subscriptionId: sub.id,
-        status: "pending" as const,
-        attempts: 0,
-        nextAttemptAt: now,
-        createdAt: now,
-      })),
-    );
+    if (matched.length > 0) {
+      await tx.insert(eventDeliveries).values(
+        matched.map((sub) => ({
+          id: randomUUID(),
+          eventId,
+          subscriptionId: sub.id,
+          status: "pending" as const,
+          attempts: 0,
+          nextAttemptAt: now,
+          createdAt: now,
+        })),
+      );
+    }
     return { eventId, duplicate: false, deliveries: matched.length };
   });
 

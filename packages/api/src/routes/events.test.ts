@@ -173,6 +173,22 @@ describe("GET /api/events/drops", () => {
     expect(body.lastEventAt).toBe(now - 500);
   });
 
+  it("shows Slack interaction diagnostics only to organization admins", async () => {
+    const a = await boot();
+    const now = Date.now();
+    await a.providers.db.insert(eventDropLog).values([
+      { id: "d_interaction", orgId: "local-org", reason: "slack_interaction_unmatched", detail: "Slack block_actions", createdAt: now },
+      { id: "d_public", orgId: "local-org", reason: "bad_signature", detail: "signature failed", createdAt: now - 1 },
+    ]);
+
+    const member = (await (await fetch(`${a.baseUrl}/api/events/drops`, { headers: { "x-valet-test-user-id": "test-member" } })).json()) as ListEventDropsResponse;
+    expect(member.drops.map((drop) => drop.id)).toEqual(["d_public"]);
+    expect(member.drops[0].detail).not.toContain("token");
+
+    const admin = (await (await fetch(`${a.baseUrl}/api/events/drops`)).json()) as ListEventDropsResponse;
+    expect(admin.drops.map((drop) => drop.id)).toEqual(["d_interaction", "d_public"]);
+  });
+
   it("resolves /events/drops as the literal path, not an event id", async () => {
     const a = await boot();
     const res = await fetch(`${a.baseUrl}/api/events/drops`);
@@ -770,6 +786,23 @@ describe("GET /api/events", () => {
 
     const limited = (await (await fetch(`${a.baseUrl}/api/events?limit=1`)).json()) as ListEventsResponse;
     expect(limited.events.map((e) => e.id)).toEqual(["ev_c"]);
+  });
+
+  it("keeps matched Slack events available to the member who owns their subscription", async () => {
+    const a = await boot();
+    const now = Date.now();
+    await seedEventRow(a, { id: "ev_slack", service: "slack", eventKey: "slack.message", receivedAt: now - 1_000 });
+    await seedSubscriptionRow(a, "sub_member_slack", "local-org", { ownerId: "test-member" });
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_member_slack", eventId: "ev_slack", subscriptionId: "sub_member_slack", status: "delivered", attempts: 1,
+      nextAttemptAt: 0, createdAt: now - 1_000,
+    });
+    const memberHeaders = { "x-valet-test-user-id": "test-member" };
+
+    const list = (await (await fetch(`${a.baseUrl}/api/events?service=slack&ownerType=user&ownerId=test-member`, { headers: memberHeaders })).json()) as ListEventsResponse;
+    expect(list.events.map((event) => event.id)).toEqual(["ev_slack"]);
+    expect((await fetch(`${a.baseUrl}/api/events/ev_slack`, { headers: memberHeaders })).status).toBe(200);
+    expect((await fetch(`${a.baseUrl}/api/events/ev_slack/redeliver`, { method: "POST", headers: memberHeaders })).status).toBe(200);
   });
 
   // The owner filter is what the page's "This workspace" state sends. It reads

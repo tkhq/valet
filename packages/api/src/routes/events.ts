@@ -18,12 +18,13 @@ import { OnePasswordAuthError } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, gte, ne, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
+import { isOrgAdminUser } from "./_org-admin.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
@@ -403,10 +404,16 @@ eventsRouter.get("/events/drops", async (c) => {
   const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, FEED_MAX_LIMIT) : FEED_DEFAULT_LIMIT;
 
+  const admin = await isOrgAdminUser(c);
+  const dropConditions = [eq(eventDropLog.orgId, user.orgId)];
+  // Slack interaction diagnostics identify form activity. They are the one
+  // new sensitive diagnostic class, so members keep the established drop feed
+  // without seeing those rows.
+  if (!admin) dropConditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"));
   const rows = await db
     .select()
     .from(eventDropLog)
-    .where(eq(eventDropLog.orgId, user.orgId))
+    .where(and(...dropConditions))
     .orderBy(desc(eventDropLog.createdAt))
     .limit(limit);
 
@@ -443,7 +450,6 @@ eventsRouter.get("/events/:id", async (c) => {
     .limit(1);
   const row = rows[0];
   if (!row) return c.json({ error: "event not found" }, 404);
-
   // The join carries the subscription NAME onto each delivery, so a row can
   // say what it was trying to reach. It also does the org scoping the
   // previous `subscriptionId IN (org subscriptions)` subquery did, over the
@@ -528,7 +534,6 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
     .limit(1);
   const event = rows[0];
   if (!event) return c.json({ error: "event not found" }, 404);
-
   const subs = await db
     .select()
     .from(eventSubscriptions)

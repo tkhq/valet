@@ -21,6 +21,7 @@ const REASON_LABEL: Record<string, string> = {
   unknown_org: "Not connected",
   transport_unavailable: "Transport down",
   slack_retry: "Slow response",
+  slack_interaction_unmatched: "Slack form did not start a workflow",
   unlinked_sender: "Unlinked sender",
 };
 
