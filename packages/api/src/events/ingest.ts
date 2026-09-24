@@ -140,19 +140,17 @@ export async function ingestEvent(
       .returning({ id: events.id });
     if (inserted.length === 0) return { eventId, duplicate: true, deliveries: 0 };
 
-    if (matched.length > 0) {
-      await tx.insert(eventDeliveries).values(
-        matched.map((sub) => ({
-          id: randomUUID(),
-          eventId,
-          subscriptionId: sub.id,
-          status: "pending" as const,
-          attempts: 0,
-          nextAttemptAt: now,
-          createdAt: now,
-        })),
-      );
-    }
+    await tx.insert(eventDeliveries).values(
+      matched.map((sub) => ({
+        id: randomUUID(),
+        eventId,
+        subscriptionId: sub.id,
+        status: "pending" as const,
+        attempts: 0,
+        nextAttemptAt: now,
+        createdAt: now,
+      })),
+    );
     return { eventId, duplicate: false, deliveries: matched.length };
   });
 
