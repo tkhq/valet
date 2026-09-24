@@ -61,7 +61,7 @@ export function DropsPanel({
 
       <SearchInput
         value={query}
-        onSettled={onQueryChange}
+        onSettled={(next) => onQueryChange?.(next)}
         placeholder="Search problems"
         aria-label="Search problems"
       />
