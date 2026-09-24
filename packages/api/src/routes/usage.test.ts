@@ -283,6 +283,8 @@ describe("GET /api/usage — scope=team", () => {
     expect(adminText).toContain("s-team");
     expect(adminText).not.toContain("s-mine");
     expect(adminText).toContain("local-user");
+    expect(adminText).toContain("Local Dev");
+    expect(adminText).toContain("local@dev");
 
     const memberRes = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`, {
       headers: { "x-valet-test-user-id": "test-member" },
@@ -290,8 +292,10 @@ describe("GET /api/usage — scope=team", () => {
     const memberText = await memberRes.text();
     expect(memberText).toContain("s-team");
     // Per-member attribution follows byUser's admin gate; a plain member's
-    // CSV must not carry it.
+    // CSV must not carry stable or human member identity.
     expect(memberText).not.toContain("local-user");
+    expect(memberText).not.toContain("Local Dev");
+    expect(memberText).not.toContain("local@dev");
   });
 });
 
@@ -373,6 +377,50 @@ describe("GET /api/usage/export.csv", () => {
     expect(header).toContain("cost_usd,priced");
     expect(rows.some((r) => r.includes("session"))).toBe(true);
     for (const model of formulaModels) expect(text).toContain(`,"'${model}",`);
+  });
+
+  it("adds current identity and durable work context without dropping or multiplying rows", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.execute(sql`UPDATE "user" SET name = '=Finance', email = '+finance@example.com' WHERE id = 'local-user'`);
+    await db.insert(agentSessions).values([
+      { id: "s-context", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
+      { id: "s-deleted", userId: "deleted-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "deleted-user", createdAt: now, updatedAt: now },
+    ]);
+    await seedEngineEntry(api, "e-context", "s-context", now);
+    await seedEngineEntry(api, "e-deleted", "s-deleted", now - 1);
+    await db.execute(sql`UPDATE engine_entries SET channel = ${JSON.stringify({ channelType: "=slack", channelId: "\tC123" })} WHERE id = 'e-context'`);
+    await db.execute(sql`
+      INSERT INTO session_repos (session_id, full_name, clone_url, position)
+      VALUES ('s-context', '@acme/primary', 'https://example.test/primary', 0),
+             ('s-context', 'acme/secondary', 'https://example.test/secondary', 1)
+    `);
+    await db.insert(llmProxyRequests).values({
+      id: "p-shared", createdAt: now - 2, orgId: "local-org", userId: null, teamId: "team-shared", apiKeyId: "shared",
+      providerKind: "openai", model: "gpt", endpoint: "/v1/responses", stream: false, statusCode: 200,
+      requestBody: "{}", inputTokens: 10, outputTokens: 2, totalTokens: 12, costUsd: 0.01,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?scope=org&window=30d`);
+    expect(res.status).toBe(200);
+    const lines = (await res.text()).trim().split("\n");
+    expect(lines[0]).toBe("timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced,employee_name,employee_email,repository,channel_type,channel_id");
+    expect(lines).toHaveLength(4);
+    expect(lines.filter((line) => line.includes("s-context"))).toHaveLength(1);
+    const context = lines.find((line) => line.includes("s-context"));
+    expect(context).toContain("local-user");
+    expect(context).toContain("\"'=Finance\"");
+    expect(context).toContain("\"'+finance@example.com\"");
+    expect(context).toContain("\"'@acme/primary;acme/secondary\"");
+    expect(context).toContain("\"'=slack\"");
+    expect(context).toContain("\"'\tC123\"");
+    const deleted = lines.find((line) => line.includes("s-deleted"));
+    expect(deleted).toContain("deleted-user,100,20,0,0,120,0.003,true,,,,,");
+    const shared = lines.find((line) => line.includes("p-shared") || line.includes(",proxy,"));
+    expect(shared).toBeDefined();
+    expect(shared).toContain(",proxy,gpt,,,,10,2,0,0,12,0.01,true,,,,,");
   });
 
   it("rejects exports over 100,000 rows without returning a partial CSV", async () => {

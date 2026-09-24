@@ -488,7 +488,7 @@ export async function getUsageSessions(
 
 const USAGE_EXPORT_MAX_ROWS = 100_000;
 
-const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced";
+const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced,employee_name,employee_email,repository,channel_type,channel_id";
 
 function csvEscape(v: unknown): string {
   const value = v === null || v === undefined ? "" : String(v);
@@ -499,10 +499,11 @@ function csvEscape(v: unknown): string {
 }
 
 /** One CSV row per billable turn for the window/scope.
- * A plain member's team export blanks `user_id`: per-member attribution
- * follows the breakdown's byUser rule (org scope, or a team scope whose
- * caller administers the team), and the CSV must not let a plain team
- * member reconstruct it with one GROUP BY. */
+ * Identity is a current join. Repository bindings are durable session metadata,
+ * and channel fields are the point-in-time target stored on the usage entry.
+ * A plain member's team export blanks all employee attribution: per-member
+ * attribution follows the breakdown's byUser rule, and the CSV must not let a
+ * plain team member reconstruct it with one GROUP BY. */
 export async function getUsageExportCsv(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope },
@@ -511,15 +512,24 @@ export async function getUsageExportCsv(
   const withholdUserId = opts.scope.scope === "team" && !opts.scope.byMember;
   interface Row {
     created_at: unknown; use_case: string; model: string | null; session_id: string | null; workflow_run_id: string | null;
-    user_id: string | null; input_tokens: unknown; output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;
-    total_tokens: unknown; cost_total: unknown; priced: unknown;
+    user_id: string | null; employee_name: string | null; employee_email: string | null; repository: string | null;
+    channel_type: string | null; channel_id: string | null; input_tokens: unknown; output_tokens: unknown;
+    cache_read_tokens: unknown; cache_write_tokens: unknown; total_tokens: unknown; cost_total: unknown; priced: unknown;
   }
   const result = (await db.execute(sql`
-    SELECT created_at, use_case, model, session_id, workflow_run_id, user_id,
-           input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_total, priced
-    FROM cost_entries
-    WHERE ${scopeWhere("", period, opts.scope)}
-    ORDER BY created_at DESC LIMIT ${USAGE_EXPORT_MAX_ROWS + 1}`)) as { rows: Row[] };
+    SELECT ce.created_at, ce.use_case, ce.model, ce.session_id, ce.workflow_run_id, ce.user_id,
+           u.name AS employee_name, u.email AS employee_email,
+           (SELECT string_agg(sr.full_name, ';' ORDER BY sr.position)
+              FROM session_repos sr WHERE sr.session_id = ce.session_id) AS repository,
+           e.channel::jsonb->>'channelType' AS channel_type,
+           e.channel::jsonb->>'channelId' AS channel_id,
+           ce.input_tokens, ce.output_tokens, ce.cache_read_tokens, ce.cache_write_tokens,
+           ce.total_tokens, ce.cost_total, ce.priced
+    FROM cost_entries ce
+    LEFT JOIN "user" u ON u.id = ce.user_id
+    LEFT JOIN engine_entries e ON e.id = ce.entry_id AND e.session_id = ce.session_id
+    WHERE ${scopeWhere("ce.", period, opts.scope)}
+    ORDER BY ce.created_at DESC LIMIT ${USAGE_EXPORT_MAX_ROWS + 1}`)) as { rows: Row[] };
 
   if (result.rows.length > USAGE_EXPORT_MAX_ROWS) {
     return {
@@ -533,9 +543,11 @@ export async function getUsageExportCsv(
 
   const lines = result.rows.map((r) =>
     [
-      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id, withholdUserId ? "" : r.user_id,
-      toNum(r.input_tokens), toNum(r.output_tokens), toNum(r.cache_read_tokens), toNum(r.cache_write_tokens), toNum(r.total_tokens),
-      r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
+      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id,
+      withholdUserId ? "" : r.user_id, toNum(r.input_tokens), toNum(r.output_tokens), toNum(r.cache_read_tokens),
+      toNum(r.cache_write_tokens), toNum(r.total_tokens), r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
+      withholdUserId ? "" : r.employee_name, withholdUserId ? "" : r.employee_email,
+      r.repository, r.channel_type, r.channel_id,
     ].map(csvEscape).join(","),
   );
   return { ok: true, csv: `${CSV_HEADER}\n${lines.join("\n")}\n` };
