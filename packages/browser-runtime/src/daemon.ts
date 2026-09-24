@@ -46,7 +46,7 @@ export type BrowserBackend = Pick<
   Partial<
     Pick<
       PlaywrightBackend,
-      'selected' | 'dialogs' | 'releaseInput' | 'screenshot'
+      'selected' | 'dialogs' | 'releaseInput' | 'screenshot' | 'agentCursor'
     >
   >;
 export interface BrowserDaemonOptions {
@@ -466,9 +466,21 @@ export class BrowserDaemon {
                 );
             };
             validateCapture();
+            const readCursor = () => {
+              try {
+                return this.control.lease?.privateMode ? undefined : this.backend.agentCursor?.(tab.id);
+              } catch {
+                // Optional display tracking must not interrupt the image feed.
+                return undefined;
+              }
+            };
+            const beforeCursor = readCursor();
             const bytes = await this.backend.frame(tab.id);
             const viewport = await this.backend.viewport(tab.id);
             validateCapture();
+            const afterCursor = readCursor();
+            // A concurrent action can move the pointer while the image is captured.
+            const agentCursor = beforeCursor?.sequence === afterCursor?.sequence ? afterCursor : undefined;
             if (request.inline) {
               // Base64 and metadata must fit inside the 1,000,000-byte reply.
               if (bytes.length > 700_000)
@@ -479,6 +491,7 @@ export class BrowserDaemon {
                 );
               response.frame = {
                 mimeType: 'image/jpeg',
+                ...(agentCursor ? { agentCursor } : {}),
                 data: bytes.toString('base64'),
                 bytes: bytes.length,
                 sha256: createHash('sha256').update(bytes).digest('hex'),

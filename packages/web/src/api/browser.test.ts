@@ -41,6 +41,7 @@ describe("browser frame transport", () => {
           "x-browser-document-id": "doc",
           "x-browser-viewport-width": "1280",
           "x-browser-viewport-height": "720",
+          "x-browser-agent-cursor": JSON.stringify({ x: 12, y: 24, kind: "click", sequence: 1, ageMs: 40 }),
         },
       }),
     );
@@ -53,6 +54,7 @@ describe("browser frame transport", () => {
       new AbortController().signal,
     );
     expect(result.documentId).toBe("doc");
+    expect(result.agentCursor).toEqual({ x: 12, y: 24, kind: "click", sequence: 1, ageMs: 40 });
     expect(result.viewport).toEqual({ width: 1280, height: 720 });
     expect(fetcher.mock.calls[0]?.[0]).toContain("session%2F1/browser/frame?");
     expect(fetcher.mock.calls[0]?.[1].headers).toEqual({
@@ -82,6 +84,18 @@ describe("browser frame transport", () => {
       ),
     ).rejects.toThrow(/changed|identity/);
   });
+
+  it.each(['{"x":', JSON.stringify({ x: 9999, y: 2, kind: "click", sequence: 1, ageMs: 20 }), "x".repeat(1025)])(
+    "ignores malformed optional activity metadata without losing the image: %s", async (header) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("jpeg", { headers: {
+        "content-type": "image/jpeg", "x-browser-runtime-id": "runtime", "x-browser-document-id": "doc",
+        "x-browser-viewport-width": "1280", "x-browser-viewport-height": "720", "x-browser-agent-cursor": header,
+      } })));
+      const frame = await fetchBrowserFrame("session", "runtime", "tab", "ticket", new AbortController().signal);
+      expect(frame.agentCursor).toBeUndefined();
+      expect(await frame.blob.text()).toBe("jpeg");
+    },
+  );
 
   it("cancels an oversized stream before consuming the remaining body", async () => {
     const cancelled = vi.fn();

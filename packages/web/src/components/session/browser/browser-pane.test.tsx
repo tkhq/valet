@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { BrowserRuntimeStatus } from "@valet/shared";
+import type { BrowserAgentCursor, BrowserRuntimeStatus } from "@valet/shared";
 import { BrowserPane } from "./browser-pane";
 
 const state = vi.hoisted(() => ({
@@ -16,6 +16,7 @@ const state = vi.hoisted(() => ({
   dialog: vi.fn().mockResolvedValue({}),
   frameEnabled: vi.fn(),
   frameDocument: null as string | null,
+  agentCursor: undefined as BrowserAgentCursor | undefined,
   settings: vi.fn().mockResolvedValue({}),
   capture: vi.fn().mockResolvedValue({}),
 }));
@@ -78,6 +79,7 @@ vi.mock("~/api/browser", () => ({
             tabId: "tab",
             documentId: state.frameDocument,
             viewport: { width: 1280, height: 720 },
+            agentCursor: state.agentCursor,
           }
         : null,
       error: null,
@@ -114,12 +116,40 @@ function ready(): BrowserRuntimeStatus {
 afterEach(() => {
   state.status = null;
   state.frameDocument = null;
+  state.agentCursor = undefined;
   state.enabled = true;
   state.settingsEnabled = true;
   vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 describe("browser pane control", () => {
+  it("preserves consumed activity across control changes and hides it during private sign-in", () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 480));
+    state.status = ready();
+    state.frameDocument = "doc";
+    state.agentCursor = { x: 30, y: 20, kind: "click", sequence: 1, ageMs: 0 };
+    const view = render(<BrowserPane sessionId="session" />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    const pulse = view.container.querySelector("[data-agent-pulse]");
+    expect(pulse).not.toBeNull();
+    state.status = { ...ready(), control: {
+      id: "lease", runtimeId: "runtime", actorId: "viewer", state: "active", privateMode: false, expiresAt: Date.now() + 60_000,
+    } };
+    view.rerender(<BrowserPane sessionId="session" />);
+    expect(view.container.querySelector("[data-agent-pulse]")).toBe(pulse);
+    state.status.control!.privateMode = true;
+    view.rerender(<BrowserPane sessionId="session" />);
+    expect(view.container.querySelector<HTMLElement>("[data-agent-pointer]")?.style.opacity).toBe("0");
+    state.status = ready();
+    view.rerender(<BrowserPane sessionId="session" />);
+    expect(view.container.querySelector("[data-agent-pulse]")).toBe(pulse);
+    expect(view.container.querySelector<HTMLElement>("[data-agent-pointer]")?.style.opacity).toBe("0");
+    state.agentCursor = { ...state.agentCursor, sequence: 2 };
+    view.rerender(<BrowserPane sessionId="session" />);
+    fireEvent.load(screen.getByAltText("Browser page"));
+    expect(view.container.querySelector<HTMLElement>("[data-agent-pointer]")?.style.opacity).toBe("1");
+  });
   it("answers a dialog outside the page input queue and pauses frame capture", async () => {
     state.status = {
       ...ready(),

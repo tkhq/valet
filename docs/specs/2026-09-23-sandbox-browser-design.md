@@ -1225,3 +1225,8 @@ Minimizing retains page selection and stops frame requests. The full Browser vie
 Private sign-in hides page images and metadata. Status and frame errors hide cached images.
 The window fits the transcript area above the composer and decision gates. A short area shows only its header.
 See [floating browser preview](2026-09-24-browser-overlay-design.md) for interaction and lifecycle details.
+
+Both browser views show agent activity with an animated pointer. The overlay follows actual pointer and editable-field events during agent commands.
+The API carries validated coordinates with each image. Human input, navigation, and private transitions clear old activity.
+The transparent input layer does not draw a focus border around the browser. Remote controls retain their native focus appearance.
+See [animated browser agent pointer](2026-09-24-browser-agent-pointer-design.md) for capture, animation, and expiry details.

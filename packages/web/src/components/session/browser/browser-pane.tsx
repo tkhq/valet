@@ -554,8 +554,10 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
             </div>
           ) : viewing.frame ? (
             <BrowserViewport
-              key={`${runtime.runtimeId}:${selected?.id}:${viewing.frame.documentId}:${lease?.id}:${lease?.state}`}
+              key={`${runtime.runtimeId}:${selected?.id}:${viewing.frame.documentId}`}
               frame={viewing.frame}
+              controlEpoch={`${lease?.id}:${lease?.state}`}
+              showAgentCursor={!lease?.privateMode}
               canControl={canControl && !error}
               send={(input) => send(input, viewing.frame?.documentId)}
               onError={setError}

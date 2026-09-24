@@ -1,3 +1,4 @@
+import { parseBrowserAgentCursor, type BrowserAgentCursor } from "@valet/shared";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
@@ -227,6 +228,8 @@ export function useBrowserActions(sessionId: string) {
 }
 
 export interface BrowserFrameData {
+  agentCursor?: BrowserAgentCursor;
+  receivedAt?: number;
   blob: Blob;
   runtimeId: string;
   documentId: string;
@@ -274,6 +277,7 @@ export async function fetchBrowserFrame(
     signal.throwIfAborted();
     response = await load();
   }
+  const receivedAt = Date.now();
   if (!response.ok)
     throw new Error(
       response.status === 401 || response.status === 403
@@ -328,7 +332,13 @@ export async function fetchBrowserFrame(
     reader.releaseLock();
   }
   const blob = new Blob(chunks, { type: "image/jpeg" });
-  return { blob, runtimeId, documentId, viewport: { width, height } };
+  let agentCursor: BrowserAgentCursor | undefined;
+  const cursorHeader = response.headers.get("x-browser-agent-cursor");
+  if (cursorHeader && cursorHeader.length < 1024) {
+    try { agentCursor = parseBrowserAgentCursor(JSON.parse(cursorHeader), { width, height }); }
+    catch { /* A bad optional marker must not interrupt the page feed. */ }
+  }
+  return { blob, runtimeId, documentId, viewport: { width, height }, agentCursor, receivedAt };
 }
 
 /** One request at a time, at most ten starts per second. Capture time consumes the interval. */
@@ -401,6 +411,8 @@ export function useBrowserFrame(
           tabId,
           documentId: data.documentId,
           viewport: data.viewport,
+          agentCursor: data.agentCursor,
+          receivedAt: data.receivedAt,
         });
       },
       abort.signal,

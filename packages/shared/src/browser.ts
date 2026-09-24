@@ -139,8 +139,34 @@ export interface BrowserExportDescriptor extends BrowserArtifact {
   path: string;
   transferId: string;
 }
+export interface BrowserAgentCursor {
+  x: number;
+  y: number;
+  kind: 'move' | 'click' | 'type';
+  sequence: number;
+  ageMs: number;
+}
+/** Ignore optional visual metadata that does not fit the captured viewport. */
+export function parseBrowserAgentCursor(
+  value: unknown,
+  viewport: { width: number; height: number },
+): BrowserAgentCursor | undefined {
+  if (!value || typeof value !== 'object') return;
+  const x: unknown = Reflect.get(value, 'x');
+  const y: unknown = Reflect.get(value, 'y');
+  const kind: unknown = Reflect.get(value, 'kind');
+  const sequence: unknown = Reflect.get(value, 'sequence');
+  const ageMs: unknown = Reflect.get(value, 'ageMs');
+  if (typeof x !== 'number' || !Number.isFinite(x) || x < 0 || x >= viewport.width ||
+      typeof y !== 'number' || !Number.isFinite(y) || y < 0 || y >= viewport.height ||
+      typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 0 ||
+      typeof ageMs !== 'number' || !Number.isFinite(ageMs) || ageMs < 0 || ageMs > 2500 ||
+      (kind !== 'move' && kind !== 'click' && kind !== 'type')) return;
+  return { x, y, kind, sequence, ageMs };
+}
 export interface BrowserInlineFrame {
   mimeType: 'image/jpeg';
+  agentCursor?: BrowserAgentCursor;
   data: string;
   bytes: number;
   sha256: string;

@@ -3,20 +3,26 @@ import { browserPointerCursor, type BrowserHumanInput, type BrowserPointerCursor
 import type { BrowserFrame } from "~/api/browser";
 import { browserKey, browserPoint, browserWheel } from "./input";
 import { BrowserInputQueue } from "./input-queue";
+import { BrowserPageImage } from "./browser-page-image";
 
 export function BrowserViewport({
   frame,
   canControl,
+  controlEpoch,
+  showAgentCursor = true,
   send,
   onError,
 }: {
   frame: BrowserFrame;
   canControl: boolean;
+  controlEpoch?: string;
+  showAgentCursor?: boolean;
   send: (input: BrowserHumanInput) => Promise<BrowserPointerCursor | void>;
   onError: (message: string) => void;
 }) {
   const surface = useRef<HTMLTextAreaElement>(null);
   const [loadedDocument, setLoadedDocument] = useState<string | null>(null);
+  const [suppressedCursor, setSuppressedCursor] = useState<{ target: string; sequence: number } | null>(null);
   const callbacks = useRef({ send, onError });
   callbacks.current = { send, onError };
   const queue = useRef<BrowserInputQueue | null>(null);
@@ -55,17 +61,21 @@ export function BrowserViewport({
     queue.current = next;
     heldKeys.current.clear();
     heldPointer.current = null;
+    composing.current = false;
+    typedKey.current = false;
+    composedText.current = null;
     return () => {
       active = false;
       next.dispose();
     };
-  }, [target, canControl]);
+  }, [target, canControl, controlEpoch]);
 
   useEffect(() => {
     const element = surface.current;
     if (!ready || !element) return;
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
+      setSuppressedCursor({ target, sequence: frame.agentCursor?.sequence ?? -1 });
       queue.current?.add(
         browserWheel(
           event.deltaX,
@@ -78,10 +88,13 @@ export function BrowserViewport({
     // React's delegated wheel listener is passive and cannot stop local scrolling.
     element.addEventListener("wheel", wheel, { passive: false });
     return () => element.removeEventListener("wheel", wheel);
-  }, [ready, frame.viewport.height]);
+  }, [ready, frame.viewport.height, target, frame.agentCursor?.sequence]);
 
   function input(value: BrowserHumanInput) {
-    if (ready) queue.current?.add(value);
+    if (ready) {
+      setSuppressedCursor({ target, sequence: frame.agentCursor?.sequence ?? -1 });
+      queue.current?.add(value);
+    }
   }
   function releaseHeld() {
     for (const key of heldKeys.current)
@@ -138,12 +151,11 @@ export function BrowserViewport({
 
   return (
     <div className="relative min-h-48 flex-1 overflow-hidden bg-ink-wash">
-      <img
-        key={target}
-        src={frame.url}
+      <BrowserPageImage
+        frame={frame}
+        showAgentCursor={showAgentCursor}
         alt="Browser page"
-        draggable={false}
-        className="absolute inset-0 h-full w-full select-none object-contain"
+        suppressedSequence={suppressedCursor?.target === target ? suppressedCursor.sequence : undefined}
         onLoad={() => setLoadedDocument(target)}
         onError={() =>
           onError("The browser image could not load. Retry the browser view.")
@@ -162,7 +174,7 @@ export function BrowserViewport({
         autoComplete="off"
         autoCapitalize="off"
         spellCheck={false}
-        className="absolute inset-0 h-full w-full cursor-default resize-none border-0 bg-transparent text-transparent caret-transparent outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-moss"
+        className="absolute inset-0 h-full w-full cursor-default resize-none border-0 bg-transparent text-transparent caret-transparent outline-none"
         onPointerDown={(event) => pointer(event, "down")}
         onPointerMove={(event) => pointer(event, "move")}
         onPointerUp={(event) => pointer(event, "up")}

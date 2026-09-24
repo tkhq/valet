@@ -62,6 +62,28 @@ it('keeps the existing file transfer mode', async () => {
   expect(response.frame).toBeUndefined();
 });
 
+it('carries stable agent activity and omits activity that changes during capture', async () => {
+  const f = await fixture();
+  let sequence = 1;
+  f.backend.agentCursor = () => ({ x: 10, y: 20, kind: 'click', sequence, ageMs: 30 });
+  expect((await f.frame()).frame?.agentCursor?.sequence).toBe(1);
+  f.backend.frame = async () => { sequence++; return f.bytes; };
+  const response = await f.frame();
+  expect(response.ok).toBe(true);
+  expect(response.frame?.agentCursor).toBeUndefined();
+});
+
+it('keeps optional tracking failures and private activity out of the image feed', async () => {
+  const f = await fixture();
+  f.backend.agentCursor = () => { throw new Error('tracker unavailable'); };
+  expect((await f.frame()).frame?.data).toBe(f.bytes.toString('base64'));
+  f.backend.agentCursor = () => ({ x: 10, y: 20, kind: 'click', sequence: 1, ageMs: 30 });
+  await f.daemon.handle({ ...identity, command: 'control', action: 'take', privateMode: true });
+  const response = await f.frame();
+  expect(response.frame?.data).toBe(f.bytes.toString('base64'));
+  expect(response.frame?.agentCursor).toBeUndefined();
+});
+
 it('rejects inline JPEGs over 700000 bytes and releases the capture slot', async () => {
   const f = await fixture();
   f.backend.frame = async () => Buffer.alloc(700001);

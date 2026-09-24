@@ -1,8 +1,10 @@
+import { parseBrowserAgentCursor, type BrowserAgentCursor } from "@valet/shared";
 import { createHash } from "node:crypto";
 
 /** Validate inline preview bytes before serving them to the authenticated viewer. */
 export function decodeBrowserFrame(value: unknown, tabId: string): {
   data: Buffer;
+  agentCursor?: BrowserAgentCursor;
   documentId: string;
   viewport: { width: number; height: number };
 } {
@@ -24,5 +26,5 @@ export function decodeBrowserFrame(value: unknown, tabId: string): {
     data[0] !== 0xff || data[1] !== 0xd8 || data[2] !== 0xff ||
     data.at(-2) !== 0xff || data.at(-1) !== 0xd9 ||
     createHash("sha256").update(data).digest("hex") !== frame.sha256) throw invalid();
-  return { data, documentId: frame.documentId, viewport: {width: viewport.width, height: viewport.height} };
+  return { data, agentCursor: parseBrowserAgentCursor(frame.agentCursor, { width: viewport.width, height: viewport.height }), documentId: frame.documentId, viewport: {width: viewport.width, height: viewport.height} };
 }

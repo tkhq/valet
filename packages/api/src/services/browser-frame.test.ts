@@ -21,4 +21,15 @@ describe("inline browser frame", () => {
   ])("rejects malformed, changed, or corrupt frames", (value) => {
     expect(() => decodeBrowserFrame(value, "tab")).toThrow(/frame.*retry|frame.*image/i);
   });
+  it("preserves valid cursor metadata and drops malformed display metadata", () => {
+    const cursor = { x: 20, y: 30, kind: "click", sequence: 4, ageMs: 10 };
+    expect(decodeBrowserFrame({ ...frame, agentCursor: cursor }, "tab").agentCursor).toEqual(cursor);
+    for (const agentCursor of [null, { ...cursor, x: -1 }, { ...cursor, y: 800 },
+      { ...cursor, kind: "script" }, { ...cursor, sequence: Infinity }, { ...cursor, ageMs: 3000 }]) {
+      const decoded = decodeBrowserFrame({ ...frame, agentCursor }, "tab");
+      expect(decoded.agentCursor).toBeUndefined();
+      expect(decoded.data).toEqual(bytes);
+    }
+  });
+
 });

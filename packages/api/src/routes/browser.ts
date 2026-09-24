@@ -462,6 +462,7 @@ browserRouter.get("/:id/browser/frame", async (c) => {
       "x-browser-runtime-id": response.runtimeId,
       "x-browser-viewport-width": String(frame.viewport.width),
       "x-browser-viewport-height": String(frame.viewport.height),
+      ...(frame.agentCursor ? { "x-browser-agent-cursor": JSON.stringify(frame.agentCursor) } : {}),
     },
   });
 });

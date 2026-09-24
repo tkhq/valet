@@ -11,6 +11,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type {
   BrowserArtifact,
+  BrowserAgentCursor,
   BrowserCapability,
   BrowserElementRef,
   BrowserHumanInput,
@@ -21,6 +22,7 @@ import type {
 } from '@valet/shared';
 import { FileBroker } from './files.js';
 import { cursorAt, installViewerPage } from './viewer-page.js';
+import { AgentCursorTracker } from './agent-cursor.js';
 import {
   BrowserFault,
   canonicalHash,
@@ -28,7 +30,7 @@ import {
   object,
   string,
 } from './protocol.js';
-import { documentation } from './registry.js';
+import { documentation, METHOD_REGISTRY } from './registry.js';
 interface TabRecord {
   info: BrowserTabInfo;
   page: Page;
@@ -79,6 +81,7 @@ export class PlaywrightBackend {
     { tabId: string; documentId: string; urls: string[] }
   >();
   private quiet = false;
+  private readonly cursor = new AgentCursorTracker();
   readonly capabilities: Record<string, BrowserCapability> = {
     automation: { available: true },
     aria: { available: true },
@@ -140,6 +143,7 @@ export class PlaywrightBackend {
       },
     );
     await installViewerPage(this.context);
+    await this.cursor.install(this.context).catch(() => {});
     this.context.setDefaultTimeout(15_000);
     this.context.setDefaultNavigationTimeout(30_000);
     // HTTP routing is defense in depth. The network namespace and broker own network policy.
@@ -237,6 +241,7 @@ export class PlaywrightBackend {
       }),
     );
     page.on('framenavigated', (frame) => {
+      this.clearCursor(page);
       record.info.documentId = randomUUID();
       this.clearRefs(record);
       if (frame === page.mainFrame()) {
@@ -310,6 +315,7 @@ export class PlaywrightBackend {
       );
     });
     page.on('close', () => {
+      this.clearCursor(page);
       this.clearRefs(record);
       this.records.delete(info.id);
       if (this.selectedId === info.id)
@@ -336,7 +342,35 @@ export class PlaywrightBackend {
     for (const record of this.records.values()) this.clearRefs(record);
   }
   setPrivate(value: boolean) {
+    for (const record of this.records.values()) this.clearCursor(record.page);
+    try {
+      this.cursor.setEnabled(!value);
+    } catch { /* Cursor display is optional. */ }
     this.quiet = value;
+  }
+  agentCursor(id: string): BrowserAgentCursor | undefined {
+    const record = this.record(id);
+    try {
+      return this.cursor.get(record.page);
+    } catch {
+      return undefined;
+    }
+  }
+  private clearCursor(page: Page) {
+    try {
+      this.cursor.clear(page);
+    } catch { /* Cursor display is optional. */ }
+  }
+  private captureCursor(page: Page, human: boolean) {
+    let finish: (() => void) | undefined;
+    try {
+      finish = human ? this.cursor.suspend(page) : this.cursor.begin(page);
+    } catch { /* Cursor setup must not change an input result. */ }
+    return () => {
+      try {
+        finish?.();
+      } catch { /* Preserve the input result or its original error. */ }
+    };
   }
   async newTab(thread: string | null, actor: string, url?: string) {
     const destination = url ? checkedURL(url) : undefined;
@@ -727,6 +761,7 @@ export class PlaywrightBackend {
     for (const id of new Set([...this.heldKeys.keys(), ...this.heldButtons.keys()])) {
       const record = this.records.get(id);
       if (record && !record.page.isClosed()) {
+        const resumeCursor = this.captureCursor(record.page, true);
         this.clearRefs(record);
         try {
           for (const key of this.heldKeys.get(id) ?? []) {
@@ -738,6 +773,7 @@ export class PlaywrightBackend {
             this.heldButtons.get(id)?.delete(button);
           }
         } finally {
+          resumeCursor();
           this.clearRefs(record);
         }
       }
@@ -952,6 +988,25 @@ export class PlaywrightBackend {
     return state;
   }
   async execute(
+    method: string,
+    params: Record<string, unknown>,
+    thread: string,
+    actor: string,
+  ): Promise<unknown> {
+    const query = params.locator && typeof params.locator === 'object'
+      ? params.locator : undefined;
+    const tabId: unknown = query ? Reflect.get(query, 'tabId') : params.tabId;
+    const record = typeof tabId === 'string' ? this.records.get(tabId) : undefined;
+    const endCapture = record &&
+      (actor === 'human' || METHOD_REGISTRY[method]?.operationClass === 'mutation')
+      ? this.captureCursor(record.page, actor === 'human') : undefined;
+    try {
+      return await this.executeCommand(method, params, thread, actor);
+    } finally {
+      endCapture?.();
+    }
+  }
+  private async executeCommand(
     method: string,
     params: Record<string, unknown>,
     thread: string,
@@ -1362,6 +1417,7 @@ export class PlaywrightBackend {
   }
   async humanInput(id: string, documentId: string, input: BrowserHumanInput) {
     const r = this.record(id);
+    this.clearCursor(r.page);
     if (r.info.documentId !== documentId)
       throw new BrowserFault(
         'STALE_REFERENCE',
@@ -1369,6 +1425,7 @@ export class PlaywrightBackend {
         'Refresh the browser frame.',
       );
     this.clearRefs(r);
+    const resumeCursor = this.captureCursor(r.page, true);
     try {
       await this.applyHumanInput(r, input);
       if (input.type === 'pointer' || input.type === 'move' || input.type === 'click') {
@@ -1377,6 +1434,7 @@ export class PlaywrightBackend {
         return await cursorAt(r.page, input.x, input.y).catch(() => 'default' as const);
       }
     } finally {
+      resumeCursor();
       // Observations started during this effect cannot authorize later input.
       this.clearRefs(r);
     }

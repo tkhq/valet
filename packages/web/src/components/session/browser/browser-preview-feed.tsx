@@ -5,6 +5,7 @@ import {
   useBrowserStatus,
 } from "~/api/browser";
 import { Button, Spinner } from "~/components/primitives";
+import { BrowserPageImage } from "./browser-page-image";
 
 export function BrowserPreviewFeed({
   sessionId,
@@ -165,15 +166,13 @@ export function BrowserPreviewFeed({
               </Button>
             )}
           </div>
-        ) : (
-          <img
-            src={live.frame?.url}
+        ) : live.frame ? (
+          <BrowserPageImage
+            frame={live.frame}
             alt="Live browser page"
-            draggable={false}
-            className="h-full w-full select-none object-contain"
             onError={() => setDecodeError(true)}
           />
-        )}
+        ) : null}
       </div>
       {showMetadata && selected && (
         <p
