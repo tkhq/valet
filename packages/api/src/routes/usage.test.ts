@@ -29,10 +29,10 @@ afterEach(async () => {
 const USAGE = JSON.stringify({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, total: 120 });
 const COST = JSON.stringify({ input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 });
 
-async function seedEngineEntry(api: TestApi, id: string, sessionId: string, now: number): Promise<void> {
+async function seedEngineEntry(api: TestApi, id: string, sessionId: string, now: number, queueItemId: string | null = null): Promise<void> {
   await api.providers.db.execute(sql`
-    INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
-    VALUES (${id}, ${sessionId}, 'th', 'message', 'assistant', 'claude', ${USAGE}::text, ${COST}::text, ${now})
+    INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, queue_item_id, usage, cost, created_at)
+    VALUES (${id}, ${sessionId}, 'th', 'message', 'assistant', 'claude', ${queueItemId}, ${USAGE}::text, ${COST}::text, ${now})
   `);
 }
 
@@ -389,9 +389,15 @@ describe("GET /api/usage/export.csv", () => {
       { id: "s-context", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
       { id: "s-deleted", userId: "deleted-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "deleted-user", createdAt: now, updatedAt: now },
     ]);
-    await seedEngineEntry(api, "e-context", "s-context", now);
+    await db.execute(sql`
+      INSERT INTO engine_queue_items (id, session_id, thread_id, status, content, channel,
+        attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-context', 's-context', 'th', 'settled', 'prompt',
+              ${JSON.stringify({ channelType: "=slack", channelId: "\tC123" })},
+              1, 1, ${now}, ${now - 1}, ${now})
+    `);
+    await seedEngineEntry(api, "e-context", "s-context", now, "q-context");
     await seedEngineEntry(api, "e-deleted", "s-deleted", now - 1);
-    await db.execute(sql`UPDATE engine_entries SET channel = ${JSON.stringify({ channelType: "=slack", channelId: "\tC123" })} WHERE id = 'e-context'`);
     await db.execute(sql`
       INSERT INTO session_repos (session_id, full_name, clone_url, position)
       VALUES ('s-context', '@acme/primary', 'https://example.test/primary', 0),

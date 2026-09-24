@@ -500,7 +500,7 @@ function csvEscape(v: unknown): string {
 
 /** One CSV row per billable turn for the window/scope.
  * Identity is a current join. Repository bindings are durable session metadata,
- * and channel fields are the point-in-time target stored on the usage entry.
+ * and channel fields come from the queue item for the billed engine entry.
  * A plain member's team export blanks all employee attribution: per-member
  * attribution follows the breakdown's byUser rule, and the CSV must not let a
  * plain team member reconstruct it with one GROUP BY. */
@@ -521,13 +521,14 @@ export async function getUsageExportCsv(
            u.name AS employee_name, u.email AS employee_email,
            (SELECT string_agg(sr.full_name, ';' ORDER BY sr.position)
               FROM session_repos sr WHERE sr.session_id = ce.session_id) AS repository,
-           e.channel::jsonb->>'channelType' AS channel_type,
-           e.channel::jsonb->>'channelId' AS channel_id,
+           q.channel::jsonb->>'channelType' AS channel_type,
+           q.channel::jsonb->>'channelId' AS channel_id,
            ce.input_tokens, ce.output_tokens, ce.cache_read_tokens, ce.cache_write_tokens,
            ce.total_tokens, ce.cost_total, ce.priced
     FROM cost_entries ce
     LEFT JOIN "user" u ON u.id = ce.user_id
     LEFT JOIN engine_entries e ON e.id = ce.entry_id AND e.session_id = ce.session_id
+    LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
     WHERE ${scopeWhere("ce.", period, opts.scope)}
     ORDER BY ce.created_at DESC LIMIT ${USAGE_EXPORT_MAX_ROWS + 1}`)) as { rows: Row[] };
 

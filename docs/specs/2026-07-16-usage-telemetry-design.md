@@ -128,6 +128,7 @@ identity fields.
 Employee identity is a current join to the user table. It is not a historical
 snapshot. Repository values come from durable session repository bindings and
 use semicolons when a session has multiple bindings. Channel type and ID come
-from the channel target stored on the billable engine entry. Repository and
-channel fields stay blank for proxy usage and other rows without that durable
-context. The export does not infer a project or accounting category.
+from the queue item linked to the billable engine entry. Queue items and usage
+entries have the same session lifecycle. Historical rows without a linked queue
+item or channel stay blank. Proxy rows also have blank work context. The export
+does not infer a project or accounting category.
