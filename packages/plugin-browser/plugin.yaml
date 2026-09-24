@@ -1,6 +1,6 @@
 name: browser
 version: 0.0.1
-description: Browser control via agent-browser CLI
+description: Persistent sandbox browser with page observations and human control
 icon: "\U0001F310"
 
 v2: true

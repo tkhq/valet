@@ -67,6 +67,7 @@ import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
+import { browserRouter } from "./routes/browser.js";
 import { profilePicturesPublicRouter, profilePicturesRouter } from "./routes/profile-pictures.js";
 import { teamPoliciesRouter } from "./routes/team-policies.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
@@ -307,6 +308,7 @@ export function createApp(
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
   app.route("/api/sessions", fileUploadRouter);
+  app.route("/api/sessions", browserRouter);
   app.route("/api/sessions", securityRouter);
   app.route("/api/sessions", ratingsRouter);
   app.route("/api/evals", evalsRouter);

@@ -1479,6 +1479,7 @@ export type WireEvent =
       toolName: string;
       callId?: string;
       result: string;
+      resultData?: unknown;
       isError: boolean;
     }
   | {
@@ -5345,4 +5346,23 @@ export interface ListBakeQueueResponse {
   queued: BakeQueueItem[];
   recent: BakeQueueItem[];
   blocked: BakeQueueBlockedSource[];
+}
+export interface SessionBrowserResponse {
+  enabled: boolean;
+  actorId: string;
+  canAdminister: boolean;
+  settings: import('@valet/shared').BrowserSettings;
+  status: import('@valet/shared').BrowserRuntimeStatus | null;
+  error?: string;
+}
+
+export interface BrowserAnnotationMark { x: number; y: number; label: string }
+export interface BrowserAnnotationsResponse { annotations: BrowserAnnotation[] }
+export interface BrowserAnnotation {
+  id: string;
+  artifactId: string;
+  documentId: string;
+  stale: boolean;
+  marks: BrowserAnnotationMark[];
+  createdAt: number;
 }

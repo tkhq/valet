@@ -1,5 +1,6 @@
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
+import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -661,6 +662,9 @@ export type ToolArtifact =
   | { type: "diff"; path?: string; content: string };
 
 export interface ToolContext {
+  browserPolicy?: BrowserPolicyService;
+  /** Persisted model tool-call ID. Stable when a suspended invocation is replayed. */
+  invocationId?: string;
   userId: string;
   orgId: string;
   sessionId: string;
@@ -1292,6 +1296,7 @@ export interface SandboxResources {
 export type SandboxResourceField = "cpu" | "memory";
 
 export interface SandboxCreateOpts {
+  browser?: { enabled: boolean; viewer?: boolean };
   image?: string;
   workspace?: string;
   /**
@@ -1364,12 +1369,21 @@ export interface SandboxCreateOpts {
   nestedKubernetes?: boolean;
 }
 
+/** Host cleanup that must succeed before compute stops or private state is deleted. */
+export interface SandboxLifecycle {
+  beforeStop(sandbox: Sandbox, reason: 'suspend' | 'replace' | 'destroy', context?: { suspended: boolean }): Promise<void>;
+  /** Drain durable host cleanup after attachment, before new work can use compute. */
+  afterReady?(sandbox: Sandbox): Promise<void>;
+}
+
 /**
  * Static description of what a sandbox backend can do (decision 1). Used by
  * the attachment/policy layer to decide on cold-start hints, snapshot
  * strategy, etc. — not a runtime probe, a fixed per-backend constant.
  */
 export interface SandboxCapabilities {
+  browserAutomation?: boolean;
+  browserViewer?: boolean;
   snapshot: "memory" | "filesystem" | "none";
   persistentWorkspace: boolean;
   tunnels: boolean;
@@ -1444,6 +1458,8 @@ export interface SandboxStatus {
  * reconcile sweep's raw material. */
 export interface SandboxListing {
   id: string;
+  /** Persisted browser allocation. It remains true when the feature is disabled later. */
+  browserEnabled?: boolean;
   /** The owning session recorded at create time (`SandboxCreateOpts.sessionId`).
    * Null for sandboxes created before session stamping existed. */
   sessionId: string | null;
@@ -1460,6 +1476,8 @@ export interface SandboxProvider {
   restore(id: string): Promise<Sandbox>;
   destroy(id: string): Promise<void>;
   status(id: string): Promise<SandboxStatus>;
+  /** Read sanitized audit records from retained state without starting browser execution. */
+  readBrowserAudit?(id: string): Promise<{ entries: BrowserAuditEntry[]; total: number }>;
   /**
    * Optional non-terminal teardown seam for `SandboxAttachment.reportFailure`'s
    * degradation/re-provision path (spec `docs/specs/2026-07-15-kubernetes-deployment-design.md`
@@ -1586,7 +1604,7 @@ export type EngineEvent =
       reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; isError: boolean }
+  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean }
   | {
       type: "turn_end";
       threadId: string;
@@ -2244,6 +2262,10 @@ export interface ResolvedModel {
 }
 
 export interface CreateSessionOptions {
+  sandboxLifecycle?: SandboxLifecycle;
+  /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
+  onTurnComplete?: (context: { sessionId: string; submissionId: string; threadId: string; actorId: string; owner: Principal; sandbox?: Sandbox }) => Promise<void>;
+  browserPolicy?: BrowserPolicyService;
   id?: string;
   userId: string;
   orgId: string;

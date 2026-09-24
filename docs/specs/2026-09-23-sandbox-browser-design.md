@@ -1145,3 +1145,10 @@ Accessibility observations are bounded full snapshots. The runtime does not yet 
 Browser history contains this runtime's visits; it does not import historical visits from Chromium storage.
 Navigation and selector waits are available. Event-armed download and file-chooser wait helpers are not part of this release.
 Capabilities and installed documentation describe these limits before an agent starts using the browser.
+
+Turn cleanup is recorded before normal or recovered submission settlement.
+If compute is absent, the next attachment drains that cleanup without an earlier wake.
+Final deletion waits for pending execution release and verifies retained-state audit export.
+An export failure preserves engine history and returns an actionable retry error.
+The Docker provider can read a stopped runtime's journal with a network-disabled helper.
+An unsupported retained-state reader fails closed when no verified suspension checkpoint exists.

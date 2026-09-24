@@ -1448,7 +1448,8 @@ export class Session {
     await Promise.all([...this.threads.values()].map((t) => t.resume()));
   }
 
-  async destroy(): Promise<void> {
+  /** Required host cleanup runs after execution stops and before durable history is deleted. */
+  async destroy(beforeStoreDelete?: () => Promise<void>): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.heartbeatTimer !== null) {
@@ -1462,6 +1463,7 @@ export class Session {
     try {
       await Promise.all([...this.threads.values()].map((t) => t.abort()));
       await this.attachment.destroy();
+      await beforeStoreDelete?.();
       await this.providers.store.deleteSession(this.id);
     } catch (err) {
       // A partial destroy must stay retryable. The delete routes call

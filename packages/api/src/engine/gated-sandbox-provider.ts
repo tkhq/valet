@@ -150,6 +150,7 @@ export function withSandboxCapacityGate(
   if (inner.release) gated.release = inner.release.bind(inner);
   if (inner.deriveId) gated.deriveId = inner.deriveId.bind(inner);
   if (inner.list) gated.list = inner.list.bind(inner);
+  if (inner.readBrowserAudit) gated.readBrowserAudit = inner.readBrowserAudit.bind(inner);
   if (inner.suspend) gated.suspend = inner.suspend.bind(inner);
   if (inner.resume) gated.resume = inner.resume.bind(inner);
   if (inner.updateCreds) gated.updateCreds = inner.updateCreds.bind(inner);

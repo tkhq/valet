@@ -20,3 +20,4 @@ export type { AuthServerMetadata, RegisteredClient, TokenResponse } from './mcp/
 
 // NOTE: React UI components are exported from '@valet/sdk/ui'
 // to avoid pulling React into backend bundles.
+export type { BrowserPolicyService, BrowserSettings, BrowserGrant } from '@valet/shared';

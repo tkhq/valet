@@ -289,6 +289,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           toolName: e.tool,
           callId: e.callId,
           result: e.result,
+          ...(e.resultData !== undefined ? { resultData: e.resultData } : {}),
           isError: e.isError,
         },
       ];

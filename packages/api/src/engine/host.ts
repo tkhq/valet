@@ -33,6 +33,7 @@ import {
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import { pluginStore } from "../services/plugin-store.js";
+import { createBrowserPolicy, browserSessionHooks, prepareBrowserSandboxStop } from "../services/browser-host.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import {
   loadRoleFromMarkdown,
@@ -1125,6 +1126,7 @@ export class EngineHost {
         ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
         : sandboxMint?.env;
     const sandboxOpts = {
+      browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true && !dockerFlag && !kubernetesFlag, viewer: true },
       workspace: meta.workspace,
       image,
       env: sandboxEnv,
@@ -1211,6 +1213,7 @@ export class EngineHost {
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+            ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
@@ -1238,6 +1241,7 @@ export class EngineHost {
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+          ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
@@ -1430,12 +1434,14 @@ export class EngineHost {
       serviceAvailability,
       resolveServiceAvailability,
     };
-
-    if (!this.opts.db) return pluginSessionExtras(plugins, [], pins, catalogOptions);
+    const browserPins = this.opts.sandboxProvider.capabilities().browserAutomation && plugins.some((plugin) => plugin.name === 'browser')
+      ? ['browser.describe', 'browser.execute', 'browser.reset'].map((actionId) => ({ actionId })) : [];
+    const effectivePins = [...pins, ...browserPins];
+    if (!this.opts.db) return pluginSessionExtras(plugins, [], effectivePins, catalogOptions);
     return pluginSessionExtras(
       plugins,
       filterSkillSources(await listSkillSourcesFor(this.opts.db, owner, orgId), behavior),
-      pins,
+      effectivePins,
       catalogOptions,
     );
   }
@@ -1764,6 +1770,15 @@ export class EngineHost {
     const db = this.opts.db;
     if (!db) return undefined;
     return (pluginName: string) => pluginStore(db, pluginName);
+  }
+
+  browserPolicy() {
+    return this.opts.db ? createBrowserPolicy(this.opts.db, this.opts.engineStore, this.opts.blobs) : undefined;
+  }
+
+  private browserOptions(sessionId: string) {
+    if (!this.opts.sandboxProvider.capabilities().browserAutomation || !this.opts.db) return {};
+    return { browserPolicy: this.browserPolicy(), ...browserSessionHooks(sessionId, this.opts.engineStore, this.opts.blobs, pluginStore(this.opts.db, 'browser')) };
   }
 
   private getPolicyResolver(): PolicyResolver | undefined {
@@ -2673,12 +2688,14 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
       queueMode,
       sandbox: {
+        browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
         workspace,
         // Single-lineage stock default, the same fall-through a REST-created
         // session and a child both use. This path pinned `defaultImage`,
@@ -2827,7 +2844,15 @@ export class EngineHost {
     // including failed builds that may have written only part of their state.
     await this.inflight.get(sessionId)?.catch(() => undefined);
     const entry = this.cache.get(sessionId);
+    // Existing browser state keeps its audit obligation after allocation is disabled.
+    if (entry && !entry.session.options.sandboxLifecycle) {
+      const rows = await this.opts.sandboxProvider.list?.() ?? [];
+      for (const row of rows.filter((value) => value.sessionId === sessionId && value.browserEnabled)) {
+        await this.stopBrowserBefore(row.id, 'destroy');
+      }
+    }
     if (!entry) {
+      await this.destroyRetainedBrowserSandboxes(sessionId);
       // Cold session: nothing cached in this process, but every caller of
       // destroy() means "this session is being deleted", and the durable
       // engine rows and live grants/tokens must not outlive that. The
@@ -2846,7 +2871,9 @@ export class EngineHost {
       return;
     }
     try {
-      await entry.session.destroy();
+      // Replacement drops its attachment handle before it releases compute.
+      // Final deletion also owns any browser state that remains in inventory.
+      await entry.session.destroy(() => this.destroyRetainedBrowserSandboxes(sessionId));
     } finally {
       this.cache.delete(sessionId);
       this.buildEpoch.delete(sessionId);
@@ -2863,6 +2890,13 @@ export class EngineHost {
           console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
         }
       }
+    }
+  }
+
+  private async destroyRetainedBrowserSandboxes(sessionId: string): Promise<void> {
+    const rows = await this.opts.sandboxProvider.list?.() ?? [];
+    for (const row of rows.filter((value) => value.sessionId === sessionId && (value.browserEnabled ?? this.opts.sandboxProvider.capabilities().browserAutomation))) {
+      await this.destroySandbox(row.id);
     }
   }
 
@@ -3046,7 +3080,12 @@ export class EngineHost {
    * remaining handle.
    */
   async destroySandbox(sandboxId: string): Promise<void> {
+    await this.stopBrowserBefore(sandboxId, 'destroy');
     await this.opts.sandboxProvider.destroy(sandboxId);
+  }
+
+  private async stopBrowserBefore(sandboxId: string, reason: 'destroy' | 'suspend'): Promise<void> {
+    await prepareBrowserSandboxStop(this.opts.sandboxProvider, sandboxId, reason, this.opts.engineStore, this.opts.blobs, this.opts.db ? pluginStore(this.opts.db, 'browser') : undefined);
   }
 
   /**
@@ -3065,6 +3104,7 @@ export class EngineHost {
           "Gate callers on sandboxHibernationCapable().",
       );
     }
+    await this.stopBrowserBefore(sandboxId, 'suspend');
     await suspend.call(this.opts.sandboxProvider, sandboxId);
   }
 
@@ -3703,6 +3743,7 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -3710,6 +3751,7 @@ export class EngineHost {
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
       sandbox: {
+        browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true && !dockerFlag && !kubernetesFlag, viewer: true },
         workspace: opts.workspace,
         // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).
@@ -3889,6 +3931,7 @@ export class EngineHost {
       ...(specProvider ? { specProvider } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -3903,6 +3946,7 @@ export class EngineHost {
       // under this flag.
       warmSandboxOnClaim: false,
       sandbox: {
+        browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
         workspace: opts.workspace,
         image: this.opts.defaultImage,
         env: sandboxMint?.env,

@@ -77,6 +77,17 @@ describe("engineToWireParts", () => {
 });
 
 describe("busEventToWire", () => {
+  it("preserves image evidence beside the text fallback", () => {
+    const resultData = { content: [
+      { type: "text", text: "Screenshot" },
+      { type: "image", data: "cGl4ZWxz", mimeType: "image/png" },
+    ] };
+    expect(busEventToWire(ev({
+      type: "tool_end", threadId: "t1", tool: "browser_execute",
+      result: "Screenshot", resultData, isError: false,
+    }))).toEqual([expect.objectContaining({ result: "Screenshot", resultData })]);
+  });
+
   it("forwards message_start", () => {
     const out = busEventToWire(ev({ type: "message_start", threadId: "t1", messageId: "m1", role: "assistant" }));
     expect(out).toEqual([{ type: "message_start", threadId: "t1", messageId: "m1", role: "assistant" }]);

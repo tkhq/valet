@@ -2,6 +2,7 @@ import type {
   DesiredSandboxSpec,
   Sandbox,
   SandboxCreateOpts,
+  SandboxLifecycle,
   SandboxProvider,
   SandboxResourceField,
   SpecProvider,
@@ -156,8 +157,11 @@ export class SandboxAttachment {
   private convergeFailure: ConvergeFailure | null = null;
   /** Last ignored non-isolated resource drift, for change-aware warnings. */
   private ignoredResourceDriftKey: string | null = null;
+  private pendingRelease: { sandbox: Sandbox; provider: SandboxProvider } | null = null;
+  private releaseInFlight: Promise<void> | null = null;
+  private pendingReadyEpoch: number | null = null;
 
-  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider) {
+  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider, private readonly lifecycle?: SandboxLifecycle) {
     this.provider = provider;
     this.createOpts = createOpts;
     this.specProvider = specProvider;
@@ -171,7 +175,7 @@ export class SandboxAttachment {
    * transitions it to `error` permanently since there is nothing to
    * re-provision with.
    */
-  static forSandbox(sandbox: Sandbox): SandboxAttachment {
+  static forSandbox(sandbox: Sandbox, lifecycle?: SandboxLifecycle): SandboxAttachment {
     const stubProvider: SandboxProvider = {
       backend: "none",
       capabilities: () => ({
@@ -195,7 +199,7 @@ export class SandboxAttachment {
         throw new Error("SandboxAttachment.forSandbox: no provider available");
       },
     };
-    const attachment = new SandboxAttachment(stubProvider, {});
+    const attachment = new SandboxAttachment(stubProvider, {}, undefined, lifecycle);
     attachment.provider = null;
     attachment.noProvider = true;
     attachment._sandbox = sandbox;
@@ -283,6 +287,7 @@ export class SandboxAttachment {
     }
     const startEpoch = this._epoch;
     // On rejection: state is untouched (still `ready`) and the error propagates.
+    await this.lifecycle?.beforeStop(sandbox, 'suspend');
     await provider.suspend(sandbox.id);
     // A concurrent destroy() during the await wins — do not resurrect it.
     if (this.destroyed) return;
@@ -323,15 +328,14 @@ export class SandboxAttachment {
 
     const oldSandbox = this._sandbox;
     const provider = this.provider;
+    if (oldSandbox) await this.lifecycle?.beforeStop(oldSandbox, 'replace');
+    if (this.destroyed) throw new Error("Sandbox teardown is in progress. Wait for deletion to finish.");
     this._epoch += 1;
     this._sandbox = null;
     this.observation = null;
     this._state = "provisioning";
     if (oldSandbox) {
-      void (provider.release
-        ? provider.release(oldSandbox.id)
-        : provider.destroy(oldSandbox.id)
-      ).catch(() => {});
+      await this.releaseExecution(oldSandbox, provider);
     }
     this.kickProvision();
     // Re-widen: the guard above narrowed `this.inFlight` to null and TS
@@ -438,7 +442,7 @@ export class SandboxAttachment {
       // workspace on every liveness-triggered re-provision. Providers that
       // don't implement `release` (docker/local/virtual) fall back to
       // `destroy` — byte-identical to prior behavior.
-      void (provider.release ? provider.release(oldSandbox.id) : provider.destroy(oldSandbox.id)).catch(() => {});
+      void this.releaseExecution(oldSandbox, provider).then(() => this.kickProvision()).catch(() => {});
     }
 
     this.kickProvision();
@@ -529,6 +533,8 @@ export class SandboxAttachment {
 
         const oldSandbox = this._sandbox;
         const provider = this.provider;
+        if (oldSandbox) await this.lifecycle?.beforeStop(oldSandbox, 'replace');
+        if (this.destroyed) return;
         // Persist before clearing the observation. A transient repository read
         // has no resource opinion, so replacement keeps the observed overrides.
         this.persistReplacementSpec(desired, observed);
@@ -539,10 +545,7 @@ export class SandboxAttachment {
         this.observation = null;
         this._state = "provisioning";
         if (oldSandbox && provider) {
-          void (provider.release
-            ? provider.release(oldSandbox.id)
-            : provider.destroy(oldSandbox.id)
-          ).catch(() => {});
+          await this.releaseExecution(oldSandbox, provider);
         }
         this.kickProvision();
         // Await the re-provision so the backoff memo reflects the real outcome.
@@ -689,6 +692,7 @@ export class SandboxAttachment {
    * the sandbox standing. */
   async destroy(reason: SandboxDestroyReason = "session_destroy"): Promise<boolean> {
     if (this.destroyed) return true;
+    if (this._sandbox) await this.lifecycle?.beforeStop(this._sandbox, 'destroy', { suspended: this._state === 'suspended' });
     this.destroyed = true;
 
     const sandbox = this._sandbox;
@@ -700,6 +704,20 @@ export class SandboxAttachment {
     this.waiters.clear();
     for (const w of waiters) {
       w.reject(new SandboxUnavailableError(new Error("sandbox attachment destroyed")));
+    }
+
+    // A replacement can have dropped its handle while still releasing compute.
+    // Keep final host cleanup behind that release so retained state cannot reappear.
+    if (this.pendingRelease) {
+      const { sandbox: releasing, provider } = this.pendingRelease;
+      try {
+        await this.releaseExecution(releasing, provider);
+      } catch (error) {
+        this.destroyed = false;
+        this._state = "error";
+        this.emitStatus();
+        throw error;
+      }
     }
 
     if (!sandbox) return true;
@@ -731,6 +749,12 @@ export class SandboxAttachment {
     if (this.destroyed || this.noProvider) return;
     if (this._state === "ready") return;
     if (this.inFlight) return;
+    if (this.releaseInFlight) return;
+    if (this.pendingRelease) {
+      const { sandbox, provider } = this.pendingRelease;
+      void this.releaseExecution(sandbox, provider).then(() => this.kickProvision()).catch(() => {});
+      return;
+    }
     // A `suspended` attachment already holds a live handle and epoch — wake it
     // via `resume` rather than a fresh `create` (no epoch mint, id stable). All
     // A failed restoration retains this handle and retries its resume hooks.
@@ -742,6 +766,19 @@ export class SandboxAttachment {
     }
     if (this._epoch === 0) this._epoch = 1;
     this.inFlight = this.doProvision();
+  }
+
+  private releaseExecution(sandbox: Sandbox, provider: SandboxProvider): Promise<void> {
+    if (this.releaseInFlight) return this.releaseInFlight;
+    this.pendingRelease = { sandbox, provider };
+    const release = provider.release ? provider.release(sandbox.id) : provider.destroy(sandbox.id);
+    const operation = release.then(() => { this.pendingRelease = null; }, (error: unknown) => {
+      this._state = "error";
+      this.emitStatus();
+      throw error;
+    }).finally(() => { this.releaseInFlight = null; });
+    this.releaseInFlight = operation;
+    return operation;
   }
 
   private async doResume(): Promise<void> {
@@ -758,7 +795,7 @@ export class SandboxAttachment {
     // reroutes through a fresh provision IS a re-provision, so we bump the epoch
     // exactly like reportFailure — otherwise the fresh boot would re-emit the
     // suspended epoch's `provisioning`/`ready` and collide on the durable
-    // eventKey. The old handle is released (or destroyed) best-effort.
+    // eventKey. Release must complete before the replacement can adopt state.
     //
     // Cache-empty guard: with no observation we cannot compare (observation
     // needs a live sandbox), so we allow the resume — a subsequent `reconcile`
@@ -797,10 +834,13 @@ export class SandboxAttachment {
         this.observation = null;
         this._state = "provisioning";
         if (oldSandbox && provider) {
-          void (provider.release
-            ? provider.release(oldSandbox.id)
-            : provider.destroy(oldSandbox.id)
-          ).catch(() => {});
+          try {
+            await this.releaseExecution(oldSandbox, provider);
+          } catch {
+            // The retained release is retried by the next acquisition.
+            this.inFlight = null;
+            return;
+          }
         }
         // Hand off to a fresh cold provision for the new epoch. Clear inFlight
         // first so kickProvision's guard does not no-op on this doResume.
@@ -893,10 +933,9 @@ export class SandboxAttachment {
         superseded = true;
         return;
       }
-      this.pendingResumeEpoch = null;
-      this._state = "ready";
-      this.emitStatus();
-      this.flushWaiters();
+      if (await this.finishReady(sandbox, startEpoch)) this.publishReady();
+      if (this._epoch !== startEpoch || this._sandbox !== sandbox) superseded = true;
+      else this.pendingResumeEpoch = null;
     } catch (err) {
       if (this.destroyed) return;
       if (this._epoch !== startEpoch || this._sandbox !== sandbox) {
@@ -955,6 +994,7 @@ export class SandboxAttachment {
   }
 
   private async doProvisionInner(): Promise<void> {
+    const startEpoch = this._epoch;
     // Set BEFORE any await, including provider.create. The api's per-org
     // capacity gate (gated-sandbox-provider.ts) depends on this ordering:
     // it counts `provisioning|ready` attachments and subtracts its own
@@ -966,6 +1006,10 @@ export class SandboxAttachment {
     const provider = this.provider;
     try {
       if (!provider) throw new Error("no provider");
+      if (this._sandbox && this.pendingReadyEpoch === startEpoch) {
+        if (await this.finishReady(this._sandbox, startEpoch)) this.publishReady();
+        return;
+      }
       if (this.createOpts.nestedKubernetes && nestedKubernetesDecision(true, provider.capabilities().nestedKubernetes) !== "allow") {
         throw new SandboxStartupError(this.createOpts.sessionId ?? "sandbox", NESTED_KUBERNETES_UNSUPPORTED);
       }
@@ -1067,9 +1111,7 @@ export class SandboxAttachment {
         return;
       }
       this._sandbox = sandbox;
-      this._state = "ready";
-      this.emitStatus();
-      this.flushWaiters();
+      if (await this.finishReady(sandbox, startEpoch)) this.publishReady();
     } catch (err) {
       if (this.destroyed) return;
       this._state = "error";
@@ -1088,7 +1130,22 @@ export class SandboxAttachment {
       }
     } finally {
       this.inFlight = null;
+      if (this._epoch !== startEpoch) this.kickProvision();
     }
+  }
+
+  private async finishReady(sandbox: Sandbox, epoch: number): Promise<boolean> {
+    this.pendingReadyEpoch = epoch;
+    await this.lifecycle?.afterReady?.(sandbox);
+    if (this.destroyed || this._epoch !== epoch || this._sandbox !== sandbox) return false;
+    this.pendingReadyEpoch = null;
+    return true;
+  }
+
+  private publishReady(): void {
+    this._state = "ready";
+    this.emitStatus();
+    this.flushWaiters();
   }
 
   /**

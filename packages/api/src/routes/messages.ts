@@ -1172,6 +1172,19 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   const gate = pending.find((g) => g.id === gateId);
   if (!gate) return c.json({ error: "gate not pending" }, 404);
 
+  if (gate.context?.browser) {
+    const policy = c.var.providers.engineHost.browserPolicy();
+    if (c.var.principal.type !== 'user' || !policy) {
+      return c.json({ error: 'A browser approval requires an authorized user. Sign in to Valet.' }, 403);
+    }
+    try {
+      await policy.authorize({ protocolVersion: '1.0', sessionId: c.req.param('id'),
+        threadId: gate.threadId, actorId: c.var.user.id, ownerId: session.ownerId });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : 'Browser access changed. Reopen the session.' }, 403);
+    }
+  }
+
   await engineSession.resolveDecision(gateId, {
     actionId: body.actionId,
     value: body.value,
