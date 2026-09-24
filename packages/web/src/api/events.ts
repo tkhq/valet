@@ -131,6 +131,7 @@ export function useEventDrops(
   return useQuery<ListEventDropsResponse>({
     queryKey: qkEvents.drops(params.q, params.cursor, params.direction),
     queryFn: () => api.listEventDrops(params),
+    placeholderData: (previousData) => previousData,
     refetchInterval: 30_000,
     ...opts,
   });

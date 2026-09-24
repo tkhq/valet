@@ -215,6 +215,31 @@ describe("GET /api/events/drops", () => {
     expect(body.drops.map((drop) => drop.id)).toEqual(["literal"]);
   });
 
+  it("walks tied timestamps forward and backward for members", async () => {
+    const a = await boot();
+    await a.providers.db.insert(eventDropLog).values([
+      { id: "e", orgId: "local-org", reason: "bad_signature", detail: "e", createdAt: 3_000 },
+      { id: "d", orgId: "local-org", reason: "slack_interaction_unmatched", detail: "hidden", createdAt: 3_000 },
+      { id: "c", orgId: "local-org", reason: "bad_signature", detail: "c", createdAt: 2_000 },
+      { id: "b", orgId: "local-org", reason: "bad_signature", detail: "b", createdAt: 2_000 },
+      { id: "a", orgId: "local-org", reason: "bad_signature", detail: "a", createdAt: 1_000 },
+    ]);
+    const headers = { "x-valet-test-user-id": "test-member" };
+    const first = await (await fetch(a.baseUrl + "/api/events/drops?limit=2", { headers })).json() as ListEventDropsResponse;
+    const second = await (await fetch(a.baseUrl + "/api/events/drops?limit=2&cursor=" + encodeURIComponent(first.nextCursor!), { headers })).json() as ListEventDropsResponse;
+    expect([...first.drops, ...second.drops].map((row) => row.id)).toEqual(["e", "c", "b", "a"]);
+    expect(second.previousCursor).toBeTruthy();
+    const back = await (await fetch(a.baseUrl + "/api/events/drops?limit=2&direction=previous&cursor=" + encodeURIComponent(second.previousCursor!), { headers })).json() as ListEventDropsResponse;
+    expect(back.drops.map((row) => row.id)).toEqual(["e", "c"]);
+    expect(back.previousCursor).toBeNull();
+    expect(new Set([...first.drops, ...second.drops].map((row) => row.id)).size).toBe(4);
+  });
+
+  it("rejects an invalid drop direction", async () => {
+    const a = await boot();
+    expect((await fetch(a.baseUrl + "/api/events/drops?direction=sideways")).status).toBe(400);
+  });
+
   it.each(["?limit=0", "?limit=1.5", "?q=" + "x".repeat(201), "?cursor=broken"])('rejects invalid drop query %s', async (query) => {
     const a = await boot();
     expect((await fetch(a.baseUrl + "/api/events/drops" + query)).status).toBe(400);
