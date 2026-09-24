@@ -5,7 +5,6 @@ import { WorkspaceClause } from "~/components/workspace-clause";
 import { EventFeed, type FeedScope } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
 import { DropsPanel } from "~/components/events/drops-panel";
-import { useMe } from "~/api/settings";
 import { textParam } from "~/lib/search-params";
 
 /**
@@ -53,8 +52,6 @@ type TabId = (typeof TABS)[number]["id"];
 
 export function EventsPage() {
   const [tab, setTab] = useState<TabId>("activity");
-  const meQ = useMe();
-  const tabs = meQ.data?.orgRole === "admin" ? TABS : TABS.slice(0, 2);
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
@@ -73,7 +70,7 @@ export function EventsPage() {
         </p>
 
         <div className="mt-6">
-          <TabBar tabs={tabs} active={tab} onSelect={setTab} label={TABS_LABEL} />
+          <TabBar tabs={TABS} active={tab} onSelect={setTab} label={TABS_LABEL} />
         </div>
 
         <div

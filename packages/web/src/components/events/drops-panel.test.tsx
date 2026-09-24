@@ -1,51 +1,50 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 
-const useEventsMock = vi.fn();
-vi.mock("~/api/events", () => ({ useEvents: (...args: unknown[]) => useEventsMock(...args) }));
-vi.mock("./event-row", () => ({
-  EventRow: ({ event, onToggle }: { event: { summary: string }; onToggle: () => void }) => (
-    <button type="button" onClick={onToggle}>{event.summary}</button>
-  ),
-}));
+const useEventDropsMock = vi.fn();
+vi.mock("~/api/events", () => ({ useEventDrops: () => useEventDropsMock() }));
 
 import { DropsPanel } from "./drops-panel";
 
-const event = {
-  id: "e1",
-  service: "slack",
-  eventKey: "slack.block_actions",
-  summary: "Form submitted",
-  refs: {},
-  actor: null,
-  occurredAt: 1,
-  receivedAt: 1,
-};
-
 describe("DropsPanel", () => {
-  it("lists Slack webhook events and refreshes them", () => {
-    const refetch = vi.fn();
-    useEventsMock.mockReturnValue({ isPending: false, isFetching: false, error: null, data: { events: [event] }, refetch });
+  it("renders drops with human reason labels, details, and the last-received line", () => {
+    const now = Date.now();
+    useEventDropsMock.mockReturnValue({
+      isPending: false,
+      error: null,
+      data: {
+        lastEventAt: now - 60_000,
+        drops: [
+          {
+            id: "d1",
+            reason: "no_subscription_match",
+            detail: "A slack.reaction_added event arrived, but no enabled subscription names it.",
+            createdAt: now - 30_000,
+          },
+          { id: "d2", reason: "bad_signature", detail: "signature verification failed", createdAt: now - 120_000 },
+          { id: "d3", reason: "slack_interaction_unmatched", detail: "A Slack block_actions interaction arrived.", createdAt: now - 90_000 },
+        ],
+      },
+    });
     render(<DropsPanel />);
-
-    expect(useEventsMock).toHaveBeenCalledWith({ service: "slack" });
-    expect(screen.getByText("Form submitted")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh Slack webhook events" }));
-    expect(refetch).toHaveBeenCalledOnce();
+    expect(screen.getByText("No subscription")).toBeTruthy();
+    expect(screen.getByText("Bad signature")).toBeTruthy();
+    expect(screen.getByText("Slack form did not start a workflow")).toBeTruthy();
+    expect(screen.getByText(/no enabled subscription names it/)).toBeTruthy();
+    expect(screen.getByText(/Last event received/)).toBeTruthy();
   });
 
-  it("shows useful loading, empty, and failure states", () => {
-    useEventsMock.mockReturnValue({ isPending: true, isFetching: false, error: null, data: undefined, refetch: vi.fn() });
-    const { rerender } = render(<DropsPanel />);
-    expect(screen.getByText(/Loading Slack webhook events/)).toBeTruthy();
+  it("tells the user when no event has ever arrived", () => {
+    useEventDropsMock.mockReturnValue({ isPending: false, error: null, data: { lastEventAt: null, drops: [] } });
+    render(<DropsPanel />);
+    expect(screen.getByText(/No event has reached Valet yet/)).toBeTruthy();
+    expect(screen.getByText(/No problems in the recent window/)).toBeTruthy();
+  });
 
-    useEventsMock.mockReturnValue({ isPending: false, isFetching: false, error: null, data: { events: [] }, refetch: vi.fn() });
-    rerender(<DropsPanel />);
-    expect(screen.getByText(/No Slack webhook events are recorded/)).toBeTruthy();
-
-    useEventsMock.mockReturnValue({ isPending: false, isFetching: false, error: new Error("forbidden"), data: undefined, refetch: vi.fn() });
-    rerender(<DropsPanel />);
-    expect(screen.getByText(/Confirm that you are an organization admin/)).toBeTruthy();
+  it("shows a loading state", () => {
+    useEventDropsMock.mockReturnValue({ isPending: true, error: null, data: undefined });
+    render(<DropsPanel />);
+    expect(screen.getByText(/Loading problems/)).toBeTruthy();
   });
 });

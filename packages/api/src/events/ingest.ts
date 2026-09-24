@@ -79,9 +79,9 @@ async function logFilterExcludedDrop(db: AppDb, orgId: string, eventKey: string)
 
 export async function ingestEvent(
   deps: IngestDeps,
-  args: { orgId: string; service: string; event: NormalizedEvent; retainUnmatched?: boolean },
+  args: { orgId: string; service: string; event: NormalizedEvent },
 ): Promise<IngestResult> {
-  const { orgId, service, event, retainUnmatched = false } = args;
+  const { orgId, service, event } = args;
   const now = Date.now();
   const eventId = randomUUID();
   const catalog = catalogForService(deps.plugins, service);
@@ -106,9 +106,7 @@ export async function ingestEvent(
   // changed between this read and the insert costs one boundary event (a new
   // one misses this event; a deleted one gets a harmless orphan delivery, safe
   // because `event_deliveries` holds no foreign key to the subscription). The
-  // next event sees the change. Slack's admin webhook log is the one
-  // exception: its caller sets retainUnmatched so a verified delivery is
-  // retained without creating a delivery row.
+  // next event sees the change.
   const subs = await deps.db
     .select()
     .from(eventSubscriptions)
@@ -120,9 +118,7 @@ export async function ingestEvent(
   if (matched.length === 0 && subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
     await logFilterExcludedDrop(deps.db, orgId, event.key);
   }
-  if (matched.length === 0 && !retainUnmatched) {
-    return { eventId, duplicate: false, deliveries: 0, skipped: true };
-  }
+  if (matched.length === 0) return { eventId, duplicate: false, deliveries: 0, skipped: true };
 
   const result = await deps.db.transaction(async (tx) => {
     const inserted = await tx

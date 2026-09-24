@@ -192,12 +192,11 @@ vi.mock("~/api/workflows", () => ({
 // Teams back the subscription owner badges and the workspace-scoped create
 // target. Mutable so team cases can add fixtures; reset in afterEach.
 let teamsData: { teams: TeamSummary[] } = { teams: [] };
-let orgRole: "admin" | "member" = "member";
 vi.mock("~/api/settings", () => ({
   // `isError` is read by both events surfaces: it is what separates an
   // owner that has not resolved YET from one that never will.
   useMe: () => ({
-    data: { id: "u1", orgRole },
+    data: { id: "u1", orgRole: "member" },
     isLoading: false,
     isError: false,
     error: null,
@@ -261,7 +260,6 @@ beforeEach(() => {
 
 afterEach(() => {
   teamsData = { teams: [] };
-  orgRole = "member";
   scopeTeamId = undefined;
   searchState = {};
 });
@@ -342,17 +340,6 @@ describe("EventsPage — Activity", () => {
     searchState = { scope: "all" };
     render(<EventsPage />);
     expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
-  });
-});
-
-describe("EventsPage — Problems", () => {
-  it("shows the Slack webhook log only to organization admins", () => {
-    render(<EventsPage />);
-    expect(screen.queryByRole("tab", { name: "Problems" })).toBeNull();
-
-    orgRole = "admin";
-    render(<EventsPage />);
-    expect(screen.getByRole("tab", { name: "Problems" })).toBeTruthy();
   });
 });
 

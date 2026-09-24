@@ -59,9 +59,8 @@
  * everywhere else (`lib/org.ts`). A multi-org deployment needs a real
  * workspace-to-org lookup here.
  */
-import { createHash } from "node:crypto";
 import { Hono } from "hono";
-import type { ChannelTransport, NormalizedEvent, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
+import type { ChannelTransport, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
@@ -96,11 +95,13 @@ const MAX_CHALLENGE_CHARS = 512;
  * response — every bad request still gets its real status. */
 const DROPLOG_COOLDOWN_MS = 60_000;
 const droplogLoggedAt = new Map<string, number>();
+const interactionLoggedAt = new Map<string, number>();
 
 /** Test-only: clears the per-process drop-log throttle so suites can assert
  * one row per reason without the cooldown bleeding across cases. */
 export function __resetSlackWebhookThrottle(): void {
   droplogLoggedAt.clear();
+  interactionLoggedAt.clear();
 }
 
 async function throttledDropLog(db: AppDb, args: { orgId: string; reason: string; detail: string }): Promise<void> {
@@ -127,16 +128,23 @@ function teamIdOf(update: unknown): string | undefined {
   return undefined;
 }
 
-function webhookLogEvent(raw: RawChannelUpdate, rawBody: Uint8Array): NormalizedEvent {
-  const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : "unknown";
-  return {
-    key: `slack.webhook.${type}`,
-    dedupeKey: createHash("sha256").update(rawBody).digest("hex"),
-    occurredAt: new Date().toISOString(),
-    refs: {},
-    summary: `Slack ${type} webhook`,
-    payload: raw,
-  };
+const DIAGNOSTIC_INTERACTION_TYPES = new Set(["block_actions", "view_submission"]);
+
+/** Retain only diagnostic metadata for Slack forms. The event payload, including
+ * Slack's deprecated verification token, never enters durable storage. */
+async function logUnmatchedInteraction(db: AppDb, orgId: string, raw: RawChannelUpdate): Promise<void> {
+  const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : undefined;
+  if (!type || !DIAGNOSTIC_INTERACTION_TYPES.has(type)) return;
+  const throttleKey = `${orgId}:${type}`;
+  const now = Date.now();
+  const last = interactionLoggedAt.get(throttleKey);
+  if (last !== undefined && now - last < DROPLOG_COOLDOWN_MS) return;
+  interactionLoggedAt.set(throttleKey, now);
+  await writeDropLog(db, {
+    orgId,
+    reason: "slack_interaction_unmatched",
+    detail: `A Slack ${type} interaction arrived. Valet did not start a workflow because Slack interactions do not match workflow subscriptions.`,
+  });
 }
 
 interface FanOutDeps {
@@ -172,23 +180,18 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
   // extraction stays authoritative. The HMAC is cheap, and each definition
   // rejects event types outside its family, so the first match wins.
   try {
-    let logged = false;
+    let matchedTrigger = false;
     for (const def of deps.triggerDefs) {
       const verified = await def.verify({ headers: deps.headers, rawBody: deps.rawBody }, { webhookSecret: deps.webhookSecret, ...(deps.botId ? { botId: deps.botId } : {}), ...(deps.botUserId ? { botUserId: deps.botUserId } : {}) });
       if (!verified) continue;
       await ingestEvent(
         { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest },
-        { orgId: deps.orgId, service: "slack", event: def.toEvent(verified), retainUnmatched: true },
+        { orgId: deps.orgId, service: "slack", event: def.toEvent(verified) },
       );
-      logged = true;
+      matchedTrigger = true;
       break;
     }
-    if (!logged) {
-      await ingestEvent(
-        { db: deps.db, plugins: deps.plugins },
-        { orgId: deps.orgId, service: "slack", event: webhookLogEvent(raw, deps.rawBody), retainUnmatched: true },
-      );
-    }
+    if (!matchedTrigger) await logUnmatchedInteraction(deps.db, deps.orgId, raw);
   } catch (err) {
     console.error("[slack-webhook] event consumer failed", err);
   }

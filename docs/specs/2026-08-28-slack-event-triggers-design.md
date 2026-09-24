@@ -178,19 +178,24 @@ high-volume key like `slack.message` that is every message in the workspace, so
 logging it would re-flood the drop-log the privacy design keeps small. The "last
 event received" signal covers that case instead.
 
-### Admin Slack webhook log
+### Slack form diagnostics
 
-The Problems tab is an organization-admin-only view of the recorded Slack
-webhook stream. It calls `GET /api/events?service=slack`, which uses the
-existing event list and opens a row to show its delivery status and errors.
-A refresh control reloads the list. The route rejects a non-admin Slack filter,
-and hides Slack rows from an unfiltered non-admin event list. It also protects
-Slack event detail and redelivery reads.
+The Problems tab continues to use `GET /api/events/drops`. It shows the existing
+categories and the last-event-received signal to every organization member.
+Matched Slack events continue to use the normal event feed, detail, and
+redelivery rules. A member can inspect a Slack event that their subscription
+received.
 
-The tab does not show webhook headers, signing secrets, or raw signing material.
-It shows normalized data from each verified Slack delivery. Slack records an
-unmatched event with no delivery row, including an interaction form submission.
-This change does not parse a form or trigger a workflow from it.
+For an unmatched `block_actions` or `view_submission` interaction, Slack writes
+one `slack_interaction_unmatched` drop row per organization and interaction type
+per minute. Only organization admins receive these rows from the drops API. The
+row contains the interaction type and a corrective action. It contains no raw
+payload, form values, headers, token, signing secret, or dedupe material.
+
+The diagnostic is not an event row. It cannot enter the activity feed, create a
+delivery, or be redelivered. Slack retries can run the normal channel consumer,
+but the one-minute diagnostic limit prevents retry traffic from growing the log.
+No Slack event is retained only for diagnostics.
 
 ## Mention scoping (TKAI-299, added 2026-09-01)
 
