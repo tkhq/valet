@@ -124,6 +124,19 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   }
 
   await addColumnsMissingFromAppliedMigrations(db);
+  await expandLegacySlackWildcards(db);
+}
+
+const LEGACY_SLACK_EVENT_KEYS = [
+  "slack.app_mention", "slack.message", "slack.reaction_added", "slack.reaction_removed", "slack.member_joined_channel", "slack.member_left_channel", "slack.channel_created", "slack.channel_rename", "slack.channel_archive", "slack.channel_unarchive", "slack.file_shared", "slack.team_join",
+];
+
+/** Preserve the meaning of rows created before slack.bot_message existed. */
+export async function expandLegacySlackWildcards(db: PgDb): Promise<void> {
+  await db.query(
+    `UPDATE event_subscriptions SET event_keys = (SELECT jsonb_agg(DISTINCT key) FROM (SELECT value AS key FROM jsonb_array_elements_text(event_keys) WHERE value <> 'slack.*' UNION ALL SELECT unnest($1::text[])) keys), updated_at = $2 WHERE event_keys ? 'slack.*'`,
+    [LEGACY_SLACK_EVENT_KEYS, Date.now()],
+  );
 }
 
 /**

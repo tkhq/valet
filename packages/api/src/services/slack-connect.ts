@@ -26,6 +26,7 @@ export interface SlackWorkspaceIdentity {
   teamId: string;
   teamName?: string;
   botUserId: string;
+  botId: string;
   /**
    * Scopes the installed app granted, from Slack's `x-oauth-scopes`
    * response header. `null` when the header was absent — that is "unknown",
@@ -87,7 +88,8 @@ export async function verifySlackBotToken(token: string, env: NodeJS.ProcessEnv 
   // then the app posts as that person, and `assistant:write` is a bot-only
   // scope so the agent surface never works. Slack returns `bot_id` for a bot
   // token and omits it for a user token.
-  if (stringField(payload, "bot_id") === undefined) {
+  const botId = stringField(payload, "bot_id");
+  if (botId === undefined) {
     return {
       ok: false,
       error: "That is a user token. Paste the Bot User OAuth Token (it starts with xoxb-) from OAuth & Permissions.",
@@ -119,6 +121,7 @@ export async function verifySlackBotToken(token: string, env: NodeJS.ProcessEnv 
       teamId,
       teamName: stringField(payload, "team"),
       botUserId,
+      botId,
       grantedScopes: parseGrantedScopes(response.headers.get("x-oauth-scopes")),
     },
   };

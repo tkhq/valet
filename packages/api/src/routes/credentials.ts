@@ -212,6 +212,7 @@ async function verifySlackCredentialToken(
     teamId: check.identity.teamId,
     teamName: check.identity.teamName,
     botUserId: check.identity.botUserId,
+    botId: check.identity.botId,
   };
   // Recorded so the setup route can report missing optional scopes without
   // calling Slack again. `undefined` when Slack sent no scope header.
