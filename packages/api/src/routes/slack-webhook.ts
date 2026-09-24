@@ -329,7 +329,6 @@ slackWebhookRouter.post("/webhook", async (c) => {
           });
           continue;
         }
-        await c.var.providers.linkedDriveScope?.recordSlackMessage(orgId, raw);
         await fanOutUpdate(deps, raw);
       } catch (err) {
         console.error("[slack-webhook] fan-out failed", err);

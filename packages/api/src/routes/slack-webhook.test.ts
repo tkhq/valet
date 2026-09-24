@@ -12,8 +12,6 @@ import { and, eq } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions, teams, orgMembers, teamMembers, userIdentityLinks } from "../schema/index.js";
-import { GoogleWorkspaceLinkScope } from "../services/google-workspace-link-scope.js";
-import { pluginStore } from "../services/plugin-store.js";
 import { __resetSlackWebhookThrottle } from "./slack-webhook.js";
 import { __resetIngestDropThrottle } from "../events/ingest.js";
 
@@ -526,31 +524,5 @@ describe("POST /api/channels/slack/webhook", () => {
 
     expect(res.status).toBe(200);
     expect(elapsed).toBeLessThan(3_000);
-  });
-});
-
-describe("linked Drive intake authentication", () => {
-  it("records only verified workspace messages before event dispatch", async () => {
-    api = await bootTestApi({ plugins: [slackPlugin] });
-    await seedRunningTransport(api);
-    const scope = new GoogleWorkspaceLinkScope({
-      db: api.providers.db,
-      engineStore: api.providers.engineStore,
-      getRun: (id) => api?.providers.workflowStore.getRun(id) ?? Promise.resolve(null),
-    });
-    api.providers.linkedDriveScope = scope;
-    const capture = vi.spyOn(scope, "recordSlackMessage");
-    const body = envelope({ ...appMention(), text: "<https://docs.google.com/document/d/contractA/edit|contract>" }, "Ev-drive");
-    expect((await post(api.baseUrl, body, sign(body, "wrong-secret"))).status).toBe(401);
-    expect(capture).not.toHaveBeenCalled();
-    const foreign = envelope({ ...appMention(), text: "https://docs.google.com/document/d/foreign/edit" }, "Ev-foreign-drive", "TOTHER");
-    expect((await post(api.baseUrl, foreign, sign(foreign))).status).toBe(200);
-    const runningApi = api;
-    await vi.waitFor(async () => expect(await dropReasons(runningApi)).toContain("foreign_workspace"));
-    expect(capture).not.toHaveBeenCalled();
-    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
-    const store = pluginStore(api.providers.db, "valet").org("local-org");
-    await vi.waitFor(async () => expect(await store.get("linked-drive-files", JSON.stringify(["slack:C500:1720000002.000100", "contractA"]))).not.toBeNull());
-    expect(capture).toHaveBeenCalledWith("local-org", JSON.parse(body));
   });
 });

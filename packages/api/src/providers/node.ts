@@ -36,7 +36,6 @@ import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from ".
 import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
-import { GoogleWorkspaceLinkScope } from "../services/google-workspace-link-scope.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
@@ -418,7 +417,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         allowlist,
         denylist,
       });
-  const assembled = opts.plugins
+  const { plugins, actionPluginByService } = opts.plugins
     ? assemblePlugins([[...opts.plugins]])
     : assemblePlugins([
         bundledPlugins,
@@ -428,12 +427,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
         [workflowsActions, skillsActions, assistantsActions],
       ]);
-  const linkedDriveScope = new GoogleWorkspaceLinkScope({
-    db,
-    engineStore,
-    getRun: (runId) => workflowStore.getRun(runId),
-  });
-  const { plugins, actionPluginByService } = assemblePlugins([linkedDriveScope.wrapPlugins(assembled.plugins)]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),
     state: "load_failed" as const,
@@ -870,7 +863,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
 
   return {
     db,
-    linkedDriveScope,
     blobs,
     encryptionKey: opts.encryptionKey,
     engineStore,
