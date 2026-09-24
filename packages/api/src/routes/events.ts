@@ -18,12 +18,13 @@ import { OnePasswordAuthError } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, gte, ne, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
+import { isOrgAdminUser, requireOrgAdmin } from "./_org-admin.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
@@ -347,7 +348,13 @@ eventsRouter.get("/events", async (c) => {
   const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
   if (filter.error) return c.json({ error: filter.error }, 400);
 
+  const admin = await isOrgAdminUser(c);
+  if (service === "slack" && !admin) {
+    return c.json({ error: "org admin required" }, 403);
+  }
+
   const conditions = [eq(events.orgId, user.orgId)];
+  if (!admin) conditions.push(ne(events.service, "slack"));
   if (service) conditions.push(eq(events.service, service));
   if (key) conditions.push(eq(events.eventKey, key));
   if (filter.owner) {
@@ -443,6 +450,10 @@ eventsRouter.get("/events/:id", async (c) => {
     .limit(1);
   const row = rows[0];
   if (!row) return c.json({ error: "event not found" }, 404);
+  if (row.service === "slack") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
+  }
 
   // The join carries the subscription NAME onto each delivery, so a row can
   // say what it was trying to reach. It also does the org scoping the
@@ -528,6 +539,10 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
     .limit(1);
   const event = rows[0];
   if (!event) return c.json({ error: "event not found" }, 404);
+  if (event.service === "slack") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
+  }
 
   const subs = await db
     .select()

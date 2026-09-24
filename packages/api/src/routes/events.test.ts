@@ -772,6 +772,28 @@ describe("GET /api/events", () => {
     expect(limited.events.map((e) => e.id)).toEqual(["ev_c"]);
   });
 
+  it("limits Slack webhook event reads to organization admins", async () => {
+    const a = await boot();
+    await seedEventRow(a, { id: "ev_slack", service: "slack", eventKey: "slack.block_actions", receivedAt: 2_000 });
+    await seedEventRow(a, { id: "ev_github", receivedAt: 1_000 });
+    const memberHeaders = { "x-valet-test-user-id": "test-member" };
+
+    const all = (await (await fetch(`${a.baseUrl}/api/events`, { headers: memberHeaders })).json()) as ListEventsResponse;
+    expect(all.events.map((event) => event.id)).toEqual(["ev_github"]);
+
+    const list = await fetch(`${a.baseUrl}/api/events?service=slack`, { headers: memberHeaders });
+    expect(list.status).toBe(403);
+    expect(await list.json()).toEqual({ error: "org admin required" });
+
+    const detail = await fetch(`${a.baseUrl}/api/events/ev_slack`, { headers: memberHeaders });
+    expect(detail.status).toBe(403);
+    const replay = await fetch(`${a.baseUrl}/api/events/ev_slack/redeliver`, { method: "POST", headers: memberHeaders });
+    expect(replay.status).toBe(403);
+
+    const admin = (await (await fetch(`${a.baseUrl}/api/events?service=slack`)).json()) as ListEventsResponse;
+    expect(admin.events.map((event) => event.id)).toEqual(["ev_slack"]);
+  });
+
   // The owner filter is what the page's "This workspace" state sends. It reads
   // ownership through the deliveries, because the events table has no owner
   // column (small-fixes design, decision 2). It also carries a 30-day lower

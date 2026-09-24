@@ -59,8 +59,9 @@
  * everywhere else (`lib/org.ts`). A multi-org deployment needs a real
  * workspace-to-org lookup here.
  */
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
-import type { ChannelTransport, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
+import type { ChannelTransport, NormalizedEvent, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
@@ -126,6 +127,18 @@ function teamIdOf(update: unknown): string | undefined {
   return undefined;
 }
 
+function webhookLogEvent(raw: RawChannelUpdate, rawBody: Uint8Array): NormalizedEvent {
+  const type = isRecord(raw) && typeof raw.type === "string" ? raw.type : "unknown";
+  return {
+    key: `slack.webhook.${type}`,
+    dedupeKey: createHash("sha256").update(rawBody).digest("hex"),
+    occurredAt: new Date().toISOString(),
+    refs: {},
+    summary: `Slack ${type} webhook`,
+    payload: raw,
+  };
+}
+
 interface FanOutDeps {
   botUserId?: string;
   botId?: string;
@@ -159,14 +172,22 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
   // extraction stays authoritative. The HMAC is cheap, and each definition
   // rejects event types outside its family, so the first match wins.
   try {
+    let logged = false;
     for (const def of deps.triggerDefs) {
       const verified = await def.verify({ headers: deps.headers, rawBody: deps.rawBody }, { webhookSecret: deps.webhookSecret, ...(deps.botId ? { botId: deps.botId } : {}), ...(deps.botUserId ? { botUserId: deps.botUserId } : {}) });
       if (!verified) continue;
       await ingestEvent(
         { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest },
-        { orgId: deps.orgId, service: "slack", event: def.toEvent(verified) },
+        { orgId: deps.orgId, service: "slack", event: def.toEvent(verified), retainUnmatched: true },
       );
+      logged = true;
       break;
+    }
+    if (!logged) {
+      await ingestEvent(
+        { db: deps.db, plugins: deps.plugins },
+        { orgId: deps.orgId, service: "slack", event: webhookLogEvent(raw, deps.rawBody), retainUnmatched: true },
+      );
     }
   } catch (err) {
     console.error("[slack-webhook] event consumer failed", err);

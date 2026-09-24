@@ -328,21 +328,29 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(await dropReasons(api!)).toEqual([]);
   });
 
-  it("persists a subscribed slack.message and skips it when nothing subscribes", async () => {
+  it("records slack.message even when nothing subscribes", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
 
-    // Ingest is match-gated: an unsubscribed event must never reach the
-    // events table.
     const unsubscribed = envelope(dmMessage(), "Ev-msg-1");
     expect((await post(api.baseUrl, unsubscribed, sign(unsubscribed))).status).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await eventCount(api, "Ev-msg-1")).toBe(0);
+    await expect.poll(() => eventCount(api!, "Ev-msg-1"), { timeout: 5_000 }).toBe(1);
+    expect(await deliveryCount(api, "Ev-msg-1")).toBe(0);
 
     await seedSubscription(api, ["slack.message"]);
     const subscribed = envelope(dmMessage(), "Ev-msg-2");
     expect((await post(api.baseUrl, subscribed, sign(subscribed))).status).toBe(200);
     await expect.poll(() => eventCount(api!, "Ev-msg-2"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("records a verified Slack form submission without creating a delivery", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    const payload = encodeURIComponent(JSON.stringify({ type: "block_actions", team: { id: TEAM_ID }, user: { id: "U100" } }));
+    const body = `payload=${payload}`;
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => (await api!.providers.db.select().from(events).where(eq(events.eventKey, "slack.webhook.block_actions"))).length, { timeout: 5_000 }).toBe(1);
+    expect(await api.providers.db.select().from(eventDeliveries)).toHaveLength(0);
   });
 
   it("ingests a signed reaction_added and queues a delivery for a matching subscription", async () => {
@@ -390,10 +398,10 @@ describe("POST /api/channels/slack/webhook", () => {
     const body = envelope(reactionAdded(), "Ev-react-nosub");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
 
-    // Let the fire-and-forget fan-out run, then confirm nothing was stored and
-    // no filter-excluded drop was written for it.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await eventCount(api, "Ev-react-nosub")).toBe(0);
+    // The admin log retains the verified event, but no delivery or filter
+    // diagnostic exists when no subscription names it.
+    await expect.poll(() => eventCount(api!, "Ev-react-nosub"), { timeout: 5_000 }).toBe(1);
+    expect(await deliveryCount(api, "Ev-react-nosub")).toBe(0);
     expect(await dropReasons(api)).not.toContain("filter_excluded");
   });
 
@@ -421,7 +429,7 @@ describe("POST /api/channels/slack/webhook", () => {
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
 
     await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("filter_excluded");
-    expect(await eventCount(api, "Ev-react-filtered")).toBe(0);
+    expect(await eventCount(api, "Ev-react-filtered")).toBe(1);
   });
 
   it("ingests a signed app_mention and queues a delivery for a matching subscription", async () => {
@@ -472,7 +480,7 @@ describe("POST /api/channels/slack/webhook", () => {
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
 
     await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("filter_excluded");
-    expect(await eventCount(api, "Ev-mention-legacy")).toBe(0);
+    expect(await eventCount(api, "Ev-mention-legacy")).toBe(1);
   });
 
   it("drops an update from another workspace even though its signature is valid", async () => {

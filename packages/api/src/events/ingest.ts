@@ -79,9 +79,9 @@ async function logFilterExcludedDrop(db: AppDb, orgId: string, eventKey: string)
 
 export async function ingestEvent(
   deps: IngestDeps,
-  args: { orgId: string; service: string; event: NormalizedEvent },
+  args: { orgId: string; service: string; event: NormalizedEvent; retainUnmatched?: boolean },
 ): Promise<IngestResult> {
-  const { orgId, service, event } = args;
+  const { orgId, service, event, retainUnmatched = false } = args;
   const now = Date.now();
   const eventId = randomUUID();
   const catalog = catalogForService(deps.plugins, service);
@@ -106,7 +106,9 @@ export async function ingestEvent(
   // changed between this read and the insert costs one boundary event (a new
   // one misses this event; a deleted one gets a harmless orphan delivery, safe
   // because `event_deliveries` holds no foreign key to the subscription). The
-  // next event sees the change.
+  // next event sees the change. Slack's admin webhook log is the one
+  // exception: its caller sets retainUnmatched so a verified delivery is
+  // retained without creating a delivery row.
   const subs = await deps.db
     .select()
     .from(eventSubscriptions)
@@ -115,14 +117,10 @@ export async function ingestEvent(
   for (const sub of subs) {
     if (await authorizedSubscriptionMatchesEvent(deps.db, sub, event.key, event.payload, catalog)) matched.push(sub);
   }
-  if (matched.length === 0) {
-    // If a subscription NAMES this key but every one filtered this occurrence
-    // out, record it so "my trigger didn't fire" is answerable. An event no
-    // subscription names is ambient traffic and stays silent. Either way the
-    // event itself is never persisted.
-    if (subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
-      await logFilterExcludedDrop(deps.db, orgId, event.key);
-    }
+  if (matched.length === 0 && subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
+    await logFilterExcludedDrop(deps.db, orgId, event.key);
+  }
+  if (matched.length === 0 && !retainUnmatched) {
     return { eventId, duplicate: false, deliveries: 0, skipped: true };
   }
 
@@ -146,17 +144,19 @@ export async function ingestEvent(
       .returning({ id: events.id });
     if (inserted.length === 0) return { eventId, duplicate: true, deliveries: 0 };
 
-    await tx.insert(eventDeliveries).values(
-      matched.map((sub) => ({
-        id: randomUUID(),
-        eventId,
-        subscriptionId: sub.id,
-        status: "pending" as const,
-        attempts: 0,
-        nextAttemptAt: now,
-        createdAt: now,
-      })),
-    );
+    if (matched.length > 0) {
+      await tx.insert(eventDeliveries).values(
+        matched.map((sub) => ({
+          id: randomUUID(),
+          eventId,
+          subscriptionId: sub.id,
+          status: "pending" as const,
+          attempts: 0,
+          nextAttemptAt: now,
+          createdAt: now,
+        })),
+      );
+    }
     return { eventId, duplicate: false, deliveries: matched.length };
   });
 

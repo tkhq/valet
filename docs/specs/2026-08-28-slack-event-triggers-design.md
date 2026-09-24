@@ -178,6 +178,20 @@ high-volume key like `slack.message` that is every message in the workspace, so
 logging it would re-flood the drop-log the privacy design keeps small. The "last
 event received" signal covers that case instead.
 
+### Admin Slack webhook log
+
+The Problems tab is an organization-admin-only view of the recorded Slack
+webhook stream. It calls `GET /api/events?service=slack`, which uses the
+existing event list and opens a row to show its delivery status and errors.
+A refresh control reloads the list. The route rejects a non-admin Slack filter,
+and hides Slack rows from an unfiltered non-admin event list. It also protects
+Slack event detail and redelivery reads.
+
+The tab does not show webhook headers, signing secrets, or raw signing material.
+It shows normalized data from each verified Slack delivery. Slack records an
+unmatched event with no delivery row, including an interaction form submission.
+This change does not parse a form or trigger a workflow from it.
+
 ## Mention scoping (TKAI-299, added 2026-09-01)
 
 A `slack.app_mention` subscription started with unsafe defaults: no user
