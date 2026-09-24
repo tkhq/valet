@@ -70,6 +70,9 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
     actions.tab.isPending ||
     actions.start.isPending ||
     actions.settings.isPending;
+  const hasDialog = Boolean(
+    runtime?.dialogs?.some((dialog) => dialog.tabId === selected?.id),
+  );
   const viewing = useBrowserFrame(
     sessionId,
     runtime?.runtimeId,
@@ -77,8 +80,10 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
     Boolean(
       data?.settings.enabled &&
       runtime?.state === "ready" &&
-      runtime.capabilities.viewer?.available,
+      runtime.capabilities.viewer?.available &&
+      !hasDialog,
     ),
+    selected?.documentId,
   );
 
   useEffect(() => {
@@ -117,7 +122,9 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
       throw new Error(
         "Browser control is unavailable. Take control before interacting with the page.",
       );
-    await actions.input.mutateAsync({
+    await (
+      input.type === "dialog" ? actions.dialog : actions.input
+    ).mutateAsync({
       leaseId: lease.id,
       runtimeId: runtime.runtimeId,
       tabId: selected.id,
@@ -204,6 +211,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 !selected ||
                 !runtime.capabilities.viewer?.available ||
                 Boolean(lease?.privateMode) ||
+                hasDialog ||
                 actions.capture.isPending
               }
               onClick={() =>
@@ -536,7 +544,11 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 send={(input) => run(() => send(input))}
               />
             ))}
-          {viewing.error ? (
+          {hasDialog ? (
+            <div className="grid flex-1 place-content-center p-6 text-sm text-muted">
+              Respond to the browser dialog to resume viewing.
+            </div>
+          ) : viewing.error ? (
             <div role="alert" className="space-y-2 p-4 text-sm text-danger-600">
               <p>{viewing.error}</p>
               <Button size="sm" variant="secondary" onClick={viewing.retry}>

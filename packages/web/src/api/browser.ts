@@ -136,6 +136,9 @@ export function useBrowserAnnotations(sessionId: string, artifactId: string) {
   return useQuery({
     queryKey: qkBrowser.annotations(sessionId, artifactId),
     queryFn: () => browserApi.annotations(sessionId, artifactId),
+    staleTime: 0,
+    refetchInterval: 2000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -210,11 +213,17 @@ export function useBrowserActions(sessionId: string) {
       browserApi.input(sessionId, body),
     onError: refresh,
   });
+  // A page input can wait for its dialog. Responses must bypass that queue.
+  const dialog = useMutation({
+    mutationFn: (body: CommandBody<"input">) =>
+      browserApi.input(sessionId, body),
+    onError: refresh,
+  });
   const capture = useMutation({
     mutationFn: (body: Parameters<typeof browserApi.capture>[1]) =>
       browserApi.capture(sessionId, body),
   });
-  return { start, settings, control, tab, input, capture };
+  return { start, settings, control, tab, input, dialog, capture };
 }
 
 export interface BrowserFrameData {
@@ -228,6 +237,19 @@ export interface BrowserFrame extends Omit<BrowserFrameData, "blob"> {
   tabId: string;
 }
 
+function nextFrameTick(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, 250);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 export async function fetchBrowserFrame(
   sessionId: string,
   runtimeId: string,
@@ -236,12 +258,22 @@ export async function fetchBrowserFrame(
   signal: AbortSignal,
 ): Promise<BrowserFrameData> {
   const query = new URLSearchParams({ runtimeId, tabId });
-  const response = await fetch(`${endpoint(sessionId)}/frame?${query}`, {
-    signal,
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: { "x-browser-ticket": ticket },
-  });
+  const load = () =>
+    fetch(`${endpoint(sessionId)}/frame?${query}`, {
+      signal,
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "x-browser-ticket": ticket },
+    });
+  let response = await load();
+  // Canceling HTTP cannot cancel Chromium's active screenshot. A tab switch
+  // or navigation can briefly conflict with that capture. Retry at most three times.
+  for (let attempt = 0; response.status === 409 && attempt < 3; attempt++) {
+    await response.body?.cancel();
+    await nextFrameTick(signal);
+    signal.throwIfAborted();
+    response = await load();
+  }
   if (!response.ok)
     throw new Error(
       response.status === 401 || response.status === 403
@@ -309,15 +341,7 @@ export async function pollBrowserFrames<T>(
     const frame = await load(signal);
     if (signal.aborted) return;
     publish(frame);
-    await new Promise<void>((resolve) => {
-      const done = () => {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", done);
-        resolve();
-      };
-      const timer = setTimeout(done, 250);
-      signal.addEventListener("abort", done, { once: true });
-    });
+    await nextFrameTick(signal);
   }
 }
 
@@ -326,6 +350,7 @@ export function useBrowserFrame(
   runtimeId: string | undefined,
   tabId: string | undefined,
   enabled: boolean,
+  documentId?: string,
 ) {
   const [frame, setFrame] = useState<BrowserFrame | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -389,7 +414,7 @@ export function useBrowserFrame(
       abort.abort();
       for (const url of urls) URL.revokeObjectURL(url);
     };
-  }, [sessionId, runtimeId, tabId, enabled, visible, revision]);
+  }, [sessionId, runtimeId, tabId, documentId, enabled, visible, revision]);
   return {
     frame:
       enabled &&

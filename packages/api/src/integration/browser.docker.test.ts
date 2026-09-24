@@ -84,7 +84,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
         if (!sandbox) throw new Error("Browser sandbox is not attached");
         await sandbox.writeFile(
           "fixture.cjs",
-          `require('node:http').createServer((req,res)=>{res.setHeader('content-type','text/html');res.end('<title>Browser fixture</title><h1>Before</h1><label>Name<input aria-label="Name"></label><button onclick="document.querySelector(\\'h1\\').textContent=\\'Saved \\'+document.querySelector(\\'input\\').value">Save</button>')}).listen(5173,'0.0.0.0')`,
+          `require('node:http').createServer((req,res)=>{if(req.url==='/download'){res.setHeader('content-disposition','attachment; filename=dogfood.txt');return res.end('Valet download fixture')}res.setHeader('content-type','text/html');res.end('<title>Browser fixture</title><a href="/download" download>Download fixture</a><h1>Before</h1><label>Name<input aria-label="Name"></label><button onclick="document.querySelector(\\'h1\\').textContent=\\'Saved \\'+document.querySelector(\\'input\\').value">Save</button>')}).listen(5173,'0.0.0.0')`,
         );
         expect(
           (
@@ -108,7 +108,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
                 "browser__execute",
                 {
                   title: "Verify form",
-                  code: 'var tab = await browser.tabs.new({url:"http://127.0.0.1:5173"}); await tab.playwright.getByLabel("Name").fill("Ada"); await tab.playwright.getByRole("button",{name:"Save",exact:true}).click(); await tab.markDeliverable(); output.write(await tab.getAXState()); output.image(await tab.getScreenshot());',
+                  code: 'var tab = await browser.tabs.new({url:"http://127.0.0.1:5173"}); await tab.playwright.getByLabel("Name").fill("Ada"); await tab.playwright.getByRole("button",{name:"Save",exact:true}).click(); await tab.playwright.getByRole("link",{name:"Download fixture",exact:true}).click(); await tab.markDeliverable(); output.write(await tab.getAXState()); output.image(await tab.getScreenshot());',
                 },
                 { id: "browser-fullstack-call" },
               ),
@@ -199,6 +199,26 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
         const tab = status.status?.tabs[0];
         if (!tab || !status.status)
           throw new Error("Deliverable tab was not retained");
+        await expect
+          .poll(async () => {
+            const current = await json<SessionBrowserResponse>(path);
+            return current.status?.downloads?.some(
+              (file) => file.filename === "dogfood.txt",
+            );
+          })
+          .toBe(true);
+        const downloaded = (
+          await json<SessionBrowserResponse>(path)
+        ).status?.downloads?.find((file) => file.filename === "dogfood.txt");
+        if (!downloaded) throw new Error("Missing downloaded fixture");
+        expect(downloaded.bytes).toBe(
+          Buffer.byteLength("Valet download fixture"),
+        );
+        const downloadResponse = await fetch(
+          `${api.baseUrl}${path}/downloads/${downloaded.id}`,
+        );
+        expect(downloadResponse.status).toBe(200);
+        expect(await downloadResponse.text()).toBe("Valet download fixture");
         const artifact = await json<BrowserArtifact>(
           `${path}/evidence`,
           "POST",

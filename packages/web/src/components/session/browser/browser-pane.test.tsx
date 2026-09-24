@@ -13,6 +13,8 @@ const state = vi.hoisted(() => ({
   start: vi.fn().mockResolvedValue({}),
   tab: vi.fn().mockResolvedValue({}),
   input: vi.fn().mockResolvedValue({}),
+  dialog: vi.fn().mockResolvedValue({}),
+  frameEnabled: vi.fn(),
   settings: vi.fn().mockResolvedValue({}),
   capture: vi.fn().mockResolvedValue({}),
 }));
@@ -40,26 +42,35 @@ vi.mock("~/api/browser", () => ({
   }),
   useBrowserActions: () =>
     Object.fromEntries(
-      ["control", "start", "tab", "input", "settings", "capture"].map(
+      ["control", "start", "tab", "input", "dialog", "settings", "capture"].map(
         (name) => [
           name,
           {
             mutateAsync:
               state[
                 name as
-                  "control" | "start" | "tab" | "input" | "settings" | "capture"
+                  | "control"
+                  | "start"
+                  | "tab"
+                  | "input"
+                  | "dialog"
+                  | "settings"
+                  | "capture"
               ],
             isPending: false,
           },
         ],
       ),
     ),
-  useBrowserFrame: () => ({
-    frame: null,
-    error: null,
-    visible: true,
-    retry: vi.fn(),
-  }),
+  useBrowserFrame: (
+    _session: string,
+    _runtime: string,
+    _tab: string,
+    enabled: boolean,
+  ) => {
+    state.frameEnabled(enabled);
+    return { frame: null, error: null, visible: true, retry: vi.fn() };
+  },
 }));
 
 function ready(): BrowserRuntimeStatus {
@@ -94,6 +105,46 @@ afterEach(() => {
 });
 
 describe("browser pane control", () => {
+  it("answers a dialog outside the page input queue and pauses frame capture", async () => {
+    state.status = {
+      ...ready(),
+      control: {
+        id: "lease",
+        runtimeId: "runtime",
+        actorId: "viewer",
+        state: "active",
+        privateMode: false,
+        expiresAt: Date.now() + 60_000,
+      },
+      dialogs: [
+        {
+          tabId: "tab",
+          dialogId: "dialog",
+          kind: "alert",
+          message: "Test alert",
+        },
+      ],
+    };
+    render(<BrowserPane sessionId="session" />);
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    await waitFor(() =>
+      expect(state.dialog).toHaveBeenCalledWith({
+        leaseId: "lease",
+        runtimeId: "runtime",
+        tabId: "tab",
+        documentId: "doc",
+        input: { type: "dialog", dialogId: "dialog", accept: true, text: "" },
+      }),
+    );
+    expect(state.input).not.toHaveBeenCalled();
+    expect(state.frameEnabled).toHaveBeenLastCalledWith(false);
+    expect(
+      screen
+        .getByRole("button", { name: "Save screenshot" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
   it("does not start a runtime by mounting the browser pane", () => {
     render(<BrowserPane sessionId="session" />);
     expect(state.start).not.toHaveBeenCalled();

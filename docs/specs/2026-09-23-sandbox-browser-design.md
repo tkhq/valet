@@ -710,6 +710,9 @@ coding agent.
 ### Downloads and uploads
 
 Downloads are brokered from the browser context into a private staging directory.
+Set Chromium's download path to the broker's shared state directory. Chromium's
+private temporary filesystem is not visible to the broker. Delete the raw download
+after each import attempt, including quota rejection and stream failures.
 Assign a stable download ID and report suggested filename, source origin, MIME
 type, bytes, completion state and content hash. Sanitize names and prevent path
 traversal. Do not open downloaded executable content automatically.
@@ -732,7 +735,9 @@ Markdown paste as literal source unless an explicit conversion is requested.
 
 Surface alert, confirm, prompt and beforeunload dialogs as typed events. A dialog
 can block a pending action. Allow an authorized dialog handler to run outside the
-blocked tab command queue, under the same mutation lease. Default prompt values
+blocked tab command queue, under the same mutation lease. The web client also
+uses a separate dialog mutation queue. It pauses frame capture and disables saved
+screenshots until the selected tab has no dialog. Default prompt values
 and entered secrets are excluded from logs.
 
 Generic content export supports text/Markdown, HTML with provenance, and Chromium
@@ -1154,3 +1159,15 @@ Final deletion waits for pending execution release and verifies retained-state a
 An export failure preserves engine history and returns an actionable retry error.
 The Docker provider can read a stopped runtime's journal with a network-disabled helper.
 An unsupported retained-state reader fails closed when no verified suspension checkpoint exists.
+
+### Browser dogfood corrections (2026-09-24)
+
+The web client sends dialog responses outside its ordered page-input queue.
+Frame polling pauses while a dialog is open, then resumes when the dialog closes.
+Annotation panels refresh their stale-document status every two seconds while visible.
+The real Docker integration verifies download metadata and the exact retrieved bytes.
+See `docs/research/2026-09-24-browser-dogfood.md` for manual control coverage.
+
+An interrupted frame capture can outlive its HTTP request. The viewer retries HTTP
+409 conflicts up to three times at 250 ms intervals. Other errors stop capture.
+A document change resets frame capture and clears the previous document's error.

@@ -8,6 +8,7 @@ import {
   type Dialog,
 } from 'playwright-core';
 import { createHash, randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import type {
   BrowserArtifact,
   BrowserCapability,
@@ -124,6 +125,8 @@ export class PlaywrightBackend {
         chromiumSandbox: true,
         viewport: { width: 1280, height: 800 },
         acceptDownloads: true,
+        // Chromium's private /tmp is not visible to the trusted file broker.
+        downloadsPath: join(this.options.files.root, 'downloads'),
         serviceWorkers: 'allow',
         ...(this.options.launch
           ? {
@@ -264,33 +267,37 @@ export class PlaywrightBackend {
     });
     page.on('download', (download) => {
       void (async () => {
-        const stream = await download.createReadStream();
-        if (!stream) return;
-        const chunks: Buffer[] = [];
-        let size = 0;
-        for await (const part of stream) {
-          const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
-          size += chunk.length;
-          if (size > 100 * 1024 * 1024) {
-            await download.cancel();
-            throw new BrowserFault(
-              'QUOTA_EXCEEDED',
-              'The download is too large.',
-              'Use a smaller download.',
-            );
+        try {
+          const stream = await download.createReadStream();
+          if (!stream) return;
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const part of stream) {
+            const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
+            size += chunk.length;
+            if (size > 100 * 1024 * 1024) {
+              await download.cancel();
+              throw new BrowserFault(
+                'QUOTA_EXCEEDED',
+                'The download is too large.',
+                'Use a smaller download.',
+              );
+            }
+            chunks.push(chunk);
           }
-          chunks.push(chunk);
+          await this.options.files.create(
+            Buffer.concat(chunks),
+            'application/octet-stream',
+            download.suggestedFilename(),
+            {
+              tabId: info.id,
+              documentId: info.documentId,
+              url: sanitize(download.url()),
+            },
+          );
+        } finally {
+          await download.delete();
         }
-        await this.options.files.create(
-          Buffer.concat(chunks),
-          'application/octet-stream',
-          download.suggestedFilename(),
-          {
-            tabId: info.id,
-            documentId: info.documentId,
-            url: sanitize(download.url()),
-          },
-        );
       })().catch((error) =>
         bounded(record.logs, {
           level: 'error',

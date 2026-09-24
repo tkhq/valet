@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PlaywrightBackend } from '../src/browser.js';
@@ -11,6 +11,16 @@ let backend: PlaywrightBackend;
 let dir: string;
 let origin: string;
 const server = createServer((req, res) => {
+  if (req.url === '/download') {
+    res.setHeader('Content-Disposition', 'attachment; filename=fixture.txt');
+    res.end('download fixture');
+    return;
+  }
+  if (req.url === '/download-page') {
+    res.setHeader('Content-Type', 'text/html');
+    res.end('<a href="/download" download>Download fixture</a>');
+    return;
+  }
   if (req.url === '/many-references') {
     res.setHeader('Content-Type', 'text/html');
     res.end(
@@ -81,6 +91,37 @@ describe.skipIf(!browserInstalled)('real Chromium fixtures', () => {
         'cleanup',
         'actor',
       );
+  });
+  it('removes raw downloads when the broker rejects its session quota', async () => {
+    const files = new FileBroker(join(dir, 'quota-files'), 's', 'quota', dir, 100, 4);
+    await files.initialize();
+    const limited = new PlaywrightBackend({
+      runtimeId: 'quota',
+      profile: join(dir, 'quota-profile'),
+      files,
+      testOnlyUnconfined: true,
+    });
+    try {
+      await limited.start();
+      const tab = await limited.newTab('thread', 'actor', `${origin}/download-page`);
+      await limited.execute('locator.click', {
+        locator: {
+          tabId: tab.id,
+          runtimeId: 'quota',
+          steps: [{ kind: 'role', value: 'link', name: 'Download fixture', exact: true }],
+        },
+        args: [],
+      }, 'thread', 'actor');
+      await expect.poll(() => limited.execute('tab.logs', {
+        tabId: tab.id, runtimeId: 'quota',
+      }, 'thread', 'actor')).toContainEqual({
+        level: 'error', text: 'Browser file quota exceeded.',
+      });
+      expect(files.list()).toEqual([]);
+      expect(await readdir(join(files.root, 'downloads'))).toEqual([]);
+    } finally {
+      await limited.close();
+    }
   });
   it('navigates, snapshots, uses strict locators, and captures actual pixels', async () => {
     const tab = await backend.newTab('thread', 'actor', origin);
