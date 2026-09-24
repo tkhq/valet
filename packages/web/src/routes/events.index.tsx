@@ -99,6 +99,7 @@ export function EventsPage() {
               query={search.problemsQ}
               cursor={search.problemsCursor}
               onQueryChange={(problemsQ) => {
+                problemsQ = problemsQ.trim() ? problemsQ : "";
                 setProblemsCursorHistory([]);
                 void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
               }}

@@ -95,10 +95,10 @@ export function DropsPanel({
       )}
 
       <nav className="flex gap-2" aria-label="Problems pages">
-        <Button type="button" variant="secondary" disabled={dropsQ.isPending || !hasPrevious} onClick={onPrevious}>
+        <Button type="button" variant="secondary" disabled={!hasPrevious} aria-busy={dropsQ.isPending} onClick={() => !dropsQ.isPending && onPrevious?.()}>
           Previous
         </Button>
-        <Button type="button" variant="secondary" disabled={dropsQ.isPending || !dropsQ.data?.nextCursor} onClick={() => dropsQ.data?.nextCursor && onNext?.(dropsQ.data.nextCursor)}>
+        <Button type="button" variant="secondary" disabled={!dropsQ.data?.nextCursor} aria-busy={dropsQ.isPending} onClick={() => !dropsQ.isPending && dropsQ.data?.nextCursor && onNext?.(dropsQ.data.nextCursor)}>
           Next
         </Button>
       </nav>
