@@ -355,15 +355,15 @@ later iterations, recorded here so the scorecard's green doesn't overstate:
   (`plugin-personas`) — no test files.
 - The `valet mcp` server actually serving tools to an MCP client — only unit
   tests around the pieces.
-- Web browser e2e — 60 jsdom component tests exist, zero browser-driven.
-- Most content-only / thin plugin packages (`plugin-browser`, `plugin-notion`,
+- Web Browser panel interaction has component coverage and manual browser verification. The automated managed-browser fixture exercises the API, engine, runtime, and Chromium.
+- Most content-only / thin plugin packages (`plugin-notion`,
   `plugin-sentry`, `plugin-stripe`, …) — no test files.
 
 ## Out of scope (v1)
 
 Recorded so they don't get lost:
 
-- Web (Playwright/browser) e2e — no browser coverage exists at all today.
+- Automated full web-client journeys remain outside the runner. Managed Chromium coverage is described below.
 - A `valet handoff` e2e scenario in the T9 suite.
 - The T9 suite's self-documented gaps: real-auth login/logout, `gates resolve`
   round-trip, human-mode `send`.
@@ -379,3 +379,18 @@ The sandbox timeout contract uses the provider suite timeout for provisioning an
 The short-lived GitHub HTTP fixture closes each response connection. This prevents connection pooling from outliving an ephemeral test server. The fixture still uses real HTTP requests and responses.
 
 The web build and API bundle run sequentially before the static pool. The API bundle copies web assets, so it must wait for the web build.
+
+## Managed browser coverage (2026-09-23)
+
+The `browser-runtime` row runs the runtime unit and page fixture suites.
+The `browser-docker` row runs the packaged browser in a real Docker sandbox.
+It checks approvals, screenshot exports, invocation deduplication, private human control, API restart adoption, and retained profile cookies.
+It also runs the browser HTTP integration through the API, engine, and plugin.
+The serial row sets `VALET_BROWSER_INTEGRATION=1` for that fixture.
+The root unit sweep leaves it disabled to avoid concurrent browser provisioning.
+The workflow Docker fixture uses Rancher's macOS host address when that context is active.
+Its provider inventory is separate from other test APIs and running development instances.
+The row uses `VALET_BROWSER_TEST_IMAGE` when set.
+Otherwise, it builds `valet-browser-e2e:local` from the sandbox Dockerfile if that local image is absent.
+The row needs Docker but no external model credentials.
+These two rows bring the scorecard to 37 rows.

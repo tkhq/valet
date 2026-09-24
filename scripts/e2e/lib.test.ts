@@ -34,9 +34,9 @@ const ALL_TRUE: Probes = {
 };
 
 describe("STEPS", () => {
-  it("has the spec's 35 unique rows", () => {
-    expect(STEPS).toHaveLength(35);
-    expect(new Set(STEPS.map((s) => s.id)).size).toBe(35);
+  it("has the spec's 37 unique rows", () => {
+    expect(STEPS).toHaveLength(37);
+    expect(new Set(STEPS.map((s) => s.id)).size).toBe(37);
   });
 
   it("includes every spec row id", () => {
@@ -48,7 +48,7 @@ describe("STEPS", () => {
       "sandbox-docker-unit", "registry-drift",
       "integration-core",
       "orchestrator-smoke", "session-smoke", "integration-agent", "cli",
-      "sandbox-docker", "sandbox-dind", "sandbox-k8s", "store-postgres", "workspace-prep-docker",
+      "browser-runtime", "browser-docker", "sandbox-docker", "sandbox-dind", "sandbox-k8s", "store-postgres", "workspace-prep-docker",
       "prebuilds-docker", "k8s-builder-cluster", "keycloak-oidc",
       "fullstack-docker", "fullstack-k8s", "telegram", "github-live", "openai",
       "onepassword",
@@ -301,7 +301,7 @@ describe("selectSteps", () => {
   });
 
   it("returns all steps without --only", () => {
-    expect(selectSteps(STEPS)).toHaveLength(35);
+    expect(selectSteps(STEPS)).toHaveLength(37);
   });
 
   it("throws on unknown ids", () => {

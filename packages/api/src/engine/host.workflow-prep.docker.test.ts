@@ -47,6 +47,11 @@ function dockerAvailable(): boolean {
 }
 
 const dockerHere = dockerAvailable();
+const dockerContext = spawnSync("docker", ["context", "show"], { encoding: "utf8" }).stdout?.trim();
+// Rancher's Docker host-gateway is the VM bridge, not the macOS test API host.
+const sandboxApiHost = process.platform === "darwin" && dockerContext === "rancher-desktop"
+  ? "host.lima.internal"
+  : "host.docker.internal";
 // Skip in CI: the GitHub runner's docker daemon lacks the base image and
 // the host-gateway setup this test needs. `CI` is set by GitHub Actions.
 const describeDocker = dockerHere && !process.env.CI ? describe : describe.skip;
@@ -144,7 +149,7 @@ async function bootWithApp(): Promise<TestApi> {
 
   inventoryRoot = await createSandboxWorkspace("valet-wf-inventory-");
   provider = new TrackingDockerProvider({ inventoryRoot });
-  const booted = await bootTestApi({ auth: true, sandboxProvider: provider, sandboxApiHost: "host.docker.internal" });
+  const booted = await bootTestApi({ auth: true, sandboxProvider: provider, sandboxApiHost });
   const { db, engineCredentials } = booted.providers;
   const now = Date.now();
   await db.insert(orgs).values({ id: ORG, name: "Workflow Prep Org", createdAt: now });

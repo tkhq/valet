@@ -138,6 +138,7 @@ const INTEGRATION_AGENT_FILES = [
 
 /** Integration files owned by dedicated rows (see lists above). */
 export const DEDICATED_INTEGRATION_FILES = [
+  "src/integration/browser.docker.test.ts",
   "src/integration/cli.e2e.test.ts",
   "src/integration/telegram.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
@@ -156,6 +157,7 @@ export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INT
  * ROOT workspace config from the wrong cwd — enumerate instead of globbing.
  * A new plugin gaining tests must be added here (guarded by lib.test.ts). */
 const TESTED_PLUGINS = [
+  "@valet/plugin-browser",
   "@valet/plugin-github",
   "@valet/plugin-gmail",
   "@valet/plugin-google-calendar",
@@ -189,6 +191,7 @@ export const STEPS: StepDef[] = [
   { id: "docs-lint", group: "static", title: "STE prose lint (maintained docs)", command: ["bash", "-c", "command -v python3 >/dev/null || { echo 'python3 not found - skipping'; exit 0; }; python3 scripts/docs/docs_lint.py"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
   { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
   { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
+  { id: "browser-runtime", group: "static", title: "browser runtime, cells, journal and page fixtures", command: ["pnpm", "--filter", "@valet/browser-runtime", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "gateway-unit", group: "static", title: "sandbox gateway (JWT, WS proxy)", command: ["pnpm", "--filter", "@valet/sandbox-gateway", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "plugins-unit", group: "static", title: "plugin package suites", command: ["pnpm", ...TESTED_PLUGINS.flatMap((n) => ["--filter", n]), "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
@@ -211,6 +214,7 @@ export const STEPS: StepDef[] = [
   { id: "cli", group: "integration", title: "CLI e2e (T9)", command: apiTest("src/integration/cli.e2e.test.ts"), needs: [], env: { VALET_CLI_E2E: "1" }, timeoutMs: 15 * MIN },
 
   // ── docker / cluster gated ───────────────────────────────────────────────
+  { id: "browser-docker", group: "docker", title: "managed browser isolation, persistence, approvals and HTTP flow", command: ["pnpm", "exec", "tsx", "scripts/e2e/browser.ts"], needs: ["docker"], timeoutMs: 20 * MIN },
   { id: "sandbox-docker", group: "docker", title: "sandbox-docker suite", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "sandbox-dind", group: "docker", title: "rootless docker-in-sandbox", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/dind.e2e.test.ts"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "sandbox-k8s", group: "docker", title: "sandbox-kubernetes cluster suite", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test"], needs: ["k8sContext"], timeoutMs: 20 * MIN },
