@@ -18,7 +18,7 @@ import { OnePasswordAuthError } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, gte, ilike, lt, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, gt, gte, ilike, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -410,6 +410,9 @@ eventsRouter.get("/events/drops", async (c) => {
   if (limit === undefined) return c.json({ error: "limit must be a whole number of 1 or more" }, 400);
   const query = c.req.query("q")?.trim() ?? "";
   if (query.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
+  const rawDirection = c.req.query("direction");
+  if (rawDirection !== undefined && rawDirection !== "previous") return c.json({ error: "direction must be previous" }, 400);
+  const direction = rawDirection === "previous" ? "previous" : "next";
   const rawCursor = c.req.query("cursor");
   const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
   const cursor = decoded && typeof decoded.orgId === "string" && decoded.orgId === user.orgId &&
@@ -436,23 +439,19 @@ eventsRouter.get("/events/drops", async (c) => {
     if (search) dropConditions.push(search);
   }
   if (cursor) {
-    const after = or(
-      lt(eventDropLog.createdAt, cursor.createdAt),
-      and(eq(eventDropLog.createdAt, cursor.createdAt), lt(eventDropLog.id, cursor.id)),
-    );
-    if (after) dropConditions.push(after);
+    const boundary = direction === "previous"
+      ? or(gt(eventDropLog.createdAt, cursor.createdAt), and(eq(eventDropLog.createdAt, cursor.createdAt), gt(eventDropLog.id, cursor.id)))
+      : or(lt(eventDropLog.createdAt, cursor.createdAt), and(eq(eventDropLog.createdAt, cursor.createdAt), lt(eventDropLog.id, cursor.id)));
+    if (boundary) dropConditions.push(boundary);
   }
-  const rows = await db
-    .select()
-    .from(eventDropLog)
-    .where(and(...dropConditions))
-    .orderBy(desc(eventDropLog.createdAt), desc(eventDropLog.id))
-    .limit(limit + 1);
-  const page = rows.slice(0, limit);
+  const rows = await db.select().from(eventDropLog).where(and(...dropConditions))
+    .orderBy(...(direction === "previous" ? [eventDropLog.createdAt, eventDropLog.id] : [desc(eventDropLog.createdAt), desc(eventDropLog.id)])).limit(limit + 1);
+  const page = direction === "previous" ? rows.slice(0, limit).reverse() : rows.slice(0, limit);
+  const first = page[0];
   const last = page.at(-1);
-  const nextCursor = rows.length > limit && last
-    ? encodePageCursor({ orgId: user.orgId, q: query, createdAt: last.createdAt, id: last.id })
-    : null;
+  const makeCursor = (row: typeof eventDropLog.$inferSelect) => encodePageCursor({ orgId: user.orgId, q: query, createdAt: row.createdAt, id: row.id });
+  const nextCursor = last && (direction === "previous" ? cursor !== undefined : rows.length > limit) ? makeCursor(last) : null;
+  const previousCursor = first && (direction === "previous" ? rows.length > limit : cursor !== undefined) ? makeCursor(first) : null;
 
   // "Last event received" = the most recent time ANY event reached ingest,
   // matched (an events row) or not (a visible drop-log row). This remains
@@ -477,6 +476,7 @@ eventsRouter.get("/events/drops", async (c) => {
   const resp: ListEventDropsResponse = {
     drops: page.map((r) => ({ id: r.id, reason: r.reason, detail: r.detail, createdAt: r.createdAt })),
     nextCursor,
+    previousCursor,
     lastEventAt,
   };
   return c.json(resp);

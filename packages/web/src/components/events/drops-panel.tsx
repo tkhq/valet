@@ -30,19 +30,19 @@ const REASON_LABEL: Record<string, string> = {
 export function DropsPanel({
   query = "",
   cursor,
+  direction,
   onQueryChange,
-  hasPrevious = false,
   onPrevious,
   onNext,
 }: {
   query?: string;
   cursor?: string;
+  direction?: "previous";
   onQueryChange?: (query: string) => void;
-  hasPrevious?: boolean;
-  onPrevious?: () => void;
+  onPrevious?: (cursor: string) => void;
   onNext?: (cursor: string) => void;
 }) {
-  const dropsQ = useEventDrops({ q: query, cursor });
+  const dropsQ = useEventDrops({ q: query, cursor, direction });
 
   return (
     <div className="space-y-4">
@@ -69,7 +69,7 @@ export function DropsPanel({
       {dropsQ.isPending && <LoadingRow label="Loading problems…" />}
       {dropsQ.error != null && (
         <ErrorRow>
-          {cursor ? <><span>That page is no longer available. </span><button type="button" className="underline" onClick={onPrevious}>Return to the first page</button></> : "Failed to load. Press refresh to try again."}
+          {cursor ? <><span>That page is no longer available. </span><button type="button" className="underline" onClick={() => onPrevious?.("")}>Return to the first page</button></> : "Failed to load. Press refresh to try again."}
         </ErrorRow>
       )}
       {dropsQ.data && dropsQ.data.drops.length === 0 && (
@@ -95,7 +95,7 @@ export function DropsPanel({
       )}
 
       <nav className="flex gap-2" aria-label="Problems pages">
-        <Button type="button" variant="secondary" disabled={!hasPrevious} aria-busy={dropsQ.isPending} onClick={() => !dropsQ.isPending && onPrevious?.()}>
+        <Button type="button" variant="secondary" disabled={!dropsQ.data?.previousCursor} aria-busy={dropsQ.isPending} onClick={() => !dropsQ.isPending && dropsQ.data?.previousCursor && onPrevious?.(dropsQ.data.previousCursor)}>
           Previous
         </Button>
         <Button type="button" variant="secondary" disabled={!dropsQ.data?.nextCursor} aria-busy={dropsQ.isPending} onClick={() => !dropsQ.isPending && dropsQ.data?.nextCursor && onNext?.(dropsQ.data.nextCursor)}>

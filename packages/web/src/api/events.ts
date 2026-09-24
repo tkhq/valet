@@ -54,7 +54,7 @@ export const qkEvents = {
   feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
     ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
   detail: (id: string) => ["events", "detail", id] as const,
-  drops: (q = "", cursor = "") => ["events", "drops", q, cursor] as const,
+  drops: (q = "", cursor = "", direction = "") => ["events", "drops", q, cursor, direction] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
@@ -125,11 +125,11 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
  * last time any event reached ingest. Polls like the feed — new drops land
  * from external webhooks at any time. */
 export function useEventDrops(
-  params: { q?: string; cursor?: string } = {},
+  params: { q?: string; cursor?: string; direction?: "previous" } = {},
   opts?: Partial<UseQueryOptions<ListEventDropsResponse>>,
 ) {
   return useQuery<ListEventDropsResponse>({
-    queryKey: qkEvents.drops(params.q, params.cursor),
+    queryKey: qkEvents.drops(params.q, params.cursor, params.direction),
     queryFn: () => api.listEventDrops(params),
     refetchInterval: 30_000,
     ...opts,

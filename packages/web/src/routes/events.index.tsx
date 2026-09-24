@@ -30,6 +30,7 @@ interface EventsSearch {
   scope?: FeedScope;
   problemsQ?: string;
   problemsCursor?: string;
+  problemsDirection?: "previous";
 }
 
 /** Only "all" is written to the URL. An absent or hand-edited value reads
@@ -38,7 +39,8 @@ function readEventsSearch(raw: unknown): EventsSearch {
   const scope = textParam(raw, "scope") === "all" ? "all" : undefined;
   const problemsQ = textParam(raw, "problemsQ");
   const problemsCursor = textParam(raw, "problemsCursor");
-  return { ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}) };
+  const problemsDirection = textParam(raw, "problemsDirection") === "previous" ? "previous" as const : undefined;
+  return { ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}), ...(problemsDirection ? { problemsDirection } : {}) };
 }
 
 export const Route = createFileRoute("/events/")({
@@ -57,7 +59,6 @@ type TabId = (typeof TABS)[number]["id"];
 
 export function EventsPage() {
   const [tab, setTab] = useState<TabId>("activity");
-  const [problemsCursorHistory, setProblemsCursorHistory] = useState<(string | undefined)[]>([]);
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
@@ -98,21 +99,13 @@ export function EventsPage() {
             <DropsPanel
               query={search.problemsQ}
               cursor={search.problemsCursor}
+              direction={search.problemsDirection}
               onQueryChange={(problemsQ) => {
                 problemsQ = problemsQ.trim() ? problemsQ : "";
-                setProblemsCursorHistory([]);
                 void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
               }}
-              hasPrevious={problemsCursorHistory.length > 0}
-              onPrevious={() => {
-                const previous = problemsCursorHistory.at(-1);
-                setProblemsCursorHistory((history) => history.slice(0, -1));
-                void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(previous ? { problemsCursor: previous } : {}) } });
-              }}
-              onNext={(problemsCursor) => {
-                setProblemsCursorHistory((history) => [...history, search.problemsCursor]);
-                void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } });
-              }}
+              onPrevious={(problemsCursor) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor, problemsDirection: "previous" as const } : {}) } })}
+              onNext={(problemsCursor) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } })}
             />
           )}
         </div>
