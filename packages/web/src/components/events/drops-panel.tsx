@@ -11,6 +11,7 @@ import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { Button } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { useEventDrops } from "~/api/events";
+import { useState } from "react";
 import { relativeTime } from "~/lib/relative-time";
 
 /** Human labels for the reasons ingest and the webhook routes record. An
@@ -80,17 +81,7 @@ export function DropsPanel({
 
       {dropsQ.data && dropsQ.data.drops.length > 0 && (
         <ul className="divide-y divide-line border-t border-line">
-          {dropsQ.data.drops.map((drop) => (
-            <li key={drop.id} className="flex flex-col items-start justify-between gap-2 py-3 sm:flex-row sm:gap-3">
-              <div className="min-w-0 space-y-0.5">
-                <div className="text-sm font-medium text-ink">
-                  {REASON_LABEL[drop.reason] ?? drop.reason}
-                </div>
-                <p className="break-words text-xs leading-relaxed text-muted">{drop.detail}</p>
-              </div>
-              <span className="shrink-0 text-xs text-muted">{relativeTime(drop.createdAt)}</span>
-            </li>
-          ))}
+          {dropsQ.data.drops.map((drop) => <DropRow key={drop.id} drop={drop} />)}
         </ul>
       )}
 
@@ -104,4 +95,19 @@ export function DropsPanel({
       </nav>
     </div>
   );
+}
+
+function DropRow({ drop }: { drop: { id: string; reason: string; detail: string; createdAt: number } }) {
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = `problem-details-${drop.id}`;
+  return <li className="flex flex-col items-start justify-between gap-2 py-3 sm:flex-row sm:gap-3">
+    <div className="min-w-0 space-y-1">
+      <div className="text-sm font-medium text-ink">{REASON_LABEL[drop.reason] ?? drop.reason}</div>
+      <button type="button" className="text-xs text-muted underline" aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded((value) => !value)}>
+        {expanded ? "Hide details" : "Details"}
+      </button>
+      {expanded && <p id={detailsId} className="break-words text-xs leading-relaxed text-muted">{drop.detail}</p>}
+    </div>
+    <span className="shrink-0 text-xs text-muted">{relativeTime(drop.createdAt)}</span>
+  </li>;
 }

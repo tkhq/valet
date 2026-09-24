@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 const useEventDropsMock = vi.fn();
 vi.mock("~/api/events", () => ({ useEventDrops: () => useEventDropsMock() }));
@@ -31,7 +31,15 @@ describe("DropsPanel", () => {
     expect(screen.getByText("No subscription")).toBeTruthy();
     expect(screen.getByText("Bad signature")).toBeTruthy();
     expect(screen.getByText("Slack form did not start a workflow")).toBeTruthy();
+    expect(screen.queryByText(/no enabled subscription names it/)).toBeNull();
+    const details = screen.getAllByRole("button", { name: "Details" })[0];
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("true");
+    expect(details.getAttribute("aria-controls")).toBeTruthy();
     expect(screen.getByText(/no enabled subscription names it/)).toBeTruthy();
+    fireEvent.click(details);
+    expect(screen.queryByText(/no enabled subscription names it/)).toBeNull();
     expect(screen.getByText(/Last event received/)).toBeTruthy();
   });
 
