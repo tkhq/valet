@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import type { Context } from "@earendil-works/pi-ai/compat";
@@ -211,7 +212,7 @@ describe("lazy sandbox attachment integration", () => {
     const faux = registerFauxProvider({ provider: "lazy3" });
     const capturedPrompts: (string | undefined)[] = [];
     const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+      capturedPrompts.push(getCurrentSystemPrompt(context.messages));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("first (cold)"), captureStep("second (warm)")]);
@@ -409,7 +410,7 @@ describe("lazy sandbox attachment integration", () => {
     const faux = registerFauxProvider({ provider: "lazy8" });
     const capturedPrompts: (string | undefined)[] = [];
     const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+      capturedPrompts.push(getCurrentSystemPrompt(context.messages));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("no tools here")]);

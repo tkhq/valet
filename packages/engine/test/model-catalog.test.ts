@@ -18,6 +18,16 @@ describe("bundled model catalog", () => {
     }
   });
 
+  it("includes Claude Opus 5.5 from the upstream catalog", () => {
+    expect(bundledModel("anthropic", "claude-opus-5-5")).toMatchObject({
+      id: "claude-opus-5-5",
+      api: "anthropic-messages",
+      provider: "anthropic",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    });
+  });
+
   it("includes Astra with the Responses capabilities and tiered prices", () => {
     const astra = bundledModel("openai", "gpt-6-astra");
     expect(astra).toMatchObject({

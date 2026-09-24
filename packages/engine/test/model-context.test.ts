@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, describe, expect, it } from "vitest";
 import * as pi from "@earendil-works/pi-ai/compat";
 import {
@@ -30,7 +31,7 @@ function setup() {
   const prompts: string[] = [];
   const capture = (reply: pi.AssistantMessage = pi.fauxAssistantMessage("done")) =>
     (ctx: pi.Context) => {
-      prompts.push(ctx.systemPrompt ?? "");
+      prompts.push(getCurrentSystemPrompt(ctx.messages));
       return reply;
     };
   const resolveModel = async (spec: string): Promise<ResolvedModel | null> => {
@@ -143,7 +144,7 @@ describe("runtime model context delivered to the provider", () => {
     const thread = await session.ensureDefaultThread();
     s.small.setResponses([
       async (ctx) => {
-        s.prompts.push(ctx.systemPrompt ?? "");
+        s.prompts.push(getCurrentSystemPrompt(ctx.messages));
         await thread.setModel("m", "set_via_api");
         return pi.fauxAssistantMessage([pi.fauxToolCall("list_threads", {})], { stopReason: "toolUse" });
       },
