@@ -6,11 +6,12 @@ import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // provider-maintained retryable/permanent taxonomy (incl. the quota
 // blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
-import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
+import type { Api, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
@@ -1496,7 +1497,7 @@ export class Thread {
       );
     } finally {
       this.agent.state.model = baselineModel;
-      this.agent.state.systemPrompt = baselinePrompt;
+      this.restoreResumeSystemPrompt(baselinePrompt);
       this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
@@ -2101,11 +2102,11 @@ export class Thread {
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.replaceActiveSkillInvocations(entries);
-    this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
+    this.replaceAgentMessages(entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
       activeLeafEntryId: this.activeLeafEntryId,
-    });
+    }));
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
     // transcript directly (TKAI-305), so no usage seeding is needed and a
@@ -3416,7 +3417,7 @@ export class Thread {
       const entries = snapshot.entries;
       const resumeModel = this.effectiveModelLenient();
       this.replaceActiveSkillInvocations(entries);
-      this.agent.state.messages = entriesToAgentMessages(
+      this.replaceAgentMessages(entriesToAgentMessages(
         entries,
         {
           api: resumeModel.api,
@@ -3428,7 +3429,7 @@ export class Thread {
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
         },
-      );
+      ));
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
@@ -3446,7 +3447,7 @@ export class Thread {
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
     } finally {
       this.agent.state.model = baselineModel;
-      this.agent.state.systemPrompt = baselinePrompt;
+      this.restoreResumeSystemPrompt(baselinePrompt);
       this.turnApiKey = undefined;
     }
 
@@ -3866,7 +3867,7 @@ export class Thread {
     // applied FIRST so the composition is base → systemContext → repo
     // instructions → role → cold hint, and restored LAST so the existing
     // overlays nest unchanged inside it.
-    const repoInstructionsPrompt = this.applyRepoInstructionsForTurn();
+    this.applyRepoInstructionsForTurn();
     // Apply role overlay (system-prompt overlay + optional model override) for
     // this one turn. Restored unconditionally in finally.
     const roleOverlay = this.applyRoleForTurn(item);
@@ -3874,10 +3875,10 @@ export class Thread {
     // so the two compose (role text, then hint). Restored unconditionally in
     // finally, before the role restore, so both idioms nest correctly
     // whether or not a role was applied this turn.
-    const coldHintPrompt = this.applyColdHintForTurn();
+    this.applyColdHintForTurn();
     // Followed Slack-thread signals carry `reply: "manual"`. Add the shared
     // delivery guidance after all other turn overlays so it remains prominent.
-    const slackOverheardPrompt = this.applySlackOverheardGuidanceForTurn(item);
+    this.applySlackOverheardGuidanceForTurn(item);
     // The sender line must match what entriesToAgentMessages renders for
     // this entry on reload — same gate (shared owner, non-signal), same
     // render function — or the hot and cold transcripts diverge.
@@ -3907,10 +3908,10 @@ export class Thread {
         await this.runProactiveCompaction();
       }
     } finally {
-      this.restoreSlackOverheardGuidanceAfterTurn(slackOverheardPrompt);
-      this.restoreColdHintAfterTurn(coldHintPrompt);
+      this.restoreSlackOverheardGuidanceAfterTurn();
+      this.restoreColdHintAfterTurn();
       this.restoreRoleAfterTurn(roleOverlay);
-      this.restoreRepoInstructionsAfterTurn(repoInstructionsPrompt);
+      this.restoreRepoInstructionsAfterTurn();
       // Restore the agent's baseline model so the next turn picks up any
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
@@ -3936,64 +3937,76 @@ export class Thread {
    * kick happened), so a "provisioning" hint would be false and the lazy
    * first-touch contract covers it silently instead.
    */
-  private applyColdHintForTurn(): string {
-    const preHintPrompt = this.agent.state.systemPrompt;
-    if (this.session.attachment.state === "ready") return preHintPrompt;
-    if (this.session.options.warmSandboxOnClaim === false && this.session.attachment.state !== "provisioning") {
-      return preHintPrompt;
-    }
-    const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
-    const hint = `\n\n[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`;
-    this.agent.state.systemPrompt = preHintPrompt + hint;
-    return preHintPrompt;
+  private appendSystemSection(name: string, content: string | null): void {
+    this.agent.state.messages = [...this.agent.state.messages, {
+      role: "system",
+      content: "",
+      sections: { [name]: content },
+      timestamp: Date.now(),
+    }];
   }
 
-  private restoreColdHintAfterTurn(preHintPrompt: string): void {
-    this.agent.state.systemPrompt = preHintPrompt;
+  private restoreResumeSystemPrompt(prompt: string): void {
+    if (this.agent.state.systemPrompt === prompt) return;
+    this.agent.state.messages = [...this.agent.state.messages, {
+      role: "system",
+      content: prompt,
+      timestamp: Date.now(),
+    }];
+  }
+
+  private replaceAgentMessages(messages: AgentMessage[]): void {
+    const system = getCurrentSystemMessage(this.agent.state.messages);
+    this.agent.state.messages = system ? [system, ...messages] : messages;
+  }
+
+  private applyColdHintForTurn(): void {
+    if (this.session.attachment.state === "ready") return;
+    if (this.session.options.warmSandboxOnClaim === false && this.session.attachment.state !== "provisioning") {
+      return;
+    }
+    const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
+    this.appendSystemSection(
+      "valet-cold-sandbox",
+      `[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`,
+    );
+  }
+
+  private restoreColdHintAfterTurn(): void {
+    this.appendSystemSection("valet-cold-sandbox", null);
   }
 
   /** Add the shared Slack guidance only to manual-delivery message signals. */
-  private applySlackOverheardGuidanceForTurn(item: QueueItem): string {
-    const preGuidancePrompt = this.agent.state.systemPrompt;
+  private applySlackOverheardGuidanceForTurn(item: QueueItem): void {
     if (!isSignalContent(item.content) ||
         !item.content.signalType.endsWith(".message") ||
         item.content.origin?.channelType !== "slack" ||
         item.content.origin.reply !== "manual") {
-      return preGuidancePrompt;
+      return;
     }
-    this.agent.state.systemPrompt = preGuidancePrompt
-      ? `${preGuidancePrompt}\n\n${SLACK_OVERHEARD_REPLY_GUIDANCE}`
-      : SLACK_OVERHEARD_REPLY_GUIDANCE;
-    return preGuidancePrompt;
+    this.appendSystemSection("valet-slack-overheard", SLACK_OVERHEARD_REPLY_GUIDANCE);
   }
 
-  private restoreSlackOverheardGuidanceAfterTurn(preGuidancePrompt: string): void {
-    this.agent.state.systemPrompt = preGuidancePrompt;
+  private restoreSlackOverheardGuidanceAfterTurn(): void {
+    this.appendSystemSection("valet-slack-overheard", null);
   }
 
   /**
    * Repo AGENTS.md instructions overlay (agents-md spec, decision 4).
    * Snapshots `session.repoInstructions()` exactly ONCE, here at turn start,
-   * and appends a turn-local fragment — a `refreshRepoInstructions()` that
-   * lands mid-turn replaces the session's reference but cannot change the
-   * prompt this turn already carries; the new value takes effect on the next
-   * turn's overlay. Returns the pre-overlay prompt for the unconditional
-   * restore in the turn's finally.
+   * and appends a turn-local fragment. A mid-turn `refreshRepoInstructions()`
+   * applies to the next turn.
    */
-  private applyRepoInstructionsForTurn(): string {
-    const preOverlayPrompt = this.agent.state.systemPrompt;
+  private applyRepoInstructionsForTurn(): void {
     const instructions = this.session.repoInstructions();
-    if (!instructions) return preOverlayPrompt;
+    if (!instructions) return;
     const fragment = buildRepoInstructionsFragment(instructions);
-    if (!fragment) return preOverlayPrompt;
-    this.agent.state.systemPrompt = preOverlayPrompt
-      ? `${preOverlayPrompt}\n\n${fragment}`
-      : fragment;
-    return preOverlayPrompt;
+    if (!fragment) return;
+    this.appendSystemSection("valet-repo-instructions", fragment);
   }
 
-  private restoreRepoInstructionsAfterTurn(preOverlayPrompt: string): void {
-    this.agent.state.systemPrompt = preOverlayPrompt;
+  private restoreRepoInstructionsAfterTurn(): void {
+    this.appendSystemSection("valet-repo-instructions", null);
   }
 
   private applyRoleForTurn(item: QueueItem): RoleOverlay {
@@ -4008,11 +4021,7 @@ export class Thread {
       this.emitError("role_not_found", `role "${roleName}" not registered on this session`);
       return { restore: false };
     }
-    const baseSystemPrompt = this.agent.state.systemPrompt;
-    const overlaid = baseSystemPrompt
-      ? `${baseSystemPrompt}\n\n${role.content}`
-      : role.content;
-    this.agent.state.systemPrompt = overlaid;
+    this.appendSystemSection("valet-role", role.content);
 
     let priorModel: PiModel | undefined;
     if (role.model) {
@@ -4037,7 +4046,6 @@ export class Thread {
 
     return {
       restore: true,
-      systemPrompt: baseSystemPrompt,
       model: priorModel,
     };
   }
@@ -4045,9 +4053,7 @@ export class Thread {
   private restoreRoleAfterTurn(overlay: RoleOverlay): void {
     this.roleModelSpec = undefined;
     if (!overlay.restore) return;
-    if (overlay.systemPrompt !== undefined) {
-      this.agent.state.systemPrompt = overlay.systemPrompt;
-    }
+    this.appendSystemSection("valet-role", null);
     if (overlay.model !== undefined) {
       this.agent.state.model = overlay.model;
     }
@@ -4722,7 +4728,7 @@ export class Thread {
       const updatedSnapshot = await this.transcriptSnapshot();
       const updatedEntries = updatedSnapshot.entries;
       this.replaceActiveSkillInvocations(updatedEntries);
-      this.agent.state.messages = entriesToAgentMessages(
+      this.replaceAgentMessages(entriesToAgentMessages(
         updatedEntries,
         {
           api: effectiveModel.api,
@@ -4734,7 +4740,7 @@ export class Thread {
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
         },
-      );
+      ));
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
@@ -4825,10 +4831,28 @@ export class Thread {
       // upstream knob forever.
       streamFn: async (model, context, options) => {
         await this.persistSkillContextAttributions();
-        return streamSimple(model, {
-          ...context,
-          systemPrompt: this.modelSystemPrompt(context.systemPrompt, model),
-        }, {
+        const runtimeModelContext = this.modelSystemPrompt(undefined, model);
+        const currentSystem = getCurrentSystemMessage(this.agent.state.messages);
+        const transcript = {
+          messages: [
+            currentSystem
+              ? {
+                  ...currentSystem,
+                  sections: {
+                    ...currentSystem.sections,
+                    "valet-runtime-model": runtimeModelContext,
+                  },
+                }
+              : {
+                  role: "system" as const,
+                  content: "",
+                  sections: { "valet-runtime-model": runtimeModelContext },
+                  timestamp: Date.now(),
+                },
+            ...context.messages.filter((message) => message.role !== "system"),
+          ],
+        };
+        return streamSimple(model, transcript, {
           ...options,
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
@@ -4877,9 +4901,9 @@ export class Thread {
       // here is what makes "takes effect on the next LLM call" true.
       prepareNextTurn: () => ({ model: this.agent.state.model }),
       // A stale fenced publication means a successor owns this submission.
-      // abort() is best-effort while a tool is executing, so also stop at the
+      // abort() is best-effort while a tool is executing, so also end at the
       // turn boundary before the loop can start another provider request.
-      shouldStopAfterTurn: () => this.staleFenceDetected,
+      finishTurn: () => this.staleFenceDetected ? { action: "end" } : undefined,
       // Per-turn key delivery: pi-agent-core calls this with the turn's provider
       // and stamps the result onto StreamOptions.apiKey (undefined → env fallback).
       ...(hasResolver ? { getApiKey: (_provider: string) => this.turnApiKey } : {}),
@@ -5844,7 +5868,6 @@ function renderToolResult(result: unknown): string {
 
 interface RoleOverlay {
   restore: boolean;
-  systemPrompt?: string;
   model?: PiModel;
 }
 
@@ -6147,7 +6170,7 @@ export function entriesToAgentMessages(
             type: "toolCall",
             id: p.callId,
             name: p.toolName,
-            arguments: (p.args as Record<string, unknown>) ?? {},
+            arguments: (p.args as JsonObject) ?? {},
           });
         }
       }

@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 /**
  * Model switching: layered resolution + the `switch_model` builtin tool.
  *
@@ -726,7 +727,7 @@ describe("engine: active submission model state", () => {
     let rolePrompt: string | undefined;
     roleFaux.setResponses([
       (context) => {
-        rolePrompt = context.systemPrompt;
+        rolePrompt = getCurrentSystemPrompt(context.messages);
         return fauxAssistantMessage("review completed");
       },
     ]);
@@ -735,7 +736,7 @@ describe("engine: active submission model state", () => {
       | undefined;
     baseFaux.setResponses([
       (context, _options, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: getCurrentSystemPrompt(context.messages) };
         return fauxAssistantMessage("plain follow-up completed");
       },
     ]);
@@ -835,7 +836,7 @@ Role-only instructions.
       | undefined;
     baseFaux.setResponses([
       (context, _options, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: getCurrentSystemPrompt(context.messages) };
         return fauxAssistantMessage("plain follow-up completed");
       },
     ]);
@@ -922,7 +923,7 @@ Role-only instructions.
       | undefined;
     baseFaux.setResponses([
       (ctx, _opts, _state, model) => {
-        nextRun = { provider: model.provider, systemPrompt: ctx.systemPrompt };
+        nextRun = { provider: model.provider, systemPrompt: getCurrentSystemPrompt(ctx.messages) };
         return fauxAssistantMessage("next prompt completed");
       },
     ]);

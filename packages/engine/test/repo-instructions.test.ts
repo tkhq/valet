@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import type { Context } from "@earendil-works/pi-ai/compat";
@@ -172,7 +173,7 @@ describe("repo instructions turn overlay", () => {
     const faux = registerFauxProvider({ provider: "agents1" });
     const capturedPrompts: (string | undefined)[] = [];
     const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+      capturedPrompts.push(getCurrentSystemPrompt(context.messages));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("first (cold)"), captureStep("second (warm)")]);
@@ -225,7 +226,7 @@ describe("repo instructions turn overlay", () => {
     const faux = registerFauxProvider({ provider: "agents2" });
     const capturedPrompts: (string | undefined)[] = [];
     const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+      capturedPrompts.push(getCurrentSystemPrompt(context.messages));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([
@@ -287,7 +288,7 @@ describe("repo instructions turn overlay", () => {
     const faux = registerFauxProvider({ provider: "agents3" });
     const capturedPrompts: (string | undefined)[] = [];
     const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+      capturedPrompts.push(getCurrentSystemPrompt(context.messages));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("t1"), captureStep("t2")]);
