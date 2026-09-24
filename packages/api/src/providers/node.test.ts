@@ -17,8 +17,6 @@ import {
   resolvePgPoolMax,
   resolvePgPoolConnectTimeoutMs,
 } from "./node.js";
-import { Type } from "typebox";
-import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { users } from "../schema/index.js";
 
 let tmpDir: string | undefined;
@@ -125,21 +123,5 @@ describe("resolvePgPoolConnectTimeoutMs", () => {
 
   it("treats a non-numeric value as disabled", () => {
     expect(resolvePgPoolConnectTimeoutMs({ VALET_PG_POOL_CONNECT_TIMEOUT_MS: "bogus" })).toBe(0);
-  });
-});
-
-describe("linked Drive provider wiring", () => {
-  it("wraps the same Google action in both dispatch registries without mutating the source plugin", async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "valet-linked-drive-test-"));
-    const original: PluginAction = { id: "docs.read_document", name: "read", description: "read", riskLevel: "low", parameters: Type.Object({ documentId: Type.String() }), execute: async () => ({ success: true }) };
-    const plugin: ValetPlugin = { name: "google-workspace", version: "1", actions: [{ service: "google_workspace", actions: [original] }] };
-    const providers = await buildNodeProviders({ pgDataDir: join(tmpDir, "pg"), blobsRoot: join(tmpDir, "blobs"), encryptionKey: "test-key", plugins: [plugin] });
-    expect(providers.linkedDriveScope).toBeDefined();
-    const catalogAction = providers.plugins[0]?.actions?.[0]?.actions[0];
-    const workflowAction = providers.actionPluginByService.get("google_workspace")?.actionPlugin.actions[0];
-    expect(catalogAction).toBeDefined();
-    expect(catalogAction).toBe(workflowAction);
-    expect(catalogAction?.execute).not.toBe(original.execute);
-    expect(plugin.actions?.[0]?.actions[0]).toBe(original);
   });
 });

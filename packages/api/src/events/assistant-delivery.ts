@@ -17,7 +17,6 @@ import type { EngineHost } from "../engine/host.js";
 import type { Session } from "@valet/engine";
 import { ensureAssistantSession, ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
 import type { AssistantRow } from "../schema/index.js";
-import { bindLinkedDriveThread } from "../services/google-workspace-link-scope.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
 /**
@@ -160,11 +159,6 @@ async function deliverToAssistantThreadInner(
     orgId: data.orgId,
     workspace: data.workspace,
   }, args.actorUserId);
-  if (args.signal.origin?.channelType === "slack" && args.signal.origin.threadKey === args.threadKey) {
-    await bindLinkedDriveThread(deps.db, {
-      orgId: data.orgId, owner: data.owner, sessionId: session.id, threadId: thread.id, threadKey: args.threadKey,
-    });
-  }
   let signal = args.signal;
   // On the assistant's FIRST turn in a channel thread, prepend the thread's
   // earlier messages so it participates in the group conversation with full
