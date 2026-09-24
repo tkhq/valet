@@ -146,12 +146,6 @@ export interface ActionInvokerOpts {
    * through raw, byte-identical to before this task.
    */
   onePassword?: OnePasswordService;
-  /** Runs after durable dedup selects the canonical invocation result. */
-  onStoredResult?: (args: {
-    request: WorkflowInvokeActionRequest;
-    context: ActionInvocationContext;
-    result: WorkflowInvokeActionResult;
-  }) => Promise<void>;
 }
 
 export type ActionInvoker = (
@@ -178,10 +172,7 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
 
   return async (req, ctx) => {
     const existing = await selectStoredResult(opts.db, req.invocationId);
-    if (existing) {
-      await opts.onStoredResult?.({ request: req, context: ctx, result: existing });
-      return existing;
-    }
+    if (existing) return existing;
 
     const result = await computeResult(opts, req, ctx);
 
@@ -205,7 +196,6 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
     if (!stored) {
       throw new Error(`action-invoker: invocation ${req.invocationId} vanished immediately after insert`);
     }
-    await opts.onStoredResult?.({ request: req, context: ctx, result: stored });
     return stored;
   };
 }
