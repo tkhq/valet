@@ -128,6 +128,7 @@ function teamIdOf(update: unknown): string | undefined {
 
 interface FanOutDeps {
   botUserId?: string;
+  botId?: string;
   db: AppDb;
   plugins: ValetPlugin[];
   transport: ChannelTransport;
@@ -159,7 +160,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
   // rejects event types outside its family, so the first match wins.
   try {
     for (const def of deps.triggerDefs) {
-      const verified = await def.verify({ headers: deps.headers, rawBody: deps.rawBody }, { webhookSecret: deps.webhookSecret });
+      const verified = await def.verify({ headers: deps.headers, rawBody: deps.rawBody }, { webhookSecret: deps.webhookSecret, ...(deps.botId ? { botId: deps.botId } : {}), ...(deps.botUserId ? { botUserId: deps.botUserId } : {}) });
       if (!verified) continue;
       await ingestEvent(
         { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest },
@@ -306,6 +307,7 @@ slackWebhookRouter.post("/webhook", async (c) => {
     channelHost,
     engineHost,
     botUserId: typeof credential?.metadata?.botUserId === "string" ? credential.metadata.botUserId : undefined,
+    botId: typeof credential?.metadata?.botId === "string" ? credential.metadata.botId : undefined,
     triggerDefs: slackTriggerDefs(plugins),
     onIngest: eventDispatcher.nudge,
     orgId,

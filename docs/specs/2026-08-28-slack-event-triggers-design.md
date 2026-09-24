@@ -334,3 +334,11 @@ a separate one for System A if in-app command routing is wanted.
 - Multi-org workspace resolution (the deployment resolves one org, per
   `lib/org.ts`; the webhook route notes the single lookup a multi-org deployment
   would add).
+
+## Third-party bot messages
+
+Valet keeps `slack.message` for human messages. It adds `slack.bot_message` for signed Slack `message` events with subtype `bot_message`. The trigger requires a nonempty canonical bot ID. It uses `bot_id`, or `bot_profile.id` when Slack omits `bot_id`. It does not use a display name.
+
+The connect check stores the installed bot ID as credential metadata. The bot trigger rejects that ID and the installed bot user ID. This rule is independent of subscription filters. A legacy credential without the bot ID rejects bot messages. An administrator must reconnect Slack in Settings to refresh the credential metadata. Human messages continue to work.
+
+Before the catalog exposes this key, startup expands existing `slack.*` subscription rows to the prior explicit Slack keys. Those rows do not begin to match bot messages. The Slack manifest stays unchanged because both classifiers use the existing raw `message` subscription.

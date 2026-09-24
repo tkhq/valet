@@ -26,7 +26,16 @@ function rec(v: unknown): Record<string, unknown> | undefined {
 
 /** "slack.message" for plain message events; "slack.{type}" otherwise. */
 function keyFor(eventType: string): string {
-  return eventType === "message" ? "slack.message" : `slack.${eventType}`;
+  if (eventType === "message") return "slack.message";
+  if (eventType === "bot_message") return "slack.bot_message";
+  return `slack.${eventType}`;
+}
+
+/** Slack can put a bot identity in either field. Do not use display names. */
+export function canonicalBotId(event: Record<string, unknown>): string | undefined {
+  const direct = str(event.bot_id);
+  if (direct) return direct;
+  return str(rec(event.bot_profile)?.id);
 }
 
 /** Slack seconds.decimal ("1773177297.231269") → ISO; wall clock fallback. */
@@ -38,56 +47,40 @@ function tsToIso(ts: string | undefined): string {
   return new Date().toISOString();
 }
 
-function makeVerify(eventTypes: readonly string[]): TriggerDef["verify"] {
+function makeVerify(eventTypes: readonly string[], botMessages = false): TriggerDef["verify"] {
   return async (req, secrets) => {
     const secret = secrets.webhookSecret;
     if (!secret) return null;
-
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) headers[key.toLowerCase()] = value;
     const bodyText = new TextDecoder().decode(req.rawBody);
     if (!(await verifySlackSignature(headers, bodyText, secret))) return null;
-
     let body: Record<string, unknown> | undefined;
-    try {
-      body = rec(JSON.parse(bodyText));
-    } catch {
-      return null;
-    }
+    try { body = rec(JSON.parse(bodyText)); } catch { return null; }
     if (!body || body.type !== "event_callback") return null;
-
-    const event = rec(body.event);
-    const eventType = str(event?.type);
-    if (!event || eventType === undefined || !eventTypes.includes(eventType)) return null;
-
-    // Suppress the app's own posts (bot_id) for both message and app_mention.
-    // Without this drop, a workflow subscribed to slack.message or
-    // slack.app_mention that also posts to Slack self-triggers into an
-    // unbounded loop: its own channel post re-fires slack.message, and a post
-    // whose text @-mentions the bot re-fires slack.app_mention. A Slack bot
-    // post carries bot_id on both event types, so the one guard closes both
-    // loops.
-    if (eventType === "message" || eventType === "app_mention") {
-      if (str(event.bot_id) !== undefined) return null;
+    const rawEvent = rec(body.event);
+    const rawType = str(rawEvent?.type);
+    if (!rawEvent || rawType === undefined || !eventTypes.includes(rawType)) return null;
+    const subtype = str(rawEvent.subtype);
+    const botId = canonicalBotId(rawEvent);
+    if (botMessages) {
+      // A missing installation identity fails closed. Reconnect Slack to refresh it.
+      if (rawType !== "message" || subtype !== "bot_message" || !botId || !secrets.botId) return null;
+      if (botId === secrets.botId) return null;
+      if (secrets.botUserId && str(rawEvent.user) === secrets.botUserId) return null;
+    } else {
+      // `slack.message` is human-only. This explicit subtype check keeps classifiers disjoint.
+      if (rawType === "message" && (subtype === "bot_message" || botId)) return null;
+      if (rawType === "app_mention" && botId) return null;
+      if (rawType === "message" && subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
     }
-
-    // Message events also drop the noise subtypes the channel transport drops
-    // (edits, deletes, join/leave/topic system messages). Using the shared
-    // SKIP_SUBTYPES — rather than "everything except file_share" — keeps
-    // fully-populated human events like thread_broadcast and me_message, which
-    // carry a real user/text/channel.
-    if (eventType === "message") {
-      const subtype = str(event.subtype);
-      if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
-    }
-
     const deliveryId = str(body.event_id);
     if (!deliveryId) return null;
-
-    return { eventType, deliveryId, payload: event };
+    // Make the canonical identity available to the catalog filter when Slack uses bot_profile.
+    const payload = botMessages && rawEvent.bot_id !== botId ? { ...rawEvent, bot_id: botId } : rawEvent;
+    return { eventType: botMessages ? "bot_message" : rawType, deliveryId, payload };
   };
 }
-
 function toEvent(event: VerifiedEvent): NormalizedEvent {
   const p = rec(event.payload) ?? {};
   const type = event.eventType;
@@ -240,6 +233,19 @@ const triggerSpecs: TriggerSpec[] = [
     ],
   },
   {
+    id: "slack.bot_message",
+    eventTypes: ["message"],
+    description: "Third-party Slack bot or app message posted in a conversation the app can see",
+    catalog: [{ key: "slack.bot_message", description: "When a third-party Slack bot or app posts a message", filters: [
+      { field: "channel", path: "channel", description: "Slack channel id", options: { source: "slack.channels" } },
+      { field: "channel_type", path: "channel_type", description: "Conversation type" },
+      { field: "bot_id", path: "bot_id", description: "Slack bot id" },
+      { field: "app_id", path: "app_id", description: "Slack app id" },
+      { field: "user", path: "user", description: "Slack user id when Slack supplies it", options: { source: "slack.users" } },
+      { field: "text", path: "text", description: "Message text" },
+    ] }],
+  },
+  {
     id: "slack.reaction",
     eventTypes: ["reaction_added", "reaction_removed"],
     description: "Slack emoji reactions added or removed",
@@ -372,7 +378,7 @@ export const slackTriggerDefs: TriggerDef[] = triggerSpecs.map((spec) => ({
   id: spec.id,
   service: "slack",
   description: spec.description,
-  verify: makeVerify(spec.eventTypes),
+  verify: makeVerify(spec.eventTypes, spec.id === "slack.bot_message"),
   toEvent,
   catalog: spec.catalog,
 }));
