@@ -169,9 +169,13 @@ interface FanOutDeps {
  * neither consumer may block the other.
  */
 async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<void> {
+  let consumedByChannel = false;
   try {
     const event = deps.transport.parseUpdate(raw);
-    if (event) await deps.channelHost.handleUpdate("slack", event);
+    if (event) {
+      consumedByChannel = true;
+      await deps.channelHost.handleUpdate("slack", event);
+    }
   } catch (err) {
     console.error("[slack-webhook] channel consumer failed", err);
   }
@@ -191,7 +195,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
       matchedTrigger = true;
       break;
     }
-    if (!matchedTrigger) await logUnmatchedInteraction(deps.db, deps.orgId, raw);
+    if (!matchedTrigger && !consumedByChannel) await logUnmatchedInteraction(deps.db, deps.orgId, raw);
   } catch (err) {
     console.error("[slack-webhook] event consumer failed", err);
   }
