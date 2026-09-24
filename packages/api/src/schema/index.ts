@@ -713,7 +713,7 @@ export const eventDropLog = pgTable(
     detail: text("detail").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("event_drop_log_org").on(t.orgId)],
+  (t) => [index("event_drop_log_org").on(t.orgId), index("event_drop_log_page").on(t.orgId, t.createdAt, t.id)],
 );
 
 // ─── Channel bindings + identity links ──────────────────────────────────────

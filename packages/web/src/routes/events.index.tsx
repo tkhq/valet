@@ -28,12 +28,17 @@ import { textParam } from "~/lib/search-params";
  */
 interface EventsSearch {
   scope?: FeedScope;
+  problemsQ?: string;
+  problemsCursor?: string;
 }
 
 /** Only "all" is written to the URL. An absent or hand-edited value reads
  * as the default workspace scope. */
 function readEventsSearch(raw: unknown): EventsSearch {
-  return textParam(raw, "scope") === "all" ? { scope: "all" } : {};
+  const scope = textParam(raw, "scope") === "all" ? "all" : undefined;
+  const problemsQ = textParam(raw, "problemsQ");
+  const problemsCursor = textParam(raw, "problemsCursor");
+  return { ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}) };
 }
 
 export const Route = createFileRoute("/events/")({
@@ -88,7 +93,14 @@ export function EventsPage() {
             />
           )}
           {tab === "subscriptions" && <SubscriptionsPanel />}
-          {tab === "problems" && <DropsPanel />}
+          {tab === "problems" && (
+            <DropsPanel
+              query={search.problemsQ}
+              cursor={search.problemsCursor}
+              onQueryChange={(problemsQ) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } })}
+              onCursorChange={(problemsCursor) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}) } })}
+            />
+          )}
         </div>
       </div>
     </div>

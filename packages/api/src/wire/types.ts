@@ -4733,6 +4733,8 @@ export interface EventDropWire {
  * "arrived but matched nothing". */
 export interface ListEventDropsResponse {
   drops: EventDropWire[];
+  /** Opaque cursor for the next older page, or null at the end. */
+  nextCursor: string | null;
   lastEventAt: number | null;
 }
 

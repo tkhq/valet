@@ -18,7 +18,7 @@ import { OnePasswordAuthError } from "../services/onepassword.js";
 import type { StoredCredential } from "@valet/engine";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, gte, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, exists, gte, ilike, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -32,6 +32,7 @@ import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { armableDefinitionRow } from "../workflows/service.js";
 import { checkAssistantForOwner } from "../assistants/service.js";
+import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
@@ -401,21 +402,48 @@ eventsRouter.get("/events", async (c) => {
 eventsRouter.get("/events/drops", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
-  const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
-  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, FEED_MAX_LIMIT) : FEED_DEFAULT_LIMIT;
+  const limit = readLimit(c.req.query("limit"), FEED_DEFAULT_LIMIT, FEED_MAX_LIMIT);
+  if (limit === undefined) return c.json({ error: "limit must be a whole number of 1 or more" }, 400);
+  const query = c.req.query("q")?.trim() ?? "";
+  if (query.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
+  const rawCursor = c.req.query("cursor");
+  const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
+  const cursor = decoded && typeof decoded.orgId === "string" && decoded.orgId === user.orgId &&
+    typeof decoded.q === "string" && decoded.q === query &&
+    typeof decoded.createdAt === "number" && Number.isFinite(decoded.createdAt) &&
+    typeof decoded.id === "string"
+    ? { createdAt: decoded.createdAt, id: decoded.id }
+    : undefined;
+  if (rawCursor !== undefined && !cursor) return c.json({ error: "cursor is invalid" }, 400);
 
   const admin = await isOrgAdminUser(c);
-  const dropConditions = [eq(eventDropLog.orgId, user.orgId)];
+  const dropConditions: SQL[] = [eq(eventDropLog.orgId, user.orgId)];
   // Slack interaction diagnostics identify form activity. They are the one
   // new sensitive diagnostic class, so members keep the established drop feed
   // without seeing those rows.
   if (!admin) dropConditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"));
+  if (query) {
+    const search = or(ilike(eventDropLog.reason, `%${query}%`), ilike(eventDropLog.detail, `%${query}%`));
+    if (search) dropConditions.push(search);
+  }
+  if (cursor) {
+    const after = or(
+      lt(eventDropLog.createdAt, cursor.createdAt),
+      and(eq(eventDropLog.createdAt, cursor.createdAt), lt(eventDropLog.id, cursor.id)),
+    );
+    if (after) dropConditions.push(after);
+  }
   const rows = await db
     .select()
     .from(eventDropLog)
     .where(and(...dropConditions))
-    .orderBy(desc(eventDropLog.createdAt))
-    .limit(limit);
+    .orderBy(desc(eventDropLog.createdAt), desc(eventDropLog.id))
+    .limit(limit + 1);
+  const page = rows.slice(0, limit);
+  const last = page.at(-1);
+  const nextCursor = rows.length > limit && last
+    ? encodePageCursor({ orgId: user.orgId, q: query, createdAt: last.createdAt, id: last.id })
+    : null;
 
   // "Last event received" = the most recent time ANY event reached ingest,
   // matched (an events row) or not (a drop-log row). rows[0] already holds the
@@ -432,7 +460,8 @@ eventsRouter.get("/events/drops", async (c) => {
   const lastEventAt = candidates.length > 0 ? Math.max(...candidates) : null;
 
   const resp: ListEventDropsResponse = {
-    drops: rows.map((r) => ({ id: r.id, reason: r.reason, detail: r.detail, createdAt: r.createdAt })),
+    drops: page.map((r) => ({ id: r.id, reason: r.reason, detail: r.detail, createdAt: r.createdAt })),
+    nextCursor,
     lastEventAt,
   };
   return c.json(resp);

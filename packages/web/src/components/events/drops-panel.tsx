@@ -8,6 +8,8 @@
  * action in its detail.
  */
 import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Button } from "~/components/primitives";
+import { SearchInput } from "~/components/search-input";
 import { useEventDrops } from "~/api/events";
 import { relativeTime } from "~/lib/relative-time";
 
@@ -25,8 +27,13 @@ const REASON_LABEL: Record<string, string> = {
   unlinked_sender: "Unlinked sender",
 };
 
-export function DropsPanel() {
-  const dropsQ = useEventDrops();
+export function DropsPanel({
+  query = "",
+  cursor,
+  onQueryChange,
+  onCursorChange,
+}: { query?: string; cursor?: string; onQueryChange?: (query: string) => void; onCursorChange?: (cursor?: string) => void }) {
+  const dropsQ = useEventDrops({ q: query, cursor });
 
   return (
     <div className="space-y-4">
@@ -43,10 +50,19 @@ export function DropsPanel() {
         </p>
       )}
 
+      <SearchInput
+        value={query}
+        onSettled={(next) => onQueryChange?.(next.trim())}
+        placeholder="Search problems"
+        aria-label="Search problems"
+      />
+
       {dropsQ.isPending && <LoadingRow label="Loading problems…" />}
       {dropsQ.error != null && <ErrorRow>Failed to load. Press refresh to try again.</ErrorRow>}
       {dropsQ.data && dropsQ.data.drops.length === 0 && (
-        <EmptyRow>No problems in the recent window. Every event that arrived was handled.</EmptyRow>
+        <EmptyRow>
+          {query ? "No problems match this search." : "No problems in the recent window. Every event that arrived was handled."}
+        </EmptyRow>
       )}
 
       {dropsQ.data && dropsQ.data.drops.length > 0 && (
@@ -63,6 +79,17 @@ export function DropsPanel() {
             </li>
           ))}
         </ul>
+      )}
+
+      {dropsQ.data && (cursor || dropsQ.data.nextCursor) && (
+        <nav className="flex gap-2" aria-label="Problems pages">
+          <Button type="button" variant="secondary" disabled={!cursor} onClick={() => onCursorChange?.()}>
+            Previous
+          </Button>
+          <Button type="button" variant="secondary" disabled={!dropsQ.data.nextCursor} onClick={() => onCursorChange?.(dropsQ.data.nextCursor ?? undefined)}>
+            Next
+          </Button>
+        </nav>
       )}
     </div>
   );

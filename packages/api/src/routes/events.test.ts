@@ -173,6 +173,30 @@ describe("GET /api/events/drops", () => {
     expect(body.lastEventAt).toBe(now - 500);
   });
 
+  it("searches and pages drops without showing members Slack diagnostics", async () => {
+    const a = await boot();
+    await a.providers.db.insert(eventDropLog).values([
+      { id: "d3", orgId: "local-org", reason: "bad_signature", detail: "Webhook signature failed", createdAt: 3_000 },
+      { id: "d2", orgId: "local-org", reason: "no_subscription_match", detail: "No rule for deploy", createdAt: 2_000 },
+      { id: "d1", orgId: "local-org", reason: "bad_signature", detail: "Older signature failure", createdAt: 1_000 },
+      { id: "hidden", orgId: "local-org", reason: "slack_interaction_unmatched", detail: "Slack deploy action", createdAt: 4_000 },
+    ]);
+    const member = { "x-valet-test-user-id": "test-member" };
+    const first = await fetch(a.baseUrl + "/api/events/drops?q=signature&limit=1", { headers: member });
+    const firstBody = (await first.json()) as ListEventDropsResponse;
+    expect(firstBody.drops.map((drop) => drop.id)).toEqual(["d3"]);
+    expect(firstBody.nextCursor).toBeTruthy();
+    const second = await fetch(a.baseUrl + "/api/events/drops?q=signature&cursor=" + encodeURIComponent(firstBody.nextCursor!), { headers: member });
+    expect(((await second.json()) as ListEventDropsResponse).drops.map((drop) => drop.id)).toEqual(["d1"]);
+    const hidden = await fetch(a.baseUrl + "/api/events/drops?q=deploy", { headers: member });
+    expect(((await hidden.json()) as ListEventDropsResponse).drops.map((drop) => drop.id)).toEqual(["d2"]);
+  });
+
+  it.each(["?limit=0", "?limit=1.5", "?q=" + "x".repeat(201), "?cursor=broken"])('rejects invalid drop query %s', async (query) => {
+    const a = await boot();
+    expect((await fetch(a.baseUrl + "/api/events/drops" + query)).status).toBe(400);
+  });
+
   it("shows Slack interaction diagnostics only to organization admins", async () => {
     const a = await boot();
     const now = Date.now();
