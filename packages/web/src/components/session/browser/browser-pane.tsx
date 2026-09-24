@@ -60,10 +60,9 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
   );
   const leaseExpired = Boolean(lease && lease.expiresAt <= Date.now());
   const canControl = Boolean(
-    ownsLease &&
-    !leaseExpired &&
-    lease?.state === "active" &&
-    runtime?.state === "ready",
+    data?.settings.enabled &&
+    runtime?.state === "ready" &&
+    (!lease || (ownsLease && !leaseExpired && lease.state === "active")),
   );
   const changing =
     actions.control.isPending ||
@@ -98,6 +97,9 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
     setError(null);
   }, [sessionId, runtime?.runtimeId]);
   useEffect(() => {
+    setError(null);
+  }, [selected?.id, selected?.documentId, viewing.frame?.documentId]);
+  useEffect(() => {
     setCapture(null);
     setAnnotating(false);
   }, [sessionId]);
@@ -118,14 +120,14 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
     input: BrowserHumanInput,
     documentId = selected?.documentId,
   ): Promise<void> {
-    if (!canControl || !lease || !runtime || !selected || !documentId)
+    if (!canControl || !runtime || !selected || !documentId)
       throw new Error(
-        "Browser control is unavailable. Take control before interacting with the page.",
+        "Browser input is unavailable. Refresh browser status or resume shared use.",
       );
     await (
       input.type === "dialog" ? actions.dialog : actions.input
     ).mutateAsync({
-      leaseId: lease.id,
+      ...(lease ? { leaseId: lease.id } : {}),
       runtimeId: runtime.runtimeId,
       tabId: selected.id,
       documentId,
@@ -138,27 +140,15 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
   }
   function selectTab(tabId: string) {
     setChosenTab(tabId);
-    if (canControl && lease && runtime)
+    if (canControl && runtime)
       void run(() =>
         actions.tab.mutateAsync({
           action: "select",
-          leaseId: lease.id,
+          ...(lease ? { leaseId: lease.id } : {}),
           runtimeId: runtime.runtimeId,
           tabId,
         }),
       );
-  }
-  async function stopActions() {
-    const response =
-      ownsLease && lease && !leaseExpired
-        ? null
-        : await actions.control.mutateAsync({ action: "take" });
-    const held = response?.status?.control ?? lease;
-    if (!held)
-      throw new Error(
-        "Browser control could not be acquired. Refresh browser status before stopping actions.",
-      );
-    await actions.control.mutateAsync({ action: "pause", leaseId: held.id });
   }
 
   if (query.isPending)
@@ -258,7 +248,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                       void run(() =>
                         actions.control.mutateAsync({
                           action: "resume",
-                          leaseId: lease.id,
+                          ...(lease ? { leaseId: lease.id } : {}),
                         }),
                       )
                     }
@@ -279,7 +269,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                     )
                   }
                 >
-                  Release control
+                  {lease?.privateMode ? "End private sign-in" : "Resume agent"}
                 </Button>
               </>
             ) : (
@@ -294,7 +284,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                     )
                   }
                 >
-                  Take control
+                  Pause agent
                 </Button>
                 <Button
                   size="sm"
@@ -314,18 +304,6 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 </Button>
               </>
             )}
-            <Button
-              size="sm"
-              variant="danger"
-              disabled={
-                changing ||
-                Boolean(lease && !ownsLease) ||
-                lease?.state === "paused"
-              }
-              onClick={() => void run(stopActions)}
-            >
-              Stop browser actions
-            </Button>
           </>
         )}
         <Button
@@ -344,6 +322,20 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
           className="shrink-0 border-b border-line bg-danger-wash px-3 py-2 text-sm text-danger-600"
         >
           {error ?? data.error}
+          {error && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="ml-2"
+              onClick={() => {
+                setError(null);
+                viewing.retry();
+                void query.refetch();
+              }}
+            >
+              Retry browser input
+            </Button>
+          )}
         </div>
       ) : null}
       {lease ? (
@@ -357,18 +349,18 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
         >
           {ownsLease
             ? leaseExpired
-              ? "Your control lease expired. Renew control to continue, or release control to return the browser to the agent."
+              ? "Your exclusive control expired. Renew control to continue, or end it to resume shared use."
               : lease.privateMode
-                ? "Private sign-in is active. The agent cannot observe the page. Release control when you finish."
+                ? "Private sign-in is active. The agent cannot observe the page. End private sign-in when you finish."
                 : lease.state === "paused"
-                  ? "Browser actions are stopped. Resume control or release control when ready."
-                  : "You control this browser. Agent actions are paused until you release control."
-            : "Another user controls this browser. Wait for them to release control."}
+                  ? "Browser input is paused. Resume control to interact, or resume the agent for shared use."
+                  : "Agent browser actions are paused. You can still use the page. Resume the agent when ready."
+            : "Another user paused shared interaction. Wait for them to resume shared use."}
         </div>
       ) : runtime?.state === "ready" ? (
         <p className="shrink-0 border-b border-line px-3 py-2 text-xs text-muted">
-          Viewing the agent’s browser. Take control to interact. Private sign-in
-          pauses agent observations.
+          You and the agent can use this browser. Pause the agent when you need
+          exclusive control.
         </p>
       ) : null}
 
@@ -434,7 +426,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 >
                   {tab.title || tab.url || "New page"}
                 </button>
-                {canControl && lease ? (
+                {canControl ? (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -445,7 +437,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                         actions.tab.mutateAsync({
                           action: "close",
                           runtimeId: runtime.runtimeId,
-                          leaseId: lease.id,
+                          ...(lease ? { leaseId: lease.id } : {}),
                           tabId: tab.id,
                         }),
                       )
@@ -462,16 +454,15 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
               aria-label="New browser page"
               disabled={!canControl || changing}
               onClick={() => {
-                if (lease)
-                  void run(async () => {
-                    const response = await actions.tab.mutateAsync({
-                      action: "new",
-                      runtimeId: runtime.runtimeId,
-                      leaseId: lease.id,
-                      url: "about:blank",
-                    });
-                    setChosenTab(response.status?.selectedTabId ?? null);
+                void run(async () => {
+                  const response = await actions.tab.mutateAsync({
+                    action: "new",
+                    runtimeId: runtime.runtimeId,
+                    ...(lease ? { leaseId: lease.id } : {}),
+                    url: "about:blank",
                   });
+                  setChosenTab(response.status?.selectedTabId ?? null);
+                });
               }}
             >
               <Plus aria-hidden className="h-4 w-4" />
@@ -579,7 +570,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                   {selected
                     ? (runtime.capabilities.viewer?.reason ??
                       "This browser image does not support viewing. Use a supported browser image.")
-                    : "No browser pages are open. Take control and open a page."}
+                    : "No browser pages are open. Open a new page to continue."}
                 </p>
               )}
             </div>

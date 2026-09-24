@@ -30,7 +30,7 @@ export class BrowserInputQueue {
     if (this.pending.length > 64) {
       this.dispose();
       this.onError(
-        "Browser input is too slow. Release control and reconnect before continuing.",
+        "Browser input is too slow. Retry browser input before continuing.",
       );
       return;
     }
@@ -52,6 +52,7 @@ export class BrowserInputQueue {
         await this.send(input);
       }
     } catch (error) {
+      if (this.stopped) return;
       this.dispose();
       this.onError(
         error instanceof Error

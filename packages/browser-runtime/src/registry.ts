@@ -107,7 +107,7 @@ export function documentation() {
     'Export rendered content through the artifact broker:',
     'await tab.content.export("text");',
   ].join('\n');
-  return `Browser protocol 1.0. Persistent Node REPL bindings support top-level await. Lexical redeclarations fail; use the browser.reset tool to discard bindings. Observation methods emit by default; use {emit:false} to return without emitting. Use output.write for other reads. Locators are strict. References expire after navigation, replacement, or human control. Coordinates use viewport CSS pixels. evaluate reads an immutable snapshot and cannot access live page globals. Approval waits preserve the cell. Never repeat a failed mutation before checking its receipt and the page.\n\n${examples}\n\nAvailable methods:\n${Object.entries(
+  return `Browser protocol 1.0. Persistent Node REPL bindings support top-level await. Lexical redeclarations fail; use the browser.reset tool to discard bindings. Observation methods emit by default; use {emit:false} to return without emitting. Use output.write for other reads. Locators are strict. People and agents share normal input. References expire after navigation, replacement, or human input. An explicit pause blocks agent mutations until the user resumes shared use. Coordinates use viewport CSS pixels. evaluate reads an immutable snapshot and cannot access live page globals. Approval waits preserve the cell. Never repeat a failed mutation before checking its receipt and the page.\n\n${examples}\n\nAvailable methods:\n${Object.entries(
     METHOD_REGISTRY,
   )
     .map(([name, meta]) => `${name}: ${meta.operationClass}`)

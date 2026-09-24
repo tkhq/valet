@@ -1,5 +1,9 @@
 import { useState } from "react";
-import { useBrowserFrame, useBrowserStatus } from "~/api/browser";
+import {
+  useBrowserActions,
+  useBrowserFrame,
+  useBrowserStatus,
+} from "~/api/browser";
 import { Button, Spinner } from "~/components/primitives";
 
 export function BrowserPreviewFeed({
@@ -16,10 +20,17 @@ export function BrowserPreviewFeed({
   onChoose: (id: string) => void;
 }) {
   const query = useBrowserStatus(sessionId);
+  const actions = useBrowserActions(sessionId);
+  const [controlError, setControlError] = useState<string | null>(null);
   const [decodeError, setDecodeError] = useState(false);
   const data = query.data;
   const runtime = data?.status;
-  const privateMode = !!runtime?.control?.privateMode;
+  const control = runtime?.control;
+  const ownsControl =
+    !!control &&
+    control.actorId === data?.actorId &&
+    control.runtimeId === runtime?.runtimeId;
+  const privateMode = !!control?.privateMode;
   const selected =
     runtime?.tabs.find((tab) => tab.id === choice) ??
     runtime?.tabs.find(
@@ -95,9 +106,42 @@ export function BrowserPreviewFeed({
             ))}
           </select>
           <span className="shrink-0 text-[10px] text-muted">
-            {runtime?.control ? "Paused" : working ? "Working" : "Live"}
+            {control ? "Agent paused" : working ? "Working" : "Live"}
           </span>
         </div>
+      )}
+      {showMetadata && control && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2 text-xs">
+          <p className="flex-1 text-muted">
+            Agent browser actions are paused. The preview stays live.
+          </p>
+          {ownsControl && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={actions.control.isPending}
+              onClick={() => {
+                setControlError(null);
+                void actions.control
+                  .mutateAsync({ action: "release", leaseId: control.id })
+                  .catch((failure: unknown) => {
+                    setControlError(
+                      failure instanceof Error
+                        ? failure.message
+                        : "Could not resume the agent. Open the Browser view and retry.",
+                    );
+                  });
+              }}
+            >
+              Resume agent
+            </Button>
+          )}
+        </div>
+      )}
+      {controlError && !privateMode && (
+        <p role="alert" className="px-3 py-2 text-xs text-danger-600">
+          {controlError}
+        </p>
       )}
       <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto bg-ink-wash">
         {message ? (

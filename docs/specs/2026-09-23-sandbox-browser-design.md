@@ -8,7 +8,7 @@ Research: [harness observations and source notes](../research/2026-09-23-browser
 
 Valet gives each session a real Chromium browser inside its sandbox. Agents control
 that browser through a persistent JavaScript interface. People view the same tabs
-in Valet and can take control. The browser can reach development servers in its
+in Valet and can interact alongside the agent. The browser can reach development servers in its
 own sandbox and authorized external websites.
 
 The interface supports three observations: an accessibility snapshot, a DOM
@@ -561,9 +561,9 @@ website into the Valet origin. Remote page scripts run only inside Chromium.
 Escape tab titles, URLs, logs and page-supplied text in the Valet UI.
 
 The panel includes a tab strip, address bar, navigation buttons, current origin,
-runtime state, control owner, screenshot action, downloads and a Stop control.
-Show the state as connecting, ready, agent control, human control, paused for
-approval, sleeping, crashed or unavailable. Error states name the corrective
+runtime state, control owner, screenshot action, downloads and explicit pause controls.
+Show connecting, ready, shared input, explicit pause, private sign-in, sleeping,
+crashed, or unavailable states. Error states name the corrective
 action.
 
 The daemon owns CDP screencast sessions. A browser stream frame includes a sequence
@@ -578,26 +578,34 @@ streamed pages per runtime. Obtain a fresh frame after tab switch or viewport
 change. CDP screencast is experimental and must pass the pinned-version tests.
 Bounded screenshot polling is an explicit degraded mode if screencast fails.
 
-### Control lease
+### Shared input and explicit control
 
-One actor holds the session's mutation lease: an agent thread or an authorized
-person. Other threads can read stable snapshots and queue work. Browser-global
-changes and tab actions use the same scheduler; competing input never interleaves.
+People and agents share the browser by default. Navigation, typing, pointer input,
+and tab actions use the same ordered effect queue. No control lease is required
+for normal human input. Each actor shares page focus and state.
 
-A person selects Take control. The daemon stops admission of agent mutations,
-cancels queued input, waits for or classifies an in-flight action, and acknowledges
-the handoff. Only then does the panel send human input. Do not pretend an already
-submitted network request was rolled back.
+Human input carries the viewer identity, runtime ID, and current document ID.
+Reject input from unauthorized viewers, old runtimes, or old documents. An optional
+lease ID requires a valid matching actor, runtime, state, and expiry.
+Human effects invalidate affected agent observations. Observation generations
+prevent in-flight captures from restoring references that human input invalidated.
+Release held human keys and buttons before validating the next agent mutation.
 
-Human input carries a lease ID and runtime ID. Reject input from old sockets,
-expired leases, other viewers or old frames. Map canvas coordinates through the
-recorded viewport transform. Support keyboard composition and IME through an
-input overlay, not individual keycodes alone. Clipboard transfer is explicit.
+Pause agent and Private sign-in acquire explicit exclusive control. Acquisition
+reserves its owner before draining effects. Shared input cannot join during takeover.
+An authorized dialog response can unblock an effect while takeover drains it.
+The runtime must not admit agent dialog mutations during explicit control.
 
-Release control invalidates agent observations. The next agent action requires
-a new observation. If the viewer disconnects, pause control and expire its lease
-after a short reconnect window. Do not automatically resume agent mutations
-while the person's intended handoff state is unclear. Stop takes precedence.
+Resume agent releases exclusive control. Private sign-in requires an explicit exit.
+Expiry never silently restores agent access, including private observations.
+The preview stays live during a nonprivate pause and names agent actions as paused.
+
+Map canvas coordinates through the recorded viewport transform. Support keyboard
+composition and IME through an input overlay. Clipboard transfer is explicit.
+If a page race rejects input, discard pending input. A fresh document or explicit
+retry re-enables input without replaying the failed mutation.
+
+See [Shared browser interaction](2026-09-24-browser-shared-input-design.md).
 
 ### Authentication and privacy
 

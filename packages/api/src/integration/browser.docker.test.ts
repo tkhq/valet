@@ -280,24 +280,105 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
           action: "release",
           leaseId: lease.id,
         });
-        const control = await json<BrowserResponse>(`${path}/control`, "POST", {
-          action: "take",
-        });
-        await json(`${path}/input`, "POST", {
-          leaseId: control.status?.control?.id,
-          runtimeId: status.status.runtimeId,
-          tabId: tab.id,
-          documentId: frame.headers.get("x-browser-document-id"),
-          input: { type: "reload" },
-        });
+        // Normal human input must not leave an exclusive lease behind.
+        const sharedReload = await json<BrowserResponse>(
+          `${path}/input`,
+          "POST",
+          {
+            runtimeId: status.status.runtimeId,
+            tabId: tab.id,
+            documentId: frame.headers.get("x-browser-document-id"),
+            input: { type: "reload" },
+          },
+        );
         const annotations = await json<{ annotations: { stale: boolean }[] }>(
           `${path}/evidence/${artifact.id}/annotations`,
         );
         expect(annotations.annotations[0]?.stale).toBe(true);
-        await json(`${path}/control`, "POST", {
-          action: "release",
-          leaseId: control.status?.control?.id,
+        expect(sharedReload.ok).toBe(true);
+        expect(
+          (await json<SessionBrowserResponse>(path)).status?.control,
+        ).toBeNull();
+        const opened = await json<BrowserResponse>(`${path}/tab`, "POST", {
+          action: "new",
+          runtimeId: status.status.runtimeId,
+          url: "about:blank",
         });
+        expect(opened.ok).toBe(true);
+        const sharedTab = opened.status?.selectedTabId;
+        expect(sharedTab).toBeTruthy();
+        expect(sharedTab).not.toBe(tab.id);
+        const selected = await json<BrowserResponse>(`${path}/tab`, "POST", {
+          action: "select",
+          runtimeId: status.status.runtimeId,
+          tabId: tab.id,
+        });
+        expect(selected.ok).toBe(true);
+        const closed = await json<BrowserResponse>(`${path}/tab`, "POST", {
+          action: "close",
+          runtimeId: status.status.runtimeId,
+          tabId: sharedTab,
+        });
+        expect(closed.ok).toBe(true);
+        expect(closed.status?.control).toBeNull();
+        faux.setResponses([
+          fauxAssistantMessage(
+            [
+              fauxToolCall(
+                "browser__execute",
+                {
+                  title: "Continue after shared input",
+                  code: `var sharedTab = await browser.tabs.get(${JSON.stringify(tab.id)}); await sharedTab.getAXState(); await sharedTab.playwright.getByLabel("Name").fill("Shared"); await sharedTab.playwright.getByRole("button",{name:"Save",exact:true}).click(); output.write(await sharedTab.getAXState());`,
+                },
+                { id: "browser-shared-call" },
+              ),
+            ],
+            { stopReason: "toolUse" },
+          ),
+          fauxAssistantMessage("Shared browser input verified."),
+        ]);
+        await session.prompt(
+          "Continue using the page after my browser input.",
+          {
+            author: { id: "local-user", name: "Local Dev" },
+          },
+        );
+        await expect
+          .poll(
+            async () => {
+              const current = await json<ListMessagesResponse>(
+                `/api/sessions/${sessionId}/messages`,
+              );
+              return current.messages.some(
+                (message) =>
+                  message.role === "assistant" &&
+                  message.content.includes("Shared browser input verified."),
+              );
+            },
+            { timeout: 30_000, interval: 250 },
+          )
+          .toBe(true);
+        const sharedHistory = await json<ListMessagesResponse>(
+          `/api/sessions/${sessionId}/messages`,
+        );
+        const sharedResult = sharedHistory.messages
+          .flatMap((message) => message.parts)
+          .find(
+            (part) =>
+              part.kind === "tool_call" &&
+              part.callId === "browser-shared-call",
+          );
+        expect(
+          sharedResult?.kind === "tool_call" ? sharedResult.status : undefined,
+        ).toBe("completed");
+        expect(
+          sharedResult?.kind === "tool_call"
+            ? JSON.stringify(sharedResult.result)
+            : "",
+        ).toContain("Saved Shared");
+        expect(
+          (await json<SessionBrowserResponse>(path)).status?.control,
+        ).toBeNull();
         await json(`${path}/settings`, "PATCH", { enabled: false });
         const denied = await fetch(`${api.baseUrl}${path}/start`, {
           method: "POST",

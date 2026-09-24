@@ -42,10 +42,14 @@ const state = vi.hoisted(() => ({
   frameError: null as string | null,
   frame: vi.fn(),
   retry: vi.fn(),
+  control: vi.fn().mockResolvedValue({}),
   refetch: vi.fn(),
   visible: true,
 }));
 vi.mock("~/api/browser", () => ({
+  useBrowserActions: () => ({
+    control: { mutateAsync: state.control, isPending: false },
+  }),
   useBrowserStatus: () => ({
     data: state.data,
     isPending: !state.data,
@@ -111,6 +115,37 @@ describe("read-only browser preview", () => {
       "other",
     );
   });
+  it.each(["viewer", "other-viewer"])(
+    "shows live frames during explicit pause with resume limited to %s",
+    (actorId) => {
+      const data = ready();
+      data.status!.control = {
+        id: "lease",
+        runtimeId: "runtime",
+        actorId,
+        state: "active",
+        privateMode: false,
+        expiresAt: Date.now() - 1,
+      };
+      state.data = data;
+      render(<PreviewHarness />);
+      expect(
+        screen.getByRole("img", { name: "Live browser page" }),
+      ).toBeTruthy();
+      expect(screen.getByText("Agent paused")).toBeTruthy();
+      if (actorId === "viewer") {
+        fireEvent.click(screen.getByRole("button", { name: "Resume agent" }));
+        expect(state.control).toHaveBeenCalledWith({
+          action: "release",
+          leaseId: "lease",
+        });
+      } else {
+        expect(
+          screen.queryByRole("button", { name: "Resume agent" }),
+        ).toBeNull();
+      }
+    },
+  );
   it.each([
     "private",
     "dialog",

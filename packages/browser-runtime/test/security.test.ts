@@ -6,6 +6,7 @@ const base = {
   threadId: 't',
   actorId: 'a',
   ownerId: 'a',
+  audience: 'viewer',
 };
 it('rejects malformed human inputs and invalid tab commands at the transport boundary', () => {
   for (const input of [

@@ -45,6 +45,7 @@ interface TabRecord {
   dialog?: { id: string; value: Dialog };
   baselines: Map<string, BrowserObservation>;
   observedThreads: Set<string>;
+  observationGeneration: number;
 }
 export interface BrowserBackendOptions {
   runtimeId: string;
@@ -200,6 +201,7 @@ export class PlaywrightBackend {
       network: [],
       baselines: new Map(),
       observedThreads: new Set(),
+      observationGeneration: 0,
     };
     this.records.set(info.id, record);
     this.selectedId = info.id;
@@ -319,11 +321,14 @@ export class PlaywrightBackend {
     this.options.onTabs?.(this.tabs());
   }
   private clearRefs(record: TabRecord) {
+    record.observationGeneration++;
     for (const item of record.refs.values())
       void item.handle.dispose().catch(() => {});
     record.refs.clear();
     record.baselines.clear();
     record.observedThreads.clear();
+    for (const [id, inventory] of this.inventories)
+      if (inventory.tabId === record.info.id) this.inventories.delete(id);
   }
   invalidate() {
     for (const record of this.records.values()) this.clearRefs(record);
@@ -387,6 +392,7 @@ export class PlaywrightBackend {
   }
   async observe(id: string, thread: string): Promise<BrowserObservation> {
     const record = this.record(id);
+    const generation = record.observationGeneration;
     const snapshotId = randomUUID();
     const rawText = await record.page.ariaSnapshot({
       mode: 'ai',
@@ -484,6 +490,17 @@ export class PlaywrightBackend {
         ...omissions,
       ],
     };
+    if (generation !== record.observationGeneration) {
+      for (const ref of refs) {
+        void record.refs.get(ref.id)?.handle.dispose().catch(() => {});
+        record.refs.delete(ref.id);
+      }
+      throw new BrowserFault(
+        'STALE_REFERENCE',
+        'The page changed during the observation.',
+        'Take a fresh observation before acting.',
+      );
+    }
     record.baselines.set(thread, observation);
     record.observedThreads.add(thread);
     return observation;
@@ -494,6 +511,7 @@ export class PlaywrightBackend {
     thread?: string,
   ): Promise<BrowserArtifact> {
     const r = this.record(id);
+    const generation = r.observationGeneration;
     const viewport = await this.viewport(id);
     const fullPage = options.fullPage === true;
     let clip: BrowserArtifact['clip'];
@@ -525,6 +543,12 @@ export class PlaywrightBackend {
         ? { animations: 'disabled' as const }
         : {}),
     });
+    if (generation !== r.observationGeneration)
+      throw new BrowserFault(
+        'STALE_REFERENCE',
+        'The page changed during screenshot capture.',
+        'Capture a fresh screenshot before acting.',
+      );
     if (thread && !fullPage) r.observedThreads.add(thread);
     return this.options.files.create(bytes, 'image/png', 'screenshot.png', {
       tabId: id,
@@ -698,20 +722,26 @@ export class PlaywrightBackend {
     };
   }
   async releaseInput() {
-    for (const [id, keys] of this.heldKeys) {
+    for (const id of new Set([...this.heldKeys.keys(), ...this.heldButtons.keys()])) {
       const record = this.records.get(id);
-      if (record)
-        for (const key of keys)
-          await record.page.keyboard.up(key).catch(() => {});
+      if (record && !record.page.isClosed()) {
+        this.clearRefs(record);
+        try {
+          for (const key of this.heldKeys.get(id) ?? []) {
+            await record.page.keyboard.up(key);
+            this.heldKeys.get(id)?.delete(key);
+          }
+          for (const button of this.heldButtons.get(id) ?? []) {
+            await record.page.mouse.up({ button });
+            this.heldButtons.get(id)?.delete(button);
+          }
+        } finally {
+          this.clearRefs(record);
+        }
+      }
+      this.heldKeys.delete(id);
+      this.heldButtons.delete(id);
     }
-    for (const [id, buttons] of this.heldButtons) {
-      const record = this.records.get(id);
-      if (record)
-        for (const button of buttons)
-          await record.page.mouse.up({ button }).catch(() => {});
-    }
-    this.heldKeys.clear();
-    this.heldButtons.clear();
   }
   private buildLocator(query: BrowserLocator): Locator {
     if (query.runtimeId !== this.options.runtimeId)
@@ -1336,6 +1366,16 @@ export class PlaywrightBackend {
         'The viewer frame belongs to an old document.',
         'Refresh the browser frame.',
       );
+    this.clearRefs(r);
+    try {
+      return await this.applyHumanInput(r, input);
+    } finally {
+      // Observations started during this effect cannot authorize later input.
+      this.clearRefs(r);
+    }
+  }
+  private async applyHumanInput(r: TabRecord, input: BrowserHumanInput) {
+    const id = r.info.id;
     switch (input.type) {
       case 'click':
         await r.page.mouse.click(
@@ -1364,7 +1404,9 @@ export class PlaywrightBackend {
           this.heldKeys.set(id, keys);
         } else if (input.phase === 'up') {
           await r.page.keyboard.up(string(input.key, 'key'));
-          this.heldKeys.get(id)?.delete(input.key);
+          const keys = this.heldKeys.get(id);
+          keys?.delete(input.key);
+          if (!keys?.size) this.heldKeys.delete(id);
         } else await r.page.keyboard.press(string(input.key, 'key'));
         return;
       case 'pointer':
@@ -1380,7 +1422,9 @@ export class PlaywrightBackend {
           this.heldButtons.set(id, buttons);
         } else if (input.phase === 'up') {
           await r.page.mouse.up({ button: input.button });
-          this.heldButtons.get(id)?.delete(input.button ?? 'left');
+          const buttons = this.heldButtons.get(id);
+          buttons?.delete(input.button ?? 'left');
+          if (!buttons?.size) this.heldButtons.delete(id);
         }
         return;
       case 'back':
@@ -1457,6 +1501,7 @@ export class PlaywrightBackend {
     );
   }
   private async assets(r: TabRecord) {
+    const generation = r.observationGeneration;
     const resources = await r.page.evaluate(() =>
       Array.from(
         document.querySelectorAll(
@@ -1472,6 +1517,12 @@ export class PlaywrightBackend {
               : (node.getAttribute('src') ?? ''),
         })),
     );
+    if (generation !== r.observationGeneration)
+      throw new BrowserFault(
+        'STALE_REFERENCE',
+        'The page changed during the asset observation.',
+        'Create a fresh asset inventory before acting.',
+      );
     const urls = resources
       .map((v) => new URL(v.url, r.page.url()).href)
       .filter((url) => /^https?:/.test(url));

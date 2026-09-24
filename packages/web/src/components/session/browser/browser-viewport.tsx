@@ -132,7 +132,7 @@ export function BrowserViewport({
         aria-description={
           ready
             ? "Keyboard and pointer input go to the remote page. Press Escape and then Tab to leave this area."
-            : "Take control to interact with the remote page."
+            : "Wait for the current page image or check browser input status."
         }
         readOnly={!ready}
         tabIndex={ready ? 0 : -1}

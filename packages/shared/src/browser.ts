@@ -279,7 +279,7 @@ export type BrowserRequest = BrowserIdentity &
       }
     | {
         command: 'input';
-        leaseId: string;
+        leaseId?: string;
         runtimeId: string;
         tabId: string;
         documentId: string;
@@ -290,7 +290,7 @@ export type BrowserRequest = BrowserIdentity &
     | {
         command: 'tab';
         action: 'new' | 'close' | 'select';
-        leaseId: string;
+        leaseId?: string;
         runtimeId: string;
         tabId?: string;
         url?: string;

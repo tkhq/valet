@@ -90,7 +90,6 @@ export class BrowserDaemon {
   private restorableTabs: BrowserRuntimeStatus['tabs'] = [];
   private state: BrowserRuntimeStatus['state'] = 'starting';
   private closed = false;
-  private takingControl = false;
   private effects = new Set<Promise<unknown>>();
   private deferredCleanup = new Set<string>();
   private frameInFlight = new Set<string>();
@@ -337,21 +336,23 @@ export class BrowserDaemon {
           return response;
         case 'control': {
           if (request.action === 'take') {
-            this.takingControl = true;
-            try {
-              await Promise.allSettled([...this.effects]);
-              await this.backend.releaseInput?.();
-              await this.control.take(request.actorId, request.privateMode);
-            } finally {
-              this.takingControl = false;
-            }
+            await this.control.take(
+              request.actorId,
+              request.privateMode,
+              async () => {
+                await Promise.allSettled([...this.effects]);
+                await this.backend.releaseInput?.();
+              },
+            );
           } else if (request.action === 'release') {
+            this.control.validateOwner(request.leaseId ?? '', request.actorId);
             await this.backend.releaseInput?.();
             this.control.release(request.leaseId ?? '', request.actorId);
             for (const thread of this.deferredCleanup)
               await this.backend.turnEnd(thread);
             this.deferredCleanup.clear();
           } else if (request.action === 'pause') {
+            this.control.validate(request.leaseId ?? '', request.actorId, this.runtimeId);
             await this.backend.releaseInput?.();
             this.control.pause(request.leaseId ?? '', request.actorId);
           } else this.control.resume(request.leaseId ?? '', request.actorId);
@@ -361,10 +362,11 @@ export class BrowserDaemon {
           return response;
         }
         case 'input': {
-          this.control.validate(
-            request.leaseId,
+          this.control.authorize(
             request.actorId,
             request.runtimeId,
+            request.leaseId,
+            request.input.type === 'dialog',
           );
           if (request.input.type === 'navigate')
             this.options.authorizeOrigin?.(
@@ -372,12 +374,19 @@ export class BrowserDaemon {
                 ? 'about:blank'
                 : new URL(request.input.url).origin,
             );
-          const operation = () =>
-            this.backend.humanInput(
+          const operation = () => {
+            this.control.authorize(
+              request.actorId,
+              request.runtimeId,
+              request.leaseId,
+              request.input.type === 'dialog',
+            );
+            return this.backend.humanInput(
               request.tabId,
               request.documentId,
               request.input,
             );
+          };
           if (request.input.type === 'dialog') await operation();
           else
             await this.control.run(request.actorId, operation, request.leaseId);
@@ -494,10 +503,10 @@ export class BrowserDaemon {
           return response;
         }
         case 'tab': {
-          this.control.validate(
-            request.leaseId,
+          this.control.authorize(
             request.actorId,
             request.runtimeId,
+            request.leaseId,
           );
           await this.control.run(
             request.actorId,
@@ -688,7 +697,7 @@ export class BrowserDaemon {
         'Split the work into smaller cells.',
       );
     const operationClass = methodClass(rpc.method);
-    if (this.control.lease?.privateMode || this.takingControl)
+    if (this.control.lease?.privateMode || this.control.taking)
       throw new BrowserFault(
         'CONTROL_HELD',
         'Private sign-in pauses agent browser access.',
@@ -773,7 +782,7 @@ export class BrowserDaemon {
           'Observe the browser before continuing.',
         );
       const run = async () => {
-        if (this.control.lease?.privateMode || this.takingControl)
+        if (this.control.lease?.privateMode || this.control.taking)
           throw new BrowserFault(
             'CONTROL_HELD',
             'Human control pauses this operation.',
@@ -785,6 +794,11 @@ export class BrowserDaemon {
             'The cell was cancelled.',
             'Observe the browser before continuing.',
           );
+        if (!['observation', 'history', 'diagnostic'].includes(operationClass)) {
+          this.control.authorize(live.request.actorId, this.runtimeId);
+          // Keyup and mouseup can change the page. Check policy after cleanup.
+          if (rpc.method !== 'tab.dialogRespond') await this.backend.releaseInput?.();
+        }
         if (
           canonicalHash(
             await this.backend.policyState(rpc.method, rpc.params),
@@ -795,7 +809,7 @@ export class BrowserDaemon {
             'The page changed after approval.',
             'Take a fresh observation and request approval again.',
           );
-        if (this.control.lease?.privateMode || this.takingControl)
+        if (this.control.lease?.privateMode || this.control.taking)
           throw new BrowserFault(
             'CONTROL_HELD',
             'Human control pauses this operation.',

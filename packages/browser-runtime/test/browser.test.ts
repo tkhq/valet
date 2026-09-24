@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,11 @@ import { FileBroker } from '../src/files.js';
 let backend: PlaywrightBackend;
 let dir: string;
 let origin: string;
+async function loadedTab(thread: string, url = origin) {
+  const tab = await backend.newTab(thread, 'actor', url);
+  await backend.execute('tab.waitForLoadState', { tabId: tab.id, runtimeId: 'r', state: 'load' }, thread, 'actor');
+  return backend.info(tab.id);
+}
 const server = createServer((req, res) => {
   if (req.url === '/download') {
     res.setHeader('Content-Disposition', 'attachment; filename=fixture.txt');
@@ -124,7 +129,7 @@ describe.skipIf(!browserInstalled)('real Chromium fixtures', () => {
     }
   });
   it('navigates, snapshots, uses strict locators, and captures actual pixels', async () => {
-    const tab = await backend.newTab('thread', 'actor', origin);
+    const tab = await loadedTab('thread');
     const observation = await backend.observe(tab.id, 'thread');
     expect(observation.text).toContain('Save');
     expect(observation.refs.length).toBeGreaterThan(0);
@@ -175,7 +180,7 @@ describe.skipIf(!browserInstalled)('real Chromium fixtures', () => {
     expect(screenshot.bytes).toBeGreaterThan(1000);
   });
   it('rejects detached and relabelled references without retargeting', async () => {
-    const tab = await backend.newTab('thread', 'actor', origin);
+    const tab = await loadedTab('thread');
     const observation = await backend.observe(tab.id, 'thread');
     await backend.execute(
       'tab.reload',
@@ -209,7 +214,7 @@ describe.skipIf(!browserInstalled)('real Chromium fixtures', () => {
   });
 
   it('captures frame and open-shadow observations without exposing hidden secrets', async () => {
-    const tab = await backend.newTab('frames', 'actor', origin);
+    const tab = await loadedTab('frames');
     const ax = await backend.observe(tab.id, 'frames');
     expect(ax.text).toContain('Frame control');
     expect(ax.text).toContain('Shadow control');
@@ -235,12 +240,63 @@ describe.skipIf(!browserInstalled)('real Chromium fixtures', () => {
     await backend.humanInput(tab.id, tab.documentId, { type: 'key', key: 'x' });
     expect((await backend.observe(tab.id, 'input')).text).toContain('false');
   });
+  it('keeps fresh observations when a human has already released all input', async () => {
+    const tab = await loadedTab('released');
+    await backend.humanInput(tab.id, tab.documentId, { type: 'key', key: 'Shift', phase: 'down' });
+    await backend.humanInput(tab.id, tab.documentId, { type: 'key', key: 'Shift', phase: 'up' });
+    await backend.humanInput(tab.id, tab.documentId, { type: 'pointer', phase: 'down', x: 1, y: 1 });
+    await backend.humanInput(tab.id, tab.documentId, { type: 'pointer', phase: 'up', x: 1, y: 1 });
+    await backend.observe(tab.id, 'released');
+    await backend.releaseInput();
+    await expect(backend.execute('tab.click', {
+      tabId: tab.id, runtimeId: 'r', args: [{ x: 1, y: 1 }],
+    }, 'released', 'actor')).resolves.toBeUndefined();
+  });
+  it('invalidates references and viewport observations only on the page with human input', async () => {
+    const changed = await loadedTab('shared');
+    const untouched = await loadedTab('shared');
+    const before = await backend.observe(changed.id, 'shared');
+    const kept = await backend.observe(untouched.id, 'shared');
+    await expect(backend.humanInput(changed.id, 'old-document', { type: 'key', key: 'x' })).rejects.toThrow(/old document/);
+    await backend.humanInput(changed.id, backend.info(changed.id).documentId, { type: 'key', key: 'x' });
+    await expect(backend.execute('tab.click', {
+      tabId: changed.id, runtimeId: 'r', args: [before.refs[0]],
+    }, 'shared', 'actor')).rejects.toThrow(/reference/);
+    await expect(backend.execute('tab.click', {
+      tabId: changed.id, runtimeId: 'r', args: [{ x: 1, y: 1 }],
+    }, 'shared', 'actor')).rejects.toThrow(/observation/);
+    await expect(backend.execute('tab.click', {
+      tabId: untouched.id, runtimeId: 'r', args: [kept.refs[0]],
+    }, 'shared', 'actor')).resolves.toBeUndefined();
+    await backend.observe(changed.id, 'shared');
+    await expect(backend.execute('tab.click', {
+      tabId: changed.id, runtimeId: 'r', args: [{ x: 1, y: 1 }],
+    }, 'shared', 'actor')).resolves.toBeUndefined();
+  });
+  it.each(['observe', 'screenshot'] as const)('rejects %s captured across human input', async (kind) => {
+    const tab = await loadedTab('race');
+    const viewport = backend.viewport.bind(backend);
+    const spy = vi.spyOn(backend, 'viewport').mockImplementationOnce(async (id) => {
+      const result = await viewport(id);
+      await backend.humanInput(id, backend.info(id).documentId, { type: 'key', key: 'x' });
+      return result;
+    });
+    try {
+      await expect(kind === 'observe' ? backend.observe(tab.id, 'race') : backend.screenshot(tab.id, {}, 'race'))
+        .rejects.toThrow(/observation|capture/);
+      await expect(backend.execute('tab.click', {
+        tabId: tab.id, runtimeId: 'r', args: [{ x: 1, y: 1 }],
+      }, 'race', 'actor')).rejects.toThrow(/observation/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
   it('opens an explicit blank tab without network authorization', async () => {
     const tab = await backend.newTab('blank', 'actor', 'about:blank');
     expect(tab.url).toBe('about:blank');
   });
   it('records screenshot crop coordinates and decoded PNG dimensions', async () => {
-    const tab = await backend.newTab('crop', 'actor', origin);
+    const tab = await loadedTab('crop');
     const result = await backend.execute(
       'tab.getScreenshot',
       {

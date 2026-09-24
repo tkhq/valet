@@ -29,6 +29,23 @@ describe("ordered browser input", () => {
     );
   });
 
+  it("ignores an old request failure after its page queue is disposed", async () => {
+    let reject: ((error: Error) => void) | undefined;
+    const failure = vi.fn();
+    const request = new Promise<void>((_resolve, fail) => {
+      reject = fail;
+    });
+    const send = vi.fn(() => request);
+    const queue = new BrowserInputQueue(send, failure);
+    queue.add({ type: "key", key: "x" });
+    queue.add({ type: "key", key: "y" });
+    queue.dispose();
+    reject?.(new Error("The previous document changed."));
+    await request.catch(() => {});
+    expect(failure).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it("stops queued input after a stale-reference error", async () => {
     const fail = vi.fn();
     const send = vi

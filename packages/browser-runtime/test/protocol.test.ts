@@ -8,6 +8,22 @@ const identity = {
   ownerId: 'user:1',
 };
 describe('browser protocol', () => {
+  it('accepts viewer input and tab commands without an exclusive lease', () => {
+    for (const command of [
+      { command: 'input', tabId: 'tab', documentId: 'doc', input: { type: 'key', key: 'A' } },
+      { command: 'tab', action: 'new' },
+    ])
+      expect(parseRequest({ ...identity, audience: 'viewer', runtimeId: 'runtime', ...command }).command).toBe(command.command);
+  });
+  it('requires the viewer audience for human input, tab commands, and exclusive control', () => {
+    for (const audience of [undefined, 'agent', 'lifecycle'])
+      for (const command of [
+        { command: 'input', tabId: 'tab', documentId: 'doc', input: { type: 'key', key: 'A' } },
+        { command: 'tab', action: 'new' },
+        { command: 'control', action: 'take' },
+      ])
+        expect(() => parseRequest({ ...identity, audience, runtimeId: 'runtime', leaseId: 'lease', ...command })).toThrow(/viewer/);
+  });
   it('accepts fixed submit messages and retains invocation identity', () => {
     expect(
       parseRequest({

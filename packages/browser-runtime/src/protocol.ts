@@ -122,10 +122,10 @@ export function parseRequest(value: unknown): BrowserRequest {
     export: ['artifactId'],
     ack: ['transferId'],
     control: ['action'],
-    input: ['leaseId', 'runtimeId', 'tabId', 'documentId'],
+    input: ['runtimeId', 'tabId', 'documentId'],
     evidence: ['tabId', 'runtimeId'],
     frame: ['tabId', 'runtimeId'],
-    tab: ['action', 'leaseId', 'runtimeId'],
+    tab: ['action', 'runtimeId'],
     revoke: [],
     audit: [],
     turn_end: [],
@@ -139,6 +139,12 @@ export function parseRequest(value: unknown): BrowserRequest {
     );
   for (const key of required[command])
     string(v[key], key, key === 'code' ? 100_000 : 1024);
+  if (['input', 'tab', 'control'].includes(command) && v.audience !== 'viewer')
+    throw new BrowserFault(
+      'INVALID_REQUEST',
+      'Human browser commands require the viewer audience.',
+      'Send the command through the authenticated Browser panel.',
+    );
   if (command === 'frame' && v.inline !== undefined && typeof v.inline !== 'boolean')
     throw new BrowserFault(
       'INVALID_REQUEST',

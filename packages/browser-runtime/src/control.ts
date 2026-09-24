@@ -4,25 +4,46 @@ import { BrowserFault } from './protocol.js';
 export class Control {
   lease: BrowserControlLease | null = null;
   private tail: Promise<unknown> = Promise.resolve();
-  private takeover = false;
+  private takeoverActor: string | undefined;
   constructor(
     private readonly runtimeId: string,
     private readonly invalidate: () => void = () => {},
   ) {}
+  get taking() {
+    return this.takeoverActor !== undefined;
+  }
+  authorize(
+    actorId: string,
+    runtimeId: string,
+    humanLease?: string,
+    dialog = false,
+  ) {
+    if (runtimeId !== this.runtimeId)
+      throw new BrowserFault(
+        'RUNTIME_CHANGED',
+        'The viewer runtime changed.',
+        'Reconnect the Browser panel.',
+      );
+    if (this.takeoverActor && (!dialog || this.takeoverActor !== actorId))
+      throw new BrowserFault(
+        'CONTROL_HELD',
+        'A person is taking browser control.',
+        'Wait for shared browser use to resume.',
+      );
+    if (humanLease !== undefined) this.validate(humanLease, actorId, runtimeId);
+    else if (this.lease)
+      throw new BrowserFault(
+        'CONTROL_HELD',
+        'A person holds browser control.',
+        'Wait for the person to resume shared browser use.',
+      );
+  }
   run<T>(
     actorId: string,
     operation: () => Promise<T>,
     humanLease?: string,
   ): Promise<T> {
-    const allowed = () => {
-      if (humanLease) this.validate(humanLease, actorId, this.runtimeId);
-      else if (this.lease || this.takeover)
-        throw new BrowserFault(
-          'CONTROL_HELD',
-          'A person holds browser control.',
-          'Wait for the person to release control.',
-        );
-    };
+    const allowed = () => this.authorize(actorId, this.runtimeId, humanLease);
     try {
       allowed();
     } catch (error) {
@@ -35,26 +56,34 @@ export class Control {
     this.tail = next.catch(() => {});
     return next;
   }
-  async take(actorId: string, privateMode = false) {
-    if (this.lease && this.lease.actorId !== actorId)
+  async take(
+    actorId: string,
+    privateMode = false,
+    beforeGrant?: () => Promise<void>,
+  ) {
+    if (this.taking || (this.lease && this.lease.actorId !== actorId))
       throw new BrowserFault(
         'CONTROL_HELD',
         'Another person holds browser control.',
         'Ask the control owner to release control.',
       );
-    this.takeover = true;
-    await this.tail;
-    this.invalidate();
-    this.lease = {
-      id: randomUUID(),
-      actorId,
-      runtimeId: this.runtimeId,
-      state: 'active',
-      privateMode,
-      expiresAt: Date.now() + 120_000,
-    };
-    this.takeover = false;
-    return this.lease;
+    this.takeoverActor = actorId;
+    try {
+      await this.tail;
+      await beforeGrant?.();
+      this.invalidate();
+      this.lease = {
+        id: randomUUID(),
+        actorId,
+        runtimeId: this.runtimeId,
+        state: 'active',
+        privateMode,
+        expiresAt: Date.now() + 120_000,
+      };
+      return this.lease;
+    } finally {
+      this.takeoverActor = undefined;
+    }
   }
   validate(id: string, actor: string, runtime: string) {
     if (
@@ -68,7 +97,7 @@ export class Control {
       throw new BrowserFault(
         'CONTROL_HELD',
         'The control lease is invalid or expired.',
-        'Take control again before sending input.',
+        'Renew control or resume shared use in the Browser panel.',
       );
     this.lease.expiresAt = Date.now() + 120_000;
     return this.lease;
@@ -88,18 +117,22 @@ export class Control {
       throw new BrowserFault(
         'CONTROL_HELD',
         'The reconnect lease expired.',
-        'Release control, then take control again.',
+        'Renew control or resume shared use in the Browser panel.',
       );
     this.lease.state = 'active';
     this.lease.expiresAt = Date.now() + 120_000;
   }
-  release(id: string, actor: string) {
+  validateOwner(id: string, actor: string) {
     if (!this.lease || this.lease.id !== id || this.lease.actorId !== actor)
       throw new BrowserFault(
         'CONTROL_HELD',
         'The control lease does not match.',
         'Release the lease held by this actor.',
       );
+    return this.lease;
+  }
+  release(id: string, actor: string) {
+    this.validateOwner(id, actor);
     this.lease = null;
     this.invalidate();
   }

@@ -20,12 +20,14 @@ A compact layout fits narrow session panels. All controls remain reachable witho
 The header has minimize, restore, open full Browser view, and close controls. Opening the full view suspends the overlay.
 Returning to Chat restores its prior visibility. These controls do not move focus during automatic opening.
 Close returns focus to Watch browser. Expanding focuses the Browser tab.
-The preview is read-only. Users open the full Browser view for navigation, control, dialogs, or sign-in.
+The preview image is read-only. Users open the full Browser view for shared navigation, input, dialogs, or sign-in.
 
 A page selector chooses among visible runtime tabs. Its initial selection prefers the runtime selection when owned by this thread.
 Otherwise it prefers a tab owned by this thread, then the runtime selection, then the first tab.
 The viewer follows this selection until the user selects a page. It does not claim to follow every agent locator operation.
-A status label distinguishes browser work from an idle live feed, loading, paused, and unavailable states.
+A status label distinguishes browser work, a live feed, loading, agent pause, and unavailable states.
+An explicit nonprivate pause keeps frames live. Its owner can select Resume agent from the preview, including after lease expiry.
+Other viewers cannot release the lease. Private sign-in requires exit from the full Browser view.
 
 ## Data and access
 
@@ -37,7 +39,7 @@ Key the feed by session and thread to prevent stale images during navigation.
 Suppress images and page metadata during private sign-in. Suppress images during dialogs, disabled access, status errors, or unavailable viewers.
 Never render a cached frame after a permission error. Existing server authorization remains authoritative.
 HTTP errors and status responses with an error field both suppress cached images.
-Status and frame errors offer retry and access to the full Browser view. Viewing never mutates browser state.
+Status and frame errors offer retry and access to the full Browser view. Viewing alone never mutates browser state. Resume agent explicitly releases an owned nonprivate lease.
 
 ## Validation
 

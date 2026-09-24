@@ -27,3 +27,18 @@ it('serializes effects and completes takeover after the current effect', async (
   });
   expect(seen.at(-1)).toBe('new');
 });
+it('keeps the first pending takeover owner when another person requests control', async () => {
+  const control = new Control('runtime');
+  let finish: (() => void) | undefined;
+  const effect = control.run('agent', () => new Promise<void>((resolve) => { finish = resolve; }));
+  await Promise.resolve();
+  const first = control.take('first');
+  const second = control.take('second');
+  const rejected = expect(second).rejects.toThrow(/control/);
+  finish?.();
+  await effect;
+  const lease = await first;
+  await rejected;
+  expect(control.lease).toBe(lease);
+  expect(lease.actorId).toBe('first');
+});

@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   input: vi.fn().mockResolvedValue({}),
   dialog: vi.fn().mockResolvedValue({}),
   frameEnabled: vi.fn(),
+  frameDocument: null as string | null,
   settings: vi.fn().mockResolvedValue({}),
   capture: vi.fn().mockResolvedValue({}),
 }));
@@ -69,7 +70,20 @@ vi.mock("~/api/browser", () => ({
     enabled: boolean,
   ) => {
     state.frameEnabled(enabled);
-    return { frame: null, error: null, visible: true, retry: vi.fn() };
+    return {
+      frame: state.frameDocument
+        ? {
+            url: "blob:frame",
+            runtimeId: "runtime",
+            tabId: "tab",
+            documentId: state.frameDocument,
+            viewport: { width: 1280, height: 720 },
+          }
+        : null,
+      error: null,
+      visible: true,
+      retry: vi.fn(),
+    };
   },
 }));
 
@@ -99,6 +113,7 @@ function ready(): BrowserRuntimeStatus {
 }
 afterEach(() => {
   state.status = null;
+  state.frameDocument = null;
   state.enabled = true;
   state.settingsEnabled = true;
   vi.clearAllMocks();
@@ -227,9 +242,7 @@ describe("browser pane control", () => {
     expect(
       screen.getByRole("button", { name: "Go" }).hasAttribute("disabled"),
     ).toBe(true);
-    expect(
-      screen.queryByRole("button", { name: "Release control" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume agent" })).toBeNull();
   });
 
   it("keeps release and renewal available after the viewer's lease expires", () => {
@@ -253,37 +266,148 @@ describe("browser pane control", () => {
       action: "take",
       privateMode: true,
     });
-    fireEvent.click(screen.getByRole("button", { name: "Release control" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "End private sign-in" }),
+    );
     expect(state.control).toHaveBeenCalledWith({
       action: "release",
       leaseId: "lease",
     });
   });
 
-  it("stops agent actions by acquiring control and then pausing the returned lease", async () => {
+  it("pauses only when requested and resumes shared use", async () => {
     state.status = ready();
-    state.control.mockResolvedValueOnce({
-      status: {
-        ...ready(),
-        control: {
-          id: "new-lease",
-          runtimeId: "runtime",
-          actorId: "viewer",
-          state: "active",
-          privateMode: false,
-          expiresAt: Date.now() + 60_000,
-        },
+    const view = render(<BrowserPane sessionId="session" />);
+    expect(state.control).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Pause agent" }));
+    await waitFor(() =>
+      expect(state.control.mock.calls).toEqual([[{ action: "take" }]]),
+    );
+    state.status = {
+      ...ready(),
+      control: {
+        id: "lease",
+        runtimeId: "runtime",
+        actorId: "viewer",
+        state: "active",
+        privateMode: false,
+        expiresAt: Date.now() + 60_000,
       },
+    };
+    view.rerender(<BrowserPane sessionId="session" />);
+    expect(
+      screen.getByRole("button", { name: "Go" }).hasAttribute("disabled"),
+    ).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Resume agent" }));
+    expect(state.control).toHaveBeenLastCalledWith({
+      action: "release",
+      leaseId: "lease",
     });
+  });
+
+  it("navigates, opens, selects, and closes pages without acquiring control", async () => {
+    state.status = ready();
     render(<BrowserPane sessionId="session" />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Stop browser actions" }),
+    fireEvent.change(screen.getByRole("textbox", { name: "Browser address" }), {
+      target: { value: "https://next.example/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Go" }));
+    await waitFor(() =>
+      expect(state.input).toHaveBeenCalledWith({
+        runtimeId: "runtime",
+        tabId: "tab",
+        documentId: "doc",
+        input: { type: "navigate", url: "https://next.example/" },
+      }),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Example" }));
+    expect(state.tab).toHaveBeenCalledWith({
+      action: "select",
+      runtimeId: "runtime",
+      tabId: "tab",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "New browser page" }));
+    expect(state.tab).toHaveBeenCalledWith({
+      action: "new",
+      runtimeId: "runtime",
+      url: "about:blank",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close Example" }));
+    expect(state.tab).toHaveBeenCalledWith({
+      action: "close",
+      runtimeId: "runtime",
+      tabId: "tab",
+    });
+    expect(state.control).not.toHaveBeenCalled();
+  });
+
+  it("answers dialogs without acquiring control", async () => {
+    state.status = {
+      ...ready(),
+      dialogs: [
+        {
+          tabId: "tab",
+          dialogId: "dialog",
+          kind: "alert",
+          message: "Test alert",
+        },
+      ],
+    };
+    render(<BrowserPane sessionId="session" />);
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    await waitFor(() =>
+      expect(state.dialog).toHaveBeenCalledWith({
+        runtimeId: "runtime",
+        tabId: "tab",
+        documentId: "doc",
+        input: { type: "dialog", dialogId: "dialog", accept: true, text: "" },
+      }),
+    );
+    expect(state.control).not.toHaveBeenCalled();
+  });
+
+  it("recovers input on a fresh document without replaying failed input", async () => {
+    state.status = ready();
+    state.frameDocument = "doc";
+    state.input.mockRejectedValueOnce(
+      new Error("The page changed. Observe the current page before retrying."),
+    );
+    const view = render(<BrowserPane sessionId="session" />);
+    fireEvent.load(screen.getByRole("img", { name: "Browser page" }));
+    fireEvent.keyDown(
+      screen.getByRole("textbox", { name: "Browser page input" }),
+      { key: "x" },
     );
     await waitFor(() =>
-      expect(state.control.mock.calls).toEqual([
-        [{ action: "take" }],
-        [{ action: "pause", leaseId: "new-lease" }],
-      ]),
+      expect(screen.getByRole("alert").textContent).toContain(
+        "The page changed",
+      ),
+    );
+    state.frameDocument = "new-doc";
+    state.status = {
+      ...ready(),
+      tabs: [{ ...ready().tabs[0]!, documentId: "new-doc" }],
+    };
+    view.rerender(<BrowserPane sessionId="session" />);
+    fireEvent.load(screen.getByRole("img", { name: "Browser page" }));
+    expect(
+      screen
+        .getByRole("textbox", { name: "Browser page input" })
+        .hasAttribute("readonly"),
+    ).toBe(false);
+    expect(state.input).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(
+      screen.getByRole("textbox", { name: "Browser page input" }),
+      { key: "y" },
+    );
+    await waitFor(() =>
+      expect(state.input).toHaveBeenLastCalledWith({
+        runtimeId: "runtime",
+        tabId: "tab",
+        documentId: "new-doc",
+        input: { type: "key", key: "y", phase: "down" },
+      }),
     );
   });
 

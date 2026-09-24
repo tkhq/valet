@@ -41,7 +41,7 @@ const controlSchema = Type.Object({
 });
 const tabSchema = Type.Object({
   action: Type.Union(["new", "close", "select"].map((v) => Type.Literal(v))),
-  leaseId: id,
+  leaseId: Type.Optional(id),
   runtimeId: id,
   tabId: Type.Optional(id),
   url: Type.Optional(Type.String({ maxLength: 8192 })),
@@ -69,7 +69,7 @@ const button = Type.Optional(
   ]),
 );
 const inputSchema = Type.Object({
-  leaseId: id,
+  leaseId: Type.Optional(id),
   runtimeId: id,
   tabId: id,
   documentId: id,
