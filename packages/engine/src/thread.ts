@@ -4821,25 +4821,27 @@ export class Thread {
       streamFn: async (model, context, options) => {
         await this.persistSkillContextAttributions();
         const runtimeModelContext = this.modelSystemPrompt(undefined, model);
-        const currentSystem = getCurrentSystemMessage(this.agent.state.messages);
+        const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
+        const runtimeSystem = {
+          role: "system" as const,
+          content: "",
+          sections: { "valet-runtime-model": runtimeModelContext },
+          timestamp: Date.now(),
+        };
         const transcript = {
-          messages: [
-            currentSystem
-              ? {
-                  ...currentSystem,
-                  sections: {
-                    ...currentSystem.sections,
-                    "valet-runtime-model": runtimeModelContext,
-                  },
-                }
-              : {
-                  role: "system" as const,
-                  content: "",
-                  sections: { "valet-runtime-model": runtimeModelContext },
-                  timestamp: Date.now(),
-                },
-            ...context.messages.filter((message) => message.role !== "system"),
-          ],
+          messages: initialSystemIndex === -1
+            ? [runtimeSystem, ...context.messages]
+            : context.messages.map((message, index) =>
+              index === initialSystemIndex && message.role === "system"
+                ? {
+                    ...message,
+                    sections: {
+                      ...message.sections,
+                      "valet-runtime-model": runtimeModelContext,
+                    },
+                  }
+                : message,
+            ),
         };
         return streamSimple(model, transcript, {
           ...options,
@@ -4877,7 +4879,7 @@ export class Thread {
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {
         return messages.filter(
-          (m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+          (m) => m.role === "system" || m.role === "user" || m.role === "assistant" || m.role === "toolResult",
         ) as Message[];
       },
       // Re-read the live model between loop iterations (TKAI-338).
