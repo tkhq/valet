@@ -43,7 +43,11 @@ export function DropsPanel({
   onPrevious?: (cursor: string) => void;
   onNext?: (cursor: string) => void;
 }) {
-  const dropsQ = useEventDrops({ q: query, cursor, direction });
+  const searchTooLong = query.length > 200;
+  const dropsQ = useEventDrops(
+    { q: query, cursor, direction },
+    { enabled: !searchTooLong },
+  );
 
   return (
     <div className="space-y-4">
@@ -65,12 +69,16 @@ export function DropsPanel({
         onSettled={(next) => onQueryChange?.(next)}
         placeholder="Search problems"
         aria-label="Search problems"
+        maxLength={200}
       />
 
+      {searchTooLong && (
+        <ErrorRow>Search is too long. Shorten the search to 200 characters or fewer.</ErrorRow>
+      )}
       {dropsQ.isPending && <LoadingRow label="Loading problems…" />}
-      {dropsQ.error != null && (
+      {dropsQ.error != null && !searchTooLong && (
         <ErrorRow>
-          {cursor ? <><span>That page is no longer available. </span><button type="button" className="underline" onClick={() => onPrevious?.("")}>Return to the first page</button></> : "Failed to load. Press refresh to try again."}
+          {cursor ? <><span>That page is no longer available. </span><button type="button" className="underline" onClick={() => onPrevious?.("")}>Return to the first page</button></> : "Failed to load. Reload the page and try again."}
         </ErrorRow>
       )}
       {dropsQ.data && dropsQ.data.drops.length === 0 && (
