@@ -75,6 +75,22 @@ async function collectUntil(
 }
 
 describe("WS handshake seeds per-thread state after init", () => {
+  it("seeds current sandbox readiness on a fresh connection without provisioning", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    vi.spyOn(engineSession.attachment, "state", "get").mockReturnValue("ready");
+    vi.spyOn(engineSession.attachment, "currentEpoch").mockReturnValue(3);
+    const provision = vi.spyOn(engineSession.attachment, "ensureReady");
+    const frames = await collectUntil(api.wsUrl, sessionId, (event) => event.type === "sandbox.status");
+    expect(frames.find((event) => event.type === "sandbox.status")).toMatchObject({
+      state: "ready", epoch: 3,
+    });
+    expect(provision).not.toHaveBeenCalled();
+  });
+
   it("seeds an idle thread's queue.state", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);

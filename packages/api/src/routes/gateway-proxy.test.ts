@@ -524,6 +524,43 @@ describe("session gateway reverse-proxy", () => {
     expect(echoed).toBe("hello-through-the-gateway");
   });
 
+  it("WS authenticates the VS Code connection with the gateway cookie", async () => {
+    const sessionId = "gw-vscode-cookie";
+    fakeBackend = await startFakeBackend();
+    gateway = startGateway({ port: 0, sessionId,
+      jwtSecret: deriveSandboxJwtSecret(internalToken(), sessionId),
+      targets: { ttyd: fakeBackend.ttydPort, vscode: fakeBackend.vscodePort },
+    });
+    const gatewayPort = (gateway.server.address() as AddressInfo).port;
+    api = await bootTestApi({
+      sandboxProvider: new GatewayTestSandboxProvider({ host: "127.0.0.1", port: gatewayPort }),
+    });
+    await seedSession(api, { id: sessionId, userId: "local-user" });
+    await warmSandbox(api, { id: sessionId, userId: "local-user" });
+    const minted = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/sandbox-jwt`, { method: "POST" });
+    const { token } = await minted.json() as { token: string };
+    const page = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/gateway/vscode/?token=${encodeURIComponent(token)}`);
+    expect(page.status).toBe(200);
+    const cookie = page.headers.get("set-cookie")?.split(";")[0];
+    expect(cookie).toMatch(/^gateway_session=/);
+    const ws = new BackendWebSocket(`${api.wsUrl}/api/sessions/${sessionId}/gateway/vscode/`, {
+      headers: { Cookie: `unrelated=private; ${cookie}` },
+    });
+    try {
+      const echoed = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Cookie-authenticated WS timed out")), 5000);
+        ws.on("open", () => ws.send("vscode-cookie-echo"));
+        ws.on("message", (data) => { clearTimeout(timeout); resolve(data.toString()); });
+        ws.on("close", () => { clearTimeout(timeout); reject(new Error("Cookie-authenticated WS closed before its reply")); });
+        ws.on("error", (error) => { clearTimeout(timeout); reject(error); });
+      });
+      expect(echoed).toBe("vscode-cookie-echo");
+      expect(fakeBackend.lastVscodeProtocol()).toBeUndefined();
+    } finally {
+      ws.close();
+    }
+  });
+
   it("HTTP proxy stamps EngineHost.touchGatewayActivity on every proxied request (final-review fix wave, hibernation arc)", async () => {
     const sessionId = "gw-touch-http";
     fakeBackend = await startFakeBackend();
