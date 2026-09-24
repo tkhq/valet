@@ -392,6 +392,10 @@ eventsRouter.get("/events", async (c) => {
   return c.json(resp);
 });
 
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
 /**
  * `GET /api/events/drops` — recent reasons an event arrived but did not become
  * a feed row: a bad signature, the wrong workspace, a missing credential, or
@@ -422,8 +426,13 @@ eventsRouter.get("/events/drops", async (c) => {
   // new sensitive diagnostic class, so members keep the established drop feed
   // without seeing those rows.
   if (!admin) dropConditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"));
+  const visibleDropConditions = [...dropConditions];
   if (query) {
-    const search = or(ilike(eventDropLog.reason, `%${query}%`), ilike(eventDropLog.detail, `%${query}%`));
+    const escapedQuery = escapeLike(query);
+    const search = or(
+      sql`${eventDropLog.reason} ILIKE ${`%${escapedQuery}%`} ESCAPE '\\'`,
+      sql`${eventDropLog.detail} ILIKE ${`%${escapedQuery}%`} ESCAPE '\\'`,
+    );
     if (search) dropConditions.push(search);
   }
   if (cursor) {
@@ -446,15 +455,21 @@ eventsRouter.get("/events/drops", async (c) => {
     : null;
 
   // "Last event received" = the most recent time ANY event reached ingest,
-  // matched (an events row) or not (a drop-log row). rows[0] already holds the
-  // newest drop; one more indexed read gets the newest matched event.
+  // matched (an events row) or not (a visible drop-log row). This remains
+  // global to the org, not the current search or cursor page.
+  const [lastDropRow] = await db
+    .select({ at: eventDropLog.createdAt })
+    .from(eventDropLog)
+    .where(and(...visibleDropConditions))
+    .orderBy(desc(eventDropLog.createdAt), desc(eventDropLog.id))
+    .limit(1);
   const lastEventRow = await db
     .select({ at: events.receivedAt })
     .from(events)
     .where(eq(events.orgId, user.orgId))
     .orderBy(desc(events.receivedAt))
     .limit(1);
-  const candidates = [rows[0]?.createdAt, lastEventRow[0]?.at].filter(
+  const candidates = [lastDropRow?.at, lastEventRow[0]?.at].filter(
     (v): v is number => typeof v === "number",
   );
   const lastEventAt = candidates.length > 0 ? Math.max(...candidates) : null;

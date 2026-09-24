@@ -31,8 +31,17 @@ export function DropsPanel({
   query = "",
   cursor,
   onQueryChange,
-  onCursorChange,
-}: { query?: string; cursor?: string; onQueryChange?: (query: string) => void; onCursorChange?: (cursor?: string) => void }) {
+  hasPrevious = false,
+  onPrevious,
+  onNext,
+}: {
+  query?: string;
+  cursor?: string;
+  onQueryChange?: (query: string) => void;
+  hasPrevious?: boolean;
+  onPrevious?: () => void;
+  onNext?: (cursor: string) => void;
+}) {
   const dropsQ = useEventDrops({ q: query, cursor });
 
   return (
@@ -52,13 +61,17 @@ export function DropsPanel({
 
       <SearchInput
         value={query}
-        onSettled={(next) => onQueryChange?.(next.trim())}
+        onSettled={onQueryChange}
         placeholder="Search problems"
         aria-label="Search problems"
       />
 
       {dropsQ.isPending && <LoadingRow label="Loading problems…" />}
-      {dropsQ.error != null && <ErrorRow>Failed to load. Press refresh to try again.</ErrorRow>}
+      {dropsQ.error != null && (
+        <ErrorRow>
+          {cursor ? <><span>That page is no longer available. </span><button type="button" className="underline" onClick={onPrevious}>Return to the first page</button></> : "Failed to load. Press refresh to try again."}
+        </ErrorRow>
+      )}
       {dropsQ.data && dropsQ.data.drops.length === 0 && (
         <EmptyRow>
           {query ? "No problems match this search." : "No problems in the recent window. Every event that arrived was handled."}
@@ -81,16 +94,14 @@ export function DropsPanel({
         </ul>
       )}
 
-      {dropsQ.data && (cursor || dropsQ.data.nextCursor) && (
-        <nav className="flex gap-2" aria-label="Problems pages">
-          <Button type="button" variant="secondary" disabled={!cursor} onClick={() => onCursorChange?.()}>
-            Previous
-          </Button>
-          <Button type="button" variant="secondary" disabled={!dropsQ.data.nextCursor} onClick={() => onCursorChange?.(dropsQ.data.nextCursor ?? undefined)}>
-            Next
-          </Button>
-        </nav>
-      )}
+      <nav className="flex gap-2" aria-label="Problems pages">
+        <Button type="button" variant="secondary" disabled={dropsQ.isPending || !hasPrevious} onClick={onPrevious}>
+          Previous
+        </Button>
+        <Button type="button" variant="secondary" disabled={dropsQ.isPending || !dropsQ.data?.nextCursor} onClick={() => dropsQ.data?.nextCursor && onNext?.(dropsQ.data.nextCursor)}>
+          Next
+        </Button>
+      </nav>
     </div>
   );
 }

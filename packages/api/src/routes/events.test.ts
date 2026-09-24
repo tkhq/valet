@@ -192,6 +192,29 @@ describe("GET /api/events/drops", () => {
     expect(((await hidden.json()) as ListEventDropsResponse).drops.map((drop) => drop.id)).toEqual(["d2"]);
   });
 
+  it("keeps last-event time global across search and pages", async () => {
+    const a = await boot();
+    await a.providers.db.insert(eventDropLog).values([
+      { id: "new", orgId: "local-org", reason: "bad_signature", detail: "unmatched", createdAt: 4_000 },
+      { id: "old1", orgId: "local-org", reason: "bad_signature", detail: "needle", createdAt: 2_000 },
+      { id: "old2", orgId: "local-org", reason: "bad_signature", detail: "needle", createdAt: 1_000 },
+    ]);
+    const first = (await (await fetch(a.baseUrl + "/api/events/drops?q=needle&limit=1")).json()) as ListEventDropsResponse;
+    const second = (await (await fetch(a.baseUrl + "/api/events/drops?q=needle&cursor=" + encodeURIComponent(first.nextCursor!))).json()) as ListEventDropsResponse;
+    expect(first.lastEventAt).toBe(4_000);
+    expect(second.lastEventAt).toBe(4_000);
+  });
+
+  it.each(["x%y", "x_y", "x\\y"])("treats %s as a literal search character", async (query) => {
+    const a = await boot();
+    await a.providers.db.insert(eventDropLog).values([
+      { id: "literal", orgId: "local-org", reason: "bad_signature", detail: "literal " + query, createdAt: 2_000 },
+      { id: "other", orgId: "local-org", reason: "bad_signature", detail: "ordinary text", createdAt: 1_000 },
+    ]);
+    const body = (await (await fetch(a.baseUrl + "/api/events/drops?q=" + encodeURIComponent(query))).json()) as ListEventDropsResponse;
+    expect(body.drops.map((drop) => drop.id)).toEqual(["literal"]);
+  });
+
   it.each(["?limit=0", "?limit=1.5", "?q=" + "x".repeat(201), "?cursor=broken"])('rejects invalid drop query %s', async (query) => {
     const a = await boot();
     expect((await fetch(a.baseUrl + "/api/events/drops" + query)).status).toBe(400);

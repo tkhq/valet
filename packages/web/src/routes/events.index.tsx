@@ -57,6 +57,7 @@ type TabId = (typeof TABS)[number]["id"];
 
 export function EventsPage() {
   const [tab, setTab] = useState<TabId>("activity");
+  const [problemsCursorHistory, setProblemsCursorHistory] = useState<(string | undefined)[]>([]);
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
@@ -88,7 +89,7 @@ export function EventsPage() {
             <EventFeed
               scope={scope}
               onScopeChange={(next) =>
-                void navigate({ to: "/events", search: next === "all" ? { scope: "all" } : {} })
+                void navigate({ to: "/events", search: { ...(next === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(search.problemsCursor ? { problemsCursor: search.problemsCursor } : {}) } })
               }
             />
           )}
@@ -97,8 +98,20 @@ export function EventsPage() {
             <DropsPanel
               query={search.problemsQ}
               cursor={search.problemsCursor}
-              onQueryChange={(problemsQ) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } })}
-              onCursorChange={(problemsCursor) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}) } })}
+              onQueryChange={(problemsQ) => {
+                setProblemsCursorHistory([]);
+                void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
+              }}
+              hasPrevious={problemsCursorHistory.length > 0}
+              onPrevious={() => {
+                const previous = problemsCursorHistory.at(-1);
+                setProblemsCursorHistory((history) => history.slice(0, -1));
+                void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(previous ? { problemsCursor: previous } : {}) } });
+              }}
+              onNext={(problemsCursor) => {
+                setProblemsCursorHistory((history) => [...history, search.problemsCursor]);
+                void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } });
+              }}
             />
           )}
         </div>
