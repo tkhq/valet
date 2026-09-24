@@ -1476,7 +1476,6 @@ export class Thread {
     // wedging or mislabeling it.
     let continueError: unknown;
     const baselineModel = this.agent.state.model;
-    const baselinePrompt = this.agent.state.systemPrompt;
     try {
       // Host resolver (if any) delivers this resumed turn's per-turn key
       // before the continuation LLM call; no-op when absent.
@@ -1497,7 +1496,6 @@ export class Thread {
       );
     } finally {
       this.agent.state.model = baselineModel;
-      this.restoreResumeSystemPrompt(baselinePrompt);
       this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
@@ -3065,9 +3063,9 @@ export class Thread {
     // abort OF THIS ITEM still wins via the durable `abortRequestedAt` stamp
     // checked below, which `Thread.abort` writes before interrupting the
     // stream.
-    const last = this.agent.state.messages[this.agent.state.messages.length - 1];
+    const last = [...this.agent.state.messages].reverse().find((message) => message.role !== "system");
     const stop =
-      this.currentAssistantMessageId !== undefined && last && last.role === "assistant"
+      this.currentAssistantMessageId !== undefined && last?.role === "assistant"
         ? last.stopReason
         : undefined;
     if (current.supersededByItemId) return { outcome: "superseded" };
@@ -3387,7 +3385,6 @@ export class Thread {
     let turnFailed = false;
     let turnError: unknown;
     const baselineModel = this.agent.state.model;
-    const baselinePrompt = this.agent.state.systemPrompt;
     try {
       // Rest-state repair FIRST — before appending any recovery output.
       await this.repairRestState(item, fence, repairMessage);
@@ -3447,7 +3444,6 @@ export class Thread {
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
     } finally {
       this.agent.state.model = baselineModel;
-      this.restoreResumeSystemPrompt(baselinePrompt);
       this.turnApiKey = undefined;
     }
 
@@ -3867,7 +3863,7 @@ export class Thread {
     // applied FIRST so the composition is base → systemContext → repo
     // instructions → role → cold hint, and restored LAST so the existing
     // overlays nest unchanged inside it.
-    this.applyRepoInstructionsForTurn();
+    const repoInstructionsApplied = this.applyRepoInstructionsForTurn();
     // Apply role overlay (system-prompt overlay + optional model override) for
     // this one turn. Restored unconditionally in finally.
     const roleOverlay = this.applyRoleForTurn(item);
@@ -3875,10 +3871,10 @@ export class Thread {
     // so the two compose (role text, then hint). Restored unconditionally in
     // finally, before the role restore, so both idioms nest correctly
     // whether or not a role was applied this turn.
-    this.applyColdHintForTurn();
+    const coldHintApplied = this.applyColdHintForTurn();
     // Followed Slack-thread signals carry `reply: "manual"`. Add the shared
     // delivery guidance after all other turn overlays so it remains prominent.
-    this.applySlackOverheardGuidanceForTurn(item);
+    const slackOverheardApplied = this.applySlackOverheardGuidanceForTurn(item);
     // The sender line must match what entriesToAgentMessages renders for
     // this entry on reload — same gate (shared owner, non-signal), same
     // render function — or the hot and cold transcripts diverge.
@@ -3908,10 +3904,10 @@ export class Thread {
         await this.runProactiveCompaction();
       }
     } finally {
-      this.restoreSlackOverheardGuidanceAfterTurn();
-      this.restoreColdHintAfterTurn();
+      this.restoreSlackOverheardGuidanceAfterTurn(slackOverheardApplied);
+      this.restoreColdHintAfterTurn(coldHintApplied);
       this.restoreRoleAfterTurn(roleOverlay);
-      this.restoreRepoInstructionsAfterTurn();
+      this.restoreRepoInstructionsAfterTurn(repoInstructionsApplied);
       // Restore the agent's baseline model so the next turn picks up any
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
@@ -3926,9 +3922,8 @@ export class Thread {
    * Cold-attachment model hint (spec decision 7): when the sandbox
    * attachment isn't ready at turn start, appends a hint to the
    * (role-overlaid) system prompt telling the model filesystem/shell tools
-   * will wait. Returns the pre-hint prompt so the caller can restore it
-   * unconditionally in the turn's finally, regardless of whether a role was
-   * also applied this turn.
+   * will wait. Returns whether it added a section so the caller can remove it
+   * in the turn's finally.
    *
    * For `warmSandboxOnClaim: false` sessions the hint applies only while
    * the attachment is actually `provisioning` — a lazy session's earlier
@@ -3946,49 +3941,42 @@ export class Thread {
     }];
   }
 
-  private restoreResumeSystemPrompt(prompt: string): void {
-    if (this.agent.state.systemPrompt === prompt) return;
-    this.agent.state.messages = [...this.agent.state.messages, {
-      role: "system",
-      content: prompt,
-      timestamp: Date.now(),
-    }];
-  }
-
   private replaceAgentMessages(messages: AgentMessage[]): void {
     const system = getCurrentSystemMessage(this.agent.state.messages);
     this.agent.state.messages = system ? [system, ...messages] : messages;
   }
 
-  private applyColdHintForTurn(): void {
-    if (this.session.attachment.state === "ready") return;
+  private applyColdHintForTurn(): boolean {
+    if (this.session.attachment.state === "ready") return false;
     if (this.session.options.warmSandboxOnClaim === false && this.session.attachment.state !== "provisioning") {
-      return;
+      return false;
     }
     const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
     this.appendSystemSection(
       "valet-cold-sandbox",
       `[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`,
     );
+    return true;
   }
 
-  private restoreColdHintAfterTurn(): void {
-    this.appendSystemSection("valet-cold-sandbox", null);
+  private restoreColdHintAfterTurn(applied: boolean): void {
+    if (applied) this.appendSystemSection("valet-cold-sandbox", null);
   }
 
   /** Add the shared Slack guidance only to manual-delivery message signals. */
-  private applySlackOverheardGuidanceForTurn(item: QueueItem): void {
+  private applySlackOverheardGuidanceForTurn(item: QueueItem): boolean {
     if (!isSignalContent(item.content) ||
         !item.content.signalType.endsWith(".message") ||
         item.content.origin?.channelType !== "slack" ||
         item.content.origin.reply !== "manual") {
-      return;
+      return false;
     }
     this.appendSystemSection("valet-slack-overheard", SLACK_OVERHEARD_REPLY_GUIDANCE);
+    return true;
   }
 
-  private restoreSlackOverheardGuidanceAfterTurn(): void {
-    this.appendSystemSection("valet-slack-overheard", null);
+  private restoreSlackOverheardGuidanceAfterTurn(applied: boolean): void {
+    if (applied) this.appendSystemSection("valet-slack-overheard", null);
   }
 
   /**
@@ -3997,16 +3985,17 @@ export class Thread {
    * and appends a turn-local fragment. A mid-turn `refreshRepoInstructions()`
    * applies to the next turn.
    */
-  private applyRepoInstructionsForTurn(): void {
+  private applyRepoInstructionsForTurn(): boolean {
     const instructions = this.session.repoInstructions();
-    if (!instructions) return;
+    if (!instructions) return false;
     const fragment = buildRepoInstructionsFragment(instructions);
-    if (!fragment) return;
+    if (!fragment) return false;
     this.appendSystemSection("valet-repo-instructions", fragment);
+    return true;
   }
 
-  private restoreRepoInstructionsAfterTurn(): void {
-    this.appendSystemSection("valet-repo-instructions", null);
+  private restoreRepoInstructionsAfterTurn(applied: boolean): void {
+    if (applied) this.appendSystemSection("valet-repo-instructions", null);
   }
 
   private applyRoleForTurn(item: QueueItem): RoleOverlay {

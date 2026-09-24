@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import type { Context } from "@earendil-works/pi-ai/compat";
 import {
@@ -58,7 +59,7 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     const faux = registerFauxProvider({ provider: "svc1" });
     const capturedPrompts: (string | undefined)[] = [];
     const captureStep = (text: string) => async (context: Context) => {
-      capturedPrompts.push(context.systemPrompt);
+      capturedPrompts.push(getCurrentSystemPrompt(context.messages));
       return fauxAssistantMessage(text);
     };
     faux.setResponses([captureStep("ok")]);

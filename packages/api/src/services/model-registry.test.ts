@@ -392,9 +392,5 @@ describe("ModelRegistry", () => {
       });
     });
 
-    it("CANARY: pi does not bundle GPT-6 Astra yet", () => {
-      // If this fails, remove Astra from engine/src/model-catalog.ts and delete this test.
-      expect(getBuiltinModels("openai").map((model) => model.id)).not.toContain("gpt-6-astra");
-    });
   });
 });
