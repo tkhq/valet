@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Sandbox } from "@valet/engine";
+import { browserChannelRequest } from "./channel.js";
 import type {
   BrowserExportDescriptor,
   BrowserRequest,
@@ -12,19 +13,22 @@ export async function browserRequest(
   request: BrowserRequest,
   signal?: AbortSignal,
 ): Promise<BrowserResponse> {
-  const result = await sandbox.exec("/usr/local/bin/valet-browser-client", {
-    stdin: JSON.stringify(request),
-    timeout: 35_000,
-    maxOutputBytes: 1_048_576,
-    signal,
-    privileged: true,
-  });
-  if (result.exitCode !== 0 && !result.stdout.trim().startsWith("{")) {
-    throw new Error(
-      "The sandbox browser is unavailable. Start a sandbox with the Valet browser image and retry.",
-    );
+  let parsed: unknown = await browserChannelRequest(sandbox, request, signal);
+  if (parsed === null) {
+    const result = await sandbox.exec("/usr/local/bin/valet-browser-client", {
+      stdin: JSON.stringify(request),
+      timeout: 35_000,
+      maxOutputBytes: 1_048_576,
+      signal,
+      privileged: true,
+    });
+    if (result.exitCode !== 0 && !result.stdout.trim().startsWith("{")) {
+      throw new Error(
+        "The sandbox browser is unavailable. Start a sandbox with the Valet browser image and retry.",
+      );
+    }
+    parsed = JSON.parse(result.stdout);
   }
-  const parsed: unknown = JSON.parse(result.stdout);
   if (
     !parsed ||
     typeof parsed !== "object" ||

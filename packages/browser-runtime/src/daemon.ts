@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
@@ -94,6 +94,7 @@ export class BrowserDaemon {
   private effects = new Set<Promise<unknown>>();
   private deferredCleanup = new Set<string>();
   private frameInFlight = new Set<string>();
+  private frameGeneration = 0;
   constructor(private readonly options: BrowserDaemonOptions) {
     this.files = new FileBroker(
       options.stateDirectory,
@@ -101,9 +102,11 @@ export class BrowserDaemon {
       this.runtimeId,
       options.workingDirectory,
     );
-    this.control = new Control(this.runtimeId, () =>
-      this.backend?.invalidate(),
-    );
+    this.control = new Control(this.runtimeId, () => {
+      // A complete private-control cycle can occur during an awaited capture.
+      this.frameGeneration++;
+      this.backend?.invalidate();
+    });
   }
   async start() {
     await mkdir(this.options.stateDirectory, { recursive: true, mode: 0o700 });
@@ -429,16 +432,62 @@ export class BrowserDaemon {
             );
           this.frameInFlight.add(request.actorId);
           try {
-            const tab = this.backend.info(request.tabId);
-            response.artifact = await this.files.frame(
-              await this.backend.frame(request.tabId),
-              {
+            const generation = this.frameGeneration;
+            const tab = { ...this.backend.info(request.tabId) };
+            const validateCapture = () => {
+              if (generation !== this.frameGeneration)
+                throw new BrowserFault(
+                  'CONTROL_HELD',
+                  'Browser control changed during capture.',
+                  'Request a new viewer frame.',
+                );
+              const current = this.backend.info(request.tabId);
+              if (this.state !== 'ready' || current.runtimeId !== this.runtimeId || tab.runtimeId !== this.runtimeId)
+                throw new BrowserFault(
+                  'RUNTIME_CHANGED',
+                  'The viewer runtime changed during capture.',
+                  'Reconnect the Browser panel.',
+                );
+              if (current.id !== tab.id || tab.id !== request.tabId || current.documentId !== tab.documentId)
+                throw new BrowserFault(
+                  'STALE_REFERENCE',
+                  'The browser document changed during capture.',
+                  'Request a frame of the current document.',
+                );
+            };
+            validateCapture();
+            const bytes = await this.backend.frame(tab.id);
+            const viewport = await this.backend.viewport(tab.id);
+            validateCapture();
+            if (request.inline) {
+              // Base64 and metadata must fit inside the 1,000,000-byte reply.
+              if (bytes.length > 700_000)
+                throw new BrowserFault(
+                  'QUOTA_EXCEEDED',
+                  'The viewer frame exceeds the inline size limit.',
+                  'Use a smaller browser viewport.',
+                );
+              response.frame = {
+                mimeType: 'image/jpeg',
+                data: bytes.toString('base64'),
+                bytes: bytes.length,
+                sha256: createHash('sha256').update(bytes).digest('hex'),
                 tabId: tab.id,
                 documentId: tab.documentId,
-                viewport: await this.backend.viewport(tab.id),
-              },
-              request.actorId,
-            );
+                viewport: { width: viewport.width, height: viewport.height },
+              };
+            } else {
+              const artifact = await this.files.frame(bytes, {
+                tabId: tab.id, documentId: tab.documentId, viewport,
+              }, request.actorId);
+              try {
+                validateCapture();
+              } catch (error) {
+                await this.files.ack(artifact.transferId);
+                throw error;
+              }
+              response.artifact = artifact;
+            }
           } finally {
             this.frameInFlight.delete(request.actorId);
           }

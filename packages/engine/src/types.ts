@@ -1225,6 +1225,21 @@ export interface WorkspaceGrowth {
   pending?: boolean;
 }
 
+/** An owned, ordered stdin/stdout transport. Closing it never retries a command. */
+export interface SandboxCommandChannel {
+  write(data: string): Promise<void>;
+  close(): void;
+}
+
+export interface SandboxCommandChannelOptions {
+  /** False for passive viewers: fail without provisioning or resuming compute. */
+  waitForReady?: boolean;
+  onData(data: string): void;
+  onClose(error?: Error): void;
+  privileged?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface Sandbox {
   id: string;
   /** True when create adopted existing provider state or persistent storage.
@@ -1247,6 +1262,8 @@ export interface Sandbox {
   mkdir(path: string): Promise<void>;
   rm(path: string, opts?: { recursive?: boolean }): Promise<void>;
   exec(command: string, opts?: ExecOpts): Promise<ExecResult>;
+  /** Null means unsupported, before command execution. A failed open must throw. */
+  openCommandChannel?(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel | null>;
   snapshot?(): Promise<string>;
   tunnels?(): Promise<Record<string, string>>;
   destroy?(): Promise<void>;

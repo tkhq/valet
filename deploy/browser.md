@@ -77,3 +77,12 @@ The browser broker permits approved public origins and bounded local development
 The default development ports are `5173`, `3000`, and `8080`.
 Provider configuration can set `VALET_BROWSER_DEV_PORTS` explicitly.
 The gateway and interactive-service ports are outside that default set.
+
+## Browser command transport
+
+Docker and Kubernetes keep one private exec stream open for active browser requests.
+The stream uses the existing provider authentication and private browser identity.
+It requires no public browser port or gateway permission change.
+Idle connections close automatically. In-flight mutations are never replayed after a connection failure.
+Rebuild the sandbox image when updating the API to this transport version.
+Existing containers must use the rebuilt runtime before they can serve inline preview frames.

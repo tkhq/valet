@@ -134,13 +134,27 @@ describe("browser frame transport", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(load).toHaveBeenCalledTimes(1);
     finish?.(1);
-    await vi.advanceTimersByTimeAsync(249);
-    expect(load).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
     expect(load).toHaveBeenCalledTimes(2);
     abort.abort();
     finish?.(2);
     await task;
     expect(publish.mock.calls).toEqual([[1]]);
   });
+});
+
+
+it("starts preview frames at a bounded 100 ms cadence without adding capture time", async () => {
+  vi.useFakeTimers();
+  const abort = new AbortController();
+  const starts: number[] = [];
+  const task = pollBrowserFrames(async () => {
+    starts.push(Date.now());
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    return 1;
+  }, () => {}, abort.signal);
+  await vi.advanceTimersByTimeAsync(240);
+  expect(starts.map((time) => time - starts[0])).toEqual([0, 100, 200]);
+  abort.abort();
+  await task;
 });

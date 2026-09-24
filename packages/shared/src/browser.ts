@@ -139,6 +139,15 @@ export interface BrowserExportDescriptor extends BrowserArtifact {
   path: string;
   transferId: string;
 }
+export interface BrowserInlineFrame {
+  mimeType: 'image/jpeg';
+  data: string;
+  bytes: number;
+  sha256: string;
+  tabId: string;
+  documentId: string;
+  viewport: { width: number; height: number };
+}
 export interface BrowserPolicyRequest {
   operationId: string;
   cellId: string;
@@ -277,7 +286,7 @@ export type BrowserRequest = BrowserIdentity &
         input: BrowserHumanInput;
       }
     | { command: 'evidence'; tabId: string; runtimeId: string }
-    | { command: 'frame'; tabId: string; runtimeId: string }
+    | { command: 'frame'; tabId: string; runtimeId: string; inline?: boolean }
     | {
         command: 'tab';
         action: 'new' | 'close' | 'select';
@@ -322,6 +331,7 @@ export interface BrowserResponse {
   cell?: BrowserCellReceipt;
   status?: BrowserRuntimeStatus;
   artifact?: BrowserExportDescriptor;
+  frame?: BrowserInlineFrame;
   description?: string;
   audit?: BrowserAuditEntry[];
   auditTotal?: number;

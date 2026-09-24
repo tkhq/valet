@@ -26,6 +26,7 @@ import {
   mintBrowserTicket,
   verifyBrowserTicket,
 } from "../services/browser-ticket.js";
+import { decodeBrowserFrame } from "../services/browser-frame.js";
 import { pluginStore } from "../services/plugin-store.js";
 import type { BrowserArtifact } from "@valet/shared";
 
@@ -261,10 +262,8 @@ async function context(
     });
     await engineHost.markSessionUsed(session.id);
   }
-  const sandbox =
-    engineSession?.attachment.state === "ready"
-      ? engineSession.attachment.current()
-      : null;
+  const attached = engineSession?.attachment.current() ?? null;
+  const sandbox = attached && engineSession ? engineSession.sandbox : null;
   if (mode === "active" && !sandbox)
     throw new HTTPException(409, {
       message: "The browser is sleeping. Start it from the Browser tab.",
@@ -277,6 +276,7 @@ async function context(
     enabled,
     canAdminister,
     sandbox,
+    attached,
   };
 }
 
@@ -289,13 +289,13 @@ async function status(c: Context<AppEnv>, start = false) {
     settings: ctx.settings,
     status: null,
   };
-  if (ctx.enabled && ctx.sandbox) {
+  if (ctx.enabled && ctx.sandbox && ctx.attached) {
     try {
       await ctx.policy.authorize(ctx.identity);
       if (
         start ||
         (
-          await ctx.sandbox.exec(
+          await ctx.attached.exec(
             "test -S /var/lib/valet/browser/browser.sock",
             { timeout: 5000, privileged: true },
           )
@@ -443,38 +443,27 @@ browserRouter.get("/:id/browser/frame", async (c) => {
     throw new HTTPException(409, {
       message: "Start the browser before opening its viewer.",
     });
-  const frame = await browserRequest(
+  const response = await browserRequest(
     ctx.sandbox,
-    { ...ctx.identity, command: "frame", runtimeId, tabId },
+    { ...ctx.identity, command: "frame", runtimeId, tabId, inline: true },
     c.req.raw.signal,
   );
-  if (!frame.artifact)
+  if (response.runtimeId !== runtimeId)
     throw new HTTPException(409, {
-      message: "The page has no frame. Select a browser tab.",
+      message: "The browser runtime changed. Reopen the browser viewer.",
     });
-  try {
-    const data = await readBrowserExport(ctx.sandbox, frame.artifact);
-    return new Response(Buffer.from(data), {
-      headers: {
-        "content-type": frame.artifact.mimeType,
-        "cache-control": "no-store",
-        "x-browser-document-id": frame.artifact.documentId ?? "",
-        "x-browser-runtime-id": frame.runtimeId,
-        "x-browser-viewport-width": String(
-          frame.artifact.viewport?.width ?? frame.artifact.width ?? 0,
-        ),
-        "x-browser-viewport-height": String(
-          frame.artifact.viewport?.height ?? frame.artifact.height ?? 0,
-        ),
-      },
-    });
-  } finally {
-    await browserRequest(ctx.sandbox, {
-      ...ctx.identity,
-      command: "ack",
-      transferId: frame.artifact.transferId,
-    });
-  }
+  const frame = decodeBrowserFrame(response.frame, tabId);
+  return new Response(frame.data, {
+    headers: {
+      "content-type": "image/jpeg",
+      "content-length": String(frame.data.length),
+      "cache-control": "no-store",
+      "x-browser-document-id": frame.documentId,
+      "x-browser-runtime-id": response.runtimeId,
+      "x-browser-viewport-width": String(frame.viewport.width),
+      "x-browser-viewport-height": String(frame.viewport.height),
+    },
+  });
 });
 browserRouter.get("/:id/browser/evidence/:artifactId", async (c) => {
   const ctx = await context(c, "status");

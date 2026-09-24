@@ -29,6 +29,7 @@ import {
   resolvePodName,
   sandboxStatus,
 } from "../src/lifecycle.js";
+import { openCommandChannelInPod } from "../src/command-channel.js";
 import { execInPod, podExecApiAdapter, type ExecDeps } from "../src/exec.js";
 import {
   mkdirInPod,
@@ -143,6 +144,26 @@ describe.skipIf(!isClusterReady)("exec/files/jobs (live rancher-desktop cluster)
     expect(result.timedOut).toBe(true);
     expect(Date.now() - start).toBeLessThan(5000);
   }, 10_000);
+
+  it("keeps a command channel open across writes and closes it explicitly", async () => {
+    let output = "";
+    let closes = 0;
+    const channel = await openCommandChannelInPod(
+      deps, podName, 'while IFS= read -r line; do printf "%s\\n" "$line"; done',
+      { onData: (data) => { output += data; }, onClose: () => { closes++; } },
+    );
+    try {
+      await channel.write("first\n");
+      await expect.poll(() => output).toBe("first\n");
+      const large = "browser-✓".repeat(12_000);
+      await channel.write(large + "\n");
+      await channel.write("last\n");
+      await expect.poll(() => output).toBe("first\n" + large + "\nlast\n");
+      expect(closes).toBe(0);
+    } finally { channel.close(); }
+    expect(closes).toBe(1);
+    await expect(channel.write("later\n")).rejects.toThrow(/closed/);
+  });
 
   // ── files ──────────────────────────────────────────────────────────
 

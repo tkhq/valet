@@ -121,8 +121,12 @@ export class BrowserPolicy implements BrowserPolicyService {
           "The browser policy or approval expired. Start a new operation.",
       };
     }
+    // Method classes do not identify business effects. The browser skill requires
+    // task authorization, with ask_approval for unapproved consequential actions.
     if (
-      ["observation", "history", "diagnostic"].includes(request.operationClass)
+      ["observation", "navigation", "mutation", "history", "diagnostic"].includes(
+        request.operationClass,
+      )
     )
       return { decision: "allow" as const, ...access };
     const settings = await this.settings(request.sessionId);

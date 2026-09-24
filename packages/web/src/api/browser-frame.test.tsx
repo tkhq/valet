@@ -131,8 +131,8 @@ it("retries a bounded number of frame conflicts after an interrupted capture", a
   const fetcher = vi
     .fn()
     .mockResolvedValueOnce(new Response("Capture in progress", { status: 409 }))
-    .mockResolvedValueOnce(
-      new Response("image", {
+    .mockImplementation(
+      async () => new Response("image", {
         headers: {
           "content-type": "image/jpeg",
           "x-browser-runtime-id": "runtime",
@@ -151,7 +151,7 @@ it("retries a bounded number of frame conflicts after an interrupted capture", a
   });
   expect(view.result.current.error).toBeNull();
   expect(view.result.current.frame?.documentId).toBe("doc");
-  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(fetcher).toHaveBeenCalledTimes(3);
   view.unmount();
 });
 

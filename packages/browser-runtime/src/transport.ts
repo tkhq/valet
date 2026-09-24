@@ -86,55 +86,54 @@ export async function serveDaemon(
 export function requestDaemon(
   request: BrowserRequest,
   path: string,
+  signal?: AbortSignal,
 ): Promise<BrowserResponse> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason); return; }
     const socket = createConnection(path);
     socket.setEncoding('utf8');
     let body = '';
-    socket.setTimeout(35_000, () => {
+    let settled = false;
+    let sent = false;
+    function fail(error: unknown) {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
       socket.destroy();
-      reject(
-        new BrowserFault(
-          'OUTCOME_UNKNOWN',
-          'The browser client timed out.',
-          'Attach to the same invocation and inspect its receipt.',
-          'possible',
-        ),
-      );
+      reject(error);
+    }
+    function abort() { fail(signal?.reason); }
+    function outcomeUnknown(message: string) {
+      return new BrowserFault('OUTCOME_UNKNOWN', message, 'Attach to the same invocation and inspect its receipt.', 'possible');
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+    socket.setTimeout(35_000, () => fail(outcomeUnknown('The browser client timed out.')));
+    socket.on('connect', () => {
+      if (settled) return;
+      sent = true;
+      socket.write(JSON.stringify(request) + '\n');
     });
-    socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
-    socket.on('error', reject);
+    socket.on('error', (error) => fail(sent ? outcomeUnknown('The browser connection failed after dispatch.') : error));
+    socket.on('close', () => {
+      if (!settled) fail(outcomeUnknown('The browser connection closed before its reply.'));
+    });
     socket.on('data', (chunk) => {
       body += chunk.toString('utf8');
-      if (Buffer.byteLength(body) > 1_000_000) {
-        socket.destroy();
-        reject(
-          new BrowserFault(
-            'QUOTA_EXCEEDED',
-            'Browser response exceeds the transport limit.',
-            'Read a smaller event batch.',
-          ),
-        );
-      }
+      if (Buffer.byteLength(body) > 1_000_000)
+        fail(new BrowserFault('QUOTA_EXCEEDED', 'Browser response exceeds the transport limit.', 'Read a smaller event batch.'));
     });
     socket.on('end', () => {
+      if (settled) return;
       try {
         const value: unknown = JSON.parse(body);
-        if (
-          !value ||
-          typeof value !== 'object' ||
-          Reflect.get(value, 'protocolVersion') !== '1.0' ||
-          typeof Reflect.get(value, 'ok') !== 'boolean'
-        )
-          throw new BrowserFault(
-            'PROTOCOL_MISMATCH',
-            'The browser response is incompatible.',
-            'Rebuild the sandbox browser image.',
-          );
+        if (!value || typeof value !== 'object' || Reflect.get(value, 'protocolVersion') !== '1.0' || typeof Reflect.get(value, 'ok') !== 'boolean')
+          throw new BrowserFault('PROTOCOL_MISMATCH', 'The browser response is incompatible.', 'Rebuild the sandbox browser image.');
+        settled = true;
+        signal?.removeEventListener('abort', abort);
+        socket.destroy();
+        // The daemon validates its typed response; this transport checks the envelope.
         resolve(value as BrowserResponse);
-      } catch (error) {
-        reject(error);
-      }
+      } catch (error) { fail(error); }
     });
   });
 }

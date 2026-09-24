@@ -16,7 +16,10 @@ import type {
   SandboxProvider,
   SandboxStatus,
   SandboxListing,
+  SandboxCommandChannel,
+  SandboxCommandChannelOptions,
 } from "@valet/engine";
+import { openDockerCommandChannel } from './command-channel.js';
 import { DockerInventory, dockerOwnerLabels, parseDockerInspection, validateDockerOwner, type DockerInventoryRecord } from "./inventory.js";
 import { READ_RETAINED_BROWSER_AUDIT, parseRetainedBrowserAudit, type RetainedBrowserAudit } from "./browser-audit.js";
 import {
@@ -603,6 +606,10 @@ export class DockerSandbox implements Sandbox {
       browser: this.browser,
       privileged: opts?.privileged,
     });
+  }
+
+  openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel> {
+    return openDockerCommandChannel(this.execArgs(command, { privileged: options.privileged, stdin: '' }), options);
   }
 
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {

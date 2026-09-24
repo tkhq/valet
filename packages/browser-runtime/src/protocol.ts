@@ -139,6 +139,12 @@ export function parseRequest(value: unknown): BrowserRequest {
     );
   for (const key of required[command])
     string(v[key], key, key === 'code' ? 100_000 : 1024);
+  if (command === 'frame' && v.inline !== undefined && typeof v.inline !== 'boolean')
+    throw new BrowserFault(
+      'INVALID_REQUEST',
+      'Invalid inline frame flag.',
+      'Set inline to true or false.',
+    );
   if (command === 'resolve') {
     if (v.decision !== 'allow' && v.decision !== 'deny')
       throw new BrowserFault(

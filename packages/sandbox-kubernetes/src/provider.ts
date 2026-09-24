@@ -76,6 +76,8 @@ import type {
   JobPoll,
   Sandbox,
   SandboxCapabilities,
+  SandboxCommandChannel,
+  SandboxCommandChannelOptions,
   SandboxCreateOpts,
   SandboxListing,
   SandboxProvider,
@@ -83,6 +85,7 @@ import type {
   WorkspaceGrowth,
 } from "@valet/engine";
 import { execInPod, type ExecDeps, type PodExecApi } from "./exec.js";
+import { openCommandChannelInPod } from "./command-channel.js";
 import {
   mkdirInPod,
   PodFileOpError,
@@ -617,6 +620,11 @@ export class KubernetesSandbox implements Sandbox {
 
   async rm(path: string, opts?: { recursive?: boolean }): Promise<void> {
     return this.withPod((pod) => rmInPod(this.execDeps(), pod, path, opts));
+  }
+
+  async openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel> {
+    if (options.signal?.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new Error('Command channel aborted. Open a new channel when needed.');
+    return this.withPodContext(({ podName }) => openCommandChannelInPod(this.execDeps(), podName, command, options));
   }
 
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {

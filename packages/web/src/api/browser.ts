@@ -237,7 +237,7 @@ export interface BrowserFrame extends Omit<BrowserFrameData, "blob"> {
   tabId: string;
 }
 
-function nextFrameTick(signal: AbortSignal): Promise<void> {
+function nextFrameTick(signal: AbortSignal, delayMs = 250): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
     const done = () => {
@@ -245,7 +245,7 @@ function nextFrameTick(signal: AbortSignal): Promise<void> {
       signal.removeEventListener("abort", done);
       resolve();
     };
-    const timer = setTimeout(done, 250);
+    const timer = setTimeout(done, delayMs);
     signal.addEventListener("abort", done, { once: true });
   });
 }
@@ -331,17 +331,19 @@ export async function fetchBrowserFrame(
   return { blob, runtimeId, documentId, viewport: { width, height } };
 }
 
-/** One request at a time. The delay starts after completion, so the rate never exceeds four frames per second. */
+/** One request at a time, at most ten starts per second. Capture time consumes the interval. */
 export async function pollBrowserFrames<T>(
   load: (signal: AbortSignal) => Promise<T>,
   publish: (frame: T) => void,
   signal: AbortSignal,
 ): Promise<void> {
   while (!signal.aborted) {
+    const started = Date.now();
     const frame = await load(signal);
     if (signal.aborted) return;
     publish(frame);
-    await nextFrameTick(signal);
+    const remaining = 100 - (Date.now() - started);
+    if (remaining > 0) await nextFrameTick(signal, remaining);
   }
 }
 

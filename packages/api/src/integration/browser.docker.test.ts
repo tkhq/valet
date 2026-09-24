@@ -28,7 +28,7 @@ const image = process.env.VALET_BROWSER_TEST_IMAGE;
 describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
   "browser full stack in Docker",
   () => {
-    it("persists a real approved browser turn, serves evidence and supports human control", async () => {
+    it("autoallows routine browser work, retains export approval, and serves direct frames", async () => {
       const root = await mkdtemp(join(tmpdir(), "valet-browser-api-"));
       const provider = new DockerSandboxProvider({
         inventoryRoot: join(root, "inventory"),
@@ -108,7 +108,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
                 "browser__execute",
                 {
                   title: "Verify form",
-                  code: 'var tab = await browser.tabs.new({url:"http://127.0.0.1:5173"}); await tab.playwright.getByLabel("Name").fill("Ada"); await tab.playwright.getByRole("button",{name:"Save",exact:true}).click(); await tab.playwright.getByRole("link",{name:"Download fixture",exact:true}).click(); await tab.markDeliverable(); output.write(await tab.getAXState()); output.image(await tab.getScreenshot());',
+                  code: 'var tab = await browser.tabs.new({url:"http://127.0.0.1:5173"}); await tab.reload(); await tab.playwright.getByLabel("Name").fill("Ada"); await tab.playwright.getByRole("button",{name:"Save",exact:true}).click(); await tab.playwright.getByRole("link",{name:"Download fixture",exact:true}).click(); await tab.markDeliverable(); output.write(await tab.getAXState()); output.image(await tab.getScreenshot()); await tab.content.export("text");',
                 },
                 { id: "browser-fullstack-call" },
               ),
@@ -130,7 +130,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
         await session.prompt("Inspect the fixture and save visual evidence.", {
           author: { id: "local-user", name: "Local Dev" },
         });
-        let approvals = 0;
+        const approvals: string[] = [];
         const resolved = new Set<string>();
         await expect
           .poll(
@@ -141,7 +141,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
               for (const gate of decisions.gates) {
                 if (resolved.has(gate.id)) continue;
                 resolved.add(gate.id);
-                approvals += 1;
+                approvals.push(gate.title);
                 await json(
                   `/api/sessions/${sessionId}/decisions/${gate.id}/resolve`,
                   "POST",
@@ -187,7 +187,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
           );
         expect(result).toContain("Saved Ada");
         expect(result).toContain("image/png");
-        expect(approvals).toBeGreaterThanOrEqual(3);
+        expect(approvals).toEqual(["Browser: tab.export"]);
         expect(
           events.some(
             (event) =>

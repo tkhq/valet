@@ -23,6 +23,9 @@
 import { PassThrough } from "node:stream";
 import type { Readable as ReadableStream, Writable as WritableStream } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
+import { Exec } from "@kubernetes/client-node";
+import { WebSocketHandler } from "@kubernetes/client-node/dist/web-socket-handler.js";
+import WebSocket from "ws";
 import { CappedOutputBuffer, SandboxConnectionError, formatSandboxErrorCause, type ExecOpts, type ExecResult } from "@valet/engine";
 
 /** Directory the job-mode protocol (jobs.ts) writes its `{execId}.{out,exit,pid}`
@@ -187,6 +190,11 @@ function formatExecTransportCause(cause: unknown): string {
  * assignable to `close(): void` (fewer required params), no cast needed. */
 export interface PodExecSocket {
   close(): void;
+  /** Persistent channels observe transport failure and bound queued socket data. */
+  on?(event: "close" | "error", listener: (...args: unknown[]) => void): unknown;
+  off?(event: "close" | "error", listener: (...args: unknown[]) => void): unknown;
+  readonly readyState?: number;
+  readonly bufferedAmount?: number;
 }
 
 /** The subset of `@kubernetes/client-node`'s `Exec` class this module
@@ -204,17 +212,43 @@ export interface PodExecApi {
     stdin: ReadableStream | null,
     tty: boolean,
     statusCallback?: (status: ExecStatus) => void,
+    startup?: { signal: AbortSignal; timeoutMs: number },
   ): Promise<PodExecSocket>;
 }
 
-/** Wraps a real `k8s.Exec` instance. No casts: `k8s.Exec.exec`'s real
- * signature already matches `PodExecApi.exec` structurally (its `V1Status`
- * callback param is a supertype of our `ExecStatus`, and its `WebSocket`
- * return type is a supertype of `PodExecSocket`). */
+/** Ordinary exec keeps the supplied adapter. Channel startup owns a cancellable socket
+ * because client-node does not expose its WebSocket until the upgrade succeeds. */
 export function podExecApiAdapter(exec: k8s.Exec): PodExecApi {
   return {
-    exec: (namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback) =>
-      exec.exec(namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback),
+    exec: async (namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback, startup) => {
+      if (!startup) return exec.exec(namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback);
+      startup.signal.throwIfAborted();
+      if (!(exec.handler instanceof WebSocketHandler)) {
+        throw new Error("The exec adapter cannot cancel channel startup. Use the standard Kubernetes WebSocket handler.");
+      }
+      let socket: WebSocket | undefined;
+      const abort = () => socket?.terminate();
+      startup.signal.addEventListener("abort", abort, { once: true });
+      try {
+        const handler = new WebSocketHandler(exec.handler.config, (uri, protocols, options) => {
+          // Authentication can finish after the channel deadline. Do not create a late connection.
+          startup.signal.throwIfAborted();
+          socket = new WebSocket(uri, protocols, { ...options, handshakeTimeout: startup.timeoutMs });
+          return socket;
+        }, {
+          stdin: stdin ?? new PassThrough(), stdout: stdout ?? new PassThrough(), stderr: stderr ?? new PassThrough(),
+        });
+        const channelExec = new Exec(exec.handler.config, handler);
+        const connected = await channelExec.exec(namespace, podName, containerName, command, stdout, stderr, stdin, tty, statusCallback);
+        if (startup.signal.aborted) {
+          connected.terminate();
+          startup.signal.throwIfAborted();
+        }
+        return connected;
+      } finally {
+        startup.signal.removeEventListener("abort", abort);
+      }
+    },
   };
 }
 

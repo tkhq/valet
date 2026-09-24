@@ -1076,10 +1076,16 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      ws:
+        specifier: ^8.21.1
+        version: 8.21.1
     devDependencies:
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.39
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       typescript:
         specifier: ^5.3.3
         version: 5.9.3

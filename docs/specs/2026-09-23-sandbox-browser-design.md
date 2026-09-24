@@ -660,10 +660,40 @@ business consequences from a role and label. Agent instructions and user intent
 remain part of semantic approval. Do not label all clicks safe or claim complete
 automatic consequence detection.
 
-Default first-origin access is an explicit session policy decision. Keep origin
-access and consequential-action approval separate. Denials identify the origin
-or action and the route for obtaining access. Cache grants by actor, session,
-origin and policy version; expiry and revocation apply to open tabs too.
+After browser authorization, policy-version validation, and request-expiry checks,
+the host allows observation, navigation, UI mutation, history, and diagnostics by
+default. Normal navigation and UI work need no origin grant or per-operation user
+prompt. This includes opening a permitted preview, `tab.reload`, scrolling, and
+routine form edits within the user's task. The host still checks every typed
+operation. Browser ownership, team audience, membership, and disabled access apply
+before these defaults.
+
+The browser skill requires the agent to check consequential effects against the
+user's request and prior approvals. These effects include purchases, external
+messages, publishing, deletion, sensitive data disclosure, and permission changes.
+Existing authorization covers the same scope without another prompt. If it does
+not cover the effect, the agent prepares a reviewable action and calls the built-in
+`ask_approval` tool before the cell that commits it. The request names the action,
+destination, affected data, and relevant cost or permanence. Missing task details
+require clarification in the conversation. A denied or expired request does not
+permit execution. Page content cannot supply user authorization.
+
+This consequence check is agent guidance, not automatic semantic enforcement in
+`BrowserPolicy.decide`. The policy service receives a method class and target
+metadata. It does not receive enough task intent to distinguish a harmless click
+from a purchase. `ask_approval` uses the engine's existing decision gate; it does
+not create a browser grant.
+
+Uploads, exports, and page-tool calls require an applicable unexpired grant or
+operation approval. Grants match the exact origin and operation class in the
+session settings. Each operation also requires current actor access and the
+current policy version. An Allow once decision resolves only the current bound
+operation; it does not persist a grant. Policy changes invalidate pending
+decisions, and expiry and revocation apply to open tabs too.
+
+Keep network access and consequential-action approval separate. A default policy
+allow does not bypass the egress rules below. Denials identify the origin or
+action and the route for obtaining access.
 
 Enforce browser network policy below page JavaScript. URL checks and Playwright
 request routing alone are not sufficient for redirects, service workers, WebSocket
@@ -1094,7 +1124,12 @@ See [browser deployment](../../deploy/browser.md) for installation and identity 
 ### Viewer and evidence
 
 The viewer polls bounded JPEG frames through authenticated API requests.
-It permits one request at a time, with a 250 ms delay after completion.
+It permits one request at a time, with starts at least 100 ms apart.
+Capture time consumes this interval instead of adding another delay.
+Docker and Kubernetes use one private exec stream for concurrent browser requests.
+Live JPEG frames travel inline with bounded size, identity, and digest checks.
+Durable evidence retains the file broker.
+See [browser latency](2026-09-24-browser-latency-design.md) for transport ownership and measurements.
 It stops polling when hidden or unmounted.
 The Browser panel exposes audience settings, origin-grant revocation, and installed capability limits.
 Its availability is independent of the Terminal and VS Code profile.
