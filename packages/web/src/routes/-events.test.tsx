@@ -142,12 +142,15 @@ const deleteMutate = vi.fn();
  * that needs the new value on screen must cause a render of its own, which
  * is what a tab click does. Reset in `afterEach`. */
 let searchState: Record<string, unknown> = {};
+type NavigateSearch = Record<string, unknown> | ((previous: Record<string, unknown>) => Record<string, unknown>);
+const navigateCalls: { search?: NavigateSearch }[] = [];
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useSearch: () => searchState,
-  useNavigate: () => (opts: { search?: Record<string, unknown> }) => {
-    searchState = opts.search ?? {};
+  useNavigate: () => (opts: { search?: NavigateSearch }) => {
+    navigateCalls.push(opts);
+    searchState = typeof opts.search === "function" ? opts.search(searchState) : opts.search ?? {};
   },
   Link: ({
     children,
@@ -174,6 +177,11 @@ vi.mock("~/api/events", () => ({
     isFetching: false,
     error: null,
     refetch: vi.fn(),
+  }),
+  useEventDrops: () => ({
+    data: { lastEventAt: null, drops: [] },
+    isPending: false,
+    error: null,
   }),
   useEvent: () => ({ data: eventDetailData, isLoading: false, error: null }),
   useEventSubscriptions: () => ({ data: subscriptionsData, isPending: false, error: null }),
@@ -262,6 +270,7 @@ afterEach(() => {
   teamsData = { teams: [] };
   scopeTeamId = undefined;
   searchState = {};
+  navigateCalls.length = 0;
 });
 
 describe("EventsPage — Activity", () => {
@@ -340,6 +349,49 @@ describe("EventsPage — Activity", () => {
     searchState = { scope: "all" };
     render(<EventsPage />);
     expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
+  });
+
+  it("opens Problems from a shared Problems URL", () => {
+    searchState = {
+      tab: "problems",
+      problemsQ: "signature",
+      problemsCursor: "cursor_2",
+      problemsDirection: "previous",
+    };
+    render(<EventsPage />);
+
+    expect(screen.getByRole("tab", { name: "Problems" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("searchbox", { name: "Search problems" })).toBeTruthy();
+  });
+
+  it("writes tab changes to the URL so history restores the selected tab", async () => {
+    const page = render(<EventsPage />);
+    fireEvent.click(screen.getByRole("tab", { name: "Problems" }));
+    expect(searchState).toEqual({ tab: "problems" });
+    expect(screen.getByRole("tab", { name: "Problems" }).getAttribute("aria-selected")).toBe("true");
+
+    searchState = {};
+    page.rerender(<EventsPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Activity" }).getAttribute("aria-selected")).toBe("true"));
+
+    searchState = { tab: "problems" };
+    page.rerender(<EventsPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Problems" }).getAttribute("aria-selected")).toBe("true"));
+  });
+
+  it("keeps a Problems backward cursor when Activity scope changes", async () => {
+    searchState = { problemsQ: "signature", problemsCursor: "cursor_2", problemsDirection: "previous" };
+    render(<EventsPage />);
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), { key: "Enter" });
+    fireEvent.click(await screen.findByText("All"));
+
+    expect(searchState).toEqual({
+      scope: "all",
+      problemsQ: "signature",
+      problemsCursor: "cursor_2",
+      problemsDirection: "previous",
+    });
   });
 });
 

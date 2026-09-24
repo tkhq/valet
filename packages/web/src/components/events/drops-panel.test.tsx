@@ -71,14 +71,15 @@ describe("DropsPanel", () => {
     expect(onQueryChange).toHaveBeenCalledWith("x".repeat(200));
   });
 
-  it("explains how to correct an overlong search from a URL", () => {
-    useEventDropsMock.mockReturnValue({ isPending: false, error: null, data: undefined });
+  it("explains how to correct an overlong search from a URL without loading", () => {
+    useEventDropsMock.mockReturnValue({ isPending: true, error: null, data: undefined });
     const query = "x".repeat(201);
     render(<DropsPanel query={query} />);
 
     expect(screen.getByRole("alert").textContent).toBe(
       "Search is too long. Shorten the search to 200 characters or fewer.",
     );
+    expect(screen.queryByText("Loading problems…")).toBeNull();
     expect(useEventDropsMock).toHaveBeenLastCalledWith(
       { q: query, cursor: undefined, direction: undefined },
       { enabled: false },

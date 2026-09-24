@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { TabBar, tabPanelId } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
@@ -9,38 +9,40 @@ import { textParam } from "~/lib/search-params";
 
 /**
  * `/events` — the UI over the event system (feed, catalog, subscriptions;
- * see the events router in packages/api). Two tabs:
+ * see the events router in packages/api). Three tabs:
  *
  * - Activity: ingested events, filterable by service/key, each expandable
  *   into its payload and delivery attempts. The scope control starts at the
  *   active workspace's events and opens to the whole org on request.
  * - Subscriptions: the rules that turn a matching event into a workflow
  *   run or an orchestrator prompt, listed for the active workspace.
+ * - Problems: reasons why an event did not become an activity row.
  *
- * Local-state tabs, not child routes: the two panels share no params and
- * a deep link to a tab has no use yet. Promote to routes when one does. One
- * event DOES have its own URL — `/events/$eventId` — because an event that
- * broke a run has to be paste-able into a ticket.
- *
- * The feed's scope is NOT local state: the two tabs unmount each other, and
- * a diagnosis crosses them. It lives in `?scope=`, the same way the
- * workflows hub keeps `?tab=`.
+ * The selected tab and the feed scope live in search params. A shared
+ * Problems search or cursor must also select Problems after reload. This
+ * follows the workflows hub's `?tab=` pattern. One event has its own URL,
+ * `/events/$eventId`, because a broken run needs a paste-able reference.
  */
+type TabId = "activity" | "subscriptions" | "problems";
+
 interface EventsSearch {
+  tab?: TabId;
   scope?: FeedScope;
   problemsQ?: string;
   problemsCursor?: string;
   problemsDirection?: "previous";
 }
 
-/** Only "all" is written to the URL. An absent or hand-edited value reads
- * as the default workspace scope. */
-function readEventsSearch(raw: unknown): EventsSearch {
+/** Only non-default values are written to the URL. An absent or hand-edited
+ * value reads as the default tab and workspace scope. */
+export function readEventsSearch(raw: unknown): EventsSearch {
+  const tabValue = textParam(raw, "tab");
+  const tab = tabValue === "subscriptions" || tabValue === "problems" ? tabValue : undefined;
   const scope = textParam(raw, "scope") === "all" ? "all" : undefined;
   const problemsQ = textParam(raw, "problemsQ");
   const problemsCursor = textParam(raw, "problemsCursor");
   const problemsDirection = textParam(raw, "problemsDirection") === "previous" ? "previous" as const : undefined;
-  return { ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}), ...(problemsDirection ? { problemsDirection } : {}) };
+  return { ...(tab ? { tab } : {}), ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}), ...(problemsDirection ? { problemsDirection } : {}) };
 }
 
 export const Route = createFileRoute("/events/")({
@@ -55,15 +57,26 @@ const TABS = [
   { id: "problems", label: "Problems" },
 ] as const;
 
-type TabId = (typeof TABS)[number]["id"];
-
 export function EventsPage() {
-  const [tab, setTab] = useState<TabId>("activity");
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
+  const [tab, setTab] = useState<TabId>(search.tab ?? "activity");
+  useEffect(() => setTab(search.tab ?? "activity"), [search.tab]);
   const scope: FeedScope = search.scope ?? "workspace";
+
+  function selectTab(next: TabId) {
+    setTab(next);
+    void navigate({
+      to: "/events",
+      search: (previous) => {
+        const current = readEventsSearch(previous);
+        const { tab: _tab, ...rest } = current;
+        return next === "activity" ? rest : { ...rest, tab: next };
+      },
+    });
+  }
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
@@ -77,7 +90,7 @@ export function EventsPage() {
         </p>
 
         <div className="mt-6">
-          <TabBar tabs={TABS} active={tab} onSelect={setTab} label={TABS_LABEL} />
+          <TabBar tabs={TABS} active={tab} onSelect={selectTab} label={TABS_LABEL} />
         </div>
 
         <div
@@ -90,7 +103,7 @@ export function EventsPage() {
             <EventFeed
               scope={scope}
               onScopeChange={(next) =>
-                void navigate({ to: "/events", search: { ...(next === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(search.problemsCursor ? { problemsCursor: search.problemsCursor } : {}) } })
+                void navigate({ to: "/events", search: { ...(tab === "activity" ? {} : { tab }), ...(next === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(search.problemsCursor ? { problemsCursor: search.problemsCursor } : {}), ...(search.problemsDirection ? { problemsDirection: search.problemsDirection } : {}) } })
               }
             />
           )}
@@ -102,10 +115,10 @@ export function EventsPage() {
               direction={search.problemsDirection}
               onQueryChange={(problemsQ) => {
                 problemsQ = problemsQ.trim() ? problemsQ : "";
-                void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
+                void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
               }}
-              onPrevious={(problemsCursor) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor, problemsDirection: "previous" as const } : {}) } })}
-              onNext={(problemsCursor) => void navigate({ to: "/events", search: { ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } })}
+              onPrevious={(problemsCursor) => void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor, problemsDirection: "previous" as const } : {}) } })}
+              onNext={(problemsCursor) => void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } })}
             />
           )}
         </div>

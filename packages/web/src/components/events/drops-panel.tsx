@@ -75,7 +75,7 @@ export function DropsPanel({
       {searchTooLong && (
         <ErrorRow>Search is too long. Shorten the search to 200 characters or fewer.</ErrorRow>
       )}
-      {dropsQ.isPending && <LoadingRow label="Loading problems…" />}
+      {!searchTooLong && dropsQ.isPending && <LoadingRow label="Loading problems…" />}
       {dropsQ.error != null && !searchTooLong && (
         <ErrorRow>
           {cursor ? <><span>That page is no longer available. </span><button type="button" className="underline" onClick={() => onPrevious?.("")}>Return to the first page</button></> : "Failed to load. Reload the page and try again."}
