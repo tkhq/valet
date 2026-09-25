@@ -34,8 +34,9 @@ async function hasAuditCheckpoint(sessionId: string, sandboxId: string, blobs?: 
 
 async function exportAudit(sessionId: string, sandboxId: string, snapshot: { entries: BrowserAuditEntry[]; total: number; runtimeId?: string }, blobs?: BlobStore, store?: PluginStore): Promise<void> {
   if (!blobs || !store) throw new Error('Browser audit storage is unavailable. Configure the blob store and database before deleting the sandbox.');
+  if (snapshot.entries.length !== snapshot.total) throw new Error('Browser audit export is incomplete. Restore the browser runtime and export every audit page before deleting the sandbox.');
   const key = `browser-audit/${encodeURIComponent(sessionId)}/${encodeURIComponent(sandboxId)}-${encodeURIComponent(snapshot.runtimeId ?? 'retained')}.json`;
-  await blobs.put(key, new TextEncoder().encode(JSON.stringify({ ...snapshot, exportedAt: Date.now(), truncated: snapshot.entries.length < snapshot.total })), { contentType: 'application/json' });
+  await blobs.put(key, new TextEncoder().encode(JSON.stringify({ ...snapshot, exportedAt: Date.now(), truncated: false })), { contentType: 'application/json' });
   await store.session(sessionId).put<AuditCheckpoint>('audit_exports', sandboxId, { key, sessionId, sandboxId });
 }
 
@@ -71,6 +72,22 @@ export function browserSessionHooks(sessionId: string, sessions: SessionStore, b
       cursor = page.nextCursor ?? undefined;
     } while (cursor);
   }
+  async function readCompleteAudit(sandbox: Sandbox, identity: BrowserIdentity) {
+    const entries: BrowserAuditEntry[] = [];
+    let total: number | undefined;
+    let runtimeId: string | undefined;
+    do {
+      const page = await browserRequest(sandbox, { ...identity, command: 'audit', offset: entries.length });
+      runtimeId ??= page.runtimeId;
+      if (runtimeId !== page.runtimeId) throw new Error('Browser runtime changed during audit export. Suspend the browser and retry deletion.');
+      total ??= page.auditTotal ?? page.audit?.length ?? 0;
+      if (total !== (page.auditTotal ?? page.audit?.length ?? 0)) throw new Error('Browser audit changed during export. Suspend the browser and retry deletion.');
+      const batch = page.audit ?? [];
+      if (batch.length === 0 && entries.length < total) throw new Error('Browser audit pagination stopped early. Restore the browser runtime and retry deletion.');
+      entries.push(...batch);
+    } while (entries.length < (total ?? 0));
+    return { runtimeId, entries, total: total ?? 0 };
+  }
   return {
     onTurnComplete: async ({ submissionId, sandbox, threadId, actorId, owner }) => {
       if (!scoped) throw new Error('Browser cleanup storage is unavailable. Configure the database before settling this turn.');
@@ -96,8 +113,8 @@ export function browserSessionHooks(sessionId: string, sessions: SessionStore, b
         if (!session) throw new Error('Browser session ownership is missing. Restore the session record before deleting its sandbox.');
         const identity: BrowserIdentity = { protocolVersion: '1.0', audience: 'lifecycle', sessionId, threadId: 'lifecycle', actorId: session.userId, ownerId: session.owner.id };
         await browserRequest(sandbox, { ...identity, command: 'suspend' });
-        const audit = await browserRequest(sandbox, { ...identity, command: 'audit' });
-        await exportAudit(sessionId, sandbox.id, { runtimeId: audit.runtimeId, entries: audit.audit ?? [], total: audit.auditTotal ?? audit.audit?.length ?? 0 }, blobs, store);
+        const audit = await readCompleteAudit(sandbox, identity);
+        await exportAudit(sessionId, sandbox.id, audit, blobs, store);
       },
     },
   };

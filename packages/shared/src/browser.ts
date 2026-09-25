@@ -323,7 +323,7 @@ export type BrowserRequest = BrowserIdentity &
         url?: string;
       }
     | { command: 'revoke' }
-    | { command: 'audit' }
+    | { command: 'audit'; offset?: number }
     | { command: 'turn_end' }
     | { command: 'suspend' }
   );

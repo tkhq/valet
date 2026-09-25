@@ -575,9 +575,9 @@ export class BrowserDaemon {
           response.status = this.status(request);
           return response;
         case 'audit':
-          response.audit = this.journal.audit();
+          response.audit = this.journal.audit(request.offset ?? 0);
           response.auditTotal = this.journal.auditTotal();
-          response.auditTruncated = response.audit.length < response.auditTotal;
+          response.auditTruncated = (request.offset ?? 0) + response.audit.length < response.auditTotal;
           return response;
         case 'turn_end':
           if (this.control.lease) this.deferredCleanup.add(request.threadId);

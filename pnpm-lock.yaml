@@ -1086,6 +1086,12 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+      '@valet/plugin-browser':
+        specifier: workspace:*
+        version: link:../plugin-browser
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
       typescript:
         specifier: ^5.3.3
         version: 5.9.3

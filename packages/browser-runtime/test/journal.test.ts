@@ -77,3 +77,13 @@ it('bounds aggregate receipt results while retaining explicit truncation metadat
   ).toBe(true);
   j.close();
 });
+it('pages the complete audit without truncating retained operations', () => {
+  const j = new Journal(make(), 'r');
+  const { cell } = j.submit('s', 't', 'a', 'i', 'h');
+  for (let index = 0; index < 501; index++)
+    j.prepare(cell.cellId, `op:${index}`, 'tab.getAXState', `hash:${index}`);
+  expect(j.audit()).toHaveLength(500);
+  expect(j.audit(500)).toHaveLength(1);
+  expect(j.auditTotal()).toBe(501);
+  j.close();
+});

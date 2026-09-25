@@ -151,6 +151,15 @@ export function parseRequest(value: unknown): BrowserRequest {
       'Invalid inline frame flag.',
       'Set inline to true or false.',
     );
+  if (command === 'audit' && v.offset !== undefined) {
+    number(v.offset, 'offset', 0, Number.MAX_SAFE_INTEGER);
+    if (!Number.isSafeInteger(v.offset))
+      throw new BrowserFault(
+        'INVALID_REQUEST',
+        'Invalid offset.',
+        'Supply a non-negative integer offset.',
+      );
+  }
   if (command === 'resolve') {
     if (v.decision !== 'allow' && v.decision !== 'deny')
       throw new BrowserFault(

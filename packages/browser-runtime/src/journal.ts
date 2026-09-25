@@ -348,13 +348,13 @@ export class Journal {
         .get()?.count ?? 0
     );
   }
-  audit(): BrowserAuditEntry[] {
+  audit(offset = 0): BrowserAuditEntry[] {
     return this.db
       .prepare<
-        [],
+        [number],
         BrowserAuditEntry
-      >('SELECT cells.invocation AS invocationId,cells.id AS cellId,operations.id AS operationId,cells.session AS sessionId,cells.thread AS threadId,cells.actor AS actorId,cells.runtime AS runtimeId,operations.method,operations.hash,operations.status FROM operations JOIN cells ON cells.id=operations.cell ORDER BY operations.rowid DESC LIMIT 1000')
-      .all();
+      >('SELECT cells.invocation AS invocationId,cells.id AS cellId,operations.id AS operationId,cells.session AS sessionId,cells.thread AS threadId,cells.actor AS actorId,cells.runtime AS runtimeId,operations.method,operations.hash,operations.status FROM operations JOIN cells ON cells.id=operations.cell ORDER BY operations.rowid DESC LIMIT 500 OFFSET ?')
+      .all(offset);
   }
   close() {
     this.db.close();

@@ -35,6 +35,11 @@ describe('browser protocol', () => {
       }).command,
     ).toBe('submit');
   });
+  it('accepts only non-negative integer audit offsets', () => {
+    expect(parseRequest({ ...identity, command: 'audit', offset: 500 })).toMatchObject({ offset: 500 });
+    for (const offset of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1])
+      expect(() => parseRequest({ ...identity, command: 'audit', offset })).toThrow(BrowserFault);
+  });
   it('rejects command injection, oversized cells, unsupported versions and missing actors', () => {
     for (const change of [
       { command: 'shell' },

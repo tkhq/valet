@@ -98,9 +98,10 @@ export async function ensureRuntimeState(
   sandboxId: string,
   storage: string,
   requireExisting: boolean,
-): Promise<string> {
+): Promise<{ name: string; created: boolean }> {
   const name = runtimeStateClaimName(sessionId);
   let existing = await api.read(namespace, name);
+  let created = false;
   if (!existing) {
     if (requireExisting)
       throw new Error(
@@ -122,6 +123,7 @@ export async function ensureRuntimeState(
     try {
       await api.create(namespace, claim);
       existing = claim;
+      created = true;
     } catch (error) {
       if (code(error) !== 409) throw error;
       existing = await api.read(namespace, name);
@@ -136,7 +138,7 @@ export async function ensureRuntimeState(
     throw new Error(
       "Browser runtime volume has another owner. Stop the previous owner and restore the matching session volume before retrying.",
     );
-  return name;
+  return { name, created };
 }
 /** Private volumes retain their session identity after the Sandbox CR is deleted. */
 export async function listRuntimeStateOwners(

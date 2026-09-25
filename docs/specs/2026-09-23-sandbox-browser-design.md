@@ -844,8 +844,9 @@ Do not silently create a second browser when the first container is still alive.
 
 Use the Kubernetes CR, pod identity and runtime-state PVC as the equivalent
 inventory. A retained profile volume belongs to the session, not to a transient
-pod or replacement attachment. Its ownership reference and finalizer must reflect
-that distinction; deleting an old sandbox CR must not garbage-collect it early.
+pod or replacement attachment. Persist the session and sandbox owner on the PVC.
+Do not give the transient Sandbox CR an owner reference to the PVC. Final session
+deletion validates these owner markers before it deletes the PVC explicitly.
 
 Separate three operations in the generic sandbox lifecycle contract:
 

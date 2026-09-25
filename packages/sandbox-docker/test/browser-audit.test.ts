@@ -12,10 +12,10 @@ const entry = {
   hash: "hash",
   status: "in_flight",
 };
-it("preserves uncertain retained audit entries and exposes truncation totals", () => {
-  expect(
+it("rejects an incomplete retained audit export", () => {
+  expect(() =>
     parseRetainedBrowserAudit({ entries: [entry], total: 2 }, "session"),
-  ).toEqual({ entries: [entry], total: 2 });
+  ).toThrow(/invalid/i);
 });
 it("rejects an audit from another session or an invalid operation", () => {
   expect(() =>

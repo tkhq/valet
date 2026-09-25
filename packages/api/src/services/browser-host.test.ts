@@ -48,6 +48,39 @@ describe('browser lifecycle persistence', () => {
     expect(f.commands).toEqual([]);
   });
 
+  it('blocks deletion when a retained audit reader returns a partial export', async () => {
+    const f = await fixture();
+    f.provider.readBrowserAudit = async () => ({
+      entries: [{ invocationId: 'i', cellId: 'c', operationId: 'o', sessionId: 'session', threadId: 't', actorId: 'a', runtimeId: 'r', method: 'click', hash: 'h', status: 'completed' }],
+      total: 2,
+    });
+    await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow(/incomplete/i);
+    expect(f.data.size).toBe(0);
+  });
+
+  it('exports every live audit page before it records a deletion checkpoint', async () => {
+    const f = await fixture();
+    const entries = ["one", "two"].map((operationId) => ({
+      invocationId: 'i', cellId: 'c', operationId, sessionId: 'session', threadId: 't', actorId: 'a', runtimeId: 'runtime', method: 'click', hash: operationId, status: 'completed' as const,
+    }));
+    vi.spyOn(f.sandbox, 'exec').mockImplementation(async (command, opts) => {
+      if (command.startsWith('test ')) return { exitCode: 0, stdout: '', stderr: '' };
+      const request = JSON.parse(opts?.stdin ?? '{}') as { command?: string; offset?: number };
+      const audit = request.command === 'audit' ? [entries[request.offset ?? 0]].filter(Boolean) : undefined;
+      return { exitCode: 0, stdout: JSON.stringify({ protocolVersion: '1.0', runtimeId: 'runtime', ok: true, events: [], cursor: 0, gap: false, audit, auditTotal: audit ? 2 : undefined }), stderr: '' };
+    });
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store).sandboxLifecycle?.beforeStop(f.sandbox, 'destroy');
+
+    const bytes = [...f.data.values()][0];
+    expect(bytes).toBeDefined();
+    if (!bytes) throw new Error('Audit blob was not written.');
+    const exported = JSON.parse(new TextDecoder().decode(bytes)) as { entries: unknown[]; total: number; truncated: boolean };
+    expect(exported.entries).toHaveLength(2);
+    expect(exported.total).toBe(2);
+    expect(exported.truncated).toBe(false);
+  });
+
   it('fails closed when stopped state has neither a reader nor verified audit export', async () => {
     const f = await fixture();
     await expect(prepareBrowserSandboxStop(f.provider, f.sandbox.id, 'destroy', f.sessions, f.blobs, f.store)).rejects.toThrow('audit');

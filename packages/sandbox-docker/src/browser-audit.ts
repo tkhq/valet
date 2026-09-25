@@ -3,7 +3,7 @@ export type RetainedBrowserAudit = Awaited<
   ReturnType<NonNullable<SandboxProvider["readBrowserAudit"]>>
 >;
 
-export const READ_RETAINED_BROWSER_AUDIT = `const fs=require('node:fs');const Database=require('/opt/valet/browser/node_modules/better-sqlite3');const source='/var/lib/valet/browser';const destination=fs.mkdtempSync('/tmp/valet-browser-audit-');for(const name of ['journal.sqlite','journal.sqlite-wal','journal.sqlite-shm']){try{const p=source+'/'+name;if(!fs.lstatSync(p).isFile())throw Error('Invalid journal file');fs.copyFileSync(p,destination+'/'+name);}catch(error){if(error.code!=='ENOENT'||name==='journal.sqlite')throw error;}}const db=new Database(destination+'/journal.sqlite',{readonly:true,fileMustExist:true});try{const total=db.prepare('SELECT COUNT(*) AS count FROM operations').get().count;const entries=db.prepare('SELECT cells.invocation AS invocationId,cells.id AS cellId,operations.id AS operationId,cells.session AS sessionId,cells.thread AS threadId,cells.actor AS actorId,cells.runtime AS runtimeId,operations.method,operations.hash,operations.status FROM operations JOIN cells ON cells.id=operations.cell ORDER BY operations.rowid DESC LIMIT 10000').all();process.stdout.write(JSON.stringify({entries,total}));}finally{db.close();fs.rmSync(destination,{recursive:true,force:true});}`;
+export const READ_RETAINED_BROWSER_AUDIT = `const fs=require('node:fs');const Database=require('/opt/valet/browser/node_modules/better-sqlite3');const source='/var/lib/valet/browser';const destination=fs.mkdtempSync('/tmp/valet-browser-audit-');for(const name of ['journal.sqlite','journal.sqlite-wal','journal.sqlite-shm']){try{const p=source+'/'+name;if(!fs.lstatSync(p).isFile())throw Error('Invalid journal file');fs.copyFileSync(p,destination+'/'+name);}catch(error){if(error.code!=='ENOENT'||name==='journal.sqlite')throw error;}}const db=new Database(destination+'/journal.sqlite',{readonly:true,fileMustExist:true});try{const entries=db.prepare('SELECT cells.invocation AS invocationId,cells.id AS cellId,operations.id AS operationId,cells.session AS sessionId,cells.thread AS threadId,cells.actor AS actorId,cells.runtime AS runtimeId,operations.method,operations.hash,operations.status FROM operations JOIN cells ON cells.id=operations.cell ORDER BY operations.rowid DESC').all();process.stdout.write(JSON.stringify({entries,total:entries.length}));}finally{db.close();fs.rmSync(destination,{recursive:true,force:true});}`;
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -21,7 +21,7 @@ export function parseRetainedBrowserAudit(
     !("total" in value) ||
     typeof value.total !== "number" ||
     !Number.isSafeInteger(value.total) ||
-    value.total < value.entries.length
+    value.total !== value.entries.length
   ) {
     throw new Error(
       "The retained browser audit is invalid. Restore the matching runtime image before deleting this session.",
