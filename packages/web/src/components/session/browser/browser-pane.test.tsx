@@ -197,6 +197,15 @@ describe("browser pane control", () => {
     expect(state.start).toHaveBeenCalledOnce();
   });
 
+  it("does not resubmit the selected browser audience", () => {
+    state.status = ready();
+    render(<BrowserPane sessionId="session" />);
+    const owner = screen.getByRole("button", { name: "Owner" });
+    expect(owner.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(owner);
+    expect(state.settings).not.toHaveBeenCalled();
+  });
+
   it("requests a private lease and explains the agent pause", () => {
     state.status = ready();
     render(<BrowserPane sessionId="session" />);

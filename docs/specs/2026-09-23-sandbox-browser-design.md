@@ -1145,6 +1145,7 @@ Durable evidence retains the file broker.
 See [browser latency](2026-09-24-browser-latency-design.md) for transport ownership and measurements.
 It stops polling when hidden or unmounted.
 The Browser panel exposes audience settings, origin-grant revocation, and installed capability limits.
+The selected audience control is disabled because each policy change closes the browser.
 Its availability is independent of the Terminal and VS Code profile.
 This implementation does not use a gateway WebSocket or CDP screencast.
 Each request rechecks authorization and a short-lived, purpose-separated viewer ticket.

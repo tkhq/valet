@@ -629,7 +629,9 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 variant={
                   data.settings.audience === "owner" ? "primary" : "ghost"
                 }
-                disabled={changing}
+                disabled={
+                  changing || data.settings.audience === "owner"
+                }
                 onClick={() =>
                   void run(() =>
                     actions.settings.mutateAsync({ audience: "owner" }),
@@ -643,7 +645,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 variant={
                   data.settings.audience === "team" ? "primary" : "ghost"
                 }
-                disabled={changing}
+                disabled={changing || data.settings.audience === "team"}
                 onClick={() =>
                   void run(() =>
                     actions.settings.mutateAsync({ audience: "team" }),
