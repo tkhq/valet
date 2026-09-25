@@ -900,6 +900,26 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: COST_ENTRIES_VIEW_SQL,
   },
   {
+    describe: "engine_entries_usage_export index",
+    probe: { kind: "index", index: "engine_entries_usage_export" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_entries_usage_export" ON "engine_entries" ("created_at" DESC, "id" DESC) WHERE "usage" IS NOT NULL',
+  },
+  {
+    describe: "llm_proxy_requests_org_export index",
+    probe: { kind: "index", index: "llm_proxy_requests_org_export" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_org_export" ON "llm_proxy_requests" ("org_id", "created_at" DESC, "id" DESC) WHERE "total_tokens" > 0',
+  },
+  {
+    describe: "llm_proxy_requests_user_export index",
+    probe: { kind: "index", index: "llm_proxy_requests_user_export" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_user_export" ON "llm_proxy_requests" ("user_id", "created_at" DESC, "id" DESC) WHERE "total_tokens" > 0',
+  },
+  {
+    describe: "llm_proxy_requests_team_export index",
+    probe: { kind: "index", index: "llm_proxy_requests_team_export" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_team_export" ON "llm_proxy_requests" ("team_id", "created_at" DESC, "id" DESC) WHERE "total_tokens" > 0',
+  },
+  {
     // The index marks completion of this atomic nullable-user and view repair.
     // Keep the block one statement: pg binds tx.query as a prepared statement.
     describe: "llm_proxy_requests team attribution",

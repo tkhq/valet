@@ -755,33 +755,33 @@ describe("UsagePage — CSV export", () => {
     render(<UsagePage />);
     const granularity = screen.getByLabelText("CSV granularity") as HTMLSelectElement;
     expect(granularity.value).toBe("day");
-    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
-    expect(csvLink.href).toContain("window=7d");
-    expect(csvLink.href).toContain("scope=me");
-    expect(csvLink.href).toContain("granularity=day");
+    const csvLink = screen.getByTitle("Usage CSV download") as HTMLIFrameElement;
+    expect(csvLink.dataset.downloadUrl!).toContain("window=7d");
+    expect(csvLink.dataset.downloadUrl!).toContain("scope=me");
+    expect(csvLink.dataset.downloadUrl!).toContain("granularity=day");
     expect(csvLink.hasAttribute("download")).toBe(false);
   });
 
-  it("selects itemized export, validates it, then uses the native anchor", async () => {
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  it("selects itemized export, validates it, then uses the native iframe", async () => {
     render(<UsagePage />);
     fireEvent.change(screen.getByLabelText("CSV granularity"), { target: { value: "turn" } });
-    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
-    expect(csvLink.href).toContain("granularity=turn");
+    const csvLink = screen.getByTitle("Usage CSV download") as HTMLIFrameElement;
+    expect(csvLink.dataset.downloadUrl!).toContain("granularity=turn");
     fireEvent.click(screen.getByRole("button", { name: "Download CSV (7d, me)" }));
     await waitFor(() => expect(usageExportValidations).toEqual([{ granularity: "turn", scope: "me" }]));
-    expect(click).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(csvLink.src).toContain("granularity=turn"));
   });
 
   it("shows validation errors and does not start a native download", async () => {
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     usageExportError = Object.assign(new Error("GET /usage/export.csv → 400"), {
       payload: { error: { code: "invalid_range", message: "Choose a valid export range." } },
     });
     render(<UsagePage />);
+    const frame = screen.getByTitle("Usage CSV download") as HTMLIFrameElement;
+    const initialSrc = frame.src;
     fireEvent.click(screen.getByRole("button", { name: "Download CSV (7d, me)" }));
     expect(await screen.findByText("Choose a valid export range.")).toBeTruthy();
-    expect(click).not.toHaveBeenCalled();
+    expect(frame.src).toBe(initialSrc);
   });
 });
 
@@ -808,9 +808,9 @@ describe("UsagePage — team workspace scope", () => {
 
   it("pins the CSV export to scope=team with the team id", () => {
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement | null;
-    expect(csvLink!.href).toContain("scope=team");
-    expect(csvLink!.href).toContain("teamId=team-x");
+    const csvLink = screen.getByTitle("Usage CSV download") as HTMLIFrameElement | null;
+    expect(csvLink!.dataset.downloadUrl!).toContain("scope=team");
+    expect(csvLink!.dataset.downloadUrl!).toContain("teamId=team-x");
   });
 
   it("shows member daily averages, zeroes, shared activity, and the UTC denominator", () => {
@@ -955,8 +955,8 @@ describe("UsagePage custom period controls", () => {
     const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
     fireEvent.change(month, { target: { value: "2024-02" } });
     expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "month", month: "2024-02" });
-    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
-    expect(csvLink.href).toContain("month=2024-02");
+    const csvLink = screen.getByTitle("Usage CSV download") as HTMLIFrameElement;
+    expect(csvLink.dataset.downloadUrl!).toContain("month=2024-02");
   });
 
   it("applies an inclusive custom range to data and CSV", () => {
@@ -965,8 +965,8 @@ describe("UsagePage custom period controls", () => {
     fireEvent.change(screen.getByLabelText("Custom end date"), { target: { value: "2024-02-29" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply dates" }));
     expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "custom", start: "2024-02-01", end: "2024-02-29" });
-    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
-    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    const csvLink = screen.getByTitle("Usage CSV download") as HTMLIFrameElement;
+    expect(csvLink.dataset.downloadUrl!).toContain("start=2024-02-01&end=2024-02-29");
     expect(screen.getByRole("button", { name: "Download CSV (2024-02-01 to 2024-02-29, me)" })).toBeTruthy();
   });
 
@@ -984,8 +984,8 @@ describe("UsagePage custom period controls", () => {
     fireEvent.change(start, { target: { value: "2024-02-02" } });
     expect(apply.getAttribute("aria-pressed")).toBe("false");
     expect(apply.className).toContain("border-amber-500");
-    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
-    expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
+    const csvLink = screen.getByTitle("Usage CSV download") as HTMLIFrameElement;
+    expect(csvLink.dataset.downloadUrl!).toContain("start=2024-02-01&end=2024-02-29");
     expect(breakdownCalls.at(-1)?.[0]).toEqual({
       kind: "custom",
       start: "2024-02-01",
@@ -994,7 +994,7 @@ describe("UsagePage custom period controls", () => {
 
     fireEvent.click(apply);
     expect(apply.getAttribute("aria-pressed")).toBe("true");
-    expect(csvLink.href).toContain("start=2024-02-02&end=2024-02-29");
+    expect(csvLink.dataset.downloadUrl!).toContain("start=2024-02-02&end=2024-02-29");
   });
 
   it("shows the server range error message", () => {

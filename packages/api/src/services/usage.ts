@@ -135,7 +135,7 @@ function scopeWhere(prefix: "" | "ce.", period: ResolvedUsagePeriod, s: UsageSco
 // ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
 
 const BUCKET_COLS = sql`
-  COALESCE(SUM(cost_total),0)            AS cost_usd,
+  COALESCE(SUM(ROUND(cost_total::numeric, 12)),0::numeric) AS cost_usd,
   COALESCE(SUM(total_tokens),0)         AS total_tokens,
   COALESCE(SUM(input_tokens),0)         AS input_tokens,
   COALESCE(SUM(output_tokens),0)        AS output_tokens,
@@ -332,7 +332,7 @@ export async function getUsageBreakdown(
     // `floor` truncates the day index deterministically whether Postgres infers
     // the `${DAY_MS}` parameter as integer or float (a plain `bigint / param`
     // could do float division on real Postgres → one bucket per row).
-    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
+    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(ROUND(cost_total::numeric, 12)),0::numeric) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
     // Only the engine branch of cost_entries carries session_id. Count across
     // the whole rolling window, not member/day buckets; unpriced usage counts.
     db.execute(sql`SELECT ${BUCKET_COLS}, COUNT(DISTINCT session_id) FILTER (
@@ -404,7 +404,7 @@ export async function getUsageDrillItems(
     interface Row { session_id: string; title: string | null; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.session_id, s.title, cw.parent_session_id,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+             COALESCE(SUM(ROUND(ce.cost_total::numeric, 12)),0::numeric) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
       FROM cost_entries ce
       LEFT JOIN agent_sessions s ON s.id = ce.session_id
       LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
@@ -421,7 +421,7 @@ export async function getUsageDrillItems(
     interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.workflow_run_id, wd.name,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+             COALESCE(SUM(ROUND(ce.cost_total::numeric, 12)),0::numeric) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
       FROM cost_entries ce
       LEFT JOIN workflow_definitions wd ON wd.id = ce.workflow_id
       WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_run_id IS NOT NULL
@@ -438,7 +438,7 @@ export async function getUsageDrillItems(
     : scopeWhere("", period, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
-    SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
+    SELECT harness, COALESCE(SUM(ROUND(cost_usd::numeric, 12)),0::numeric) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
     FROM llm_proxy_requests
     WHERE ${whereProxy} AND total_tokens > 0
     GROUP BY harness ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
@@ -463,7 +463,7 @@ export async function getUsageSessions(
   interface Row { session_id: string; title: string | null; use_case: string; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const result = (await db.execute(sql`
     SELECT ce.session_id, s.title, ce.use_case, cw.parent_session_id,
-           COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
+           COALESCE(SUM(ROUND(ce.cost_total::numeric, 12)),0::numeric) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
     FROM cost_entries ce
     LEFT JOIN agent_sessions s ON s.id = ce.session_id
     LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
@@ -498,6 +498,13 @@ function csvEscape(v: unknown): string {
   return formulaPrefix || /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
+function costUsdCsv(v: unknown): string {
+  const value = String(v);
+  const match = /^(-?\d+)(?:\.(\d+))?$/.exec(value);
+  if (!match) return Number(v).toFixed(12);
+  return `${match[1]}.${(match[2] ?? "").padEnd(12, "0").slice(0, 12)}`;
+}
+
 interface AggregateExportRow {
   bucket_start: unknown; use_case: string; provider: string | null; model: string | null;
   owner_type: string | null; owner_id: string | null; user_id: string | null;
@@ -530,7 +537,7 @@ export async function getUsageAggregateExportCsv(
            COALESCE(SUM(ce.cache_read_tokens), 0) AS cache_read_tokens,
            COALESCE(SUM(ce.cache_write_tokens), 0) AS cache_write_tokens,
            COALESCE(SUM(ce.total_tokens), 0) AS total_tokens,
-           COALESCE(SUM(ce.cost_total), 0) AS cost_usd
+           COALESCE(SUM(ROUND(ce.cost_total::numeric, 12)), 0::numeric) AS cost_usd
     FROM cost_entries ce
     LEFT JOIN "user" u ON u.id = ce.user_id
     WHERE ${scopeWhere("ce.", period, opts.scope)}
@@ -543,12 +550,13 @@ export async function getUsageAggregateExportCsv(
     new Date(toNum(row.bucket_start)).toISOString(), row.use_case, row.provider, row.model,
     row.owner_type, row.owner_id, row.user_id, row.employee_name, row.employee_email,
     toNum(row.turns), toNum(row.unpriced_turns), toNum(row.input_tokens), toNum(row.output_tokens),
-    toNum(row.cache_read_tokens), toNum(row.cache_write_tokens), toNum(row.total_tokens), toNum(row.cost_usd),
+    toNum(row.cache_read_tokens), toNum(row.cache_write_tokens), toNum(row.total_tokens), costUsdCsv(row.cost_usd),
   ].map(csvEscape).join(","));
   return `${AGGREGATE_CSV_HEADER}\n${lines.join("\n")}${lines.length > 0 ? "\n" : ""}`;
 }
 
 interface TurnExportRow {
+  source: "engine" | "proxy";
   entry_id: string; created_at: unknown; use_case: string; model: string | null;
   session_id: string | null; workflow_run_id: string | null; user_id: string | null;
   employee_name: string | null; employee_email: string | null; repository: string | null;
@@ -557,21 +565,123 @@ interface TurnExportRow {
   total_tokens: unknown; cost_total: unknown; priced: unknown;
 }
 
+type TurnExportSource = TurnExportRow["source"];
+interface TurnExportCursor { createdAt: number; entryId: string }
+
 function turnExportLine(row: TurnExportRow, withholdIdentity: boolean): string {
   return [
     new Date(toNum(row.created_at)).toISOString(), row.use_case, row.model, row.session_id, row.workflow_run_id,
     withholdIdentity ? "" : row.user_id, toNum(row.input_tokens), toNum(row.output_tokens),
     toNum(row.cache_read_tokens), toNum(row.cache_write_tokens), toNum(row.total_tokens),
-    row.cost_total === null ? "" : toNum(row.cost_total), row.priced,
+    row.cost_total === null ? "" : costUsdCsv(row.cost_total), row.priced,
     withholdIdentity ? "" : row.employee_name, withholdIdentity ? "" : row.employee_email,
     row.repository, row.channel_type, row.channel_id,
   ].map(csvEscape).join(",");
 }
 
-/** Stream one CSV row per billable turn. Each pull loads one keyset page, so
- * memory is bounded by the page size. The `(created_at, use_case, entry_id)`
- * order is total across both ledger branches. A query error errors the stream;
- * it never closes a truncated CSV as a successful response. */
+function engineTurnScopeWhere(period: ResolvedUsagePeriod, scope: UsageScope): SQL {
+  const orgId = sql`COALESCE(s.org_id, d.org_id)`;
+  const userId = sql`CASE WHEN s.id IS NOT NULL THEN s.user_id WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END`;
+  const ownerType = sql`COALESCE(s.owner_type, r.owner_type)`;
+  const ownerId = sql`NULLIF(COALESCE(s.owner_id, r.owner_id), '')`;
+  const base = sql`e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs} AND ${orgId} = ${scope.orgId}`;
+  switch (scope.scope) {
+    case "team": return sql`${base} AND ${ownerType} = 'team' AND ${ownerId} = ${scope.teamId}`;
+    case "me": return sql`${base} AND ${userId} = ${scope.userId}`;
+    case "org": return base;
+  }
+}
+
+function proxyTurnScopeWhere(period: ResolvedUsagePeriod, scope: UsageScope): SQL {
+  const base = sql`p.created_at >= ${period.startMs} AND p.created_at < ${period.endMs} AND p.org_id = ${scope.orgId}`;
+  switch (scope.scope) {
+    case "team": return sql`${base} AND p.team_id = ${scope.teamId}`;
+    case "me": return sql`${base} AND p.user_id = ${scope.userId}`;
+    case "org": return base;
+  }
+}
+
+async function getUsageTurnExportBatch(
+  db: AppDb,
+  period: ResolvedUsagePeriod,
+  scope: UsageScope,
+  source: TurnExportSource,
+  cursor: TurnExportCursor | undefined,
+): Promise<TurnExportRow[]> {
+  const page = source === "engine" ? sql`
+    SELECT 'engine'::text AS source, e.id AS entry_id, e.created_at,
+           CASE WHEN e.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
+                WHEN e.session_id LIKE 'wf:%' THEN 'workflow' ELSE 'session' END AS use_case,
+           e.model, e.session_id, r.id AS workflow_run_id,
+           CASE WHEN s.id IS NOT NULL THEN s.user_id
+                WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END AS user_id,
+           COALESCE((e.usage::jsonb->>'input')::bigint, 0) AS input_tokens,
+           COALESCE((e.usage::jsonb->>'output')::bigint, 0) AS output_tokens,
+           COALESCE((e.usage::jsonb->>'cacheRead')::bigint, 0) AS cache_read_tokens,
+           COALESCE((e.usage::jsonb->>'cacheWrite')::bigint, 0) AS cache_write_tokens,
+           COALESCE((e.usage::jsonb->>'total')::bigint, 0) AS total_tokens,
+           ROUND((e.cost::jsonb->>'total')::numeric, 12) AS cost_total,
+           ((e.cost::jsonb->>'total') IS NOT NULL) AS priced
+    FROM engine_entries e
+    LEFT JOIN agent_sessions s ON s.id = e.session_id
+    LEFT JOIN workflow_runs r ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
+    LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
+    WHERE e.usage IS NOT NULL AND ${engineTurnScopeWhere(period, scope)}
+      ${cursor === undefined ? sql`` : sql`AND ROW(e.created_at, e.id) < ROW(${cursor.createdAt}, ${cursor.entryId})`}
+    ORDER BY e.created_at DESC, e.id DESC
+    LIMIT ${TURN_EXPORT_BATCH_SIZE}
+  ` : sql`
+    SELECT 'proxy'::text AS source, p.id AS entry_id, p.created_at, 'proxy'::text AS use_case,
+           p.model, NULL::text AS session_id, NULL::text AS workflow_run_id, p.user_id,
+           p.input_tokens, p.output_tokens, p.cache_read_tokens, p.cache_write_tokens, p.total_tokens,
+           ROUND(p.cost_usd::numeric, 12) AS cost_total, (p.cost_usd IS NOT NULL) AS priced
+    FROM llm_proxy_requests p
+    WHERE p.total_tokens > 0 AND ${proxyTurnScopeWhere(period, scope)}
+      ${cursor === undefined ? sql`` : sql`AND ROW(p.created_at, p.id) < ROW(${cursor.createdAt}, ${cursor.entryId})`}
+    ORDER BY p.created_at DESC, p.id DESC
+    LIMIT ${TURN_EXPORT_BATCH_SIZE}
+  `;
+  const result = (await db.execute(sql`
+    WITH page AS (${page}), page_repositories AS (
+      SELECT sr.session_id, string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
+      FROM session_repos sr
+      JOIN (SELECT DISTINCT session_id FROM page WHERE session_id IS NOT NULL) ps
+        ON ps.session_id = sr.session_id
+      GROUP BY sr.session_id
+    )
+    SELECT page.*, u.name AS employee_name, u.email AS employee_email,
+           pr.repository, q.channel::jsonb->>'channelType' AS channel_type,
+           q.channel::jsonb->>'channelId' AS channel_id
+    FROM page
+    LEFT JOIN "user" u ON u.id = page.user_id
+    LEFT JOIN page_repositories pr ON pr.session_id = page.session_id
+    LEFT JOIN engine_entries e ON e.id = page.entry_id AND e.session_id = page.session_id
+    LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
+    ORDER BY page.created_at DESC, page.entry_id DESC
+  `)) as { rows: TurnExportRow[] };
+  return result.rows;
+}
+
+function turnRowComesFirst(left: TurnExportRow, right: TurnExportRow): boolean {
+  const leftAt = toNum(left.created_at);
+  const rightAt = toNum(right.created_at);
+  if (leftAt !== rightAt) return leftAt > rightAt;
+  if (left.source !== right.source) return left.source === "proxy";
+  return left.entry_id > right.entry_id;
+}
+
+interface TurnExportBranchState {
+  rows: TurnExportRow[];
+  index: number;
+  cursor: TurnExportCursor | undefined;
+  exhausted: boolean;
+}
+
+/** Stream one CSV row per billable turn. Engine and proxy rows use separate
+ * ordered index scans, then merge in memory. Each branch cursor uses only
+ * `(created_at, entry_id)`, so a late page has the same index shape as an
+ * early page. A query error errors the stream instead of closing a partial
+ * file successfully. */
 export function createUsageTurnExportStream(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope },
@@ -579,59 +689,61 @@ export function createUsageTurnExportStream(
   const period = periodFromOpts(opts);
   const withholdIdentity = opts.scope.scope === "team" && !opts.scope.byMember;
   const encoder = new TextEncoder();
-  let cursor: { createdAt: number; useCase: string; entryId: string } | undefined;
+  const states: Record<TurnExportSource, TurnExportBranchState> = {
+    engine: { rows: [], index: 0, cursor: undefined, exhausted: false },
+    proxy: { rows: [], index: 0, cursor: undefined, exhausted: false },
+  };
   let finished = false;
+  let cancelled = false;
+
+  async function refill(source: TurnExportSource): Promise<void> {
+    const state = states[source];
+    if (state.index < state.rows.length || state.exhausted || cancelled) return;
+    const rows = await getUsageTurnExportBatch(db, period, opts.scope, source, state.cursor);
+    state.rows = rows;
+    state.index = 0;
+    state.exhausted = rows.length < TURN_EXPORT_BATCH_SIZE;
+    const last = rows.at(-1);
+    if (last) state.cursor = { createdAt: toNum(last.created_at), entryId: last.entry_id };
+  }
+
+  function next(source: TurnExportSource): TurnExportRow | undefined {
+    const state = states[source];
+    return state.rows[state.index];
+  }
+
+  function empty(source: TurnExportSource): boolean {
+    const state = states[source];
+    return state.index >= state.rows.length;
+  }
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(encoder.encode(`${TURN_CSV_HEADER}\n`));
     },
     async pull(controller) {
-      if (finished) return;
+      if (finished || cancelled) return;
       try {
-        const cursorWhere = cursor === undefined ? sql`` : sql`AND (
-          ce.created_at < ${cursor.createdAt}
-          OR (ce.created_at = ${cursor.createdAt} AND ce.use_case < ${cursor.useCase})
-          OR (ce.created_at = ${cursor.createdAt} AND ce.use_case = ${cursor.useCase} AND ce.entry_id < ${cursor.entryId})
-        )`;
-        const result = (await db.execute(sql`
-          WITH page AS (
-            SELECT ce.entry_id, ce.created_at, ce.use_case, ce.model, ce.session_id,
-                   ce.workflow_run_id, ce.user_id, ce.input_tokens, ce.output_tokens,
-                   ce.cache_read_tokens, ce.cache_write_tokens, ce.total_tokens,
-                   ce.cost_total, ce.priced
-            FROM cost_entries ce
-            WHERE ${scopeWhere("ce.", period, opts.scope)} ${cursorWhere}
-            ORDER BY ce.created_at DESC, ce.use_case DESC, ce.entry_id DESC
-            LIMIT ${TURN_EXPORT_BATCH_SIZE}
-          ), page_repositories AS (
-            SELECT sr.session_id, string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
-            FROM session_repos sr
-            JOIN (SELECT DISTINCT session_id FROM page WHERE session_id IS NOT NULL) ps
-              ON ps.session_id = sr.session_id
-            GROUP BY sr.session_id
-          )
-          SELECT page.*, u.name AS employee_name, u.email AS employee_email,
-                 pr.repository, q.channel::jsonb->>'channelType' AS channel_type,
-                 q.channel::jsonb->>'channelId' AS channel_id
-          FROM page
-          LEFT JOIN "user" u ON u.id = page.user_id
-          LEFT JOIN page_repositories pr ON pr.session_id = page.session_id
-          LEFT JOIN engine_entries e ON e.id = page.entry_id AND e.session_id = page.session_id
-          LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
-          ORDER BY page.created_at DESC, page.use_case DESC, page.entry_id DESC
-        `)) as { rows: TurnExportRow[] };
-
-        if (result.rows.length === 0) {
-          finished = true;
-          controller.close();
-          return;
+        await Promise.all([refill("engine"), refill("proxy")]);
+        if (cancelled) return;
+        const lines: string[] = [];
+        while (lines.length < TURN_EXPORT_BATCH_SIZE) {
+          const engine = next("engine");
+          const proxy = next("proxy");
+          if (!engine && !proxy) break;
+          const source = !engine ? "proxy" : !proxy ? "engine" : turnRowComesFirst(proxy, engine) ? "proxy" : "engine";
+          const row = next(source);
+          if (!row) break;
+          states[source].index += 1;
+          lines.push(turnExportLine(row, withholdIdentity));
+          // Do not emit from the other branch past an unknown page boundary.
+          // Refill first so the next comparison preserves the global order.
+          if (empty(source) && !states[source].exhausted) break;
         }
-        const last = result.rows[result.rows.length - 1];
-        if (!last) throw new Error("Usage export page was unexpectedly empty.");
-        cursor = { createdAt: toNum(last.created_at), useCase: last.use_case, entryId: last.entry_id };
-        controller.enqueue(encoder.encode(`${result.rows.map((row) => turnExportLine(row, withholdIdentity)).join("\n")}\n`));
-        if (result.rows.length < TURN_EXPORT_BATCH_SIZE) {
+        if (lines.length > 0) controller.enqueue(encoder.encode(`${lines.join("\n")}\n`));
+        const done = (states.engine.exhausted && empty("engine")) &&
+          (states.proxy.exhausted && empty("proxy"));
+        if (done) {
           finished = true;
           controller.close();
         }
@@ -639,6 +751,11 @@ export function createUsageTurnExportStream(
         finished = true;
         controller.error(error);
       }
+    },
+    cancel() {
+      cancelled = true;
+      states.engine.rows = [];
+      states.proxy.rows = [];
     },
   });
 }

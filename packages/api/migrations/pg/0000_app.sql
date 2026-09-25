@@ -1179,6 +1179,12 @@ CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id
 --> statement-breakpoint
 CREATE INDEX "llm_proxy_requests_team_created" ON "llm_proxy_requests" ("team_id", "created_at");
 --> statement-breakpoint
+CREATE INDEX "llm_proxy_requests_org_export" ON "llm_proxy_requests" ("org_id", "created_at" DESC, "id" DESC) WHERE "total_tokens" > 0;
+--> statement-breakpoint
+CREATE INDEX "llm_proxy_requests_user_export" ON "llm_proxy_requests" ("user_id", "created_at" DESC, "id" DESC) WHERE "total_tokens" > 0;
+--> statement-breakpoint
+CREATE INDEX "llm_proxy_requests_team_export" ON "llm_proxy_requests" ("team_id", "created_at" DESC, "id" DESC) WHERE "total_tokens" > 0;
+--> statement-breakpoint
 -- ── Plugin store (docs/specs/2026-08-29-plugin-store-design.md) ───────────
 --
 -- One core table for plugin-owned persistence, so a plugin persists config,

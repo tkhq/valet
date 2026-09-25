@@ -85,6 +85,8 @@ CREATE INDEX "engine_entries_queue_item" ON "engine_entries" ("queue_item_id");
 -- that carry usage (one per assistant turn, never a user/tool entry).
 CREATE INDEX "engine_entries_usage_window" ON "engine_entries" ("created_at") WHERE "usage" IS NOT NULL;
 --> statement-breakpoint
+CREATE INDEX "engine_entries_usage_export" ON "engine_entries" ("created_at" DESC, "id" DESC) WHERE "usage" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE "engine_queue_items" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
