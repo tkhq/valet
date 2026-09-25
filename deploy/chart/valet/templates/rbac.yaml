@@ -44,11 +44,11 @@ rules:
     verbs: ["list"]
   # On-demand workspace growth (Sandbox.growWorkspace): after an ENOSPC in
   # workspace prep the api reads the workspace PVC and merge-patches its
-  # storage request one increment up (gp3 expands online). get/patch ONLY —
-  # PVC create/delete stay with the agent-sandbox controller.
+  # storage request one increment up (gp3 expands online). The API also owns
+  # private browser PVCs, which survive Sandbox CR replacement.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "patch", "create", "list", "delete"]
   # Kubernetes authorizes the pods/exec *connect* subresource with the
   # `create` verb — for BOTH the SPDY (POST) and WebSocket (GET) clients,
   # client-node's GET upgrade included. The HTTP method does not map to the

@@ -185,3 +185,13 @@ export {
 } from "./buildkit-job.js";
 
 export { sandboxEvictionApiAdapter, type SandboxEvictionApi } from "./eviction.js";
+
+export {
+  deleteRuntimeState,
+  ensureRuntimeState,
+  runtimeStateClaimName,
+  sandboxRuntimeStateApiAdapter,
+  RUNTIME_STATE_ANNOTATION,
+  type RuntimeStateApi,
+  type RuntimeStateClaim,
+} from "./runtime-state.js";

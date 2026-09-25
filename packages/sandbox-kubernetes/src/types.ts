@@ -72,12 +72,18 @@ export interface K8sProviderConfig {
    * (EACCES; containerd issue #12182). Unset → field omitted (the daemon
    * still starts; running containers fails on such clusters). */
   dockerRuntimeClassName?: string;
+  /** Relative path beneath each node's kubelet seccomp directory. Never Unconfined. */
+  browserSeccompProfile?: string;
+  browserEnabled?: boolean;
+  /** Session-owned private runtime volume size. Default: 2Gi. */
+  browserRuntimeStorage?: string;
 }
 
 /** `corev1.SeccompProfile` subset — only the two profile types the manifest
  * builder emits (Unconfined for rootless DinD, RuntimeDefault for future use). */
 export interface SeccompProfile {
-  type: "Unconfined" | "RuntimeDefault";
+  type: "Unconfined" | "RuntimeDefault" | "Localhost";
+  localhostProfile?: string;
 }
 
 /** `corev1.SecurityContext` subset — container-level security context fields
@@ -144,6 +150,7 @@ export interface SecretVolumeSource {
 
 export interface Volume {
   name: string;
+  persistentVolumeClaim?: { claimName: string };
   secret?: SecretVolumeSource;
   /** `corev1.EmptyDirVolumeSource` subset. `sizeLimit` bounds the emptyDir
    * (the DinD docker-state volume — image layers + container rootfs — is
@@ -164,6 +171,7 @@ export interface SandboxContainer {
   resources?: ResourceRequirements;
   volumeMounts?: VolumeMount[];
   securityContext?: ContainerSecurityContext;
+  readinessProbe?: { exec: { command: string[] }; initialDelaySeconds?: number; periodSeconds?: number };
   /** `corev1.Container.workingDir` — set to `WORKSPACE_MOUNT_PATH` by the
    * manifest builder so relative paths in `exec`/file ops resolve against
    * the persistent `/workspace` volume by default (the k8s `pods/exec` API

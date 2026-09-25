@@ -400,7 +400,12 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
 
             const backendUrl = `ws://${endpoint.host}:${endpoint.port}${rewrittenPath}${url.search}`;
             const protocols = subprotocolFor(rewrittenPath);
-            backend = protocols ? new BackendWebSocket(backendUrl, protocols) : new BackendWebSocket(backendUrl);
+            // Code-server upgrades use the gateway cookie after the HTTP login.
+            // Apply the same cookie allowlist as the HTTP proxy.
+            const cookie = filteredGatewaySessionCookie(c.req.header("Cookie") ?? null);
+            backend = new BackendWebSocket(backendUrl, protocols ?? [], {
+              ...(cookie ? { headers: { Cookie: cookie } } : {}),
+            });
             backend.binaryType = "arraybuffer";
 
             backend.on("open", () => {

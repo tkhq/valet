@@ -149,6 +149,12 @@ sandbox:
   # gateway, ttyd, code-server, rootless docker toolchain, start scripts.
   # Pin to sha-<shortsha> for reproducible deploys.
   fullBaseImage: ghcr.io/tkhq/valet-sandbox:latest
+  # Install this Localhost seccomp profile on each sandbox node before use.
+  browserSeccompProfile: valet/browser.json
+  # Enable only after installing the image and node seccomp profile.
+  browserEnabled: false
+  # Private browser profile, SQLite audit, and transfer storage per session.
+  browserRuntimeStorage: 2Gi
 
   # RuntimeClass for docker-enabled sandbox pods. Point it at a containerd
   # runtime configured with `cgroup_writable = true` (containerd >= 2.1,

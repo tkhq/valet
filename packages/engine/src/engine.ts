@@ -33,6 +33,7 @@ export class Engine {
       opts.sandbox,
       opts.sandboxReadyTimeoutMs,
       opts.specProvider,
+      opts.sandboxLifecycle,
     );
     const session = new Session(id, opts, this.opts.providers, sandbox, attachment, policySandbox);
     this.sessions.set(id, session);
@@ -51,6 +52,7 @@ export class Engine {
       args.options.sandbox,
       args.options.sandboxReadyTimeoutMs,
       args.options.specProvider,
+      args.options.sandboxLifecycle,
     );
     const session = await Session.rehydrate(
       data,
@@ -88,13 +90,15 @@ export class Engine {
     arg: Sandbox | SandboxCreateOpts | undefined,
     readyTimeoutMs: number | undefined,
     specProvider?: SpecProvider,
+    lifecycle?: CreateSessionOptions['sandboxLifecycle'],
   ): Promise<{ attachment: SandboxAttachment; sandbox: Sandbox; policySandbox: PolicySandbox }> {
     let attachment: SandboxAttachment;
     if (arg && typeof (arg as Sandbox).readFile === "function") {
       // A concrete pre-provisioned handle is ready at epoch 1 and never runs
       // `doProvision`, so there is no cold-boot point at which prep could run —
       // the host is responsible for prepping a sandbox it hands in ready.
-      attachment = SandboxAttachment.forSandbox(arg as Sandbox);
+      attachment = SandboxAttachment.forSandbox(arg as Sandbox, lifecycle);
+      await lifecycle?.afterReady?.(arg as Sandbox);
     } else {
       const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
       // Stamp the owning session on the create opts so providers with a
@@ -104,7 +108,7 @@ export class Engine {
       // from another session (or carrying an explicit `sessionId: undefined`
       // key) must never annotate the sandbox with the wrong owner.
       const createOpts: SandboxCreateOpts = { ...((arg ?? {}) as SandboxCreateOpts), sessionId };
-      attachment = new SandboxAttachment(provider, createOpts, specProvider);
+      attachment = new SandboxAttachment(provider, createOpts, specProvider, lifecycle);
     }
     const policySandbox = new PolicySandbox(attachment, { readyTimeoutMs });
     return { attachment, sandbox: policySandbox, policySandbox };

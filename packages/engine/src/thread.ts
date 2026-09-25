@@ -11,7 +11,7 @@ import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
-import type { Api, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
+import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
@@ -2937,6 +2937,7 @@ export class Thread {
     if (!attemptId) return false; // defensive: terminalizing items always carry one
     const fence: WriteFence = { itemId: item.id, attemptId };
     try {
+      await this.notifyTurnComplete(item);
       await store.finalizeSettlement(this.session.id, this.id, item.id, fence);
     } catch (err) {
       if (err instanceof StaleAttemptError) return false; // successor owns it now
@@ -3009,6 +3010,7 @@ export class Thread {
       // between reserve and finalize so the record lands in finalize's own
       // transaction, but its own I/O never throws and never weakens the CAS.
       patchRef = await this.captureSettlePatch(item);
+      await this.notifyTurnComplete(item);
       await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) {
@@ -3020,6 +3022,14 @@ export class Thread {
     await store.deleteAttemptMarker(item.id, fence.attemptId);
     await this.emitSettled(item.id, outcome, patchRef);
     await this.emitQueueState();
+  }
+
+  private async notifyTurnComplete(item: QueueItem): Promise<void> {
+    await this.session.options.onTurnComplete?.({
+      sessionId: this.session.id, submissionId: item.id, threadId: this.id,
+      actorId: item.author?.id ?? this.session.options.userId, owner: this.session.owner,
+      sandbox: this.session.attachment.current() ?? undefined,
+    });
   }
 
   /**
@@ -3214,6 +3224,7 @@ export class Thread {
       // supersession — capture whatever landed on disk, same best-effort
       // contract as the normal settle path.
       patchRef = await this.captureSettlePatch(item);
+      await this.notifyTurnComplete(item);
       await store.finalizeSettlement(this.session.id, this.id, item.id, fence, patchRef);
     } catch (err) {
       if (err instanceof StaleAttemptError) return; // successor owns it now
@@ -4950,6 +4961,7 @@ export class Thread {
       runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
     return {
       // Author is persisted with the submission; session credentials stay fixed.
+      invocationId: toolCallId,
       userId: this.runningItem?.author?.id ?? session.options.userId,
       orgId: session.options.orgId,
       sessionId: session.id,
@@ -4968,6 +4980,7 @@ export class Thread {
       owner: session.owner,
       policyResolver: session.options.policyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
+      browserPolicy: session.options.browserPolicy,
       extractDocument: session.options.extractDocument,
       queueItemId: this.runningItem?.id,
       // The running submission's channel origin, when it came from a channel,
@@ -5276,6 +5289,7 @@ export class Thread {
             tool: event.toolName,
             callId: event.toolCallId,
             result: resultText,
+            ...(toolResultImages(event.result).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : event.result } : {}),
             isError: event.isError,
           },
           { queueItemId: this.runningItem?.id },
@@ -5907,6 +5921,19 @@ function toolResultText(result: unknown): string {
   return String(result ?? "");
 }
 
+/** Retain selected tool evidence on reload without reviving malformed content. */
+function toolResultImages(result: unknown): ImageContent[] {
+  if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content)) return [];
+  const images: ImageContent[] = [];
+  for (const block of result.content) {
+    if (!block || typeof block !== "object" || block.type !== "image") continue;
+    if (typeof block.data !== "string" || !block.data || typeof block.mimeType !== "string") continue;
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(block.mimeType)) continue;
+    images.push({ type: "image", data: block.data, mimeType: block.mimeType });
+  }
+  return images;
+}
+
 function findMostRecentCompaction(
   entries: readonly SessionEntry[],
 ): CompactionEntry | undefined {
@@ -6214,6 +6241,7 @@ export function entriesToAgentMessages(
                   ? "[output elided to save context]"
                   : toolResultText(p.result),
             },
+            ...(!isError && !p.elided ? toolResultImages(p.result) : []),
           ],
           isError,
           timestamp: e.createdAt,

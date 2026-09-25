@@ -18,6 +18,8 @@
  * personal dev-cluster name.
  */
 import * as k8s from "@kubernetes/client-node";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { SandboxProvider, SandboxResources } from "@valet/engine";
 import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
@@ -34,6 +36,7 @@ import {
   sandboxEvictionApiAdapter,
   podsApiAdapter,
   sandboxPvcApiAdapter,
+  sandboxRuntimeStateApiAdapter,
   sandboxSecretsApiAdapter,
   type K8sProviderConfig,
 } from "@valet/sandbox-kubernetes";
@@ -421,7 +424,11 @@ export function buildSandboxProvider(
   const backend = parseSandboxBackend(env.VALET_SANDBOX_BACKEND);
   switch (backend) {
     case "docker":
-      return new DockerSandboxProvider();
+      return new DockerSandboxProvider({
+        inventoryRoot: join(env.VALET_DATA_DIR || join(homedir(), ".valet"), "docker-runtime"),
+        browserEnabled: env.VALET_BROWSER_ENABLED === '1',
+        ...(env.VALET_BROWSER_SECCOMP_PROFILE ? { browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE } : {}),
+      });
     case "local":
       return new LocalSandboxProvider();
     case "kubernetes": {
@@ -476,6 +483,9 @@ export function buildSandboxProvider(
         }
       }
       const cfg: K8sProviderConfig = {
+        browserEnabled: env.VALET_BROWSER_ENABLED === '1',
+        browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE ?? 'valet/browser.json',
+        browserRuntimeStorage: env.VALET_BROWSER_RUNTIME_STORAGE ?? '2Gi',
         namespace,
         defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         apiVersion: SANDBOX_CR_API_VERSION,
@@ -504,7 +514,7 @@ export function buildSandboxProvider(
       const secretsApi = sandboxSecretsApiAdapter(coreApi);
       const pvcApi = sandboxPvcApiAdapter(coreApi);
       return new KubernetesSandboxProvider(
-        { objectsApi, podsApi, execApi, livenessApi, podStatusApi, evictionApi, podDeleteApi, secretsApi, pvcApi },
+        { objectsApi, podsApi, execApi, livenessApi, podStatusApi, evictionApi, podDeleteApi, secretsApi, pvcApi, runtimeStateApi: sandboxRuntimeStateApiAdapter(coreApi) },
         cfg,
       );
     }

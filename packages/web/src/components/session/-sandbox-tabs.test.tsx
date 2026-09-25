@@ -18,6 +18,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { TooltipProvider } from "~/components/primitives";
 import { SandboxTabs, type SandboxTabsProps } from "./sandbox-tabs";
 
+vi.mock("./browser/browser-pane", () => ({ BrowserPane: ({ sessionId }: { sessionId: string }) => <section aria-label="Sandbox browser">Browser for {sessionId}</section> }));
+
 function renderTabs(props: SandboxTabsProps) {
   return render(
     <TooltipProvider>
@@ -43,15 +45,23 @@ afterEach(() => {
 });
 
 describe("SandboxTabs", () => {
-  it("renders nothing for a headless session", () => {
-    const { container } = renderTabs({
+  it("offers Chat and Browser for a headless session", () => {
+    renderTabs({
       sessionId: "sess-1",
       profile: "headless",
       activeTab: "chat",
       onTabChange: () => {},
       sandbox: { state: "ready", epoch: 1 },
     });
-    expect(container.textContent).toBe("");
+    expect(screen.getByRole("tab", { name: "Chat" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Browser" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
+  });
+
+  it("opens the browser pane without minting a terminal gateway token", () => {
+    renderTabs({ sessionId: "sess-1", profile: "headless", activeTab: "browser", onTabChange: () => {}, sandbox: { state: "ready", epoch: 1 } });
+    expect(screen.getByRole("region", { name: "Sandbox browser" }).textContent).toContain("sess-1");
+    expect(mintSandboxJwt).not.toHaveBeenCalled();
   });
 
   it("full session: shows the tab bar", () => {

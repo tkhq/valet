@@ -80,3 +80,13 @@ Implementation choices where the shipped code diverges from this spec's text (Ta
 - **Web tabs precede the iframe `src` set with a same-origin `fetch` status check** (`packages/web/src/components/session/sandbox-tabs.tsx`) rather than relying on the iframe alone, since an iframe has no way to report the HTTP status of what it loaded. A 401 from that precheck triggers one silent JWT re-mint + retry (matching decision 6's "UI silently re-mints + reloads the iframe once"); a 502 renders inline as the "service down" error state.
 
 Verified against `git log --oneline d606d0d1^..a0adfe89` and the corresponding diffs; no additional undocumented deviations found beyond the above.
+
+### Reconnect readiness (2026-09-24)
+
+The WebSocket handshake sends the current sandbox state and epoch after event replay.
+This snapshot does not provision a sandbox. Terminal and VS Code can load after a
+page reload without waiting for another sandbox transition.
+
+WebSocket upgrades forward only the session's `gateway_session` cookie. Code-server
+uses this cookie after the initial HTTP request. The proxy excludes other Valet
+cookies and credentials, as it does for HTTP requests.

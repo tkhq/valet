@@ -10,8 +10,8 @@
  * failure-recovery path calls `provider.create()` again with the same
  * opts). `restore(id)` GETs the CR and never creates. `destroy(id)` is
  * TERMINAL (deletes the CR, cascading to pod+PVC) and is the only method
- * that may delete a CR. `release(id)` is the NON-terminal seam: a no-op
- * that leaves the CR standing, consumed by the engine's
+ * that may delete a CR. `release(id)` is the NON-terminal seam: it suspends
+ * the retained CR and waits for its pod to stop, consumed by the engine's
  * `SandboxAttachment.reportFailure` (liveness-triggered re-provision) in
  * preference to `destroy` when a provider implements it (see
  * `packages/engine/src/types.ts`'s `SandboxProvider.release`). Two
@@ -20,7 +20,8 @@
  *   - `SandboxAttachment.reportFailure` (non-terminal, epoch degradation)
  *     calls `provider.release(oldId)` directly when implemented, else
  *     `provider.destroy(oldId)` — it does NOT go through `Sandbox.destroy`
- *     at all.
+ *     at all. The next upsert resumes the CR with a new pod and the same
+ *     persistent volumes.
  *   - `SandboxAttachment.destroy` (terminal, session deletion) calls
  *     `sandbox.destroy()` when the raw `Sandbox` defines one, else falls
  *     back to `provider.destroy(id)`. `KubernetesSandbox` deliberately does
@@ -76,6 +77,8 @@ import type {
   JobPoll,
   Sandbox,
   SandboxCapabilities,
+  SandboxCommandChannel,
+  SandboxCommandChannelOptions,
   SandboxCreateOpts,
   SandboxListing,
   SandboxProvider,
@@ -83,6 +86,7 @@ import type {
   WorkspaceGrowth,
 } from "@valet/engine";
 import { execInPod, type ExecDeps, type PodExecApi } from "./exec.js";
+import { openCommandChannelInPod } from "./command-channel.js";
 import {
   mkdirInPod,
   PodFileOpError,
@@ -121,6 +125,7 @@ import {
   buildSandboxManifest,
   credsSecretName,
   DOCKER_LABEL_KEY,
+  BROWSER_LABEL_KEY,
   NESTED_KUBERNETES_LABEL_KEY,
   resolveWorkspaceStorageRequest,
   SANDBOX_CONTAINER_NAME,
@@ -129,6 +134,7 @@ import {
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
+import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
 import {
   growWorkspacePvc,
   parseStorageQuantity,
@@ -445,6 +451,7 @@ export interface KubernetesSandboxDeps {
    * `SandboxCreateOpts.docker` at create, and from the CR's
    * `DOCKER_LABEL_KEY` label on restore. */
   docker?: boolean;
+  browser?: boolean;
 }
 
 /**
@@ -473,6 +480,7 @@ export class KubernetesSandbox implements Sandbox {
       namespace: this.deps.cfg.namespace,
       containerName: SANDBOX_CONTAINER_NAME,
       docker: this.deps.docker,
+      browser: this.deps.browser,
     };
   }
 
@@ -615,6 +623,11 @@ export class KubernetesSandbox implements Sandbox {
     return this.withPod((pod) => rmInPod(this.execDeps(), pod, path, opts));
   }
 
+  async openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel> {
+    if (options.signal?.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new Error('Command channel aborted. Open a new channel when needed.');
+    return this.withPodContext(({ podName }) => openCommandChannelInPod(this.execDeps(), podName, command, options));
+  }
+
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
     return this.withPodContext(async ({ podName, uid }) => {
       const result = await execInPod(this.execDeps(), podName, command, opts);
@@ -738,6 +751,8 @@ export class KubernetesSandbox implements Sandbox {
 // ── Provider ─────────────────────────────────────────────────────────
 
 export interface KubernetesSandboxProviderDeps {
+  /** Required for browser sessions. Owns private PVCs independently of Sandbox CRs. */
+  runtimeStateApi?: RuntimeStateApi;
   objectsApi: SandboxCustomObjectsApi;
   podsApi: SandboxPodsApi;
   execApi: PodExecApi;
@@ -793,6 +808,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       credsMount: Boolean(this.deps.secretsApi),
       dockerSupport: true,
       nestedKubernetes: "v1",
+      browserAutomation: Boolean(this.deps.runtimeStateApi && this.cfg.browserEnabled),
+      browserViewer: Boolean(this.deps.runtimeStateApi && this.cfg.browserEnabled),
     };
   }
 
@@ -811,14 +828,30 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * sweep). */
   async list(): Promise<SandboxListing[]> {
     const items = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
-    return items.map((item) => {
+    const rows: SandboxListing[] = items.map((item) => {
       const createdAtMs = item.creationTimestamp ? Date.parse(item.creationTimestamp) : Number.NaN;
       return {
         id: item.name,
         sessionId: item.annotations?.[SESSION_ANNOTATION_KEY] ?? null,
+        browserEnabled: Boolean(item.annotations?.[RUNTIME_STATE_ANNOTATION]),
         createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
       };
     });
+    if (this.deps.runtimeStateApi) {
+      for (const owner of await listRuntimeStateOwners(this.deps.runtimeStateApi, this.cfg.namespace)) {
+        const existing = rows.find((row) => row.id === owner.sandboxId);
+        if (existing) {
+          if (existing.sessionId !== null && existing.sessionId !== owner.sessionId) {
+            throw new Error("The browser volume and sandbox have different session owners. Restore matching ownership before changing this session.");
+          }
+          existing.sessionId = owner.sessionId;
+          existing.browserEnabled = true;
+        } else {
+          rows.push({ id: owner.sandboxId, sessionId: owner.sessionId, browserEnabled: true, createdAtMs: null });
+        }
+      }
+    }
+    return rows;
   }
 
   /** Upsert-shaped (decision 5, NON-NEGOTIABLE): `applySandbox` adopts an
@@ -842,6 +875,44 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const name = sandboxCrName(opts.workspace);
     const neverReadyOwner = opts.sessionId ?? `cr:${name}`;
     const manifest = buildSandboxManifest(this.cfg, name, opts);
+    const previous = await getSandbox(this.deps.objectsApi, this.cfg, name);
+    const retainedOwners = this.deps.runtimeStateApi
+      ? await listRuntimeStateOwners(this.deps.runtimeStateApi, this.cfg.namespace, name)
+      : [];
+    if (retainedOwners.some((owner) => owner.sessionId !== opts.sessionId)) {
+      throw new Error("This sandbox has another browser session owner. Use a separate working-directory identity for the session.");
+    }
+    const retainedBrowser = Boolean(
+      retainedOwners.length ||
+      previous?.metadata.annotations?.[RUNTIME_STATE_ANNOTATION] ||
+      previous?.metadata.labels?.[BROWSER_LABEL_KEY] === "true",
+    );
+    if (previous && (retainedBrowser || opts.browser?.enabled) && previous.metadata.annotations?.[SESSION_ANNOTATION_KEY] !== opts.sessionId) {
+      throw new Error("This sandbox has another browser session owner. Use a separate working-directory identity for the session.");
+    }
+    if (retainedBrowser && !opts.browser?.enabled) {
+      throw new Error("This session has retained browser state. Re-enable browser isolation before replacing its Kubernetes sandbox.");
+    }
+    let runtimeStateCreated = false;
+    if (opts.browser?.enabled) {
+      if (!this.deps.runtimeStateApi || !opts.sessionId) throw new Error("Browser runtime storage is not configured. Connect the runtime-state Kubernetes API before starting this session.");
+      const runtimeState = await ensureRuntimeState(
+        this.deps.runtimeStateApi,
+        this.cfg.namespace,
+        opts.sessionId,
+        name,
+        this.cfg.browserRuntimeStorage ?? "2Gi",
+        retainedBrowser,
+      );
+      runtimeStateCreated = runtimeState.created;
+    }
+
+    const rollbackUnownedRuntimeState = async (): Promise<void> => {
+      if (!runtimeStateCreated || !this.deps.runtimeStateApi) return;
+      const cr = await getSandbox(this.deps.objectsApi, this.cfg, name);
+      if (cr !== null) return;
+      await deleteRuntimeState(this.deps.runtimeStateApi, this.cfg.namespace, name);
+    };
 
     // Upsert creds Secret BEFORE applying the Sandbox CR — the pod scheduler
     // reads the volume reference at start; the Secret must exist first.
@@ -851,7 +922,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       );
     }
     if (this.deps.secretsApi && opts.credsFiles && Object.keys(opts.credsFiles).length > 0) {
-      await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
+      try {
+        await this.deps.secretsApi.upsertSecret(this.cfg.namespace, credsSecretName(name), opts.credsFiles);
+      } catch (error) {
+        await rollbackUnownedRuntimeState().catch((cleanupError) => {
+          console.error(`k8s sandbox ${name}: browser volume rollback after credential failure failed:`, cleanupError);
+        });
+        throw error;
+      }
     }
 
     // `adopted` decides cleanup for ordinary startup failures below. A CR
@@ -860,9 +938,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // Post-grace capacity failures are different: the provider retained the
     // CR across earlier attempts, and no attempt returned a sandbox handle.
     const { cpu, memory } = opts.resources ?? {};
-    const { cr: applied, adopted, previousSession, resourceOverrides } = await applySandbox(
-      this.deps.objectsApi, this.cfg, manifest,
-      {
+    let applyResult: Awaited<ReturnType<typeof applySandbox>>;
+    try {
+      applyResult = await applySandbox(this.deps.objectsApi, this.cfg, manifest, {
         preserveResourcesOnAdopt: opts.preserveResourcesOnAdopt,
         preserveResourceFieldsOnAdopt: opts.preserveResourceFieldsOnAdopt,
         resourceOverrides: { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) },
@@ -870,12 +948,18 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           ? async () => {
             const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
             if (podName === null || await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName) === null) return undefined;
-            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes)));
+            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled)));
           }
           : undefined,
         neverReadyOwner,
-      },
-    );
+      });
+    } catch (error) {
+      await rollbackUnownedRuntimeState().catch((cleanupError) => {
+        console.error(`k8s sandbox ${name}: browser volume rollback after apply failure failed:`, cleanupError);
+      });
+      throw error;
+    }
+    const { cr: applied, adopted, previousSession, resourceOverrides } = applyResult;
 
     // Workspace strings are not guaranteed per-session (the web defaults every
     // session on a repo to one shared path), so an adopt can silently hand one
@@ -1071,25 +1155,30 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       throw err;
     }
     await clearNeverReadyOwner(this.deps.objectsApi, this.cfg, name);
-    const sandbox = this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes));
+    const sandbox = this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled));
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
     return sandbox;
   }
 
   /** Re-asserts (GETs) the same CR name — never creates. The engine
-   * persists `sandboxId` (== the CR name) and calls this at boot; unlike
-   * `sandbox-docker`'s in-memory `Map` (which does not survive an api
-   * restart), this provider is cluster-backed and needs no local registry. */
+   * persists `sandboxId` (== the CR name) and calls this at boot.
+   * The cluster retains ownership and isolation metadata across API restarts. */
   async restore(id: string): Promise<Sandbox> {
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
     if (cr === null) {
       throw new Error(`KubernetesSandboxProvider.restore: Sandbox CR "${id}" not found`);
     }
-    // Re-derive the exec-identity flag from the CR's own label — the CR is
-    // the only per-sandbox state that survives an api restart (there is no
-    // in-memory registry to consult, unlike sandbox-docker).
-    return this.makeSandbox(id, cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true" || cr.metadata.labels?.[NESTED_KUBERNETES_LABEL_KEY] === "true");
+    // Either persisted browser marker requires the protected workload identity.
+    const browser = Boolean(
+      cr.metadata.annotations?.[RUNTIME_STATE_ANNOTATION] ||
+      cr.metadata.labels?.[BROWSER_LABEL_KEY] === "true",
+    );
+    return this.makeSandbox(
+      id,
+      browser || cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true" || cr.metadata.labels?.[NESTED_KUBERNETES_LABEL_KEY] === "true",
+      browser,
+    );
   }
 
   /** TERMINAL (decision 5, NON-NEGOTIABLE): deletes the CR, cascading to
@@ -1109,28 +1198,35 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.deps.secretsApi.deleteSecret(this.cfg.namespace, credsSecretName(id)).catch(() => {});
     }
     await deleteSandbox(this.deps.objectsApi, this.cfg, id);
+    if (this.deps.runtimeStateApi) await deleteRuntimeState(this.deps.runtimeStateApi, this.cfg.namespace, id);
   }
 
-  /** NON-terminal (decision 5, NON-NEGOTIABLE): a no-op that leaves the CR
-   * (and its owner-referenced pod + workspace PVC) standing. This is the
+  /** NON-terminal (decision 5, NON-NEGOTIABLE): suspends the retained CR and
+   * waits for its pod to stop. This is the
    * seam `SandboxAttachment.reportFailure` calls in preference to `destroy`
    * (see `packages/engine/src/types.ts`'s `SandboxProvider.release` and
    * `packages/engine/src/sandbox/attachment.ts`'s `reportFailure`) — the
-   * subsequent `create()` call (upsert-shaped, same CR name) re-adopts the
-   * retained CR and the controller heals a fresh pod onto the retained PVC,
-   * so the workspace survives a liveness-triggered re-provision instead of
-   * being cascade-deleted the way an unconditional `destroy` would. Verifies
-   * (does not create) the CR still exists and logs when it's unexpectedly
-   * already gone — that's a legitimate race (e.g. a concurrent `destroy`)
-   * this method must never treat as an error, since it makes no state
-   * change of its own. */
+   * subsequent `create()` call re-adopts and resumes the CR. The controller
+   * starts a new pod on the retained workspace and runtime-state PVCs.
+   * Waiting for zero pods ensures that replacement releases browser locks
+   * and ephemeral processes before the new execution starts. */
   async release(id: string): Promise<void> {
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
     if (cr === null) {
-      // Already gone (e.g. raced a concurrent terminal `destroy`) — nothing
-      // to release, and this must not throw: `reportFailure`'s caller
-      // treats `release`/`destroy` as fire-and-forget best-effort.
       console.warn(`KubernetesSandboxProvider.release: Sandbox CR "${id}" was already gone`);
+      return;
+    }
+    await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Suspended");
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
+    if (podName === null) return;
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    while (await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName) !== null) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `k8s sandbox ${id}: backing pod did not stop within ${READY_TIMEOUT_MS}ms during release. Check the sandbox controller before retrying replacement.`,
+        );
+      }
+      await sleep(READY_POLL_INTERVAL_MS);
     }
   }
 
@@ -1221,7 +1317,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
   }
 
-  private makeSandbox(id: string, workloadUser: boolean): KubernetesSandbox {
+  private makeSandbox(id: string, workloadUser: boolean, browser = false): KubernetesSandbox {
     return new KubernetesSandbox(
       {
         objectsApi: this.deps.objectsApi,
@@ -1232,6 +1328,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         pvcApi: this.deps.pvcApi,
         cfg: this.cfg,
         docker: workloadUser,
+        browser,
       },
       id,
     );

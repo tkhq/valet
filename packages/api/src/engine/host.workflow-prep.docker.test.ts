@@ -47,6 +47,11 @@ function dockerAvailable(): boolean {
 }
 
 const dockerHere = dockerAvailable();
+const dockerContext = spawnSync("docker", ["context", "show"], { encoding: "utf8" }).stdout?.trim();
+// Rancher's Docker host-gateway is the VM bridge, not the macOS test API host.
+const sandboxApiHost = process.platform === "darwin" && dockerContext === "rancher-desktop"
+  ? "host.lima.internal"
+  : "host.docker.internal";
 // Skip in CI: the GitHub runner's docker daemon lacks the base image and
 // the host-gateway setup this test needs. `CI` is set by GitHub Actions.
 const describeDocker = dockerHere && !process.env.CI ? describe : describe.skip;
@@ -81,9 +86,17 @@ class TrackingDockerProvider extends DockerSandboxProvider {
   readonly createdIds: string[] = [];
 
   override async create(opts: SandboxCreateOpts): Promise<Sandbox> {
-    const sandbox = await super.create(opts);
-    this.createdIds.push(sandbox.id);
-    return sandbox;
+    try {
+      const sandbox = await super.create(opts);
+      this.createdIds.push(sandbox.id);
+      return sandbox;
+    } catch (error) {
+      console.error(
+        `Workflow fixture sandbox creation failed for ${opts.sessionId}. Check Docker connectivity, image availability, and the working-directory mount.`,
+        error,
+      );
+      throw error;
+    }
   }
 }
 
@@ -101,15 +114,19 @@ let api: TestApi | undefined;
 let fixture: GithubFixture | undefined;
 let provider: TrackingDockerProvider | undefined;
 let workspace: string | undefined;
+let inventoryRoot: string | undefined;
 const prevGithubApiUrl = process.env.GITHUB_API_URL;
 
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
   if (provider) {
-    for (const id of provider.createdIds) await provider.destroy(id).catch(() => {});
+    const ids = new Set([...provider.createdIds, ...(await provider.list()).map(row => row.id)]);
+    for (const id of ids) await provider.destroy(id);
   }
   provider = undefined;
+  if (inventoryRoot) await rm(inventoryRoot, { recursive: true, force: true });
+  inventoryRoot = undefined;
   await fixture?.close();
   fixture = undefined;
   if (workspace) await rm(workspace, { recursive: true, force: true });
@@ -130,8 +147,9 @@ async function bootWithApp(): Promise<TestApi> {
   // API base override, so the installation mint reads this variable.
   process.env.GITHUB_API_URL = fixture.url;
 
-  provider = new TrackingDockerProvider();
-  const booted = await bootTestApi({ auth: true, sandboxProvider: provider, sandboxApiHost: "host.docker.internal" });
+  inventoryRoot = await createSandboxWorkspace("valet-wf-inventory-");
+  provider = new TrackingDockerProvider({ inventoryRoot });
+  const booted = await bootTestApi({ auth: true, sandboxProvider: provider, sandboxApiHost });
   const { db, engineCredentials } = booted.providers;
   const now = Date.now();
   await db.insert(orgs).values({ id: ORG, name: "Workflow Prep Org", createdAt: now });

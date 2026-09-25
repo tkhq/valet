@@ -6,13 +6,18 @@ if [ "${VALET_SANDBOX_DOCKER:-0}" = 1 ] || [ "${VALET_SANDBOX_KUBERNETES:-0}" = 
 fi
 [ "${VALET_SANDBOX_KUBERNETES:-}" != 1 ] || /kubernetes-preflight.sh
 if [ -x /start-docker.sh ]; then /start-docker.sh; fi
+if [ "${VALET_BROWSER_ENABLED:-0}" = 1 ]; then /browser-preflight.sh; fi
 WORK_DIR=/workspace
 mkdir -p "$WORK_DIR"
 if [ "${VALET_SANDBOX_PROFILE:-headless}" = "full" ]; then
-  code-server --bind-addr "127.0.0.1:8765" --auth none \
+  WORKLOAD_COMMAND=()
+  if [ "${VALET_BROWSER_ENABLED:-0}" = 1 ]; then
+    WORKLOAD_COMMAND=(/usr/bin/env -u VALET_SANDBOX_JWT_SECRET /usr/bin/setpriv --reuid dockerd --regid dockerd --init-groups --no-new-privs /usr/bin/env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd)
+  fi
+  "${WORKLOAD_COMMAND[@]}" code-server --bind-addr "127.0.0.1:8765" --auth none \
     --disable-telemetry --disable-update-check --welcome-text "Valet Workspace" "$WORK_DIR" &
   CODE_SERVER_PID=$!
-  ttyd -W -i 127.0.0.1 -p 7681 bash -c "cd $WORK_DIR && exec bash -l" &
+  "${WORKLOAD_COMMAND[@]}" ttyd -W -i 127.0.0.1 -p 7681 bash -c "cd $WORK_DIR && exec bash -l" &
   TTYD_PID=$!
   node /gateway/dist/bin.js &
   GATEWAY_PID=$!
@@ -36,5 +41,6 @@ if [ "${VALET_SANDBOX_PROFILE:-headless}" = "full" ]; then
   set -e
   exit "$GATEWAY_EXIT"
 else
+  if [ "${VALET_BROWSER_VIEWER:-0}" = 1 ]; then exec node /gateway/dist/bin.js; fi
   exec tail -f /dev/null
 fi

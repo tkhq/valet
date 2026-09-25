@@ -5,6 +5,20 @@
     "sandbox": {
       "type": "object",
       "properties": {
+        "browserEnabled": {
+          "type": "boolean",
+          "description": "Enable the managed browser after installing its image and node seccomp profile."
+        },
+        "browserSeccompProfile": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*\\.json$",
+          "description": "Relative profile path beneath each node's kubelet seccomp directory."
+        },
+        "browserRuntimeStorage": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Storage request for each session's private browser PVC."
+        },
         "createNamespace": {
           "description": "Create the sandbox namespace as part of the Helm release.",
           "type": "boolean"

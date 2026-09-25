@@ -148,6 +148,19 @@ describe("DELETE /api/sessions/:id — assistant guard", () => {
     expect(await storedStatus(api, "plain-sess")).toBe("deleted");
   });
 
+  it("keeps the session visible when teardown fails and permits deletion retry", async () => {
+    api = await bootTestApi();
+    await seedSession(api, { id: "audit-retry", owner: { type: "user", id: "local-user" } });
+    const destroy = vi.spyOn(api.providers.engineHost, "destroy").mockRejectedValueOnce(new Error("Audit export failed. Restore audit storage before deleting the sandbox."));
+    const failed = await del(api, "audit-retry");
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "Audit export failed. Restore audit storage before deleting the sandbox." });
+    expect(await storedStatus(api, "audit-retry")).toBe("active");
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect((await del(api, "audit-retry")).status).toBe(200);
+    expect(await storedStatus(api, "audit-retry")).toBe("deleted");
+  });
+
   // Rows migrated from orchestrator_identities keep legacy `orchestrator:*`
   // session ids that `parseAssistantSessionId` cannot recognize; the guard
   // and the retire must key off the assistants.session_id COLUMN, or

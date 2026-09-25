@@ -962,6 +962,10 @@ const IMAGE_PULL_WAITING_REASONS = new Set([
 
 /** This pattern identifies node resource capacity shortages in scheduler messages. */
 const CAPACITY_UNSCHEDULABLE_PATTERN = /Insufficient (cpu|memory|ephemeral-storage)/g;
+const TRANSIENT_STORAGE_UNSCHEDULABLE_PATTERNS = [
+  /persistentvolumeclaim "[^"]+" not found/,
+  /pod has unbound immediate PersistentVolumeClaims/,
+];
 
 export type PodCapacityShortage = "cpu" | "memory" | "ephemeral-storage";
 
@@ -1224,9 +1228,9 @@ export async function livePodDrift(
  *      "container crash-looping (CrashLoopBackOff)"
  *   3. `pod.phase === "Failed"`, or the CR's `Ready` condition has
  *      `reason === "PodFailed"` → "pod failed: <detail>"
- *   4. `pod.phase === "Pending"` with a non-capacity `PodScheduled=False,
+ *   4. `pod.phase === "Pending"` with a structural `PodScheduled=False,
  *      reason=Unschedulable` condition → "unschedulable: <message>".
- *      Capacity shortages stay Pending so the autoscaler can observe them.
+ *      Capacity shortages and temporary PVC propagation stay Pending.
  *   5. otherwise `null` (defer to `mapConditionsToStatus`'s CR-Ready mapping)
  *
  * `pod === null` (CR has no backing pod yet, or the GET 404'd) always
@@ -1259,6 +1263,7 @@ export function classifyPodFailure(pod: PodStatusInfo | null, crReadyCondition?:
     if (scheduled?.status === "False" && scheduled.reason === "Unschedulable") {
       const message = scheduled.message ?? "no message";
       if (classifyPodCapacityShortages(message).length > 0) return null;
+      if (TRANSIENT_STORAGE_UNSCHEDULABLE_PATTERNS.some((pattern) => pattern.test(message))) return null;
       return `unschedulable: ${message}`;
     }
   }

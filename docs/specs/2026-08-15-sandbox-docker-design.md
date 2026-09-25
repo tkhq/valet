@@ -376,3 +376,30 @@ kubernetes is degraded: the daemon runs, `docker pull`/`system df` work,
 - Per-org policy to forbid `docker: true` (add when org policy
   machinery exists).
 - The legacy stack (`packages/worker`, Modal) — frozen.
+
+## Managed browser provider boundary (2026-09-23)
+
+Browser capabilities require explicit provider opt-in. Plain images retain their existing execution identity.
+Docker and Helm default to disabled until the managed image and required security profile are installed.
+A browser-enabled sandbox uses the separate reviewed seccomp profile in `packages/sandbox-docker/seccomp/browser.json`.
+It cannot combine that profile with Docker-in-sandbox or nested Kubernetes.
+
+The workload uses UID 1500 for shell, file APIs, terminal, and editor.
+The browser daemon uses another UID and private state outside `/workspace`.
+The fixed root-owned client drops to that UID and clears inherited environment values.
+Workload commands cannot inherit the gateway signing secret.
+
+Docker keeps an atomic owner inventory and a private state bind mount for each session.
+Each API data directory has its own Docker inventory so independent API instances do not reap each other's sessions.
+API restart adopts the validated owner; release retains its profile and audit journal.
+Docker rejects replacement without browser isolation while the owner has retained browser state.
+Final deletion exports the audit first and then removes private state.
+A stopped owner uses a read-only journal helper with a shared owner lock.
+Before release or deletion, Docker restores working-directory ownership to the API process.
+
+Kubernetes uses a session-owned private PVC without a Sandbox CR owner reference.
+Both providers reject browser isolation downgrades while private state remains.
+Kubernetes lists private PVC owners after CR deletion so failed state deletion remains retryable.
+The provider checks the saved browser owner before it changes credentials or the Sandbox CR.
+It uses the node Localhost profile and waits for the browser preflight marker.
+Missing retained state fails closed. See `deploy/browser.md` for node installation and image requirements.

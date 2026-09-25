@@ -371,6 +371,17 @@ describe("classifyPodFailure (pure)", () => {
   );
 
   it.each([
+    '0/1 nodes are available: persistentvolumeclaim "workspace-contract" not found.',
+    "0/1 nodes are available: pod has unbound immediate PersistentVolumeClaims.",
+  ])("keeps transient workspace PVC scheduling on the Pending path: %s", (message) => {
+    const pod: PodStatusInfo = {
+      phase: "Pending",
+      conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message }],
+    };
+    expect(classifyPodFailure(pod)).toBeNull();
+  });
+
+  it.each([
     "0/3 nodes had untolerated taint {dedicated: platform}",
     "0/3 nodes did not match Pod's node affinity/selector",
   ])("fails structural Unschedulable conditions: %s", (message) => {

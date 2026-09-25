@@ -28,6 +28,17 @@ export default {
   ],
   theme: {
     extend: {
+      keyframes: {
+        "browser-agent-click": {
+          from: { transform: "scale(0.45)", opacity: "0.9" },
+          to: { transform: "scale(1.8)", opacity: "0" },
+        },
+        "browser-agent-type": { from: { opacity: "0.7" }, to: { opacity: "0" } },
+      },
+      animation: {
+        "browser-agent-click": "browser-agent-click 550ms ease-out",
+        "browser-agent-type": "browser-agent-type 650ms ease-out",
+      },
       colors: {
         // Neutral grayscale, OKLCH-tuned for even visual steps. Used for
         // backgrounds, borders, secondary text. Names map to Tailwind's

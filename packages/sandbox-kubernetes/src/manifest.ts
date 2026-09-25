@@ -6,6 +6,7 @@
  * ./types.ts docblock for the source URL and confirmed shape).
  */
 import { createHash } from "node:crypto";
+import { RUNTIME_STATE_ANNOTATION, runtimeStateClaimName } from "./runtime-state.js";
 import { homeInitContainer, persistentHomeMounts, withHomeLinks, WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import { NESTED_KUBERNETES_IDENTITY, type SandboxCreateOpts } from "@valet/engine";
 import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, formatStorageQuantity, parseStorageQuantity } from "./quantity.js";
@@ -81,6 +82,7 @@ export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
  * survives an api restart — mirrors how `spec.service` records the
  * profile). Value is always "true"; the label is absent otherwise. */
 export const DOCKER_LABEL_KEY = "valet.dev/docker";
+export const BROWSER_LABEL_KEY = "valet.dev/browser";
 /** The `dockerd` workload user's uid/gid (docker/Dockerfile.sandbox-k8s
  * `useradd -m -u 1500 dockerd`). Used as the pod-level `fsGroup` so the
  * kubelet makes the workspace PVC group-writable by that user. */
@@ -304,6 +306,26 @@ export function buildSandboxManifest(
   }
 
   const isFullProfile = opts.profile === "full";
+  const browser = opts.browser?.enabled === true;
+  let browserClaim: string | undefined;
+  if (browser) {
+    if (!opts.sessionId) throw new Error("Browser session identity is missing. Supply the owning session ID before starting the sandbox.");
+    if (opts.docker || opts.nestedKubernetes) throw new Error("Browser isolation cannot use the Docker-in-sandbox or nested Kubernetes security profile. Disable those features for this session.");
+    const profile = cfg.browserSeccompProfile ?? "valet/browser.json";
+    if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*\.json$/.test(profile) || profile.split("/").includes("..")) throw new Error("The browser seccomp profile path is invalid. Configure a relative path beneath the kubelet seccomp directory.");
+    browserClaim = runtimeStateClaimName(opts.sessionId);
+    container.securityContext = { seccompProfile: { type: "Localhost", localhostProfile: profile } };
+    container.readinessProbe = { exec: { command: ["test", "-f", "/run/valet-browser-ready"] }, periodSeconds: 2 };
+    container.volumeMounts?.push({ name: "runtime-state", mountPath: "/var/lib/valet" });
+    container.env = [...(container.env ?? []).filter(entry => !entry.name.startsWith("VALET_BROWSER_")),
+      { name: "VALET_BROWSER_ENABLED", value: "1" }, { name: "VALET_BROWSER_CONFINE", value: "1" },
+      { name: "VALET_BROWSER_STATE", value: "/var/lib/valet/browser" },
+      { name: "VALET_BROWSER_DEV_PORTS", value: opts.env?.VALET_BROWSER_DEV_PORTS ?? "5173,3000,8080" },
+      { name: "VALET_BROWSER_UID", value: "1501" }, { name: "VALET_BROWSER_GID", value: "1501" },
+      ...(opts.browser?.viewer ? [{ name: "VALET_BROWSER_VIEWER", value: "1" }] : [])];
+    container.env = container.env.filter(entry => !["PATH", "NODE_OPTIONS", "BASH_ENV", "ENV"].includes(entry.name) && !entry.name.startsWith("LD_") && !entry.name.startsWith("BASH_FUNC_"));
+    if (!isFullProfile) container.command = ["/usr/bin/tini", "-g", "--", "/bin/bash", "/start-headless.sh"];
+  }
   if (isFullProfile) {
     container.command = FULL_PROFILE_COMMAND;
   }
@@ -397,6 +419,7 @@ export function buildSandboxManifest(
       },
     ],
   };
+  if (browser) podSpec.securityContext = { fsGroup: DOCKER_WORKLOAD_FS_GROUP };
   if (opts.docker || opts.nestedKubernetes) {
     // Pod-level fsGroup: the workspace PVC mounts group-owned by the
     // dockerd user's gid, so non-privileged (dockerd) execs can write
@@ -433,6 +456,7 @@ export function buildSandboxManifest(
     };
     podSpec.volumes = [credsVolume];
   }
+  if (browserClaim) podSpec.volumes = [...(podSpec.volumes ?? []), { name: "runtime-state", persistentVolumeClaim: { claimName: browserClaim } }];
 
   if (opts.docker) {
     // sizeLimit pins the docker-state emptyDir (image layers + container
@@ -478,13 +502,14 @@ export function buildSandboxManifest(
       },
     ],
   };
-  if (isFullProfile) {
+  if (isFullProfile || (browser && opts.browser?.viewer)) {
     spec.service = true;
   }
 
   const labels: Record<string, string> = { [SESSION_LABEL_KEY]: name };
   if (opts.nestedKubernetes) labels[NESTED_KUBERNETES_LABEL_KEY] = "true";
   if (opts.docker) labels[DOCKER_LABEL_KEY] = "true";
+  if (browser) labels[BROWSER_LABEL_KEY] = "true";
 
   return {
     apiVersion: cfg.apiVersion,
@@ -492,8 +517,9 @@ export function buildSandboxManifest(
     metadata: {
       name,
       labels,
-      ...((opts.sessionId || opts.nestedKubernetes) ? { annotations: {
+      ...((opts.sessionId || opts.nestedKubernetes || browserClaim) ? { annotations: {
         ...(opts.sessionId ? { [SESSION_ANNOTATION_KEY]: opts.sessionId } : {}),
+        ...(browserClaim ? { [RUNTIME_STATE_ANNOTATION]: browserClaim } : {}),
         ...(opts.nestedKubernetes ? { [NESTED_KUBERNETES_ANNOTATION_KEY]: NESTED_KUBERNETES_IDENTITY } : {}),
       } } : {}),
     },

@@ -11,7 +11,7 @@ import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
 import type { SandboxTabId } from "~/components/session/sandbox-tabs";
 
-const TAB_VALUES: readonly string[] = ["chat", "terminal", "vscode"] satisfies SandboxTabId[];
+const TAB_VALUES: readonly string[] = ["chat", "browser", "terminal", "vscode"] satisfies SandboxTabId[];
 
 interface SessionSearch {
   /** Active thread id. Defaults to the first thread (engine's web:default). */

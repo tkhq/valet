@@ -264,6 +264,15 @@ export function registerWsRoutes(
               replaying = false;
             }
 
+            // A fresh connection has no sandbox event to replay. Seed after
+            // subscription and replay so gateway panes see the current state.
+            send(ws, {
+              type: "sandbox.status",
+              state: engineSession.attachment.state,
+              epoch: engineSession.attachment.currentEpoch(),
+              estimateMs: engineSession.attachment.coldStartEstimateMs,
+            });
+
             // Seed per-thread model state after the subscription and replay.
             // `currentModelState()` serializes with model transitions, so an
             // earlier live event is sent before this authoritative snapshot.

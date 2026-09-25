@@ -9,6 +9,10 @@
     "plugin": "./dist/plugin.js"
   },
   "exports": {
+    ".": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"
@@ -20,9 +24,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@valet/engine": "workspace:*"
+    "@valet/engine": "workspace:*",
+    "@valet/shared": "workspace:*",
+    "typebox": "1.3.7"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }

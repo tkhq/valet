@@ -5,6 +5,8 @@ import type {
   GatewayEndpoint,
   JobPoll,
   Sandbox,
+  SandboxCommandChannel,
+  SandboxCommandChannelOptions,
   WorkspaceGrowth,
 } from "../types.js";
 import { SandboxConnectionError, SandboxEvictedError, SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
@@ -219,6 +221,68 @@ export class PolicySandbox implements Sandbox {
       if (!sb.snapshot) throw new Error("sandbox does not support snapshot");
       return sb.snapshot();
     });
+  }
+
+  async openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel | null> {
+    if (options.signal?.aborted) throw this.abortError(options.signal);
+    // Agent work waits for compute; passive viewers must never wake it.
+    const { sandbox, epoch } = options.waitForReady === false
+      ? { sandbox: this.attachment.current(), epoch: this.attachment.currentEpoch() }
+      : await this.attachment.ensureReady({ timeoutMs: this.readyTimeoutMs, signal: options.signal });
+    if (!sandbox) throw new SandboxUnavailableError(new Error('The sandbox is not ready. Start it before opening a command channel.'));
+    if (!sandbox.openCommandChannel) return null;
+    const controller = new AbortController();
+    let raw: SandboxCommandChannel | null = null;
+    let closed = false;
+    let failure: Error | undefined;
+    const stale = () => this.attachment.currentEpoch() !== epoch || this.attachment.current() !== sandbox;
+    const staleError = () => this.attachment.currentEpoch() !== epoch
+      ? new SandboxSupersededError(epoch)
+      : new SandboxUnavailableError(new Error('The command channel attachment stopped. Open a new channel when the sandbox is ready.'));
+    let unsubscribe = () => {};
+    const finish = (error?: Error) => {
+      if (closed) return;
+      closed = true; failure = error;
+      unsubscribe(); options.signal?.removeEventListener('abort', onAbort);
+      controller.abort(error); raw?.close();
+      options.onClose(error);
+    };
+    const onAbort = () => { if (options.signal) finish(this.abortError(options.signal)); };
+    unsubscribe = this.attachment.onStatus(() => { if (stale()) finish(staleError()); });
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      if (options.signal?.aborted) throw this.abortError(options.signal);
+      if (stale()) throw staleError();
+      const opened = await sandbox.openCommandChannel(command, {
+        privileged: options.privileged, signal: controller.signal,
+        onData: (data) => {
+          if (closed) return;
+          if (stale()) { finish(staleError()); return; }
+          options.onData(data);
+        },
+        onClose: (error) => finish(stale() ? staleError() : error),
+      });
+      if (closed || stale()) {
+        opened?.close();
+        throw failure ?? staleError();
+      }
+      raw = opened;
+      if (!raw) { unsubscribe(); options.signal?.removeEventListener('abort', onAbort); return null; }
+      const channel = raw;
+      return {
+        write: async (data) => {
+          if (!closed && stale()) finish(staleError());
+          if (closed) throw failure ?? new Error('The command channel is closed. Open a new channel before writing.');
+          await channel.write(data);
+          if (!closed && stale()) finish(staleError());
+          if (closed) throw failure ?? new Error('The command channel closed during the write. Inspect the command outcome before continuing.');
+        },
+        close: () => finish(),
+      };
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }
 
   async tunnels(): Promise<Record<string, string>> {

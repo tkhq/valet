@@ -301,21 +301,28 @@ describe("withSandboxCapacityGate", () => {
     await expect(createAs(gated, h, "org2", "b")).resolves.toBeDefined();
   });
 
-  it("preserves optional-member ABSENCE (capability presence checks stay honest)", () => {
+  it("preserves optional-member ABSENCE (capability presence checks stay honest)", async () => {
     const bare = fakeInner();
     const gatedBare = withSandboxCapacityGate(bare, { ceiling: 1, waitMs: 0, host: () => null });
     expect(gatedBare.updateCreds).toBeUndefined();
     expect(gatedBare.deriveId).toBeUndefined();
     expect(gatedBare.list).toBeUndefined();
     expect(gatedBare.suspend).toBeUndefined();
+    expect(gatedBare.readBrowserAudit).toBeUndefined();
 
     const full = fakeInner({
       deriveId: (key) => `d-${key}`,
       updateCreds: async () => {},
+      async readBrowserAudit(id) {
+        expect(this.backend).toBe('fake');
+        expect(id).toBe('retained');
+        return { entries: [], total: 4 };
+      },
     });
     const gatedFull = withSandboxCapacityGate(full, { ceiling: 1, waitMs: 0, host: () => null });
     expect(gatedFull.deriveId?.("k")).toBe("d-k");
     expect(gatedFull.updateCreds).toBeDefined();
     expect(gatedFull.list).toBeUndefined();
+    await expect(gatedFull.readBrowserAudit?.('retained')).resolves.toEqual({ entries: [], total: 4 });
   });
 });

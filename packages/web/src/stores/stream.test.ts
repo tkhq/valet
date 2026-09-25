@@ -1386,6 +1386,26 @@ describe("streaming tool calls", () => {
     expect(byCall).toEqual({ tc1: "completed", tc2: "running" });
   });
 
+  it("retains structured image evidence from live tool results", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    ingest(SESSION, {
+      seq: 2, ts: Date.now(), type: "tool_start", threadId: THREAD,
+      toolName: "browser_execute", callId: "screenshot", args: {},
+    });
+    const resultData = { content: [
+      { type: "text", text: "Screenshot" },
+      { type: "image", data: "cGl4ZWxz", mimeType: "image/png" },
+    ] };
+    ingest(SESSION, {
+      seq: 3, ts: Date.now(), type: "tool_end", threadId: THREAD,
+      toolName: "browser_execute", callId: "screenshot", result: "Screenshot",
+      resultData, isError: false,
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].parts[0])
+      .toMatchObject({ status: "completed", result: resultData });
+  });
+
   it("message_end abort removes parts still streaming (they were never persisted)", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, messageStart("m1", 1));

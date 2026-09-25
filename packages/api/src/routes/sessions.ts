@@ -1494,10 +1494,13 @@ sessionsRouter.delete("/:id", async (c) => {
     }
   }
 
-  // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
-  await engineHost.destroy(id).catch((err) => {
+  // Keep the owning session visible until required teardown succeeds.
+  try {
+    await engineHost.destroy(id);
+  } catch (err) {
     console.error(`engineHost.destroy(${id}) failed:`, err);
-  });
+    return c.json({ error: err instanceof Error ? err.message : "Session teardown failed. Restore the sandbox connection, then retry deletion." }, 503);
+  }
 
   // Deleting a team assistant's session IS removing the assistant — the
   // header item is labeled "Delete this team's assistant". Retire the row
@@ -1515,9 +1518,12 @@ sessionsRouter.delete("/:id", async (c) => {
   // destroy above and this transaction rebuilds from the not-yet-retired
   // row and re-caches — and cache hits bypass the archived-wake guard.
   // Now the row is retired, so a torn-down ghost cannot rebuild.
-  await engineHost.destroy(id).catch((err) => {
+  try {
+    await engineHost.destroy(id);
+  } catch (err) {
     console.error(`engineHost.destroy(${id}) failed:`, err);
-  });
+    return c.json({ error: err instanceof Error ? err.message : "Session teardown failed. Restore the sandbox connection, then retry deletion." }, 503);
+  }
 
   return c.json({ ok: true });
 });

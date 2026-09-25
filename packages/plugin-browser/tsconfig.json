@@ -3,8 +3,8 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    "types": []
+    "types": ["node"]
   },
   "include": ["src/**/*"],
-  "references": [{ "path": "../engine" }]
+  "references": [{ "path": "../engine" }, { "path": "../shared" }]
 }
