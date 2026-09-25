@@ -245,7 +245,7 @@ export function UsagePage() {
   const [exportError, setExportError] = useState<unknown>();
   const [exporting, setExporting] = useState(false);
   const [exportGranularity, setExportGranularity] = useState<UsageExportGranularity>("day");
-  const exportLinkRef = useRef<HTMLAnchorElement>(null);
+  const exportFrameRef = useRef<HTMLIFrameElement>(null);
   const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
   // Keep only cursor history, not every loaded row. Each page remains bounded
   // by the server's explicit page size.
@@ -342,7 +342,8 @@ export function UsagePage() {
     setExporting(true);
     try {
       await api.validateUsageExport(period, scope, exportGranularity, teamId);
-      exportLinkRef.current?.click();
+      const frame = exportFrameRef.current;
+      if (frame) frame.src = csvHref;
     } catch (error) {
       setExportError(error);
     } finally {
@@ -507,7 +508,7 @@ export function UsagePage() {
               >
                 {exporting ? "Validating export…" : `Download CSV (${periodLabel}, ${scope})`}
               </button>
-              <a ref={exportLinkRef} href={csvHref} className="sr-only" tabIndex={-1} aria-hidden="true">Download</a>
+              <iframe ref={exportFrameRef} title="Usage CSV download" data-download-url={csvHref} className="hidden" />
             </div>
           )}
         </div>

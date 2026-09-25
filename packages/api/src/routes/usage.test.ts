@@ -440,6 +440,44 @@ describe("GET /api/usage/export.csv", () => {
     }
   });
 
+  it("reconciles numeric cost across many daily and hourly groups without float noise", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    const cost = JSON.stringify({ total: 0.010713636363 });
+    await db.insert(agentSessions).values({
+      id: "aggregate-cost", userId: "local-user", orgId: "local-org", workspace: "/w",
+      status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now,
+    });
+    await db.execute(sql`
+      INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
+      SELECT 'aggregate-cost-' || i, 'aggregate-cost', 'th', 'message', 'assistant', 'cost-model',
+             ${USAGE}::text, ${cost}::text, ${now}::bigint - (i % 48) * 3600000
+      FROM generate_series(1, 20000) AS i
+    `);
+
+    const breakdown = await (await fetch(`${api.baseUrl}/api/usage/breakdown?window=30d`)).json() as UsageBreakdownResponse;
+    const daily = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d`)).text();
+    const hourly = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&granularity=hour`)).text();
+    const scaled = (value: string): bigint => {
+      const [whole, fraction = ""] = value.split(".");
+      return BigInt(whole) * 1_000_000_000_000n + BigInt(fraction.padEnd(12, "0").slice(0, 12));
+    };
+    const csvCost = (csv: string): bigint => {
+      const [header, ...lines] = csv.trim().split("\n");
+      const costIndex = header.split(",").indexOf("cost_usd");
+      return lines.reduce((sum, line) => sum + scaled(line.split(",")[costIndex]), 0n);
+    };
+    const expected = scaled(breakdown.totalCostUsd.toFixed(12));
+    expect(csvCost(daily)).toBe(expected);
+    expect(csvCost(hourly)).toBe(expected);
+    for (const csv of [daily, hourly]) {
+      const [header, ...lines] = csv.trim().split("\n");
+      const costIndex = header.split(",").indexOf("cost_usd");
+      for (const line of lines) expect(line.split(",")[costIndex]).toMatch(/^\d+\.\d{12}$/);
+    }
+  });
+
   it("removes user identity from a plain member aggregate group and neutralizes formulas", async () => {
     api = await bootTestApi();
     const db = api.providers.db;
@@ -466,7 +504,7 @@ describe("GET /api/usage/export.csv", () => {
     expect(lines[1]).toContain("\"'=formula\"");
     expect(lines[1]).not.toContain("local-user");
     expect(lines[1]).not.toContain("test-member");
-    expect(lines[1]).toContain(",2,0,200,40,0,0,240,0.006");
+    expect(lines[1]).toContain(",2,0,200,40,0,0,240,0.006000000000");
 
     const turn = await (await fetch(
       `${api.baseUrl}/api/usage/export.csv?scope=team&teamId=private-team&granularity=turn`, { headers },
@@ -558,10 +596,10 @@ describe("GET /api/usage/export.csv", () => {
     expect(context).toContain("\"'=slack\"");
     expect(context).toContain("\"'\tC123\"");
     const deleted = lines.find((line) => line.includes("s-deleted"));
-    expect(deleted).toContain("deleted-user,100,20,0,0,120,0.003,true,,,,,");
+    expect(deleted).toContain("deleted-user,100,20,0,0,120,0.003000000000,true,,,,,");
     const shared = lines.find((line) => line.includes("p-shared") || line.includes(",proxy,"));
     expect(shared).toBeDefined();
-    expect(shared).toContain(",proxy,gpt,,,,10,2,0,0,12,0.01,true,,,,,");
+    expect(shared).toContain(",proxy,gpt,,,,10,2,0,0,12,0.010000000000,true,,,,,");
   });
 
   it("streams every row over 100,000 without gaps or duplicates at tied timestamps", async () => {
@@ -578,14 +616,20 @@ describe("GET /api/usage/export.csv", () => {
              ${USAGE}::text, ${COST}::text, ${now}
       FROM generate_series(1, 100001) AS i
     `);
+    await api.providers.db.insert(llmProxyRequests).values({
+      id: "e-csv-overflow-050000", createdAt: now, orgId: "local-org", userId: "local-user",
+      apiKeyId: "collision", providerKind: "openai", model: "proxy-collision", endpoint: "/v1/responses",
+      stream: false, statusCode: 200, requestBody: "{}", totalTokens: 1, costUsd: 0.01,
+    });
 
     const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&granularity=turn`);
     expect(res.status).toBe(200);
     const lines = (await res.text()).trim().split("\n");
-    expect(lines).toHaveLength(100002);
+    expect(lines).toHaveLength(100003);
     const models = lines.slice(1).map((line) => line.split(",")[2]);
-    expect(new Set(models).size).toBe(100001);
-    expect(models[0]).toBe("model-100001");
+    expect(new Set(models).size).toBe(100002);
+    expect(models[0]).toBe("proxy-collision");
+    expect(models[1]).toBe("model-100001");
     expect(models.at(-1)).toBe("model-000001");
   }, 60_000);
 });
