@@ -34,10 +34,12 @@ it('requires an approved origin and explicit development port', async () => {
     '8.8.8.8',
   );
   policy.allow('http://localhost:5173');
-  expect((await policy.destination('localhost', 5173)).address).toBe(
-    '127.0.0.1',
-  );
+  expect((await policy.destination('localhost', 5173))).toMatchObject({
+    address: '127.0.0.1',
+    addresses: ['127.0.0.1', '::1'],
+  });
   await expect(policy.destination('localhost', 8788)).rejects.toThrow();
+  expect(() => policy.allow('http://example.com:5173')).toThrow(/egress permits/);
 });
 it('generates an architecture-specific seccomp filter', () => {
   expect(replSeccomp('arm64').length).toBeGreaterThan(100);

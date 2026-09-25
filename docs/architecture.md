@@ -167,8 +167,7 @@ gates, and thread reads.
 
 ### Boot
 
-`src/main.ts` boots on `PORT` (default `8787`. `make dev-local` runs on
-`8788`): load auth config → build providers → wire the attention router →
+`src/main.ts` boots on `PORT` (default `8788`): load auth config → build providers → wire the attention router →
 reconcile unsettled sessions → re-arm child watches → start channel ingress,
 workflow run host, and prebuild service → build better-auth → serve HTTP + WS
 (Node adapter in dev, Bun adapter inside the compiled binary). The web client's
@@ -405,8 +404,8 @@ Rancher Desktop flow. Every target pins `--context rancher-desktop`.
 
 | Port | What |
 |------|------|
-| 8787 | API default (`PORT`); Helm chart |
-| 8788 | API in `make dev-local` |
+| 8787 | Legacy Worker default |
+| 8788 | API default (`PORT`) and `make dev-local` |
 | 5173 | Vite dev server (web) |
 | 9000 | Sandbox gateway (inside `full` sandboxes) |
 | 8765 | code-server (behind the gateway) |

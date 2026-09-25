@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseRequest, canonicalHash, BrowserFault } from '../src/protocol.js';
+import { documentation } from '../src/registry.js';
 const identity = {
   protocolVersion: '1.0',
   sessionId: 'session:1',
@@ -65,4 +66,10 @@ describe('browser protocol', () => {
     );
     expect(canonicalHash({ a: '1' })).not.toBe(canonicalHash({ a: 1 }));
   });
+});
+
+it('documents diagnostic methods through the tab.dev namespace', () => {
+  expect(documentation()).toContain('tab.dev.logs: diagnostic');
+  expect(documentation()).toContain('tab.dev.network: diagnostic');
+  expect(documentation()).not.toContain('tab.logs: diagnostic');
 });

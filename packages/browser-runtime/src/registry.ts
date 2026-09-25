@@ -114,6 +114,6 @@ export function documentation() {
   return `Browser protocol 1.0. Persistent Node REPL bindings support top-level await. Lexical redeclarations fail; use a fresh variable name or reuse an existing binding. Use browser.reset only when you need to discard all bindings. Observation methods emit by default and also return their text. Use {emit:false} to return without emitting. Use output.write for other reads. Locators are strict. People and agents share normal input. References expire after navigation, replacement, reset, or human input. Keep an observation and its reference action in one cell when possible. An explicit pause blocks agent mutations until the user resumes shared use. Coordinates use viewport CSS pixels. evaluate reads an immutable snapshot and cannot access live page globals. Approval waits preserve the cell. Never repeat a failed mutation before checking its receipt and the page.\n\n${examples}\n\nAvailable methods:\n${Object.entries(
     METHOD_REGISTRY,
   )
-    .map(([name, meta]) => `${name}: ${meta.operationClass}`)
+    .map(([name, meta]) => `${name === 'tab.logs' ? 'tab.dev.logs' : name === 'tab.network' ? 'tab.dev.network' : name}: ${meta.operationClass}`)
     .join('\n')}`;
 }

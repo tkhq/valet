@@ -14,6 +14,7 @@ The legacy stack (`packages/worker`/`client`/`runner`, `backend/`, Cloudflare + 
 corepack enable         # once per machine — provisions the pnpm pinned in package.json
                         #   (packageManager). No pnpm? `npm install -g pnpm` also works.
 pnpm install
+pnpm typecheck              # fresh installs build workspace dist/ for direct API/web runs
 make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Docker
                         # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ./.valet-dev/pg
 ```
@@ -47,6 +48,7 @@ While iterating:
 pnpm typecheck                                  # all packages (worker excluded)
 pnpm --filter @valet/<pkg> test [<filter>]      # targeted suites (NO "--" before the filter
                         #   - vitest drops args after "--" and runs the FULL suite)
+pnpm exec vite --host 127.0.0.1                 # pass Vite flags directly; `pnpm run dev -- --flag` passes a literal `--`
 make smoke-orchestrator                         # fastest agent-loop-alive check (real Anthropic, no Docker)
 ```
 
