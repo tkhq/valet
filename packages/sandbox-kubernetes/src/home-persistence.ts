@@ -7,7 +7,7 @@ export const STORAGE_SUBPATH = ".valet-storage";
 export const WORKSPACE_SUBPATH = `${STORAGE_SUBPATH}/workspace`;
 const INIT_VOLUME_ROOT = "/valet-volume";
 export const HOME_LAYOUT_ENV = "VALET_HOME_LAYOUT_VERSION";
-export const HOME_LAYOUT_VERSION = "1";
+export const HOME_LAYOUT_VERSION = "2";
 export const HOME_INIT_NAME = "valet-home-init";
 export const HOME_DIRECTORIES = [".config", ".cache", ".local", ".ssh", ".npm", ".cargo", ".rustup", ".bun", ".nvm", "go", ".gradle", ".m2"];
 const HOME_FILES = [".gitconfig", ".git-credentials", ".npmrc", ".bashrc", ".profile"];
@@ -46,6 +46,11 @@ if [ ! -e "$dest" ]; then
   chmod ${directory ? "700" : "600"} "$stage"
   mv "$stage" "$dest"
 fi
+owner=$(ls -nd "$dest" | awk '{print $3 ":" $4}')
+if [ "$owner" != ${home.uid}:${home.gid} ]; then
+  chown -R ${home.uid}:${home.gid} "$dest"
+fi
+chmod ${directory ? "700" : "600"} "$dest"
 ${entry === ".ssh" ? 'chmod -R go-rwx "$dest"' : ""}`;
   }).join("\n")}`).join("\n")}
 trap - 0

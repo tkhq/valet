@@ -21,6 +21,7 @@ import {
   WORKSPACE_VOLUME_NAME,
 } from "../src/index.js";
 import type { K8sProviderConfig } from "../src/index.js";
+import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 
 const RFC1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 
@@ -144,7 +145,7 @@ describe("buildSandboxManifest", () => {
     expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
       { name: "VALET_SANDBOX_TOKEN", value: "tok-123" },
       { name: "VALET_API_URL", value: "http://valet-api.valet.svc.cluster.local" },
-      { name: "VALET_HOME_LAYOUT_VERSION", value: "1" },
+      { name: "VALET_HOME_LAYOUT_VERSION", value: HOME_LAYOUT_VERSION },
       { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
     ]);
   });
@@ -152,7 +153,7 @@ describe("buildSandboxManifest", () => {
   it("emits image and home-layout fingerprints when opts.env is not provided", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
     expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
-      { name: "VALET_HOME_LAYOUT_VERSION", value: "1" },
+      { name: "VALET_HOME_LAYOUT_VERSION", value: HOME_LAYOUT_VERSION },
       { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
     ]);
   });

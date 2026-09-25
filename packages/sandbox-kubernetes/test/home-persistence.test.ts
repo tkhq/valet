@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, lstat } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, writeFile, rm, symlink, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -41,6 +41,19 @@ describe("persistent home state", () => {
     const { home, volume, users } = await fixture();
     await symlink(home, join(volume, "test"));
     expect(() => run(homeInitScript(users, volume))).toThrow();
+  });
+
+  it("repairs an existing home file before the workload starts", async () => {
+    const { home, volume, users } = await fixture();
+    await mkdir(join(volume, "test"));
+    const persisted = join(volume, "test", ".gitconfig");
+    await writeFile(persisted, "[user]\n name = Persisted\n");
+    await chmod(persisted, 0o000);
+
+    run(homeInitScript(users, volume));
+
+    expect((await lstat(persisted)).mode & 0o777).toBe(0o600);
+    expect(await readFile(persisted, "utf8")).toContain("Persisted");
   });
 
   it("uses the existing claim and seeds home paths before the workload starts", () => {

@@ -213,8 +213,9 @@ COPY docker/browser-preflight.sh /browser-preflight.sh
 COPY docker/valet-browser-client.sh /usr/local/bin/valet-browser-client
 RUN groupadd --gid 1501 valet-browser && useradd --uid 1501 --gid 1501 --home-dir /var/lib/valet/browser --no-create-home browser \
     && mkdir -p /var/lib/valet/browser \
-    && chown -R 1501:1501 /var/lib/valet \
-    && chmod 0700 /var/lib/valet /var/lib/valet/browser \
+    && chown 1501:1501 /var/lib/valet/browser \
+    && chmod 0755 /var/lib/valet \
+    && chmod 0700 /var/lib/valet/browser \
     && chmod 0755 /browser-preflight.sh /usr/local/bin/valet-browser-client
 
 # Bundled auth gateway (Task 2): `node /gateway/dist/bin.js` is what

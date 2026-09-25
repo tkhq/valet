@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildSandboxManifest } from "../src/manifest.js";
 import { SANDBOX_CR_API_VERSION } from "../src/types.js";
@@ -63,6 +64,42 @@ describe("browser manifests", () => {
         docker: true,
       }),
     ).toThrow(/Docker-in-sandbox/i);
+  });
+
+  it("keeps the shared runtime root traversable without taking persisted home ownership", () => {
+    const manifest = buildSandboxManifest(cfg, "sandbox-a", {
+      sessionId: "session-a",
+      browser: { enabled: true },
+    });
+    const mounts = manifest.spec.podTemplate.spec.containers[0].volumeMounts ?? [];
+    expect(mounts).toContainEqual({
+      name: "runtime-state",
+      mountPath: "/var/lib/valet",
+    });
+    expect(mounts).toContainEqual({
+      name: "workspace",
+      mountPath: "/var/lib/valet/home",
+      subPath: ".valet-storage/home",
+    });
+
+    const preflight = readFileSync(
+      new URL("../../../docker/browser-preflight.sh", import.meta.url),
+      "utf8",
+    );
+    expect(preflight).toContain(
+      "install -d -m 0755 -o root -g root /var/lib/valet",
+    );
+    expect(preflight).toContain(
+      'install -d -m 0700 -o "$browser_uid" -g "$browser_gid" /var/lib/valet/browser',
+    );
+    expect(preflight).not.toMatch(/chown\s+-R[^\n]*\/var\/lib\/valet(?:\s|$)/);
+
+    const dockerfile = readFileSync(
+      new URL("../../../docker/Dockerfile.sandbox-k8s", import.meta.url),
+      "utf8",
+    );
+    expect(dockerfile).toContain("chmod 0755 /var/lib/valet");
+    expect(dockerfile).not.toMatch(/chown\s+-R[^\n]*\/var\/lib\/valet(?:\s|\\)/);
   });
 });
 class MemoryStateApi implements RuntimeStateApi {

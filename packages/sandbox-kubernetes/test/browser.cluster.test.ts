@@ -107,6 +107,12 @@ describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => 
     }
 
     try {
+      const writeGitConfig = () => sandbox.exec(
+        "git config --global credential.helper valet-test && git config --global --get credential.helper",
+      );
+      const gitConfig = await writeGitConfig();
+      expect(gitConfig.exitCode).toBe(0);
+      expect(gitConfig.stdout.trim()).toBe("valet-test");
       await startFixture();
       const initial = await request({ ...identity, command: "status" });
       let pending = await request({ ...identity, command: "submit", invocationId: "open", title: "Open fixture", code: 'const tab=await browser.tabs.new({url:"http://localhost:5173"}); await tab.title();' });
@@ -119,10 +125,18 @@ describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => 
       expect((await request({ ...identity, command: "status" })).runtimeId).toBe(initial.runtimeId);
       await finish("open", pending);
 
+      const poisonHome = await sandbox.exec(
+        "chown -R 1501:1501 /var/lib/valet/home && chmod 0700 /var/lib/valet/home/dockerd",
+        { privileged: true },
+      );
+      expect(poisonHome.exitCode).toBe(0);
+      expect((await writeGitConfig()).exitCode).not.toBe(0);
+
       await request({ ...identity, audience: "lifecycle", command: "suspend" });
       await provider.suspend(sandbox.id);
       await expect.poll(() => kubectl(["-n", namespace, "get", "pod", sandbox.id]).status, { timeout: 60_000 }).not.toBe(0);
       await provider.resume(sandbox.id);
+      expect((await writeGitConfig()).exitCode).toBe(0);
       await startFixture();
       const afterResume = await finish("resume-cookie", await request({ ...identity, command: "submit", invocationId: "resume-cookie", title: "Read cookie", code: 'const resumed=await browser.tabs.new({url:"http://localhost:5173"}); await resumed.title();' }));
       expect(afterResume.response.cell?.operations.some((operation) => operation.result === "Signed in")).toBe(true);
