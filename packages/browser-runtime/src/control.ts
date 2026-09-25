@@ -2,13 +2,20 @@ import { randomUUID } from 'node:crypto';
 import type { BrowserControlLease } from '@valet/shared';
 import { BrowserFault } from './protocol.js';
 export class Control {
-  lease: BrowserControlLease | null = null;
+  private storedLease: BrowserControlLease | null = null;
   private tail: Promise<unknown> = Promise.resolve();
   private takeoverActor: string | undefined;
   constructor(
     private readonly runtimeId: string,
     private readonly invalidate: () => void = () => {},
   ) {}
+  get lease(): BrowserControlLease | null {
+    if (this.storedLease && this.storedLease.expiresAt <= Date.now()) {
+      this.storedLease = null;
+      this.invalidate();
+    }
+    return this.storedLease;
+  }
   get taking() {
     return this.takeoverActor !== undefined;
   }
@@ -61,7 +68,8 @@ export class Control {
     privateMode = false,
     beforeGrant?: () => Promise<void>,
   ) {
-    if (this.taking || (this.lease && this.lease.actorId !== actorId))
+    const current = this.lease;
+    if (this.taking || (current && current.actorId !== actorId))
       throw new BrowserFault(
         'CONTROL_HELD',
         'Another person holds browser control.',
@@ -72,7 +80,7 @@ export class Control {
       await this.tail;
       await beforeGrant?.();
       this.invalidate();
-      this.lease = {
+      this.storedLease = {
         id: randomUUID(),
         actorId,
         runtimeId: this.runtimeId,
@@ -80,27 +88,27 @@ export class Control {
         privateMode,
         expiresAt: Date.now() + 120_000,
       };
-      return this.lease;
+      return this.storedLease;
     } finally {
       this.takeoverActor = undefined;
     }
   }
   validate(id: string, actor: string, runtime: string) {
+    const lease = this.lease;
     if (
-      !this.lease ||
-      this.lease.id !== id ||
-      this.lease.actorId !== actor ||
+      !lease ||
+      lease.id !== id ||
+      lease.actorId !== actor ||
       runtime !== this.runtimeId ||
-      this.lease.state !== 'active' ||
-      this.lease.expiresAt < Date.now()
+      lease.state !== 'active'
     )
       throw new BrowserFault(
         'CONTROL_HELD',
         'The control lease is invalid or expired.',
         'Renew control or resume shared use in the Browser panel.',
       );
-    this.lease.expiresAt = Date.now() + 120_000;
-    return this.lease;
+    lease.expiresAt = Date.now() + 120_000;
+    return lease;
   }
   pause(id: string, actor: string) {
     const lease = this.validate(id, actor, this.runtimeId);
@@ -108,32 +116,33 @@ export class Control {
     lease.expiresAt = Date.now() + 30_000;
   }
   resume(id: string, actor: string) {
+    const lease = this.lease;
     if (
-      !this.lease ||
-      this.lease.id !== id ||
-      this.lease.actorId !== actor ||
-      this.lease.expiresAt < Date.now()
+      !lease ||
+      lease.id !== id ||
+      lease.actorId !== actor
     )
       throw new BrowserFault(
         'CONTROL_HELD',
         'The reconnect lease expired.',
         'Renew control or resume shared use in the Browser panel.',
       );
-    this.lease.state = 'active';
-    this.lease.expiresAt = Date.now() + 120_000;
+    lease.state = 'active';
+    lease.expiresAt = Date.now() + 120_000;
   }
   validateOwner(id: string, actor: string) {
-    if (!this.lease || this.lease.id !== id || this.lease.actorId !== actor)
+    const lease = this.lease;
+    if (!lease || lease.id !== id || lease.actorId !== actor)
       throw new BrowserFault(
         'CONTROL_HELD',
         'The control lease does not match.',
         'Release the lease held by this actor.',
       );
-    return this.lease;
+    return lease;
   }
   release(id: string, actor: string) {
     this.validateOwner(id, actor);
-    this.lease = null;
+    this.storedLease = null;
     this.invalidate();
   }
 }

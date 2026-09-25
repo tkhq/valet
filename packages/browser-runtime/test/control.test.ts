@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { Control } from '../src/control.js';
 it('serializes effects and completes takeover after the current effect', async () => {
   const control = new Control('runtime');
@@ -41,4 +41,20 @@ it('keeps the first pending takeover owner when another person requests control'
   await rejected;
   expect(control.lease).toBe(lease);
   expect(lease.actorId).toBe('first');
+});
+
+it('clears an expired private lease so agents and another viewer can continue', async () => {
+  const now = 1_000_000;
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+  let invalidations = 0;
+  const control = new Control('runtime', () => { invalidations += 1; });
+  await control.take('alice', true);
+
+  clock.mockReturnValue(now + 120_001);
+
+  expect(control.lease).toBeNull();
+  expect(invalidations).toBe(2);
+  await expect(control.run('agent', async () => 'continued')).resolves.toBe('continued');
+  await expect(control.take('bob')).resolves.toMatchObject({ actorId: 'bob' });
+  clock.mockRestore();
 });

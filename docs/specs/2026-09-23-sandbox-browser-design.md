@@ -649,6 +649,8 @@ daemon ports and raw CDP stay off published network interfaces.
 Close active viewer sockets and revoke leases on permission loss, logout, ticket
 expiry, runtime change or session deletion. Refresh only after reauthorization.
 Do not rely on handshake-time membership checks for a long-lived connection.
+An expired control lease clears itself on the next browser request. The runtime
+also exits private mode so the agent and another authorized viewer can continue.
 
 Provide a private sign-in mode. It suspends agent reads and actions, screenshot
 capture into transcripts, logs and traces while the person enters credentials.
@@ -905,7 +907,8 @@ The base browser skill tells the agent to mark a page as deliverable when the us
 asks to finish on, leave open, show, or hand off that page.
 
 The host records cleanup before it finalizes the submission, including recovered settlements.
-If compute is absent, the host keeps cleanup pending without waking the sandbox.
+If compute is absent, the host records cleanup only when provider inventory shows
+retained browser state. It keeps that cleanup pending without waking the sandbox.
 The next attachment drains pending cleanup before admitting work.
 Replacement waits for the old execution to release its private state.
 Final deletion waits for an active release, then removes retained browser state from provider inventory before deleting engine history.
@@ -1203,6 +1206,11 @@ Accessibility observations are bounded full snapshots. The runtime does not yet 
 Browser history contains this runtime's visits; it does not import historical visits from Chromium storage.
 Navigation and selector waits are available. Event-armed download and file-chooser wait helpers are not part of this release.
 Capabilities and installed documentation describe these limits before an agent starts using the browser.
+
+Observation, navigation, and UI mutation stay prompt-free after browser access is
+authorized. An injected authenticated page can therefore try to direct the agent
+to disclose page data. The product accepts this low-friction policy for this
+release. The browser skill's consequence check remains the semantic boundary.
 
 Turn cleanup is recorded before normal or recovered submission settlement.
 If compute is absent, the next attachment drains that cleanup without an earlier wake.

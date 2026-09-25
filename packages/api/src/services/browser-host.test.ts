@@ -30,11 +30,20 @@ describe('browser lifecycle persistence', () => {
 
   it('retains cleanup without waking compute and drains it after host reconstruction', async () => {
     const f = await fixture();
-    await browserSessionHooks('session', f.sessions, f.blobs, f.store).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
     expect(f.commands).toEqual([]);
     expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(1);
     await browserSessionHooks('session', f.sessions, f.blobs, f.store).sandboxLifecycle?.afterReady?.(f.sandbox);
     expect(f.commands).toEqual(['turn_end']);
+    expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(0);
+  });
+
+  it('does not retain cleanup for a sandbox-less session with no browser state', async () => {
+    const f = await fixture();
+    f.provider.list = async () => [];
+
+    await browserSessionHooks('session', f.sessions, f.blobs, f.store, f.provider).onTurnComplete?.({ sessionId: 'session', submissionId: 'submission', threadId: 'thread', actorId: 'actor', owner: { type: 'user', id: 'owner' } });
+
     expect((await f.store.session('session').list('turn_cleanup')).items).toHaveLength(0);
   });
 

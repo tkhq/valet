@@ -1778,7 +1778,7 @@ export class EngineHost {
 
   private browserOptions(sessionId: string) {
     if (!this.opts.sandboxProvider.capabilities().browserAutomation || !this.opts.db) return {};
-    return { browserPolicy: this.browserPolicy(), ...browserSessionHooks(sessionId, this.opts.engineStore, this.opts.blobs, pluginStore(this.opts.db, 'browser')) };
+    return { browserPolicy: this.browserPolicy(), ...browserSessionHooks(sessionId, this.opts.engineStore, this.opts.blobs, pluginStore(this.opts.db, 'browser'), this.opts.sandboxProvider) };
   }
 
   private getPolicyResolver(): PolicyResolver | undefined {

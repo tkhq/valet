@@ -106,6 +106,7 @@ export class BrowserDaemon {
       // A complete private-control cycle can occur during an awaited capture.
       this.frameGeneration++;
       this.backend?.invalidate();
+      this.backend?.setPrivate(this.control?.lease?.privateMode ?? false);
     });
   }
   async start() {

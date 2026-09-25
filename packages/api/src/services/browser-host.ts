@@ -53,10 +53,10 @@ export async function prepareBrowserSandboxStop(provider: SandboxProvider, sandb
     return;
   }
   const sandbox = await provider.restore(sandboxId);
-  await browserSessionHooks(row.sessionId, sessions, blobs, store).sandboxLifecycle?.beforeStop(sandbox, reason);
+  await browserSessionHooks(row.sessionId, sessions, blobs, store, provider).sandboxLifecycle?.beforeStop(sandbox, reason);
 }
 
-export function browserSessionHooks(sessionId: string, sessions: SessionStore, blobs?: BlobStore, store?: PluginStore): Pick<CreateSessionOptions, 'sandboxLifecycle' | 'onTurnComplete'> {
+export function browserSessionHooks(sessionId: string, sessions: SessionStore, blobs?: BlobStore, store?: PluginStore, provider?: SandboxProvider): Pick<CreateSessionOptions, 'sandboxLifecycle' | 'onTurnComplete'> {
   const scoped = store?.session(sessionId);
   async function drainCleanup(sandbox: Sandbox) {
     if (!scoped) throw new Error('Browser cleanup storage is unavailable. Configure the database before continuing.');
@@ -91,6 +91,14 @@ export function browserSessionHooks(sessionId: string, sessions: SessionStore, b
   return {
     onTurnComplete: async ({ submissionId, sandbox, threadId, actorId, owner }) => {
       if (!scoped) throw new Error('Browser cleanup storage is unavailable. Configure the database before settling this turn.');
+      if (!sandbox && provider) {
+        const rows = await provider.list?.() ?? [];
+        const retained = rows.some((row) =>
+          row.sessionId === sessionId &&
+          (row.browserEnabled ?? provider.capabilities().browserAutomation),
+        );
+        if (!retained) return;
+      }
       await scoped.put<CleanupRecord>('turn_cleanup', submissionId, { identity: { protocolVersion: '1.0', sessionId, threadId, actorId, ownerId: owner.id } });
       if (sandbox) {
         try { await drainCleanup(sandbox); }
