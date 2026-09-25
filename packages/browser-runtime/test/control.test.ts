@@ -43,12 +43,12 @@ it('keeps the first pending takeover owner when another person requests control'
   expect(lease.actorId).toBe('first');
 });
 
-it('clears an expired private lease so agents and another viewer can continue', async () => {
+it('clears an expired shared lease so agents and another viewer can continue', async () => {
   const now = 1_000_000;
   const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
   let invalidations = 0;
   const control = new Control('runtime', () => { invalidations += 1; });
-  await control.take('alice', true);
+  await control.take('alice');
 
   clock.mockReturnValue(now + 120_001);
 
@@ -56,5 +56,21 @@ it('clears an expired private lease so agents and another viewer can continue', 
   expect(invalidations).toBe(2);
   await expect(control.run('agent', async () => 'continued')).resolves.toBe('continued');
   await expect(control.take('bob')).resolves.toMatchObject({ actorId: 'bob' });
+  clock.mockRestore();
+});
+
+it('keeps expired private control until its owner explicitly releases it', async () => {
+  const now = 1_000_000;
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+  const control = new Control('runtime');
+  const lease = await control.take('alice', true);
+
+  clock.mockReturnValue(now + 120_001);
+
+  expect(control.lease).toBe(lease);
+  await expect(control.run('agent', async () => undefined)).rejects.toThrow(/control/);
+  await expect(control.take('bob')).rejects.toThrow(/control/);
+  control.release(lease.id, 'alice');
+  expect(control.lease).toBeNull();
   clock.mockRestore();
 });

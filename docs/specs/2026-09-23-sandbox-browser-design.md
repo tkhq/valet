@@ -649,8 +649,10 @@ daemon ports and raw CDP stay off published network interfaces.
 Close active viewer sockets and revoke leases on permission loss, logout, ticket
 expiry, runtime change or session deletion. Refresh only after reauthorization.
 Do not rely on handshake-time membership checks for a long-lived connection.
-An expired control lease clears itself on the next browser request. The runtime
-also exits private mode so the agent and another authorized viewer can continue.
+An expired shared-control lease clears itself on the next browser request so the
+agent and another authorized viewer can continue. Private control remains active
+until its owner explicitly resumes or releases it. Expiry never exposes a private
+page to another viewer or the agent.
 
 Provide a private sign-in mode. It suspends agent reads and actions, screenshot
 capture into transcripts, logs and traces while the person enters credentials.

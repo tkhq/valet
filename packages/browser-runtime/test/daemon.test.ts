@@ -217,6 +217,19 @@ it('pauses nested browser effects for policy and attaches a repeated invocation'
       })
     ).status?.tabs,
   ).toEqual([]);
+  const activeLease = daemon.control.lease;
+  if (!activeLease) throw Error('Missing private control lease');
+  activeLease.expiresAt = 0;
+  expect(
+    (
+      await daemon.handle({
+        ...identity,
+        audience: 'viewer',
+        actorId: 'other',
+        command: 'status',
+      })
+    ).status?.tabs,
+  ).toEqual([]);
   expect(
     (
       await daemon.handle({

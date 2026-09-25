@@ -10,7 +10,11 @@ export class Control {
     private readonly invalidate: () => void = () => {},
   ) {}
   get lease(): BrowserControlLease | null {
-    if (this.storedLease && this.storedLease.expiresAt <= Date.now()) {
+    if (
+      this.storedLease &&
+      !this.storedLease.privateMode &&
+      this.storedLease.expiresAt <= Date.now()
+    ) {
       this.storedLease = null;
       this.invalidate();
     }
