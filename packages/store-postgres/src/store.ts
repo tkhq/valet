@@ -1093,6 +1093,12 @@ export class PgSessionStore implements SessionStore {
     return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
 
+  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2", [sessionId, dispatchId]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+  }
+
   async latestActivityAt(sessionId: string): Promise<number | null> {
     // MAX(updated_at) is NULL when the session has no queue items — toNumOrNull
     // maps that to null. updated_at is a bigint ms column, so it must funnel

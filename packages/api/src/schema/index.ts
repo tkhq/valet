@@ -2484,3 +2484,15 @@ export const teamDeletionRequests = pgTable("team_deletion_requests", {
   uniqueIndex("team_deletion_requests_pending").on(t.teamId, t.resourceType, t.resourceId).where(sql`${t.status} = 'pending'`),
   index("team_deletion_requests_team_status").on(t.teamId, t.status),
 ]);
+
+export const childReplyDeliveries = pgTable("child_reply_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  queueItemId: text("queue_item_id"),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+}, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);

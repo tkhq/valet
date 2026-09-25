@@ -12,7 +12,7 @@
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
 import { Hono, type Context } from "hono";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   dispatchCommand,
   NotFoundError,
@@ -22,7 +22,7 @@ import {
 import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { childWatches, agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -727,6 +727,13 @@ export async function submitSessionPrompt(
         emit: (event) => engineSession.emit(event),
       })
     : Promise.resolve();
+
+  // Clear the external route before human input can enter a child, even if child_send races it.
+  if (author) {
+    await db.update(childWatches).set({ originJson: null }).where(and(
+      eq(childWatches.childSessionId, row.id), eq(childWatches.orgId, row.orgId),
+    ));
+  }
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);

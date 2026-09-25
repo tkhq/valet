@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
 import {
+  namespaceInternalDispatchId,
   PendingCapError,
   recordSandboxDestroyed,
   ValidationError as EngineValidationError,
@@ -36,7 +37,7 @@ import {
   walkTranscriptDag,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
+import { agentSessions, childReplyDeliveries, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -578,6 +579,9 @@ export class ChildWatcher {
         });
       }
       console.error(`ChildWatcher: giving up on ${watch.childSessionId} after permanent failure:`, err);
+      await this.deps.db.update(childReplyDeliveries).set({ completedAt: Date.now(), lastError: String(err).slice(0, 1_000) })
+        .where(and(eq(childReplyDeliveries.id, namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${watch.queueItemId}`)),
+          eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
       await this.markSettled(watch.childSessionId, watch.queueItemId);
       // No sandbox teardown here, deliberately: a permanent denial means
       // the parent never received the settlement, so keep the sandbox and
@@ -648,7 +652,7 @@ export class ChildWatcher {
     // pluggable contracts (the spawner's prompt-then-insert window is the
     // same shape).
     const rows = await this.deps.db
-      .select({ queueItemId: childWatches.queueItemId, settled: childWatches.settled })
+      .select({ queueItemId: childWatches.queueItemId, settled: childWatches.settled, originJson: childWatches.originJson })
       .from(childWatches)
       .where(eq(childWatches.childSessionId, watch.childSessionId))
       .limit(1);
@@ -675,16 +679,20 @@ export class ChildWatcher {
         );
         return;
       }
+      const successorItem = await this.deps.engineStore.getQueueItem(watch.childSessionId, successor);
+      if (!successorItem) throw new Error(`Missing child successor submission ${successor}`);
+      // Human takeover starts a different task. Remove its external reply route durably.
+      const originJson = successorItem.author !== undefined ? null : row.originJson;
       await this.deps.db
         .update(childWatches)
-        .set({ queueItemId: successor, settled: false })
+        .set({ queueItemId: successor, settled: false, ...(successorItem.author !== undefined ? { originJson: null } : {}) })
         .where(
           and(
             eq(childWatches.childSessionId, watch.childSessionId),
             eq(childWatches.queueItemId, watch.queueItemId),
           ),
         );
-      this.arm({ ...watch, queueItemId: successor });
+      this.arm({ ...watch, queueItemId: successor, origin: parseOriginJson(originJson) });
       return;
     }
 
@@ -705,7 +713,17 @@ export class ChildWatcher {
           )
         : undefined;
 
-    await admitSignal(this.deps, {
+    const origin = parseOriginJson(row.originJson);
+    const replyId = namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${watch.queueItemId}`);
+    const automaticReply = origin !== undefined && origin.reply !== "manual";
+    // Write the intent before the parent can finish. Dispatch-ID lookup recovers a lost receipt.
+    if (automaticReply) {
+      await this.deps.db.insert(childReplyDeliveries).values({
+        id: replyId, orgId: watch.orgId, sessionId: watch.parentSessionId,
+        threadId: watch.parentThreadId, nextAttemptAt: Date.now(),
+      }).onConflictDoNothing();
+    }
+    const receipt = await admitSignal(this.deps, {
       from: { sessionId: watch.childSessionId, owner: childData.owner },
       to: watch.parentSessionId,
       threadKey: watch.parentThreadId,
@@ -721,13 +739,16 @@ export class ChildWatcher {
             ? { continuation_checkpoint_entry_id: continuationCheckpoint.id }
             : {}),
         },
-        // Preserve the route but make settlement explicit-only. The parent can
-        // use reply_to_origin, but settlement does not trigger a first auto-reply.
-        ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
+        // Preserve the spawning turn's route and reply policy for the parent's update.
+        ...(origin !== undefined ? { origin } : {}),
       },
       dispatchId: `settled:${watch.childSessionId}:${watch.queueItemId}`,
     });
 
+    if (automaticReply) {
+      await this.deps.db.update(childReplyDeliveries).set({ queueItemId: receipt.queueItemId })
+        .where(and(eq(childReplyDeliveries.id, replyId), eq(childReplyDeliveries.orgId, watch.orgId)));
+    }
     await this.markSettled(watch.childSessionId, watch.queueItemId);
     await this.parkChildSandbox(watch.childSessionId);
   }
@@ -1025,7 +1046,7 @@ export async function resolveChildSettlement(
   parentSessionId: string,
 ): Promise<{ settled: boolean; lastActivityAt: number | null } | null> {
   const rows = await deps.db
-    .select({ settled: childWatches.settled })
+    .select({ settled: childWatches.settled, originJson: childWatches.originJson })
     .from(childWatches)
     .where(
       and(
@@ -1065,7 +1086,8 @@ export async function resolveChildSettlement(
   // permits this auto-repair because the violation is expected in the crash
   // window it names, not a silent invariant repair. Best-effort: a write
   // failure logs and never fails the read.
-  if (settled) {
+  // Channel watches remain recoverable until the watcher stores the parent receipt.
+  if (settled && rows[0].originJson === null) {
     try {
       await deps.db
         .update(childWatches)
@@ -1225,6 +1247,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       parentThreadId: watchRow.parentThreadId,
       actorUserId: ctx.actorUserId,
       orgId: watchRow.orgId,
+      origin: parseOriginJson(watchRow.originJson),
     });
 
     return { queueItemId: receipt.queueItemId };
