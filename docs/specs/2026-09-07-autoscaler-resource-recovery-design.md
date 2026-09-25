@@ -57,6 +57,10 @@ Messages that contain `Insufficient cpu`, `Insufficient memory`, or
 `null` for these messages. `sandboxStatus` therefore reports `provisioning`, and
 `waitReady` reaches the existing pending diagnosis path.
 
+Temporary workspace PVC propagation and binding messages stay pending. The
+controller can create a pod before the scheduler observes its new PVC. Messages
+that report a missing PVC or an unbound immediate PVC can repair themselves.
+
 Other unschedulable messages stay terminal. Examples include an untolerated
 taint and a node-affinity mismatch. Adding nodes cannot repair these constraints
 unless cluster policy also changes.
