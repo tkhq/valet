@@ -146,6 +146,7 @@ export async function serveEgress(
   policy: EgressPolicy,
   connect: (options: { host: string; port: number }) => Socket =
     createConnection,
+  connectTimeoutMs = 5_000,
 ) {
   const sockets = new Set<Socket>();
   const unsubscribe = policy.onRevoke(() => {
@@ -197,16 +198,25 @@ export async function serveEgress(
                 candidates.delete(candidate);
                 sockets.delete(candidate);
               });
-              candidate.setTimeout(5_000, () =>
-                candidate.destroy(Error('Upstream connection timed out')),
+              const timeout = setTimeout(
+                () => candidate.destroy(Error('Upstream connection timed out')),
+                connectTimeoutMs,
               );
+              const rejectPending = (error: Error) => {
+                clearTimeout(timeout);
+                reject(error);
+              };
               candidate.once('connect', () => {
+                clearTimeout(timeout);
                 if (socket.destroyed) {
                   candidate.destroy();
                   reject(Error('Proxy client closed.'));
                 } else resolve(candidate);
               });
-              candidate.once('error', reject);
+              candidate.once('error', rejectPending);
+              candidate.once('close', () =>
+                rejectPending(Error('Upstream connection closed.')),
+              );
             });
             break;
           } catch {

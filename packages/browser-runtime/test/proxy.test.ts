@@ -215,3 +215,67 @@ it.each(['revoke', 'close'])(
     }
   },
 );
+
+it('keeps an established tunnel open beyond the connect timeout', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-egress-slow-response-'));
+  const fixture = createServer((_req, res) => {
+    setTimeout(() => res.end('slow fixture reached'), 500);
+  });
+  const port = await listen(fixture);
+  const policy = new EgressPolicy([port]);
+  policy.allow(`http://localhost:${port}`);
+  const broker = await serveEgress(
+    join(dir, 'broker.sock'),
+    policy,
+    createConnection,
+    200,
+  );
+  const proxy = createNamespaceProxy(join(dir, 'broker.sock'));
+  const proxyPort = await listen(proxy);
+  try {
+    await expect(
+      requestThroughProxy(proxyPort, `http://localhost:${port}/`),
+    ).resolves.toEqual({ statusCode: 200, body: 'slow fixture reached' });
+  } finally {
+    proxy.closeAllConnections();
+    fixture.closeAllConnections();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    await broker.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('bounds a candidate connection that never completes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-egress-connect-timeout-'));
+  const policy = new EgressPolicy([5173]);
+  policy.allow('http://localhost:5173');
+  const candidates: Socket[] = [];
+  const broker = await serveEgress(
+    join(dir, 'broker.sock'),
+    policy,
+    () => {
+      const candidate = new Socket();
+      candidates.push(candidate);
+      return candidate;
+    },
+    50,
+  );
+  const proxy = createNamespaceProxy(join(dir, 'broker.sock'));
+  const proxyPort = await listen(proxy);
+  try {
+    await expect(
+      requestThroughProxy(proxyPort, 'http://localhost:5173/'),
+    ).resolves.toEqual({
+      statusCode: 502,
+      body: 'Nothing is listening on localhost:5173 (tried 127.0.0.1 and ::1).',
+    });
+    expect(candidates).toHaveLength(2);
+    expect(candidates.every((candidate) => candidate.destroyed)).toBe(true);
+  } finally {
+    proxy.closeAllConnections();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    await broker.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
