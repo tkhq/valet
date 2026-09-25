@@ -710,10 +710,18 @@ export const eventDropLog = pgTable(
     orgId: text("org_id").notNull(),
     reason: text("reason").notNull(),
     conversationKey: text("conversation_key"),
+    /** Normalized key for an event-ingest diagnostic. Null for non-event drops. */
+    eventKey: text("event_key"),
+    /** Redacted event identity only. Never retain the source payload here. */
+    eventMetadata: jsonb("event_metadata"),
     detail: text("detail").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("event_drop_log_org").on(t.orgId), index("event_drop_log_page").on(t.orgId, t.createdAt, t.id)],
+  (t) => [
+    index("event_drop_log_org").on(t.orgId),
+    index("event_drop_log_page").on(t.orgId, t.createdAt, t.id),
+    index("event_drop_log_event_key").on(t.orgId, t.eventKey, t.createdAt),
+  ],
 );
 
 // ─── Channel bindings + identity links ──────────────────────────────────────

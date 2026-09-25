@@ -1377,6 +1377,21 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE INDEX IF NOT EXISTS "event_drop_log_page" ON "event_drop_log" ("org_id","created_at","id")',
   },
   {
+    describe: "event_drop_log.event_key column",
+    probe: { kind: "column", table: "event_drop_log", column: "event_key" },
+    sql: 'ALTER TABLE "event_drop_log" ADD COLUMN IF NOT EXISTS "event_key" text',
+  },
+  {
+    describe: "event_drop_log.event_metadata column",
+    probe: { kind: "column", table: "event_drop_log", column: "event_metadata" },
+    sql: 'ALTER TABLE "event_drop_log" ADD COLUMN IF NOT EXISTS "event_metadata" jsonb',
+  },
+  {
+    describe: "event_drop_log_event_key index",
+    probe: { kind: "index", index: "event_drop_log_event_key" },
+    sql: 'CREATE INDEX IF NOT EXISTS "event_drop_log_event_key" ON "event_drop_log" ("org_id","event_key","created_at")',
+  },
+  {
     // Whose credentials a team-owned session reads (team credentials
     // design, deviation 13). Nullable; the backfill below is the one-time stamp.
     describe: "agent_sessions.credential_owner_mode column",

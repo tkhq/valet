@@ -395,6 +395,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       docker: req.docker,
       resources: req.resources,
       startupWarnings: warnings,
+      sharedTranscript: ctx.origin !== undefined,
     }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     // No `author`: the parent AGENT composed this prompt, and `author`

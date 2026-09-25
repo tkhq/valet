@@ -4973,6 +4973,7 @@ export class Thread {
       // The running submission's channel origin, when it came from a channel,
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,
+      sharedTranscript: session.options.sharedTranscript,
       resolveOutboundSender: session.options.resolveOutboundSender,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,

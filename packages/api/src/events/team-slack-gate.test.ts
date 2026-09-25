@@ -6,7 +6,7 @@ import type { NormalizedEvent } from "@valet/engine";
 import type { RunHost } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
-import { ingestEvent, catalogForService } from "./ingest.js";
+import { __resetIngestDropThrottle, ingestEvent, catalogForService } from "./ingest.js";
 import { authorizedSubscriptionMatchesEvent } from "./team-slack-gate.js";
 import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -28,6 +28,7 @@ function mention(user = "U_B", channel = "C1", threadTs?: string): NormalizedEve
 describe("team assistant mentions through the org bot event pipeline", () => {
   let tdb: TestPgDb;
   beforeEach(async () => {
+    __resetIngestDropThrottle();
     tdb = await freshTestPgDb();
     await tdb.appDb.insert(teams).values({ id: "team-1", orgId: ORG, name: "Team", createdAt: Date.now() });
     await tdb.appDb.insert(orgMembers).values([
@@ -107,6 +108,40 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(await tdb.appDb.select().from(events)).toHaveLength(0);
     expect(await tdb.appDb.select().from(eventDeliveries)).toHaveLength(0);
     expect(await tdb.appDb.select().from(eventDropLog)).toEqual(expect.arrayContaining([expect.objectContaining({ reason })]));
+  });
+
+  it("does not retain a denied mention as a filter-excluded payload diagnostic", async () => {
+    await seed();
+    expect(await ingest(mention("U_X"))).toMatchObject({ deliveries: 0, skipped: true });
+
+    const rows = await tdb.appDb.select().from(eventDropLog);
+    expect(rows).toEqual(expect.arrayContaining([expect.objectContaining({ reason: "not_team_member", eventMetadata: null })]));
+    expect(rows).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: "filter_excluded" })]));
+    expect(JSON.stringify(rows)).not.toContain("Help us");
+    expect(JSON.stringify(rows)).not.toContain("C1");
+  });
+
+  it("redacts an unauthorized sender from a team-only filter miss", async () => {
+    await seed();
+    expect(await ingest(mention("U_X", "C2"))).toMatchObject({ deliveries: 0, skipped: true });
+
+    const rows = await tdb.appDb.select().from(eventDropLog);
+    expect(rows).toEqual([expect.objectContaining({ reason: "filter_excluded", eventMetadata: {} })]);
+    expect(JSON.stringify(rows)).not.toContain("Help us");
+    expect(JSON.stringify(rows)).not.toContain("C2");
+  });
+
+  it("keeps an ordinary filter diagnostic for mixed team and non-team subscriptions", async () => {
+    await seed();
+    await seed("user");
+    expect(await ingest(mention("U_X", "C2"))).toMatchObject({ deliveries: 0, skipped: true });
+
+    const rows = await tdb.appDb.select().from(eventDropLog);
+    expect(rows).toEqual([expect.objectContaining({
+      reason: "filter_excluded",
+      eventMetadata: expect.objectContaining({ channel: "C2", text: "Help us" }),
+    })]);
+    expect(rows).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: "not_team_member" })]));
   });
 
   it("drops an organization member who is on no team when the audience is the team", async () => {

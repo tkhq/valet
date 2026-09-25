@@ -385,6 +385,8 @@ CREATE TABLE "event_drop_log" (
 	"org_id" text NOT NULL,
 	"reason" text NOT NULL,
 	"conversation_key" text,
+	"event_key" text,
+	"event_metadata" jsonb,
 	"detail" text NOT NULL,
 	"created_at" bigint NOT NULL
 );
@@ -392,6 +394,8 @@ CREATE TABLE "event_drop_log" (
 CREATE INDEX "event_drop_log_org" ON "event_drop_log" ("org_id");
 --> statement-breakpoint
 CREATE INDEX "event_drop_log_page" ON "event_drop_log" ("org_id","created_at","id");
+--> statement-breakpoint
+CREATE INDEX "event_drop_log_event_key" ON "event_drop_log" ("org_id","event_key","created_at");
 --> statement-breakpoint
 CREATE TABLE "channel_bindings" (
 	"id" text PRIMARY KEY NOT NULL,

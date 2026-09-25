@@ -87,6 +87,7 @@ export async function teamMentionActor(
   db: AppDb,
   sub: { orgId: string; ownerId: string; audience?: string | null },
   payload: unknown,
+  logDenied = true,
 ): Promise<string | null> {
   const audience = mentionAudience(sub);
   const externalId = resolvePath(payload, "user");
@@ -101,15 +102,51 @@ export async function teamMentionActor(
     reason = "not_team_member";
   }
   if (reason) {
-    await writeDropLog(db, {
-      orgId: sub.orgId, reason,
-      detail: audience === "organization"
-        ? "Team mention denied. Link the sender's Slack account and check their organization membership."
-        : "Team mention denied. Link the sender's Slack account and check their organization and team memberships.",
-    });
+    if (logDenied) {
+      await writeDropLog(db, {
+        orgId: sub.orgId, reason,
+        detail: audience === "organization"
+          ? "Team mention denied. Link the sender's Slack account and check their organization membership."
+          : "Team mention denied. Link the sender's Slack account and check their organization and team memberships.",
+      });
+    }
     return null;
   }
   return identity?.userId ?? null;
+}
+
+/**
+ * Applies the team Slack sender gate before a diagnostic retains payload-derived
+ * metadata. This does not change event delivery. It guards the bot-message
+ * classifier near-miss, which has no normalized app-mention event.
+ */
+export async function authorizedSlackDiagnosticSubscription(
+  db: AppDb,
+  sub: { orgId: string; ownerId: string; ownerType: string; target: unknown; audience?: string | null },
+  payload: unknown,
+  logDenied = true,
+): Promise<boolean> {
+  return !isTeamAssistantRule(sub.ownerType, sub.target) || await teamMentionActor(db, sub, payload, logDenied) !== null;
+}
+
+export type SubscriptionMatchOutcome = "matched" | "not_matched" | "authorization_denied";
+
+/** Separates a filter miss from a team-sender denial so ingest cannot retain a
+ * denied sender's payload as a filter diagnostic. */
+export async function subscriptionMatchOutcome(
+  db: AppDb,
+  sub: {
+    orgId: string; ownerId: string; ownerType: string; target: unknown;
+    eventKeys: unknown; filters: unknown; audience?: string | null;
+  },
+  eventKey: string,
+  payload: unknown,
+  catalog: EventCatalogEntry[],
+): Promise<SubscriptionMatchOutcome> {
+  const teamMention = isTeamAssistantMention(sub, eventKey);
+  if (!subscriptionMatchesEvent(sub, eventKey, payload, catalog, teamMention)) return "not_matched";
+  if (!teamMention || await teamMentionActor(db, sub, payload) !== null) return "matched";
+  return "authorization_denied";
 }
 
 /** Shared by ingress and redelivery; the pure predicate alone cannot authorize a team mention. */
@@ -123,9 +160,7 @@ export async function authorizedSubscriptionMatchesEvent(
   payload: unknown,
   catalog: EventCatalogEntry[],
 ): Promise<boolean> {
-  const teamMention = isTeamAssistantMention(sub, eventKey);
-  if (!subscriptionMatchesEvent(sub, eventKey, payload, catalog, teamMention)) return false;
-  return !teamMention || await teamMentionActor(db, sub, payload) !== null;
+  return (await subscriptionMatchOutcome(db, sub, eventKey, payload, catalog)) === "matched";
 }
 
 /** Validate the saved actor against the team's current org and membership.
