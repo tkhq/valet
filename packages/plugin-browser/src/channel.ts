@@ -25,6 +25,7 @@ class BrowserChannel {
     this.opening = sandbox.openCommandChannel!(
       "/usr/local/bin/valet-browser-client --stream",
       {
+        target: "browser",
         privileged: true,
         waitForReady,
         onData: (chunk) => this.receive(chunk),

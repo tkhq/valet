@@ -1,10 +1,11 @@
 import { createServer, request } from 'node:http';
 import { createConnection, type Socket } from 'node:net';
 export function createNamespaceProxy(socketPath: string) {
-  function connect(host: string, port: number): Promise<Socket> {
+  function connect(host: string, port: number, signal?: AbortSignal): Promise<Socket> {
     return new Promise((resolve, reject) => {
-      const socket = createConnection(socketPath);
+      const socket = createConnection({ path: socketPath, signal });
       socket.on('error', reject);
+      socket.once('close', () => reject(Error('Browser broker connection closed.')));
       socket.on('connect', () =>
         socket.write(`${JSON.stringify({ host, port })}\n`),
       );
@@ -59,24 +60,34 @@ export function createNamespaceProxy(socketPath: string) {
     });
   });
   proxy.on('connect', (incoming, client, head) => {
+    // A client can reset while the broker handshake is pending.
+    const controller = new AbortController();
+    client.on('error', () => controller.abort());
+    client.on('close', () => controller.abort());
     void (async () => {
       const url = new URL(`https://${incoming.url}`);
-      const upstream = await connect(url.hostname, Number(url.port || 443));
+      const upstream = await connect(url.hostname, Number(url.port || 443), controller.signal);
+      if (client.destroyed) { upstream.destroy(); return; }
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length) upstream.write(head);
       client.pipe(upstream);
       upstream.pipe(client);
       upstream.on('error', () => client.destroy());
-      client.on('error', () => upstream.destroy());
-      client.on('close', () => upstream.destroy());
-    })().catch(() => client.end('HTTP/1.1 403 Forbidden\r\n\r\n'));
+      upstream.on('close', () => { if (!upstream.readableEnded) client.destroy(); });
+    })().catch(() => {
+      if (!client.destroyed) client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    });
   });
   proxy.on('upgrade', (incoming, client, head) => {
+    const controller = new AbortController();
+    client.on('error', () => controller.abort());
+    client.on('close', () => controller.abort());
     void (async () => {
       const url = new URL(incoming.url ?? '');
       if (url.protocol !== 'http:' && url.protocol !== 'ws:')
         throw Error('WebSocket protocol denied.');
-      const upstream = await connect(url.hostname, Number(url.port || 80));
+      const upstream = await connect(url.hostname, Number(url.port || 80), controller.signal);
+      if (client.destroyed) { upstream.destroy(); return; }
       upstream.write(
         `${incoming.method} ${url.pathname}${url.search} HTTP/1.1\r\n${Object.entries(
           incoming.headers,
@@ -91,8 +102,8 @@ export function createNamespaceProxy(socketPath: string) {
       if (head.length) upstream.write(head);
       client.pipe(upstream);
       upstream.pipe(client);
-      client.on('close', () => upstream.destroy());
       upstream.on('error', () => client.destroy());
+      upstream.on('close', () => { if (!upstream.readableEnded) client.destroy(); });
     })().catch(() => client.destroy());
   });
   return proxy;

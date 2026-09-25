@@ -1,3 +1,4 @@
+import { browserRuntimeFingerprint, hasBrowserCompanion } from "./browser-topology.js";
 import { withPersistentHomes, HOME_LAYOUT_ENV } from "./home-persistence.js";
 /**
  * CRD lifecycle module (decision 5's "churn containment" clause — all
@@ -1008,6 +1009,8 @@ export interface PodStatusCondition {
 
 /** Pod status and container spec fields used for startup and drift checks. */
 export interface PodStatusInfo {
+  browserFingerprint?: string;
+  browserReady?: boolean;
   /** Home mount generation, captured in the live pod spec. */
   homeLayoutVersion?: string;
   phase?: string;
@@ -1077,6 +1080,8 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
       const homeLayout = sandboxContainer?.env?.find((entry) => entry.name === HOME_LAYOUT_ENV);
       return {
         phase: pod.status?.phase, containerStatuses, conditions,
+        browserFingerprint: browserRuntimeFingerprint({ spec: pod.spec }),
+        browserReady: pod.status?.containerStatuses?.find(container => container.name === "browser")?.ready,
         sandboxImage: images.get(SANDBOX_CONTAINER_NAME),
         sandboxResources: sandboxCpuMemoryResources({ spec: pod.spec }),
         resourceFingerprint: fingerprint?.valueFrom === undefined ? fingerprint?.value : undefined,
@@ -1181,12 +1186,14 @@ export async function livePodDrift(
   resources?: SandboxCpuMemoryResources,
   expectedResourceFingerprint?: string,
   expectedImageFingerprint?: string,
+  expectedBrowserFingerprint?: string,
 ): Promise<{
   differs: true;
   podName: string;
   liveImage: string | undefined;
   imageDrift: boolean;
   resourcesDrift: boolean;
+  browserDrift?: boolean;
 } | { differs: false }> {
   const podName = await resolvePodName(objectsApi, podsApi, cfg, name);
   if (!podName) return { differs: false };
@@ -1208,8 +1215,9 @@ export async function livePodDrift(
       normalizeQuantity(status.sandboxResources?.[side]?.[field]) !== normalizeQuantity(resources[side]?.[field]),
     ),
   );
-  if (!imageDrift && !resourcesDrift) return { differs: false };
-  return { differs: true, podName, liveImage, imageDrift, resourcesDrift };
+  const browserDrift = expectedBrowserFingerprint !== undefined && status.browserFingerprint !== expectedBrowserFingerprint;
+  if (!imageDrift && !resourcesDrift && !browserDrift) return { differs: false };
+  return { differs: true, podName, liveImage, imageDrift, resourcesDrift, ...(browserDrift ? { browserDrift } : {}) };
 }
 
 /**
@@ -1334,14 +1342,20 @@ export async function sandboxStatus(
   }
   const conditions = cr.status?.conditions ?? [];
   const baseline = mapConditionsToStatus(name, conditions, cr.spec.operatingMode);
+  const browserFingerprint = browserRuntimeFingerprint(cr.spec.podTemplate, cr.metadata.name);
+  const companion = hasBrowserCompanion(cr.spec.podTemplate);
 
   if (podsApi && podStatusApi) {
     const podName = await resolvePodName(api, podsApi, cfg, name).catch(() => null);
+    if (!podName && browserFingerprint !== undefined) return { id: name, state: "provisioning" };
     if (podName) {
       const pod = await podStatusApi.getPodStatus(cfg.namespace, podName).catch(() => null);
       const readyCondition = conditions.find((c) => c.type === "Ready");
       const reason = classifyPodFailure(pod, readyCondition);
       if (reason) return { id: name, state: "error", error: reason };
+      if (browserFingerprint !== undefined && (pod?.browserFingerprint !== browserFingerprint || (companion && !pod.browserReady))) {
+        return { id: name, state: "provisioning" };
+      }
     }
   }
 

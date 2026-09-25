@@ -11,10 +11,6 @@ import type {
 } from "../../packages/shared/src/browser.js";
 
 async function main() {
-  const { DockerSandboxProvider, createSandboxWorkspace } =
-    await import("../../packages/sandbox-docker/src/sandbox.js");
-  const { browserRequest, readBrowserExport } =
-    await import("../../packages/plugin-browser/src/client.js");
   const image =
     process.env.VALET_BROWSER_TEST_IMAGE ?? "valet-browser-e2e:local";
   const inspected = spawnSync("docker", ["image", "inspect", image], {
@@ -36,11 +32,38 @@ async function main() {
       "Build the browser test image before running this suite.",
     );
   }
+  await runBrowserScenario(image, false);
+  await runBrowserScenario(image, true);
+  const api = spawnSync(
+    "pnpm",
+    ["--filter", "@valet/api", "test", "browser.docker.test"],
+    {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        VALET_BROWSER_TEST_IMAGE: image,
+        VALET_BROWSER_INTEGRATION: "1",
+      },
+    },
+  );
+  assert.equal(
+    api.status,
+    0,
+    "The browser HTTP integration failed. Inspect its test output.",
+  );
+}
+
+async function runBrowserScenario(image: string, docker: boolean) {
+  const { DockerSandboxProvider, createSandboxWorkspace } =
+    await import("../../packages/sandbox-docker/src/sandbox.js");
+  const { browserRequest, readBrowserExport } =
+    await import("../../packages/plugin-browser/src/client.js");
   const root = await createSandboxWorkspace("valet-browser-e2e-");
   const workspace = join(root, "workspace");
   await mkdir(workspace);
   const options = {
     browserEnabled: true,
+    browserImage: image,
     inventoryRoot: join(root, "private"),
   };
   let provider = new DockerSandboxProvider(options);
@@ -49,6 +72,7 @@ async function main() {
     workspace,
     sessionId,
     image,
+    docker,
     browser: { enabled: true },
     env: { VALET_BROWSER_DEV_PORTS: "5173" },
   };
@@ -121,9 +145,10 @@ async function main() {
     );
   }
   async function startFixture() {
+    const html = '<label>Count<input value="0"></label><button onclick="this.previousElementSibling.firstElementChild.value=String(Number(this.previousElementSibling.firstElementChild.value)+1)">Increment</button><input type="file" aria-label="Upload" onchange="this.files[0].text().then(text=>this.nextElementSibling.textContent=text)"><output></output>';
     await sandbox.writeFile(
       "fixture.cjs",
-      `require('node:http').createServer((req,res)=>{res.setHeader('content-type','text/html');res.setHeader('set-cookie','fixture=signed-in; Path=/; Max-Age=3600; HttpOnly');res.end('<title>'+((req.headers.cookie||'').includes('fixture=signed-in')?'Signed in':'Guest')+'</title><label>Count<input value="0"></label><button onclick="this.previousElementSibling.firstElementChild.value=String(Number(this.previousElementSibling.firstElementChild.value)+1)">Increment</button>');}).listen(5173,'127.0.0.1',()=>console.log('ready'));`,
+      `require('node:http').createServer((req,res)=>{res.setHeader('content-type','text/html');res.setHeader('set-cookie','fixture=signed-in; Path=/; Max-Age=3600; HttpOnly');res.end('<title>'+((req.headers.cookie||'').includes('fixture=signed-in')?'Signed in':'Guest')+'</title>'+${JSON.stringify(html)});}).listen(5173,'127.0.0.1',()=>console.log('ready'));`,
     );
     const job = await sandbox.execJob("node fixture.cjs");
     for (let attempt = 0; attempt < 30; attempt++) {
@@ -139,6 +164,20 @@ async function main() {
   }
 
   try {
+    if (docker) {
+      let daemon = await sandbox.exec("docker info --format '{{.ServerVersion}}'");
+      for (let attempt = 0; attempt < 60 && daemon.exitCode !== 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        daemon = await sandbox.exec("docker info --format '{{.ServerVersion}}'");
+      }
+      assert.equal(daemon.exitCode, 0, daemon.stderr);
+      assert(daemon.stdout.trim(), "Docker must remain available alongside the browser.");
+      const container = await sandbox.exec("docker run --rm busybox:stable echo docker-browser-ok", { timeout: 60_000 });
+      assert.equal(container.exitCode, 0, container.stderr);
+      assert.equal(container.stdout.trim(), "docker-browser-ok");
+      const privateState = await sandbox.exec("test ! -S /var/lib/valet/browser/runtime.sock");
+      assert.equal(privateState.exitCode, 0, "The workload must not mount the browser socket.");
+    }
     await startFixture();
     const initial = await request({ ...identity, command: "status" });
     assert.equal(initial.status?.state, "ready");
@@ -215,6 +254,16 @@ async function main() {
           /textbox "Count"[^\n]*: "?1"?/.test(event.text),
       ),
     );
+    for (const absolute of [false, true]) {
+      const content = `upload-${absolute ? "absolute" : "relative"}-exact-bytes`;
+      await sandbox.writeFile("upload.txt", content);
+      const uploaded = await cell(`upload-${absolute}`, `var uploadSnapshot=await tab.getAXState(); var uploadLine=uploadSnapshot.split("\\n").find(line=>line.includes('"Upload"')); var uploadRef=uploadLine?.match(/\\[ref=([^\\]]+)\\]/)?.[1]; if(!uploadRef)throw Error(uploadSnapshot); await tab.upload(uploadRef,[${JSON.stringify(absolute ? "/workspace/upload.txt" : "upload.txt")}]); await tab.playwright.getByText(${JSON.stringify(content)},{exact:true}).waitFor({state:"visible"}); await tab.getAXState();`);
+      assert(uploaded.events.some(event => event.type === "text" && event.text.includes(content)), "Uploaded file bytes must reach the page.");
+    }
+    if (docker) {
+      const write = await sandbox.exec("echo forbidden > /workspace/browser-write.txt", { target: "browser", privileged: true });
+      assert.notEqual(write.exitCode, 0, "The browser companion must not write the working directory.");
+    }
     provider = new DockerSandboxProvider(options);
     sandbox = await provider.restore(sandbox.id);
     assert.equal(
@@ -320,12 +369,13 @@ async function main() {
       ),
     );
     console.log(
-      "[browser] PASS: confinement, approvals, media, no replay, takeover, adoption, and profile retention",
+      `[browser docker=${docker}] PASS: confinement, approvals, media, no replay, takeover, adoption, and profile retention`,
     );
   } catch (error) {
     console.error(
       await sandbox.exec("cat /var/lib/valet/browser/daemon.log", {
         privileged: true,
+        target: "browser",
       }),
     );
     throw error;
@@ -333,23 +383,6 @@ async function main() {
     await provider.destroy(sandbox.id);
     await rm(root, { recursive: true, force: true });
   }
-  const api = spawnSync(
-    "pnpm",
-    ["--filter", "@valet/api", "test", "browser.docker.test"],
-    {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        VALET_BROWSER_TEST_IMAGE: image,
-        VALET_BROWSER_INTEGRATION: "1",
-      },
-    },
-  );
-  assert.equal(
-    api.status,
-    0,
-    "The browser HTTP integration failed. Inspect its test output.",
-  );
 }
 void main().catch((error) => {
   console.error(error);

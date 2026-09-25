@@ -10,6 +10,7 @@ import {
   customObjectsApiAdapter,
   loadRancherDesktopKubeConfig,
   podStatusApiAdapter,
+  podDeleteApiAdapter,
   podsApiAdapter,
 } from "../src/lifecycle.js";
 import { podExecApiAdapter } from "../src/exec.js";
@@ -26,17 +27,20 @@ function kubectl(args: string[]) {
 }
 
 const browserImage = process.env.VALET_BROWSER_K8S_IMAGE;
+const combinedDocker = process.env.VALET_BROWSER_K8S_DOCKER === "1";
+const dockerRuntimeClassName = process.env.VALET_BROWSER_K8S_RUNTIME_CLASS;
 const clusterReady = browserImage !== undefined &&
   kubectl(["get", "crd", "sandboxes.agents.x-k8s.io"]).status === 0 &&
   kubectl(["-n", "agent-sandbox-system", "get", "deployment", "agent-sandbox-controller"]).status === 0;
 
-describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => {
+describe.skipIf(!clusterReady)(`managed browser lifecycle on Kubernetes${combinedDocker ? " with Docker companion" : ""}`, () => {
   const namespace = `valet-browser-${Date.now()}`;
   const sessionId = `browser-k8s-${randomUUID()}`;
   const workspace = `browser-workspace-${randomUUID()}`;
   const cfg = {
     namespace,
     defaultImage: browserImage as string,
+    dockerRuntimeClassName,
     apiVersion: SANDBOX_CR_API_VERSION,
     browserEnabled: true,
     browserSeccompProfile: "valet/browser.json",
@@ -50,11 +54,13 @@ describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => 
     execApi: podExecApiAdapter(new k8s.Exec(kc)),
     livenessApi: podLivenessApiAdapter(coreApi),
     podStatusApi: podStatusApiAdapter(coreApi),
+    podDeleteApi: podDeleteApiAdapter(coreApi),
     runtimeStateApi: sandboxRuntimeStateApiAdapter(coreApi),
   };
   const create = {
     workspace,
     sessionId,
+    ...(combinedDocker ? { docker: true } : {}),
     browser: { enabled: true },
     env: { VALET_BROWSER_DEV_PORTS: "5173", VALET_SESSION_ID: sessionId },
   };
@@ -67,6 +73,7 @@ describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => 
   };
 
   beforeAll(() => {
+    if (combinedDocker && !dockerRuntimeClassName) throw new Error("The Docker RuntimeClass is missing. Set VALET_BROWSER_K8S_RUNTIME_CLASS before this test.");
     sweepStaleThrowawayNamespaces(kubectl);
     const created = kubectl(["create", "namespace", namespace]);
     if (created.status !== 0) throw new Error(`failed to create ${namespace}: ${created.stderr}`);
@@ -82,7 +89,8 @@ describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => 
     const request = (body: BrowserRequest) => browserRequest(sandbox, body);
 
     async function startFixture() {
-      await sandbox.writeFile("fixture.cjs", `require('node:http').createServer((req,res)=>{res.setHeader('content-type','text/html');res.setHeader('set-cookie','fixture=signed-in; Path=/; Max-Age=3600; HttpOnly');res.end('<title>'+((req.headers.cookie||'').includes('fixture=signed-in')?'Signed in':'Guest')+'</title>');}).listen(5173,'127.0.0.1')`);
+      const uploadHtml = '<label>Upload<input type="file" id="upload-file"></label><pre id="upload-result"></pre><script>document.getElementById("upload-file").addEventListener("change",async event=>{document.getElementById("upload-result").textContent=await event.target.files[0].text();});</script>';
+      await sandbox.writeFile("fixture.cjs", `require('node:http').createServer((req,res)=>{res.setHeader('content-type','text/html');res.setHeader('set-cookie','fixture=signed-in; Path=/; Max-Age=3600; HttpOnly');res.end('<title>'+((req.headers.cookie||'').includes('fixture=signed-in')?'Signed in':'Guest')+'</title>'+${JSON.stringify(uploadHtml)});}).listen(5173,'127.0.0.1')`);
       if (!sandbox.execJob) throw new Error("Kubernetes job execution is unavailable.");
       await sandbox.execJob("node fixture.cjs");
       await expect.poll(async () => (await sandbox.exec("node -e 'require(\"http\").get(\"http://127.0.0.1:5173\",r=>process.exit(r.statusCode===200?0:1)).on(\"error\",()=>process.exit(1))'" )).exitCode, { timeout: 10_000 }).toBe(0);
@@ -107,6 +115,20 @@ describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => 
     }
 
     try {
+      if (combinedDocker) {
+        const pod = await coreApi.readNamespacedPod({ namespace, name: sandbox.id });
+        expect(pod.spec?.hostUsers).toBe(false);
+        expect(pod.spec?.runtimeClassName).toBe(dockerRuntimeClassName);
+        expect(pod.spec?.containers.find(container => container.name === "browser")?.securityContext?.seccompProfile?.type).toBe("Localhost");
+        await expect.poll(async () => (await sandbox.exec("docker info >/dev/null 2>&1")).exitCode, { timeout: 30_000 }).toBe(0);
+        const docker = await sandbox.exec("docker run --rm busybox:stable echo docker-browser-ok", { timeout: 60_000 });
+        expect(docker.stderr).not.toContain("Operation not permitted");
+        expect(docker.exitCode).toBe(0);
+        expect(docker.stdout.trim()).toBe("docker-browser-ok");
+        await sandbox.writeFile("workload-private.txt", "workload-only");
+        expect((await sandbox.exec("test ! -e /var/lib/valet/browser", { privileged: true })).exitCode).toBe(0);
+        expect((await sandbox.exec("test -f /workspace/workload-private.txt && ! touch /workspace/browser-write-test && test ! -e /var/lib/valet/home && test ! -e /etc/valet/creds && test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token && test ! -S /var/run/docker.sock", { target: "browser", privileged: true })).exitCode).toBe(0);
+      }
       const writeGitConfig = () => sandbox.exec(
         "git config --global credential.helper valet-test && git config --global --get credential.helper",
       );
@@ -124,6 +146,19 @@ describe.skipIf(!clusterReady)("managed browser lifecycle on Kubernetes", () => 
       sandbox = await provider.restore(sandbox.id);
       expect((await request({ ...identity, command: "status" })).runtimeId).toBe(initial.runtimeId);
       await finish("open", pending);
+
+      if (combinedDocker) {
+        for (const absolute of [false, true]) {
+          const content = `kubernetes-upload-${absolute ? "absolute" : "relative"}-exact-bytes`;
+          await sandbox.writeFile("upload.txt", content);
+          const invocationId = `upload-${absolute}`;
+          const uploaded = await finish(invocationId, await request({
+            ...identity, command: "submit", invocationId, title: "Upload fixture bytes",
+            code: `var uploadSnapshot=await tab.getAXState(); var uploadLine=uploadSnapshot.split("\\n").find(line=>line.includes('"Upload"')); var uploadRef=uploadLine?.match(/\\[ref=([^\\]]+)\\]/)?.[1]; if(!uploadRef)throw Error(uploadSnapshot); await tab.upload(uploadRef,[${JSON.stringify(absolute ? "/workspace/upload.txt" : "upload.txt")}]); await tab.playwright.getByText(${JSON.stringify(content)},{exact:true}).waitFor({state:"visible"}); await tab.getAXState();`,
+          }));
+          expect(uploaded.events.some(event => event.type === "text" && event.text.includes(content))).toBe(true);
+        }
+      }
 
       const poisonHome = await sandbox.exec(
         "chown -R 1501:1501 /var/lib/valet/home && chmod 0700 /var/lib/valet/home/dockerd",

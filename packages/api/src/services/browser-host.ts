@@ -16,7 +16,7 @@ export function createBrowserPolicy(db: AppDb, sessions: SessionStore, blobs?: B
 }
 
 async function hasBrowser(sandbox: Sandbox): Promise<boolean> {
-  const probe = await sandbox.exec('test -S /var/lib/valet/browser/browser.sock', { timeout: 5000, privileged: true });
+  const probe = await sandbox.exec('test -S /var/lib/valet/browser/browser.sock', { target: 'browser', timeout: 5000, privileged: true });
   return probe.exitCode === 0;
 }
 
@@ -113,7 +113,7 @@ export function browserSessionHooks(sessionId: string, sessions: SessionStore, b
       beforeStop: async (sandbox, reason, context) => {
         // A successful stop checkpoint stays valid until afterReady invalidates it.
         if (reason === 'destroy' && context?.suspended && await hasAuditCheckpoint(sessionId, sandbox.id, blobs, store)) return;
-        if (!(await hasBrowser(sandbox)) && (await sandbox.exec('test -f /var/lib/valet/browser/journal.sqlite', { timeout: 5000, privileged: true })).exitCode !== 0) {
+        if (!(await hasBrowser(sandbox)) && (await sandbox.exec('test -f /var/lib/valet/browser/journal.sqlite', { target: 'browser', timeout: 5000, privileged: true })).exitCode !== 0) {
           await exportAudit(sessionId, sandbox.id, { entries: [], total: 0 }, blobs, store);
           return;
         }

@@ -13,8 +13,13 @@ describe("browser routes", () => {
     await api?.cleanup();
     api = undefined;
   });
-  async function setup(owner = "local-user") {
-    api = await bootTestApi();
+  async function setup(owner = "local-user", flags?: { docker?: boolean; kubernetes?: boolean }) {
+    const provider = new VirtualSandboxProvider();
+    if (flags) {
+      const capabilities = provider.capabilities();
+      vi.spyOn(provider, "capabilities").mockReturnValue({ ...capabilities, browserAutomation: true });
+    }
+    api = await bootTestApi(flags ? { sandboxProvider: provider } : {});
     await api.providers.db.insert(agentSessions).values({
       id: "browser-session",
       userId: owner,
@@ -25,6 +30,7 @@ describe("browser routes", () => {
       status: "active",
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      ...flags,
     });
     return `${api.baseUrl}/api/sessions/browser-session/browser`;
   }
@@ -37,6 +43,13 @@ describe("browser routes", () => {
       status: null,
       actorId: "local-user",
     });
+    expect(api?.providers.engineHost.liveSession("browser-session")).toBeNull();
+  });
+  it.each(["docker", "kubernetes"] as const)("reports browser support for %s sessions without waking compute", async (feature) => {
+    const url = await setup("local-user", { [feature]: true });
+    const response = await fetch(url);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ enabled: true, status: null });
     expect(api?.providers.engineHost.liveSession("browser-session")).toBeNull();
   });
   it("hides another owner’s browser", async () => {

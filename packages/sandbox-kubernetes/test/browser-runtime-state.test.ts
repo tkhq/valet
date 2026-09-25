@@ -46,7 +46,7 @@ describe("browser manifests", () => {
       value: "5173,3000,8080",
     });
   });
-  it("rejects missing identity, unsafe profile paths and elevated nested-runtime combinations", () => {
+  it("rejects missing identity and unsafe profile paths", () => {
     expect(() =>
       buildSandboxManifest(cfg, "test", { browser: { enabled: true } }),
     ).toThrow(/session/i);
@@ -57,13 +57,43 @@ describe("browser manifests", () => {
         { sessionId: "session", browser: { enabled: true } },
       ),
     ).toThrow(/profile/i);
-    expect(() =>
-      buildSandboxManifest(cfg, "test", {
-        sessionId: "session",
-        browser: { enabled: true },
-        docker: true,
-      }),
-    ).toThrow(/Docker-in-sandbox/i);
+  });
+
+  it.each([{ docker: true }, { nestedKubernetes: true }])("isolates the browser companion from elevated workload %j", (capabilities) => {
+    const manifest = buildSandboxManifest({ ...cfg, browserImage: "stock-browser:2", dockerRuntimeClassName: "valet-docker" }, "combined", {
+      ...capabilities, sessionId: "session", image: "repository-bake:1",
+      browser: { enabled: true, viewer: true }, credsFiles: { token: "secret" },
+      env: { SECRET: "secret", VALET_BROWSER_VIEWER: "1", VALET_BROWSER_DEV_PORTS: "3000" },
+    });
+    const pod = manifest.spec.podTemplate.spec;
+    const workload = pod.containers.find(container => container.name === "sandbox");
+    const browser = pod.containers.find(container => container.name === "browser");
+    expect(pod.hostUsers).toBe(false);
+    expect(pod.automountServiceAccountToken).toBe(false);
+    expect(browser?.env).toContainEqual({ name: "VALET_SESSION_ID", value: "session" });
+    expect(pod.runtimeClassName).toBe("valet-docker");
+    expect(workload?.image).toBe("repository-bake:1");
+    expect(workload?.volumeMounts?.some(mount => mount.name === "runtime-state")).toBe(false);
+    expect(workload?.env?.some(entry => entry.name.startsWith("VALET_BROWSER_"))).toBe(false);
+    expect(browser?.image).toBe("stock-browser:2");
+    expect(browser?.volumeMounts).toEqual([
+      { name: "workspace", mountPath: "/workspace", subPath: ".valet-storage/workspace", readOnly: true },
+      { name: "runtime-state", mountPath: "/var/lib/valet" },
+    ]);
+    expect(browser?.env).toContainEqual({ name: "VALET_BROWSER_WORKSPACE_READONLY", value: "1" });
+    expect(browser?.securityContext).toEqual({ seccompProfile: { type: "Localhost", localhostProfile: "valet/browser.json" } });
+    expect(browser?.env).toContainEqual({ name: "VALET_BROWSER_DEV_PORTS", value: "3000" });
+    expect(browser?.env?.some(entry => ["SECRET", "VALET_BROWSER_VIEWER", "VALET_SANDBOX_DOCKER"].includes(entry.name))).toBe(false);
+    expect(browser?.command).toEqual(["/usr/bin/tini", "-g", "--", "/bin/bash", "-c", "/browser-preflight.sh && exec tail -f /dev/null"]);
+    expect(browser?.readinessProbe?.exec.command).toEqual(["test", "-f", "/run/valet-browser-ready"]);
+    expect(browser?.resources?.limits?.memory).toBe("2Gi");
+    expect(manifest.metadata.annotations?.["valet.dev/browser-topology"]).toBe("companion");
+    expect(manifest.spec.service).toBeUndefined();
+  });
+
+  it("uses the configured default image for the companion when no browser image is set", () => {
+    const manifest = buildSandboxManifest(cfg, "combined", { sessionId: "session", docker: true, image: "bake:1", browser: { enabled: true } });
+    expect(manifest.spec.podTemplate.spec.containers.find(container => container.name === "browser")?.image).toBe(cfg.defaultImage);
   });
 
   it("keeps the shared runtime root traversable without taking persisted home ownership", () => {

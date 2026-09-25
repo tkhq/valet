@@ -1133,7 +1133,7 @@ export class EngineHost {
         ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
         : sandboxMint?.env;
     const sandboxOpts = {
-      browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true && !dockerFlag && !kubernetesFlag, viewer: true },
+      browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
       workspace: meta.workspace,
       image,
       env: sandboxEnv,
@@ -3765,7 +3765,7 @@ export class EngineHost {
       parentThreadId: opts.parentThreadId,
       sharedTranscript: opts.sharedTranscript,
       sandbox: {
-        browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true && !dockerFlag && !kubernetesFlag, viewer: true },
+        browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
         workspace: opts.workspace,
         // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).

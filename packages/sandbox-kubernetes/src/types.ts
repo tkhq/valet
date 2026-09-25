@@ -74,6 +74,8 @@ export interface K8sProviderConfig {
   dockerRuntimeClassName?: string;
   /** Relative path beneath each node's kubelet seccomp directory. Never Unconfined. */
   browserSeccompProfile?: string;
+  /** Stock browser companion image. Defaults to defaultImage. */
+  browserImage?: string;
   browserEnabled?: boolean;
   /** Session-owned private runtime volume size. Default: 2Gi. */
   browserRuntimeStorage?: string;
@@ -134,6 +136,7 @@ export interface ResourceRequirements {
 }
 
 export interface VolumeMount {
+  readOnly?: boolean;
   subPath?: string;
   name: string;
   mountPath: string;
@@ -204,6 +207,7 @@ export interface TopologySpreadConstraint {
 
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */
 export interface SandboxPodSpec {
+  automountServiceAccountToken?: boolean;
   initContainers?: SandboxContainer[];
   containers: SandboxContainer[];
   /** Soft (ScheduleAnyway) spread of sandbox pods across nodes and zones. */

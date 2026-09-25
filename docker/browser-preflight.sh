@@ -23,9 +23,19 @@ done
 # parent traversable and restrict browser ownership to its private directory.
 install -d -m 0755 -o root -g root /var/lib/valet
 install -d -m 0700 -o "$browser_uid" -g "$browser_gid" /var/lib/valet/browser
-install -d -m 0755 -o dockerd -g dockerd /home/dockerd /workspace
-# The workload owns the working directory. Private browser state uses another UID.
-chown -R -h dockerd:dockerd /workspace
+install -d -m 0755 -o dockerd -g dockerd /home/dockerd
+if [[ ${VALET_BROWSER_WORKSPACE_READONLY:-0} == 1 ]]; then
+  # The companion's trusted upload broker reads the workload's existing mount.
+  # Chromium and the REPL receive neither this mount nor the workload credentials.
+  if [[ ! -d /workspace ]] || [[ ,$(findmnt -n -o VFS-OPTIONS --target /workspace), != *,ro,* ]]; then
+    echo 'The browser upload directory is not read-only. Recreate the sandbox with the managed companion mounts.' >&2
+    exit 78
+  fi
+else
+  install -d -m 0755 -o dockerd -g dockerd /workspace
+  # The workload owns the working directory. Private browser state uses another UID.
+  chown -R -h dockerd:dockerd /workspace
+fi
 browser_extra=()
 [[ $(uname -m) != x86_64 ]] || browser_extra=(--symlink usr/lib64 /lib64)
 if ! setpriv --reuid "$browser_uid" --regid "$browser_gid" --clear-groups --no-new-privs \

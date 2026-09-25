@@ -1,6 +1,10 @@
 import { expect, it } from 'vitest';
 import { createServer, request, type Server } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import ts from 'typescript';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EgressPolicy, serveEgress } from '../src/confinement.js';
@@ -14,6 +18,26 @@ const listen = (server: Server) =>
       else resolve(address.port);
     });
   });
+
+it.each(['connect', 'upgrade'])('survives an early %s client reset and closes its pending broker connection', async (mode) => {
+  const dir = await mkdtemp(join(tmpdir(), 'proxy-reset-'));
+  try {
+    const source = await readFile(new URL('../src/proxy.ts', import.meta.url), 'utf8');
+    const compiled = ts.transpileModule(source, {
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const proxyPath = join(dir, 'proxy.mjs');
+    await writeFile(proxyPath, compiled);
+    const result = await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL('./fixtures/proxy-reset.mjs', import.meta.url)),
+      pathToFileURL(proxyPath).href, mode,
+    ], { timeout: 5000 });
+    expect(result.stdout.trim()).toBe('proxy survived; broker connections closed');
+    expect(result.stderr).toBe('');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 it('routes HTTP bodies through the approved Unix broker rather than a new direct socket', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'browser-proxy-'));
   const fixture = createServer((req, res) => {

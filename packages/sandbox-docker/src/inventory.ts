@@ -2,6 +2,15 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
+export interface DockerBrowserCompanion {
+  containerName: string;
+  containerId?: string;
+  image: string;
+  imageId?: string;
+  /** Exact workload container ID whose network namespace the browser joins. */
+  networkOwnerId?: string;
+}
+
 export interface DockerInventoryRecord {
   version: 1;
   id: string;
@@ -11,19 +20,23 @@ export interface DockerInventoryRecord {
   containerId?: string;
   workspace: string;
   runtimeStateDir: string;
+  /** Retained state from a Docker-only runtime, never mounted into its new browser. */
+  workloadStateDir?: string;
   image: string;
   imageId?: string;
   credsHostDir?: string;
   docker: boolean;
   browser?: { enabled: boolean; viewer?: boolean };
+  browserCompanion?: DockerBrowserCompanion;
   state: "creating" | "running" | "released";
 }
 export interface DockerContainerOwner {
   id: string;
   imageId: string;
   labels: Record<string, string>;
-  mounts: { source: string; destination: string }[];
+  mounts: { source: string; destination: string; readOnly?: boolean }[];
   running: boolean;
+  networkMode?: string;
 }
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -55,7 +68,7 @@ function parse(value: unknown): DockerInventoryRecord {
     value.state !== "released"
   )
     return invalid();
-  for (const key of ["containerId", "imageId", "credsHostDir"])
+  for (const key of ["containerId", "imageId", "credsHostDir", "workloadStateDir"])
     if (value[key] !== undefined && typeof value[key] !== "string")
       return invalid();
   let browser: DockerInventoryRecord["browser"];
@@ -74,6 +87,23 @@ function parse(value: unknown): DockerInventoryRecord {
         : {}),
     };
   }
+  let browserCompanion: DockerBrowserCompanion | undefined;
+  if (value.browserCompanion !== undefined) {
+    const companion = value.browserCompanion;
+    if (!record(companion) || !browser?.enabled || !value.docker ||
+        typeof companion.containerName !== "string" || typeof companion.image !== "string") return invalid();
+    for (const key of ["containerId", "imageId", "networkOwnerId"])
+      if (companion[key] !== undefined && typeof companion[key] !== "string") return invalid();
+    if (companion.networkOwnerId !== undefined && companion.networkOwnerId !== value.containerId) return invalid();
+    if (value.state === "running" && (!value.containerId || !value.imageId || !companion.containerId || !companion.imageId || !companion.networkOwnerId)) return invalid();
+    browserCompanion = {
+      containerName: companion.containerName,
+      image: companion.image,
+      ...(typeof companion.containerId === "string" ? { containerId: companion.containerId } : {}),
+      ...(typeof companion.imageId === "string" ? { imageId: companion.imageId } : {}),
+      ...(typeof companion.networkOwnerId === "string" ? { networkOwnerId: companion.networkOwnerId } : {}),
+    };
+  }
   return {
     version: 1,
     id: value.id,
@@ -82,6 +112,7 @@ function parse(value: unknown): DockerInventoryRecord {
     containerName: value.containerName,
     workspace: value.workspace,
     runtimeStateDir: value.runtimeStateDir,
+    ...(typeof value.workloadStateDir === "string" ? { workloadStateDir: value.workloadStateDir } : {}),
     image: value.image,
     docker: value.docker,
     state: value.state,
@@ -93,6 +124,7 @@ function parse(value: unknown): DockerInventoryRecord {
       ? { credsHostDir: value.credsHostDir }
       : {}),
     ...(browser ? { browser } : {}),
+    ...(browserCompanion ? { browserCompanion } : {}),
   };
 }
 export class DockerInventory {
@@ -183,6 +215,7 @@ export function dockerOwnerLabels(
     "valet.dev/sandbox-id": value.id,
     "valet.dev/session-id": value.sessionId,
     "valet.dev/provider-id": value.providerId,
+    ...(value.browserCompanion ? { "valet.dev/container-role": "workload" } : {}),
     ...(value.browser?.enabled ? { "valet.dev/browser-protocol": "1" } : {}),
   };
 }
@@ -203,9 +236,12 @@ export function validateDockerOwner(
     throw new Error(
       "Docker container image differs from the saved inventory. Inspect the image before restoring the browser profile.",
     );
+  if (expected.browserCompanion && actual.mounts.some(mount => mount.source === expected.runtimeStateDir || mount.destination === "/var/lib/valet"))
+    throw new Error("Docker workload has a private browser mount. Remove the invalid runtime before replacing this sandbox.");
   for (const [destination, source] of [
     ["/workspace", expected.workspace],
-    ["/var/lib/valet", expected.runtimeStateDir],
+    ...(!expected.browserCompanion ? [["/var/lib/valet", expected.runtimeStateDir]] : []),
+    ...(expected.credsHostDir ? [["/etc/valet/creds", expected.credsHostDir]] : []),
   ])
     if (
       !actual.mounts.some(
@@ -216,6 +252,28 @@ export function validateDockerOwner(
         "Docker container mount differs from the saved inventory. Restore the matching session state mount before retrying.",
       );
 }
+export function dockerBrowserOwnerLabels(value: DockerInventoryRecord): Record<string, string> {
+  return { ...dockerOwnerLabels(value), "valet.dev/container-role": "browser" };
+}
+
+export function validateDockerBrowserOwner(expected: DockerInventoryRecord, actual: DockerContainerOwner): void {
+  const companion = expected.browserCompanion;
+  if (!companion) throw new Error("Docker browser companion is missing. Release the runtime before replacing this sandbox.");
+  for (const [key, value] of Object.entries(dockerBrowserOwnerLabels(expected)))
+    if (actual.labels[key] !== value) throw new Error("Docker browser owner differs from inventory. Inspect both owners before retrying.");
+  if (companion.containerId && companion.containerId !== actual.id)
+    throw new Error("Docker browser identity changed. Restore the recorded companion before retrying.");
+  if (companion.imageId && companion.imageId !== actual.imageId)
+    throw new Error("Docker browser image changed. Restore the recorded companion image before retrying.");
+  if (!expected.containerId || companion.networkOwnerId !== expected.containerId || actual.networkMode !== `container:${expected.containerId}`)
+    throw new Error("Docker browser network owner changed. Release both containers before replacing this sandbox.");
+  const privateMount = actual.mounts.find(mount => mount.destination === "/var/lib/valet");
+  const workspaceMount = actual.mounts.find(mount => mount.destination === "/workspace");
+  if (actual.mounts.length !== 2 || privateMount?.source !== expected.runtimeStateDir || privateMount.readOnly !== false ||
+      workspaceMount?.source !== expected.workspace || workspaceMount.readOnly !== true)
+    throw new Error("Docker browser mounts differ from inventory. Restore private state and the read-only working-directory mount before retrying.");
+}
+
 export function parseDockerInspection(value: unknown): DockerContainerOwner {
   if (!Array.isArray(value) || value.length !== 1 || !record(value[0]))
     return invalid();
@@ -243,7 +301,7 @@ export function parseDockerInspection(value: unknown): DockerContainerOwner {
       typeof mount.Destination !== "string"
     )
       return invalid();
-    mounts.push({ source: mount.Source, destination: mount.Destination });
+    mounts.push({ source: mount.Source, destination: mount.Destination, ...(typeof mount.RW === "boolean" ? { readOnly: !mount.RW } : {}) });
   }
   return {
     id: item.Id,
@@ -251,5 +309,6 @@ export function parseDockerInspection(value: unknown): DockerContainerOwner {
     labels,
     mounts,
     running: item.State.Running,
+    ...(record(item.HostConfig) && typeof item.HostConfig.NetworkMode === "string" ? { networkMode: item.HostConfig.NetworkMode } : {}),
   };
 }

@@ -15,6 +15,16 @@ async function fixture() {
 }
 
 describe('policy command channels', () => {
+  it('preserves the trusted browser target across attachment and channel opening', async () => {
+    const f = await fixture();
+    const options = { target: 'browser' as const, privileged: true, onData: vi.fn(), onClose: vi.fn() };
+    const channel = await f.policy.openCommandChannel('browser-client', options);
+    expect(f.sandbox.openCommandChannel).toHaveBeenCalledWith('browser-client', expect.objectContaining({
+      target: 'browser', privileged: true,
+    }));
+    channel?.close();
+  });
+
   it('does not provision a nonready attachment when opening a channel', async () => {
     const provider = new VirtualSandboxProvider();
     const create = vi.spyOn(provider, 'create');
