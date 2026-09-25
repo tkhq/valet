@@ -116,3 +116,19 @@ longer than 366 days. All aggregate, drill-down, activity, and CSV queries use
 the same lower and upper bounds. SQL applies direct comparisons to
 `created_at`; it does not transform the indexed predicate or load raw turns for
 aggregation. CSV filenames include the selected month or custom range.
+
+## Finance CSV identity and work context (2026-09-24)
+
+The usage CSV keeps its existing columns and adds `employee_name`,
+`employee_email`, `repository`, `channel_type`, and `channel_id`. `user_id`
+remains the stable identity column. Missing users and rows without a user keep
+blank human identity fields. A plain team member cannot read any employee
+identity fields.
+
+Employee identity is a current join to the user table. It is not a historical
+snapshot. Repository values come from durable session repository bindings and
+use semicolons when a session has multiple bindings. Channel type and ID come
+from the queue item linked to the billable engine entry. Queue items and usage
+entries have the same session lifecycle. Historical rows without a linked queue
+item or channel stay blank. Proxy rows also have blank work context. The export
+does not infer a project or accounting category.
