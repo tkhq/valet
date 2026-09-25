@@ -427,6 +427,7 @@ export function buildSandboxProvider(
       return new DockerSandboxProvider({
         inventoryRoot: join(env.VALET_DATA_DIR || join(homedir(), ".valet"), "docker-runtime"),
         browserEnabled: env.VALET_BROWSER_ENABLED === '1',
+        browserImage: env.VALET_FULL_BASE_IMAGE ?? env.VALET_SANDBOX_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         ...(env.VALET_BROWSER_SECCOMP_PROFILE ? { browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE } : {}),
       });
     case "local":
@@ -484,6 +485,7 @@ export function buildSandboxProvider(
       }
       const cfg: K8sProviderConfig = {
         browserEnabled: env.VALET_BROWSER_ENABLED === '1',
+        browserImage: env.VALET_FULL_BASE_IMAGE ?? image ?? DEFAULT_FULL_BASE_IMAGE,
         browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE ?? 'valet/browser.json',
         browserRuntimeStorage: env.VALET_BROWSER_RUNTIME_STORAGE ?? '2Gi',
         namespace,

@@ -1,3 +1,4 @@
+import { browserRuntimeFingerprint, browserTargetContainer, hasBrowserCompanion } from "./browser-topology.js";
 /**
  * `SandboxProvider`/`Sandbox` assembly (Task 5) — wires Tasks 1/2/4 (manifest
  * construction, CRD lifecycle, exec/files/job-mode) into the engine's
@@ -451,7 +452,9 @@ export interface KubernetesSandboxDeps {
    * `SandboxCreateOpts.docker` at create, and from the CR's
    * `DOCKER_LABEL_KEY` label on restore. */
   docker?: boolean;
+  /** Only colocated browser sessions need the workload no-new-privileges wrapper. */
   browser?: boolean;
+  podStatusApi?: SandboxPodStatusApi;
 }
 
 /**
@@ -482,6 +485,20 @@ export class KubernetesSandbox implements Sandbox {
       docker: this.deps.docker,
       browser: this.deps.browser,
     };
+  }
+
+  private async targetExecDeps(podName: string, opts?: Pick<ExecOpts, "target" | "privileged">): Promise<ExecDeps> {
+    if (opts?.target !== "browser") return this.execDeps();
+    if (!opts.privileged) throw new Error("Browser execution requires a trusted caller. Use the managed browser tools.");
+    const cr = await getSandbox(this.deps.objectsApi, this.deps.cfg, this.id);
+    if (!cr) throw new Error("The browser sandbox is missing. Recreate this session before sending browser commands.");
+    const containerName = browserTargetContainer(cr);
+    const live = await this.deps.podStatusApi?.getPodStatus(this.deps.cfg.namespace, podName);
+    const expected = browserRuntimeFingerprint(cr.spec.podTemplate, cr.metadata.name);
+    if (expected === undefined || !live || live.browserFingerprint !== expected || (containerName === "browser" && !live.browserReady)) {
+      throw new Error("The browser container is missing or not ready. Recreate this sandbox or wait for browser readiness.");
+    }
+    return { ...this.execDeps(), containerName, docker: false, browser: false };
   }
 
   private nextExecId(): string {
@@ -625,12 +642,12 @@ export class KubernetesSandbox implements Sandbox {
 
   async openCommandChannel(command: string, options: SandboxCommandChannelOptions): Promise<SandboxCommandChannel> {
     if (options.signal?.aborted) throw options.signal.reason instanceof Error ? options.signal.reason : new Error('Command channel aborted. Open a new channel when needed.');
-    return this.withPodContext(({ podName }) => openCommandChannelInPod(this.execDeps(), podName, command, options));
+    return this.withPodContext(async ({ podName }) => openCommandChannelInPod(await this.targetExecDeps(podName, options), podName, command, options));
   }
 
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
     return this.withPodContext(async ({ podName, uid }) => {
-      const result = await execInPod(this.execDeps(), podName, command, opts);
+      const result = await execInPod(await this.targetExecDeps(podName, opts), podName, command, opts);
       if (!result.timedOut) await this.checkExitForDeath(podName, uid, result.exitCode);
       return result;
     });
@@ -659,6 +676,7 @@ export class KubernetesSandbox implements Sandbox {
   // directly (see `KubernetesSandboxProvider.release`, below).
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
+    if (opts?.target === "browser") throw new Error("Browser jobs are not supported. Use browser exec or a browser command channel.");
     const execId = this.nextExecId();
     return this.withPodContext(async (ctx) => {
       const handle = await execJobInPod(this.execDeps(), ctx.podName, execId, command, opts);
@@ -948,7 +966,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           ? async () => {
             const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
             if (podName === null || await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName) === null) return undefined;
-            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled)));
+            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled && !opts.docker && !opts.nestedKubernetes)));
           }
           : undefined,
         neverReadyOwner,
@@ -1096,10 +1114,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         undefined,
         podTemplateResourceFingerprint(applied.spec.podTemplate),
         imageFingerprint(manifestImage),
+        browserRuntimeFingerprint(applied.spec.podTemplate, applied.metadata.name),
       ).catch(() => null);
       if (check?.differs) {
         const podName = check.podName;
-        const reason = check.imageDrift ? `image ${check.liveImage} → ${manifestImage}` : "CPU/memory changed";
+        const reason = check.browserDrift ? "browser configuration changed" : check.imageDrift ? `image ${check.liveImage} → ${manifestImage}` : "CPU/memory changed";
         console.log(`k8s sandbox ${name}: rolling pod (${reason})`);
         // Capture the old pod UID before deletion so the wait-for-fresh loop
         // below can detect when the controller has reconciled a NEW pod object
@@ -1128,6 +1147,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     try {
       await this.waitReady(name, {
         homeLayoutVersion: HOME_LAYOUT_VERSION,
+        browserFingerprint: browserRuntimeFingerprint(applied.spec.podTemplate, applied.metadata.name),
         image: opts.image ?? this.cfg.defaultImage,
         resourceFingerprint: podTemplateResourceFingerprint(applied.spec.podTemplate),
       });
@@ -1155,7 +1175,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       throw err;
     }
     await clearNeverReadyOwner(this.deps.objectsApi, this.cfg, name);
-    const sandbox = this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled));
+    const sandbox = this.makeSandbox(name, Boolean(opts.docker || opts.nestedKubernetes || opts.browser?.enabled), Boolean(opts.browser?.enabled && !opts.docker && !opts.nestedKubernetes));
     sandbox.adopted = adopted;
     sandbox.resourceOverrides = resourceOverrides;
     return sandbox;
@@ -1177,7 +1197,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     return this.makeSandbox(
       id,
       browser || cr.metadata.labels?.[DOCKER_LABEL_KEY] === "true" || cr.metadata.labels?.[NESTED_KUBERNETES_LABEL_KEY] === "true",
-      browser,
+      browser && cr.metadata.labels?.[DOCKER_LABEL_KEY] !== "true" && cr.metadata.labels?.[NESTED_KUBERNETES_LABEL_KEY] !== "true" && !hasBrowserCompanion(cr.spec.podTemplate),
     );
   }
 
@@ -1266,7 +1286,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    */
   async resume(id: string): Promise<void> {
     await resumeWithPersistentHomes(this.deps.objectsApi, this.cfg, id);
-    await this.waitReady(id, { homeLayoutVersion: HOME_LAYOUT_VERSION });
+    const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+    await this.waitReady(id, {
+      homeLayoutVersion: HOME_LAYOUT_VERSION,
+      browserFingerprint: browserRuntimeFingerprint(cr?.spec.podTemplate, cr?.metadata.name),
+    });
   }
 
   /** Writes updated credential files into a running sandbox. Replaces the
@@ -1329,6 +1353,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         cfg: this.cfg,
         docker: workloadUser,
         browser,
+        podStatusApi: this.deps.podStatusApi,
       },
       id,
     );
@@ -1354,7 +1379,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * branch (no `error` state ever observed, just genuinely slow) keeps
    * throwing a plain `Error` — that IS a transient, retry-shaped condition.
    */
-  private async waitReady(name: string, expected?: { image?: string; resourceFingerprint?: string; homeLayoutVersion?: string }): Promise<void> {
+  private async waitReady(name: string, expected?: { image?: string; resourceFingerprint?: string; homeLayoutVersion?: string; browserFingerprint?: string }): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     const expectedImageFingerprint = expected?.image !== undefined ? imageFingerprint(expected.image) : undefined;
     const rolledGenerations = new Set<string>();
@@ -1379,7 +1404,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           const resourcesMatch = expected?.resourceFingerprint === undefined ||
             pod?.resourceFingerprint === expected.resourceFingerprint;
           const homeMatches = expected?.homeLayoutVersion === undefined || pod?.homeLayoutVersion === expected.homeLayoutVersion;
-          const matchesDesired = imageMatches && resourcesMatch;
+          const browserMatches = expected?.browserFingerprint === undefined || pod?.browserFingerprint === expected.browserFingerprint;
+          const matchesDesired = imageMatches && resourcesMatch && browserMatches;
 
           // Admission webhooks can rewrite pod.spec.containers[].image. The
           // immutable env fingerprint records the requested image generation,
@@ -1387,7 +1413,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           const podReady = pod?.phase === "Running" &&
             pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True");
           if (podName !== null && pod !== null && podReady && expected !== undefined && (!matchesDesired || !homeMatches) && this.deps.podDeleteApi) {
-            const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}:${pod.homeLayoutVersion ?? "missing"}`;
+            const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}:${pod.homeLayoutVersion ?? "missing"}:${pod.browserFingerprint ?? "missing"}`;
             if (!rolledGenerations.has(generation)) {
               console.log(`k8s sandbox ${name}: rolling stale pod generation during readiness`);
               await this.deps.podDeleteApi.deletePod(this.cfg.namespace, podName);

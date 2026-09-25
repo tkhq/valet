@@ -83,6 +83,8 @@ export const DOCKER_STATE_MOUNT_PATH = "/home/dockerd/.local/share/docker";
  * profile). Value is always "true"; the label is absent otherwise. */
 export const DOCKER_LABEL_KEY = "valet.dev/docker";
 export const BROWSER_LABEL_KEY = "valet.dev/browser";
+export const BROWSER_TOPOLOGY_ANNOTATION = "valet.dev/browser-topology";
+export const BROWSER_CONTAINER_NAME = "browser";
 /** The `dockerd` workload user's uid/gid (docker/Dockerfile.sandbox-k8s
  * `useradd -m -u 1500 dockerd`). Used as the pod-level `fsGroup` so the
  * kubelet makes the workspace PVC group-writable by that user. */
@@ -307,24 +309,39 @@ export function buildSandboxManifest(
 
   const isFullProfile = opts.profile === "full";
   const browser = opts.browser?.enabled === true;
+  const companion = browser && Boolean(opts.docker || opts.nestedKubernetes);
+  let browserContainer: SandboxContainer | undefined;
   let browserClaim: string | undefined;
   if (browser) {
     if (!opts.sessionId) throw new Error("Browser session identity is missing. Supply the owning session ID before starting the sandbox.");
-    if (opts.docker || opts.nestedKubernetes) throw new Error("Browser isolation cannot use the Docker-in-sandbox or nested Kubernetes security profile. Disable those features for this session.");
     const profile = cfg.browserSeccompProfile ?? "valet/browser.json";
     if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*\.json$/.test(profile) || profile.split("/").includes("..")) throw new Error("The browser seccomp profile path is invalid. Configure a relative path beneath the kubelet seccomp directory.");
     browserClaim = runtimeStateClaimName(opts.sessionId);
-    container.securityContext = { seccompProfile: { type: "Localhost", localhostProfile: profile } };
-    container.readinessProbe = { exec: { command: ["test", "-f", "/run/valet-browser-ready"] }, periodSeconds: 2 };
-    container.volumeMounts?.push({ name: "runtime-state", mountPath: "/var/lib/valet" });
-    container.env = [...(container.env ?? []).filter(entry => !entry.name.startsWith("VALET_BROWSER_")),
+    const target = companion ? browserContainer = {
+      name: BROWSER_CONTAINER_NAME,
+      image: cfg.browserImage ?? cfg.defaultImage,
+      command: ["/usr/bin/tini", "-g", "--", "/bin/bash", "-c", "/browser-preflight.sh && exec tail -f /dev/null"],
+      volumeMounts: [{ name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH, subPath: WORKSPACE_SUBPATH, readOnly: true }],
+      resources: {
+        requests: { cpu: "100m", memory: "256Mi", "ephemeral-storage": "256Mi" },
+        limits: { cpu: "1", memory: "2Gi", "ephemeral-storage": "2Gi" },
+      },
+      env: [{ name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(cfg.browserImage ?? cfg.defaultImage) },
+        { name: "VALET_SESSION_ID", value: opts.sessionId }],
+    } : container;
+    if (companion) container.env = container.env?.filter(entry => !entry.name.startsWith("VALET_BROWSER_"));
+    target.securityContext = { seccompProfile: { type: "Localhost", localhostProfile: profile } };
+    target.readinessProbe = { exec: { command: ["test", "-f", "/run/valet-browser-ready"] }, periodSeconds: 2 };
+    target.volumeMounts?.push({ name: "runtime-state", mountPath: "/var/lib/valet" });
+    target.env = [...(target.env ?? []).filter(entry => !entry.name.startsWith("VALET_BROWSER_")),
       { name: "VALET_BROWSER_ENABLED", value: "1" }, { name: "VALET_BROWSER_CONFINE", value: "1" },
+      ...(companion ? [{ name: "VALET_BROWSER_WORKSPACE_READONLY", value: "1" }] : []),
       { name: "VALET_BROWSER_STATE", value: "/var/lib/valet/browser" },
       { name: "VALET_BROWSER_DEV_PORTS", value: opts.env?.VALET_BROWSER_DEV_PORTS ?? "5173,3000,8080" },
       { name: "VALET_BROWSER_UID", value: "1501" }, { name: "VALET_BROWSER_GID", value: "1501" },
-      ...(opts.browser?.viewer ? [{ name: "VALET_BROWSER_VIEWER", value: "1" }] : [])];
-    container.env = container.env.filter(entry => !["PATH", "NODE_OPTIONS", "BASH_ENV", "ENV"].includes(entry.name) && !entry.name.startsWith("LD_") && !entry.name.startsWith("BASH_FUNC_"));
-    if (!isFullProfile) container.command = ["/usr/bin/tini", "-g", "--", "/bin/bash", "/start-headless.sh"];
+      ...(!companion && opts.browser?.viewer ? [{ name: "VALET_BROWSER_VIEWER", value: "1" }] : [])];
+    target.env = target.env.filter(entry => !["PATH", "NODE_OPTIONS", "BASH_ENV", "ENV"].includes(entry.name) && !entry.name.startsWith("LD_") && !entry.name.startsWith("BASH_FUNC_"));
+    if (!companion && !isFullProfile) container.command = ["/usr/bin/tini", "-g", "--", "/bin/bash", "/start-headless.sh"];
   }
   if (isFullProfile) {
     container.command = FULL_PROFILE_COMMAND;
@@ -400,7 +417,8 @@ export function buildSandboxManifest(
   container.volumeMounts = [...persistentHomeMounts(), ...(container.volumeMounts ?? [])];
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     initContainers: [homeInitContainer(image)],
-    containers: [container],
+    containers: [container, ...(browserContainer ? [browserContainer] : [])],
+    ...(companion ? { automountServiceAccountToken: false } : {}),
     restartPolicy: "Always",
     // Count all sandbox pods by session-label existence, regardless of value.
     // Soft node and zone preferences do not block uneven placement.
@@ -502,7 +520,7 @@ export function buildSandboxManifest(
       },
     ],
   };
-  if (isFullProfile || (browser && opts.browser?.viewer)) {
+  if (isFullProfile || (browser && !companion && opts.browser?.viewer)) {
     spec.service = true;
   }
 
@@ -520,6 +538,7 @@ export function buildSandboxManifest(
       ...((opts.sessionId || opts.nestedKubernetes || browserClaim) ? { annotations: {
         ...(opts.sessionId ? { [SESSION_ANNOTATION_KEY]: opts.sessionId } : {}),
         ...(browserClaim ? { [RUNTIME_STATE_ANNOTATION]: browserClaim } : {}),
+        ...(browser ? { [BROWSER_TOPOLOGY_ANNOTATION]: companion ? "companion" : "colocated" } : {}),
         ...(opts.nestedKubernetes ? { [NESTED_KUBERNETES_ANNOTATION_KEY]: NESTED_KUBERNETES_IDENTITY } : {}),
       } } : {}),
     },

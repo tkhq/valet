@@ -28,11 +28,12 @@ const image = process.env.VALET_BROWSER_TEST_IMAGE;
 describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
   "browser full stack in Docker",
   () => {
-    it("autoallows routine browser work, retains export approval, and serves direct frames", async () => {
+    it.each([false, true])("autoallows routine browser work, retains export approval, and serves direct frames (docker=%s)", async (docker) => {
       const root = await mkdtemp(join(tmpdir(), "valet-browser-api-"));
       const provider = new DockerSandboxProvider({
         inventoryRoot: join(root, "inventory"),
         browserEnabled: true,
+        browserImage: image,
       });
       const api = await bootTestApi({
         sandboxProvider: provider,
@@ -64,7 +65,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
         const created = await json<CreateSessionResponse>(
           "/api/sessions",
           "POST",
-          { workspace: join(root, "workspace"), profile: "headless" },
+          { workspace: join(root, "workspace"), profile: "headless", docker },
         );
         sessionId = created.id;
         const path = `/api/sessions/${sessionId}/browser`;
@@ -182,6 +183,7 @@ describe.skipIf(!image || process.env.VALET_BROWSER_INTEGRATION !== "1")(
             (
               await sandbox.exec("cat /var/lib/valet/browser/daemon.log", {
                 privileged: true,
+                target: "browser",
               })
             ).stdout,
           );

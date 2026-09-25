@@ -27,11 +27,28 @@ import { loadSessionMeta } from "./session-meta.js";
 import { primaryGitHubRepoTarget } from "./host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import type { RepoBinding } from "../wire/types.js";
-import type { SandboxCapabilities } from "@valet/engine";
+import type { Sandbox, SandboxCapabilities, SandboxCreateOpts } from "@valet/engine";
 
 class NestedRecordingSandboxProvider extends RecordingSandboxProvider {
   override capabilities(): SandboxCapabilities {
     return { ...super.capabilities(), nestedKubernetes: "v1" };
+  }
+}
+
+class BrowserRecordingSandboxProvider extends NestedRecordingSandboxProvider {
+  override capabilities(): SandboxCapabilities {
+    return { ...super.capabilities(), browserAutomation: true, browserViewer: true };
+  }
+  override async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    const sandbox = await super.create(opts);
+    const exec = sandbox.exec.bind(sandbox);
+    sandbox.exec = async (command, options) => {
+      if (command.startsWith("test -") && command.includes("/var/lib/valet/browser/")) {
+        return { exitCode: 1, stdout: "", stderr: "" };
+      }
+      return exec(command, options);
+    };
+    return sandbox;
   }
 }
 
@@ -172,7 +189,7 @@ describe("childSessionFor repo prebuild flags", () => {
     clearRepoPrebuildFlagsCache();
   });
 
-  it("a child resource override wins for initial creation and desired reconciliation", async () => {
+  it("a repository child keeps Docker, nested Kubernetes, browser access, and resource overrides", async () => {
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
@@ -182,7 +199,7 @@ describe("childSessionFor repo prebuild flags", () => {
           ? contentsBody('workspaceStorage: "8Gi"\ndocker: true\nkubernetes: true\nresources:\n  cpu: 4\n  memory: 8Gi\n', "blob1")
           : { status: 404, body: { message: "Not Found" } },
     });
-    const recorder = new NestedRecordingSandboxProvider();
+    const recorder = new BrowserRecordingSandboxProvider();
     api = await bootTestApi({
       sandboxProvider: recorder,
       githubTokenDeps: {
@@ -249,6 +266,7 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(call?.workspaceStorage).toBe("8Gi");
     expect(call?.docker).toBe(true);
     expect(call?.nestedKubernetes).toBe(true);
+    expect(call?.browser).toEqual({ enabled: true, viewer: true });
     expect((await db.select({ kubernetes: agentSessions.kubernetes }).from(agentSessions).where(eq(agentSessions.id, childId)).limit(1))[0]?.kubernetes).toBe(true);
     expect(call?.resources).toEqual({ cpu: 2, memory: "8Gi" });
     expect((await child.options.specProvider?.())?.resources).toEqual({ cpu: 2, memory: "8Gi" });

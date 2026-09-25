@@ -42,6 +42,7 @@ describe("persistent browser channel", () => {
     expect(f.open).toHaveBeenCalledOnce();
     expect(f.open.mock.calls[0][0]).toBe("/usr/local/bin/valet-browser-client --stream");
     expect(f.open.mock.calls[0][1].privileged).toBe(true);
+    expect(f.open.mock.calls[0][1]).toMatchObject({ target: "browser" });
     expect(f.open.mock.calls[0][1].waitForReady).toBe(true);
     f.disconnect();
   });
@@ -60,6 +61,7 @@ describe("persistent browser channel", () => {
     f.reply(0); f.reply(1);
     expect(await first).toEqual(response); expect(await second).toEqual(response);
     expect(create).toHaveBeenCalledOnce();
+    expect(f.open.mock.calls[0][1]).toMatchObject({ target: "browser", privileged: true });
     await attachment.destroy();
   });
   it("prevents viewer connections from waking compute", async () => {

@@ -254,7 +254,7 @@ export class PolicySandbox implements Sandbox {
       if (options.signal?.aborted) throw this.abortError(options.signal);
       if (stale()) throw staleError();
       const opened = await sandbox.openCommandChannel(command, {
-        privileged: options.privileged, signal: controller.signal,
+        target: options.target, privileged: options.privileged, signal: controller.signal,
         onData: (data) => {
           if (closed) return;
           if (stale()) { finish(staleError()); return; }

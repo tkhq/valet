@@ -1155,6 +1155,8 @@ export interface PolicyResolver {
 // ── Sandbox ────────────────────────────────────────────────────────
 
 export interface ExecOpts {
+  /** Trusted browser operations select the private runtime. Requires privileged execution. */
+  target?: "browser";
   cwd?: string;
   env?: Record<string, string>;
   timeout?: number;
@@ -1234,6 +1236,8 @@ export interface SandboxCommandChannel {
 }
 
 export interface SandboxCommandChannelOptions {
+  /** Trusted browser operations select the private runtime. Requires privileged execution. */
+  target?: "browser";
   /** False for passive viewers: fail without provisioning or resuming compute. */
   waitForReady?: boolean;
   onData(data: string): void;

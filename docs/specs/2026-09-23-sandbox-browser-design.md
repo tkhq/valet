@@ -1135,18 +1135,48 @@ It takes precedence where the proposed transport or budget differs.
 The image pins Node 22.23.3, Playwright Core 1.63.0, and matching Chromium revision 1243.
 It records package versions, the executable SHA256, and seccomp hashes in its runtime manifest.
 The same image supports both sandbox profiles.
-Browser automation is incompatible with Docker-in-sandbox and nested Kubernetes.
+Browser automation supports Docker-in-sandbox and nested Kubernetes through a companion container.
+Ordinary browser sessions retain their existing single-container runtime.
+Combined sessions share the workload network, including localhost development servers.
+The companion exclusively mounts private browser state.
+Its trusted upload broker receives a read-only working-directory mount.
+Chromium and the REPL cannot access that mount.
+The companion receives no workload credentials, Docker socket, or elevated Docker capabilities.
+The workload retains its existing identity and execution rules.
+
+The companion uses the configured stock browser image instead of the repository bake.
+`VALET_FULL_BASE_IMAGE` selects it, with `VALET_SANDBOX_IMAGE` and the published default as fallbacks.
+Startup runs the browser preflight under tini, then waits for the lazy browser client.
+It does not start a second gateway or interactive service.
+Kubernetes disables service-account token mounting for the combined pod.
+The pod retains the workload's Docker runtime class and user namespace.
+The companion retains the reviewed browser seccomp profile and bounded resources.
 
 Chromium retains its own namespace and seccomp sandbox.
 Bubblewrap separates the browser network and the REPL filesystem and network.
 A private Unix broker connects approved public HTTPS origins and configured development ports.
+The namespace proxy handles client disconnects while an origin handshake is pending.
+It closes the pending broker connection without stopping the proxy or Chromium.
 The default development ports are 5173, 3000, and 8080.
 The workload, browser daemon, and confined REPL have separate authority.
 Ordinary shell and file tools cannot read the profile, journal, socket, or transfer files.
 The trusted host reads a validated transfer through a fixed privileged command and checks its SHA256.
 
 The Docker provider records durable container ownership and private-state paths.
+Combined Docker records include both roles, image identities, and the exact workload network owner.
+Adoption verifies both containers and rejects missing companions or unexpected mounts.
+Release removes the browser before its network owner and retains private state.
+Stopped audit export uses the recorded browser image.
+Partial creation retains its reservation until explicit release.
+An existing Docker-only session gains a companion at its next provision request.
+The provider preserves its working directory and reserves fresh private browser state.
+It retains the old workload-mounted state separately until final deletion.
+If the workload is lost, retained audit export stops the verified companion before reading its journal.
 The Kubernetes provider uses a separate session-owned PVC.
+Its readiness and replacement checks include the browser image, topology, private mounts, and preflight readiness.
+Trusted browser RPC, evidence transfers, and lifecycle probes select `target: "browser"` with privileged execution.
+Providers reject an invalid browser target instead of falling back to the workload.
+The API grants browser availability independently of the session's Docker and nested-Kubernetes flags.
 Deployment requires the Localhost seccomp profile on each Kubernetes node.
 See [browser deployment](../../deploy/browser.md) for installation and identity details.
 

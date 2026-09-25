@@ -90,6 +90,7 @@ describe("browser container boundary", () => {
       browserSeccompProfile: "/profiles/browser.json",
       env: {
         VALET_BROWSER_CONFINE: "0",
+        VALET_BROWSER_WORKSPACE_READONLY: "1",
         VALET_BROWSER_STATE: "/workspace",
         PATH: "/workspace",
         NODE_OPTIONS: "--require /workspace/inject.cjs",
@@ -97,6 +98,7 @@ describe("browser container boundary", () => {
       },
     });
     expect(args).not.toContain("VALET_BROWSER_CONFINE=0");
+    expect(args).not.toContain("VALET_BROWSER_WORKSPACE_READONLY=1");
     expect(args).not.toContain("VALET_BROWSER_STATE=/workspace");
     expect(args).not.toContain("PATH=/workspace");
     expect(args).not.toContain("NODE_OPTIONS=--require /workspace/inject.cjs");

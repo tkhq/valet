@@ -63,6 +63,7 @@ function fixture(
     exec: async (command, opts) => {
       if (command.startsWith("/usr/bin/env -i ")) {
         expect(opts?.privileged).toBe(true);
+        expect(opts?.target).toBe("browser");
         return {
           exitCode: 0,
           stdout: Buffer.from(image).toString("base64"),

@@ -16,6 +16,7 @@ export async function browserRequest(
   let parsed: unknown = await browserChannelRequest(sandbox, request, signal);
   if (parsed === null) {
     const result = await sandbox.exec("/usr/local/bin/valet-browser-client", {
+      target: "browser",
       stdin: JSON.stringify(request),
       timeout: 35_000,
       maxOutputBytes: 1_048_576,
@@ -78,6 +79,7 @@ export async function readBrowserExport(
     `/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node -e '${script}'`,
     {
       stdin: JSON.stringify({ path: artifact.path, bytes: artifact.bytes }),
+      target: "browser",
       privileged: true,
       timeout: 35_000,
       maxOutputBytes: Math.ceil(artifact.bytes / 3) * 4 + 1024,

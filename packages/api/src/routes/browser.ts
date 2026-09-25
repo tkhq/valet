@@ -225,10 +225,7 @@ async function context(
     actorId: c.var.user.id,
     ownerId: session.ownerId,
   };
-  const enabled =
-    sandboxProvider.capabilities().browserAutomation === true &&
-    !session.docker &&
-    !session.kubernetes;
+  const enabled = sandboxProvider.capabilities().browserAutomation === true;
   const settings = await policy.settings(session.id);
   const canAdminister = await canAdministerSession(
     db,
@@ -297,7 +294,7 @@ async function status(c: Context<AppEnv>, start = false) {
         (
           await ctx.attached.exec(
             "test -S /var/lib/valet/browser/browser.sock",
-            { timeout: 5000, privileged: true },
+            { target: "browser", timeout: 5000, privileged: true },
           )
         ).exitCode === 0
       ) {
@@ -320,7 +317,7 @@ async function status(c: Context<AppEnv>, start = false) {
             c.req.raw.signal.throwIfAborted();
             const socket = await ctx.attached.exec(
               "test -S /var/lib/valet/browser/browser.sock",
-              { timeout: 5000, privileged: true },
+              { target: "browser", timeout: 5000, privileged: true },
             );
             if (socket.exitCode !== 0) {
               socketRemoved = true;
@@ -365,6 +362,7 @@ browserRouter.patch("/:id/browser/settings", async (c) => {
     ctx.sandbox &&
     (
       await ctx.sandbox.exec("test -S /var/lib/valet/browser/browser.sock", {
+        target: "browser",
         timeout: 5000,
         privileged: true,
       })
@@ -679,6 +677,7 @@ browserRouter.get(
       artifact &&
       (
         await ctx.sandbox.exec("test -S /var/lib/valet/browser/browser.sock", {
+          target: "browser",
           timeout: 5000,
           privileged: true,
         })
