@@ -3631,6 +3631,9 @@ export interface UsageBucket {
  * org (org-admin only), or one team (team-member only, needs `teamId=`). */
 export type UsageScopeName = "me" | "org" | "team";
 
+/** CSV export detail: UTC aggregate buckets or one row per billable turn. */
+export type UsageExportGranularity = "day" | "hour" | "turn";
+
 /** A Usage page period. Custom start and end dates are inclusive UTC dates. */
 export type UsagePeriodSelection =
   | { kind: "lookback"; window: "24h" | "7d" | "30d" }

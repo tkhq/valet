@@ -6,7 +6,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { getUsageBreakdown } from "../services/usage.js";
+import { createUsageTurnExportStream, getUsageBreakdown } from "../services/usage.js";
 import {
   agentSessions,
   assistants,
@@ -276,9 +276,9 @@ describe("GET /api/usage — scope=team", () => {
       .insert(teamMembers)
       .values({ teamId: "team-x", userId: "test-member", role: "member" });
 
-    const adminRes = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`);
+    const adminRes = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x&granularity=turn`);
     expect(adminRes.status).toBe(200);
-    expect(adminRes.headers.get("content-disposition")).toContain("valet-usage-team-team-x-30d.csv");
+    expect(adminRes.headers.get("content-disposition")).toContain("valet-usage-team-team-x-30d-turn.csv");
     const adminText = await adminRes.text();
     expect(adminText).toContain("s-team");
     expect(adminText).not.toContain("s-mine");
@@ -286,7 +286,7 @@ describe("GET /api/usage — scope=team", () => {
     expect(adminText).toContain("Local Dev");
     expect(adminText).toContain("local@dev");
 
-    const memberRes = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`, {
+    const memberRes = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x&granularity=turn`, {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     const memberText = await memberRes.text();
@@ -356,6 +356,141 @@ describe("GET /api/usage/items — symmetric drill-down", () => {
 });
 
 describe("GET /api/usage/export.csv", () => {
+  function aggregateTotals(csv: string) {
+    const [headerLine, ...lines] = csv.trim().split("\n");
+    const headers = headerLine.split(",");
+    const index = (name: string) => headers.indexOf(name);
+    const sum = (name: string) => lines.reduce((total, line) => total + Number(line.split(",")[index(name)]), 0);
+    return {
+      turns: sum("turns"), unpricedTurns: sum("unpriced_turns"),
+      inputTokens: sum("input_tokens"), outputTokens: sum("output_tokens"),
+      cacheReadTokens: sum("cache_read_tokens"), cacheWriteTokens: sum("cache_write_tokens"),
+      totalTokens: sum("total_tokens"), costUsd: sum("cost_usd"),
+    };
+  }
+
+  it("defaults to daily aggregates, supports hourly UTC buckets, and rejects invalid granularity", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const today = new Date().toISOString().slice(0, 10);
+    const midnight = Date.parse(`${today}T00:00:00.000Z`);
+    const previousDay = new Date(midnight - 86_400_000).toISOString().slice(0, 10);
+    await db.insert(agentSessions).values({
+      id: "aggregate-boundary", userId: "local-user", orgId: "local-org", workspace: "/w",
+      status: "active", ownerType: "user", ownerId: "local-user", createdAt: midnight - 1, updatedAt: midnight,
+    });
+    await seedEngineEntry(api, "aggregate-before-day", "aggregate-boundary", midnight - 1);
+    await seedEngineEntry(api, "aggregate-before-hour", "aggregate-boundary", midnight + 3_599_999);
+    await seedEngineEntry(api, "aggregate-at-hour", "aggregate-boundary", midnight + 3_600_000);
+    await db.insert(llmProxyRequests).values({
+      id: "aggregate-provider", createdAt: midnight + 3_600_000, orgId: "local-org", userId: "local-user",
+      apiKeyId: "provider", providerKind: "anthropic", model: "proxy-model", endpoint: "/v1/messages",
+      stream: false, statusCode: 200, requestBody: "{}", totalTokens: 1,
+    });
+
+    const daily = await fetch(`${api.baseUrl}/api/usage/export.csv?start=${previousDay}&end=${today}`);
+    expect(daily.status).toBe(200);
+    expect(daily.headers.get("content-disposition")).toContain("-day.csv");
+    const dailyLines = (await daily.text()).trim().split("\n");
+    expect(dailyLines[0]).toContain("bucket_start");
+    expect(dailyLines).toHaveLength(4);
+    expect(dailyLines.some((line) => line.startsWith(new Date(midnight - 86_400_000).toISOString()))).toBe(true);
+    expect(dailyLines.some((line) => line.startsWith(new Date(midnight).toISOString()))).toBe(true);
+    expect(dailyLines.some((line) => line.includes(",proxy,anthropic,proxy-model,"))).toBe(true);
+
+    const hourly = await fetch(`${api.baseUrl}/api/usage/export.csv?start=${previousDay}&end=${today}&granularity=hour`);
+    const hourLines = (await hourly.text()).trim().split("\n");
+    expect(hourLines).toHaveLength(5);
+    expect(hourLines.some((line) => line.startsWith(new Date(midnight).toISOString()))).toBe(true);
+    expect(hourLines.some((line) => line.startsWith(new Date(midnight + 3_600_000).toISOString()))).toBe(true);
+
+    const invalid = await fetch(`${api.baseUrl}/api/usage/export.csv?granularity=week`);
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: {
+      code: "invalid_granularity", message: "Choose granularity day, hour, or turn.",
+    } });
+  });
+
+  it("reconciles aggregate totals with breakdown for me, org, and team scopes, including unpriced turns", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(teams).values({ id: "aggregate-team", orgId: "local-org", name: "Aggregate", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "aggregate-team", userId: "local-user", role: "admin" });
+    await db.insert(agentSessions).values([
+      { id: "aggregate-me", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
+      { id: "aggregate-team-session", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "aggregate-team", createdAt: now, updatedAt: now },
+      { id: "aggregate-other", userId: "test-member", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "test-member", createdAt: now, updatedAt: now },
+    ]);
+    await seedEngineEntry(api, "aggregate-me-entry", "aggregate-me", now);
+    await seedEngineEntry(api, "aggregate-team-entry", "aggregate-team-session", now);
+    await seedEngineEntry(api, "aggregate-other-entry", "aggregate-other", now);
+    await db.execute(sql`UPDATE engine_entries SET cost = NULL WHERE id = 'aggregate-team-entry'`);
+
+    for (const suffix of ["", "&scope=org", "&scope=team&teamId=aggregate-team"]) {
+      const breakdown = await (await fetch(`${api.baseUrl}/api/usage/breakdown?window=30d${suffix}`)).json() as UsageBreakdownResponse;
+      const csv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d${suffix}`)).text();
+      expect(aggregateTotals(csv)).toEqual({
+        turns: breakdown.totalTurns, unpricedTurns: breakdown.unpricedTurns,
+        inputTokens: breakdown.totalInputTokens, outputTokens: breakdown.totalOutputTokens,
+        cacheReadTokens: breakdown.totalCacheReadTokens, cacheWriteTokens: breakdown.totalCacheWriteTokens,
+        totalTokens: breakdown.totalTokens, costUsd: breakdown.totalCostUsd,
+      });
+    }
+  });
+
+  it("removes user identity from a plain member aggregate group and neutralizes formulas", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.insert(teams).values({ id: "private-team", orgId: "local-org", name: "Private", createdAt: now });
+    await db.insert(teamMembers).values([
+      { teamId: "private-team", userId: "local-user", role: "member" },
+      { teamId: "private-team", userId: "test-member", role: "member" },
+    ]);
+    await db.insert(agentSessions).values([
+      { id: "private-a", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "private-team", createdAt: now, updatedAt: now },
+      { id: "private-b", userId: "test-member", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "private-team", createdAt: now, updatedAt: now },
+    ]);
+    await seedEngineEntry(api, "private-entry-a", "private-a", now);
+    await seedEngineEntry(api, "private-entry-b", "private-b", now);
+    await db.execute(sql`UPDATE engine_entries SET model = '=formula' WHERE id IN ('private-entry-a', 'private-entry-b')`);
+
+    const headers = { "x-valet-test-user-id": "test-member" };
+    const aggregate = await (await fetch(
+      `${api.baseUrl}/api/usage/export.csv?scope=team&teamId=private-team`, { headers },
+    )).text();
+    const lines = aggregate.trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("\"'=formula\"");
+    expect(lines[1]).not.toContain("local-user");
+    expect(lines[1]).not.toContain("test-member");
+    expect(lines[1]).toContain(",2,0,200,40,0,0,240,0.006");
+
+    const turn = await (await fetch(
+      `${api.baseUrl}/api/usage/export.csv?scope=team&teamId=private-team&granularity=turn`, { headers },
+    )).text();
+    expect(turn).toContain("\"'=formula\"");
+    expect(turn).not.toContain("local-user");
+    expect(turn).not.toContain("test-member");
+  });
+
+  it("errors the itemized stream instead of closing cleanly when a batch query fails", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const stream = createUsageTurnExportStream(db, {
+      windowMs: 30 * 24 * 60 * 60 * 1000,
+      scope: { scope: "me", orgId: "local-org", userId: "local-user" },
+    });
+    const originalExecute = db.execute.bind(db);
+    db.execute = () => originalExecute(sql`SELECT * FROM injected_usage_export_failure`);
+    const reader = stream.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain("timestamp");
+    await expect(reader.read()).rejects.toThrow("injected_usage_export_failure");
+    db.execute = originalExecute;
+  });
+
   it("exports the caller's rows as CSV with a header and an attachment", async () => {
     api = await bootTestApi();
     const now = Date.now();
@@ -367,10 +502,10 @@ describe("GET /api/usage/export.csv", () => {
       await api.providers.db.execute(sql`UPDATE engine_entries SET model = ${model} WHERE id = ${entryId}`);
     }
 
-    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d`);
+    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&granularity=turn`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/csv");
-    expect(res.headers.get("content-disposition")).toContain("valet-usage-me-30d.csv");
+    expect(res.headers.get("content-disposition")).toContain("valet-usage-me-30d-turn.csv");
     const text = await res.text();
     const [header, ...rows] = text.trim().split("\n");
     expect(header).toContain("timestamp,use_case,model");
@@ -409,7 +544,7 @@ describe("GET /api/usage/export.csv", () => {
       requestBody: "{}", inputTokens: 10, outputTokens: 2, totalTokens: 12, costUsd: 0.01,
     });
 
-    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?scope=org&window=30d`);
+    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?scope=org&window=30d&granularity=turn`);
     expect(res.status).toBe(200);
     const lines = (await res.text()).trim().split("\n");
     expect(lines[0]).toBe("timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced,employee_name,employee_email,repository,channel_type,channel_id");
@@ -429,7 +564,7 @@ describe("GET /api/usage/export.csv", () => {
     expect(shared).toContain(",proxy,gpt,,,,10,2,0,0,12,0.01,true,,,,,");
   });
 
-  it("rejects exports over 100,000 rows without returning a partial CSV", async () => {
+  it("streams every row over 100,000 without gaps or duplicates at tied timestamps", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await api.providers.db.insert(agentSessions).values({
@@ -438,21 +573,21 @@ describe("GET /api/usage/export.csv", () => {
     });
     await api.providers.db.execute(sql`
       INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
-      SELECT 'e-csv-overflow-' || i, 's-csv-overflow', 'th', 'message', 'assistant', 'claude',
+      SELECT 'e-csv-overflow-' || lpad(i::text, 6, '0'), 's-csv-overflow', 'th',
+             'message', 'assistant', 'model-' || lpad(i::text, 6, '0'),
              ${USAGE}::text, ${COST}::text, ${now}
       FROM generate_series(1, 100001) AS i
     `);
 
-    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d`);
-    expect(res.status).toBe(422);
-    expect(res.headers.get("content-disposition")).toBeNull();
-    expect(await res.json()).toEqual({
-      error: {
-        code: "export_too_large",
-        message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
-      },
-    });
-  }, 30_000);
+    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&granularity=turn`);
+    expect(res.status).toBe(200);
+    const lines = (await res.text()).trim().split("\n");
+    expect(lines).toHaveLength(100002);
+    const models = lines.slice(1).map((line) => line.split(",")[2]);
+    expect(new Set(models).size).toBe(100001);
+    expect(models[0]).toBe("model-100001");
+    expect(models.at(-1)).toBe("model-000001");
+  }, 60_000);
 });
 
 describe("GET /api/usage/summary", () => {
@@ -711,7 +846,7 @@ describe("GET /api/usage custom periods", () => {
     expect(org.totalTurns).toBe(2);
     expect(team.totalTurns).toBe(1);
 
-    const csv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?${dates}`)).text();
+    const csv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?${dates}&granularity=turn`)).text();
     expect(csv).toContain("period-personal");
     expect(csv.match(/period-personal/g)).toHaveLength(1);
   });

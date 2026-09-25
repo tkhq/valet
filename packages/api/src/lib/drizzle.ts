@@ -194,7 +194,8 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
           WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
           WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
           ELSE 'session'
-        END                                                        AS "use_case"
+        END                                                        AS "use_case",
+        NULL::text                                                  AS "provider"
       FROM "engine_entries" e
       LEFT JOIN "agent_sessions" s
         ON s."id" = e."session_id"
@@ -213,7 +214,7 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
         COALESCE(p."team_id", p."user_id") AS "owner_id",
         NULL AS "workflow_id", NULL AS "workflow_run_id",
         p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
-        p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
+        p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case", p."provider_kind" AS "provider"
       FROM "llm_proxy_requests" p
       WHERE p."total_tokens" > 0`;
 
@@ -881,14 +882,21 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     // and a UNION ALL leg over llm_proxy_requests. A view's output columns
     // appear in information_schema.columns, so the `column` probe on the new
     // use_case column detects the pre-rewrite view; CREATE OR REPLACE swaps the
-    // definition in place. The replace is safe because the rewrite only appends
-    // use_case after `priced` and leaves every prior column identical, so
+    // definition in place. The replace is safe because the rewrite appends
+    // use_case and provider after `priced` and leaves every prior column identical, so
     // Postgres allows it without a DROP (which would take a heavier lock and
     // fail on any dependent). This entry MUST stay after the table entry above
     // — the UNION leg references llm_proxy_requests. Keep the SELECT in lockstep
     // with the cost_entries view in 0000_app.sql.
     describe: "cost_entries.use_case (view rewrite)",
     probe: { kind: "column", table: "cost_entries", column: "use_case" },
+    sql: COST_ENTRIES_VIEW_SQL,
+  },
+  {
+    // The aggregate export exposes provider only where the ledger records it.
+    // Engine entries have no provider field, while proxy rows carry provider_kind.
+    describe: "cost_entries.provider (view rewrite)",
+    probe: { kind: "column", table: "cost_entries", column: "provider" },
     sql: COST_ENTRIES_VIEW_SQL,
   },
   {

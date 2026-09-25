@@ -18,7 +18,7 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
@@ -26,9 +26,8 @@ import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
-import type { UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
+import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
-import { downloadTextFile } from "~/lib/download";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -245,6 +244,8 @@ export function UsagePage() {
   const [customEnd, setCustomEnd] = useState("");
   const [exportError, setExportError] = useState<unknown>();
   const [exporting, setExporting] = useState(false);
+  const [exportGranularity, setExportGranularity] = useState<UsageExportGranularity>("day");
+  const exportLinkRef = useRef<HTMLAnchorElement>(null);
   const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
   // Keep only cursor history, not every loaded row. Each page remains bounded
   // by the server's explicit page size.
@@ -305,7 +306,7 @@ export function UsagePage() {
         (breakdown.totalInputTokens + breakdown.totalCacheReadTokens)
       : null;
 
-  const csvHref = api.usageExportCsvUrl(period, scope, teamId);
+  const csvHref = api.usageExportCsvUrl(period, scope, exportGranularity, teamId);
   const periodLabel = period.kind === "lookback"
     ? period.window
     : period.kind === "month"
@@ -335,16 +336,13 @@ export function UsagePage() {
     setPeriod({ kind: "custom", start: customStart, end: customEnd });
   }
 
-  async function handleCsvDownload(event: MouseEvent<HTMLAnchorElement>) {
-    event.preventDefault();
+  async function handleCsvDownload() {
     if (exporting) return;
     setExportError(undefined);
     setExporting(true);
     try {
-      const csv = await api.usageExportCsv(period, scope, teamId);
-      const scopeLabel = scope === "team" ? `team-${teamId}` : scope;
-      const filenamePeriod = periodLabel.replaceAll(" to ", "_to_");
-      downloadTextFile(`valet-usage-${scopeLabel}-${filenamePeriod}.csv`, csv, "text/csv;charset=utf-8");
+      await api.validateUsageExport(period, scope, exportGranularity, teamId);
+      exportLinkRef.current?.click();
     } catch (error) {
       setExportError(error);
     } finally {
@@ -483,16 +481,34 @@ export function UsagePage() {
             </div>
           )}
           {scopeKnown && (
-            <a
-              href={csvHref}
-              download
-              onClick={handleCsvDownload}
-              aria-disabled={exporting}
-              className="inline-flex w-full items-center justify-center sm:ml-auto sm:w-auto min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 border-line text-muted hover:text-ink hover:border-ink"
-              aria-label={`Download CSV (${periodLabel}, ${scope})`}
-            >
-              {exporting ? "Preparing CSV…" : `Download CSV (${periodLabel}, ${scope})`}
-            </a>
+            <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+              <label className="text-sm text-muted">
+                <span className="sr-only">CSV granularity</span>
+                <select
+                  aria-label="CSV granularity"
+                  value={exportGranularity}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "day" || value === "hour" || value === "turn") setExportGranularity(value);
+                  }}
+                  className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0 sm:py-1"
+                >
+                  <option value="day">Daily</option>
+                  <option value="hour">Hourly</option>
+                  <option value="turn">Itemized (per turn)</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                disabled={exporting}
+                onClick={handleCsvDownload}
+                className="inline-flex min-h-11 flex-1 items-center justify-center rounded border border-line px-3 py-2 text-sm text-muted hover:border-ink hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:flex-none sm:py-1"
+                aria-label={`Download CSV (${periodLabel}, ${scope})`}
+              >
+                {exporting ? "Validating export…" : `Download CSV (${periodLabel}, ${scope})`}
+              </button>
+              <a ref={exportLinkRef} href={csvHref} className="sr-only" tabIndex={-1} aria-hidden="true">Download</a>
+            </div>
           )}
         </div>
         {exportError !== undefined && (

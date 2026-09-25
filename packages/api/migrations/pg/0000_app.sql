@@ -1442,7 +1442,8 @@ SELECT
 		WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
 		WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
 		ELSE 'session'
-	END                                                        AS "use_case"
+	END                                                        AS "use_case",
+	NULL::text                                                  AS "provider"
 FROM "engine_entries" e
 LEFT JOIN "agent_sessions" s
 	ON s."id" = e."session_id"
@@ -1461,7 +1462,7 @@ SELECT
         COALESCE(p."team_id", p."user_id") AS "owner_id",
 	NULL AS "workflow_id", NULL AS "workflow_run_id",
 	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
-	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
+	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case", p."provider_kind" AS "provider"
 FROM "llm_proxy_requests" p
 -- Only rows that carry usage count as billable turns — mirrors the engine
 -- side's `WHERE e."usage" IS NOT NULL`. Excludes failed/4xx proxy calls and

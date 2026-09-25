@@ -380,26 +380,25 @@ vi.mock("~/components/workspace-clause", () => ({
 }));
 
 let usageExportError: Error | undefined;
+let usageExportValidations: Array<{ granularity: string; scope: string; teamId?: string }> = [];
 
 // Mock api client — usageExportCsvUrl is a pure URL builder.
 vi.mock("~/api/client", () => ({
   api: {
-    usageExportCsv: async () => {
+    validateUsageExport: async (_period: UsagePeriodSelection, scope: string, granularity: string, teamId?: string) => {
+      usageExportValidations.push({ granularity, scope, ...(teamId === undefined ? {} : { teamId }) });
       if (usageExportError) throw usageExportError;
-      return "csv";
     },
-    usageExportCsvUrl: (period: UsagePeriodSelection, scope: string, teamId?: string) => {
+    usageExportCsvUrl: (period: UsagePeriodSelection, scope: string, granularity = "day", teamId?: string) => {
       const query = period.kind === "lookback"
         ? `window=${period.window}`
         : period.kind === "month"
           ? `month=${period.month}`
           : `start=${period.start}&end=${period.end}`;
-      return `/api/usage/export.csv?${query}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`;
+      return `/api/usage/export.csv?${query}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}&granularity=${granularity}`;
     },
   },
 }));
-
-vi.mock("~/lib/download", () => ({ downloadTextFile: vi.fn() }));
 
 import { UsagePage } from "./usage";
 
@@ -421,6 +420,7 @@ beforeEach(() => {
   workspaceTeamId = undefined;
   workspaceResolved = true;
   usageExportError = undefined;
+  usageExportValidations = [];
   breakdownCalls = [];
   lastProxyRequestsOpts = undefined;
   lastProxySettingsOpts = undefined;
@@ -751,30 +751,37 @@ describe("UsagePage — by model section", () => {
 });
 
 describe("UsagePage — CSV export", () => {
-  it("renders a Download CSV link pointing at /api/usage/export.csv", () => {
+  it("defaults to daily export and builds the native download URL", () => {
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink).toBeTruthy();
-    expect(csvLink!.href).toContain("/api/usage/export.csv");
+    const granularity = screen.getByLabelText("CSV granularity") as HTMLSelectElement;
+    expect(granularity.value).toBe("day");
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("window=7d");
+    expect(csvLink.href).toContain("scope=me");
+    expect(csvLink.href).toContain("granularity=day");
+    expect(csvLink.hasAttribute("download")).toBe(false);
   });
 
-  it("CSV link includes the current window param", () => {
+  it("selects itemized export, validates it, then uses the native anchor", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink!.href).toContain("window=7d");
+    fireEvent.change(screen.getByLabelText("CSV granularity"), { target: { value: "turn" } });
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("granularity=turn");
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV (7d, me)" }));
+    await waitFor(() => expect(usageExportValidations).toEqual([{ granularity: "turn", scope: "me" }]));
+    expect(click).toHaveBeenCalledTimes(1);
   });
 
-  it("CSV link includes the current scope param", () => {
+  it("shows validation errors and does not start a native download", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    usageExportError = Object.assign(new Error("GET /usage/export.csv → 400"), {
+      payload: { error: { code: "invalid_range", message: "Choose a valid export range." } },
+    });
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink!.href).toContain("scope=me");
-  });
-
-  it("CSV link label mentions current window and scope", () => {
-    render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
-    expect(csvLink!.textContent).toMatch(/7d/);
-    expect(csvLink!.textContent).toMatch(/me/);
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV (7d, me)" }));
+    expect(await screen.findByText("Choose a valid export range.")).toBeTruthy();
+    expect(click).not.toHaveBeenCalled();
   });
 });
 
@@ -801,7 +808,7 @@ describe("UsagePage — team workspace scope", () => {
 
   it("pins the CSV export to scope=team with the team id", () => {
     render(<UsagePage />);
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement | null;
     expect(csvLink!.href).toContain("scope=team");
     expect(csvLink!.href).toContain("teamId=team-x");
   });
@@ -896,7 +903,7 @@ describe("UsagePage — workspace still resolving", () => {
     breakdownResult = { data: undefined, isLoading: false, error: null };
     render(<UsagePage />);
     expect(screen.getByText("Loading…")).toBeTruthy();
-    expect(document.querySelector("a[download]")).toBeNull();
+    expect(document.querySelector("a[href*='/api/usage/export.csv']")).toBeNull();
   });
 });
 
@@ -948,7 +955,7 @@ describe("UsagePage custom period controls", () => {
     const month = screen.getByLabelText("Calendar month") as HTMLInputElement;
     fireEvent.change(month, { target: { value: "2024-02" } });
     expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "month", month: "2024-02" });
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
     expect(csvLink.href).toContain("month=2024-02");
   });
 
@@ -958,9 +965,9 @@ describe("UsagePage custom period controls", () => {
     fireEvent.change(screen.getByLabelText("Custom end date"), { target: { value: "2024-02-29" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply dates" }));
     expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "custom", start: "2024-02-01", end: "2024-02-29" });
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
     expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
-    expect(csvLink.textContent).toContain("2024-02-01 to 2024-02-29");
+    expect(screen.getByRole("button", { name: "Download CSV (2024-02-01 to 2024-02-29, me)" })).toBeTruthy();
   });
 
   it("marks edited custom dates as pending while data and CSV keep the applied range", () => {
@@ -977,7 +984,7 @@ describe("UsagePage custom period controls", () => {
     fireEvent.change(start, { target: { value: "2024-02-02" } });
     expect(apply.getAttribute("aria-pressed")).toBe("false");
     expect(apply.className).toContain("border-amber-500");
-    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement;
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
     expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
     expect(breakdownCalls.at(-1)?.[0]).toEqual({
       kind: "custom",
@@ -1001,22 +1008,6 @@ describe("UsagePage custom period controls", () => {
     render(<UsagePage />);
     expect(screen.getByText("Choose an end date on or after the start date.")).toBeTruthy();
     expect(screen.queryByText(/GET \/usage\/breakdown/)).toBeNull();
-  });
-
-  it("shows an oversized export error instead of downloading a partial CSV", async () => {
-    usageExportError = Object.assign(new Error("GET /usage/export.csv → 422"), {
-      payload: {
-        error: {
-          code: "export_too_large",
-          message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
-        },
-      },
-    });
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("link", { name: "Download CSV (7d, me)" }));
-    expect(await screen.findByText(
-      "This export has more than 100,000 rows. Choose a shorter date range and try again.",
-    )).toBeTruthy();
   });
 
   it("refreshes picker limits when the page renders after UTC midnight", () => {
