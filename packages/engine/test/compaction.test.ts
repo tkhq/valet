@@ -1736,7 +1736,7 @@ describe("compaction: summarizer input covers the head", () => {
 
     expect(result.summary).toBe(SUMMARY_RESPONSE);
     // Providers reject a transcript that opens on an assistant message.
-    expect(roles[0]).toBe("user");
+    expect(roles.find((role) => role !== "system")).toBe("user");
     faux.unregister();
   });
 

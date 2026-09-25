@@ -1094,7 +1094,13 @@ export const api = {
     const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
     return request<ListEventsResponse>("GET", path);
   },
-  listEventDrops: () => request<ListEventDropsResponse>("GET", "/events/drops"),
+  listEventDrops: (params: { q?: string; cursor?: string; direction?: "previous" } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.direction) qs.set("direction", params.direction);
+    return request<ListEventDropsResponse>("GET", `/events/drops${qs.size ? `?${qs}` : ""}`);
+  },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),

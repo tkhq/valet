@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, expect, it } from "vitest";
 import { registerFauxProvider, type Context, type StreamOptions } from "@earendil-works/pi-ai/compat";
 import {
@@ -16,7 +17,7 @@ async function promptSystemPrompt(content: PromptContent): Promise<string | unde
   let systemPrompt: string | undefined;
   faux.setResponses([
     (context: Context, _opts: StreamOptions | undefined, _state, model) => {
-      systemPrompt = context.systemPrompt;
+      systemPrompt = getCurrentSystemPrompt(context.messages);
       return {
         role: "assistant" as const,
         content: [{ type: "text" as const, text: "ack" }],

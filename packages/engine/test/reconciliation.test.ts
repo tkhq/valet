@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
@@ -842,7 +843,7 @@ describe("reconciliation executor (integration)", () => {
       nextFaux.setResponses([
         (context) => {
           nextCalls += 1;
-          nextPromptSystem = context.systemPrompt;
+          nextPromptSystem = getCurrentSystemPrompt(context.messages);
           return fauxAssistantMessage("next prompt completed");
         },
       ]);
@@ -991,7 +992,7 @@ describe("reconciliation executor (integration)", () => {
       nextFaux.setResponses([
         (context) => {
           nextCalls += 1;
-          nextPromptSystem = context.systemPrompt;
+          nextPromptSystem = getCurrentSystemPrompt(context.messages);
           return fauxAssistantMessage("next prompt completed");
         },
       ]);

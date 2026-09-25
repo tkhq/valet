@@ -124,6 +124,19 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   }
 
   await addColumnsMissingFromAppliedMigrations(db);
+  await expandLegacySlackWildcards(db);
+}
+
+const LEGACY_SLACK_EVENT_KEYS = [
+  "slack.app_mention", "slack.message", "slack.reaction_added", "slack.reaction_removed", "slack.member_joined_channel", "slack.member_left_channel", "slack.channel_created", "slack.channel_rename", "slack.channel_archive", "slack.channel_unarchive", "slack.file_shared", "slack.team_join",
+];
+
+/** Preserve the meaning of rows created before slack.bot_message existed. */
+export async function expandLegacySlackWildcards(db: PgDb): Promise<void> {
+  await db.query(
+    `UPDATE event_subscriptions SET event_keys = (SELECT jsonb_agg(DISTINCT key) FROM (SELECT value AS key FROM jsonb_array_elements_text(event_keys) WHERE value <> 'slack.*' UNION ALL SELECT unnest($1::text[])) keys), updated_at = $2 WHERE event_keys ? 'slack.*'`,
+    [LEGACY_SLACK_EVENT_KEYS, Date.now()],
+  );
 }
 
 /**
@@ -1357,6 +1370,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "apikey_teamId_idx index",
     probe: { kind: "index", index: "apikey_teamId_idx" },
     sql: 'CREATE INDEX IF NOT EXISTS "apikey_teamId_idx" ON "apikey" ("team_id")',
+  },
+  {
+    describe: "event_drop_log_page index",
+    probe: { kind: "index", index: "event_drop_log_page" },
+    sql: 'CREATE INDEX IF NOT EXISTS "event_drop_log_page" ON "event_drop_log" ("org_id","created_at","id")',
   },
   {
     // Whose credentials a team-owned session reads (team credentials

@@ -58,7 +58,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration, type JsonObject } from "@earendil-works/pi-ai/compat";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import type {
@@ -179,7 +179,7 @@ async function poll<T>(fn: () => Promise<T>, ok: (v: T) => boolean, timeoutMs = 
 /** Queue one faux LLM turn: a `call_tool` invocation followed by a plain
  * text acknowledgement (consumed once the tool call — gated or not —
  * settles and the agent loop asks the model what to say next). */
-function queueCallTool(f: FauxProviderRegistration, toolId: string, params: Record<string, unknown>, summary: string) {
+function queueCallTool(f: FauxProviderRegistration, toolId: string, params: JsonObject, summary: string) {
   f.appendResponses([
     fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: toolId, params, summary }, { id: `tc-${toolId}-${Date.now()}-${Math.random()}` })], {
       stopReason: "toolUse",

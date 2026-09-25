@@ -116,6 +116,25 @@ describe("slackTriggerDefs verify", () => {
     expect(verified).toBeNull();
   });
 
+  it("accepts only third-party bot_message events", async () => {
+    const trigger = findTrigger("slack.bot_message");
+    const secrets = { webhookSecret: SECRET, botId: "BVALET", botUserId: "UVALET" };
+    const bot = { type: "message", subtype: "bot_message", bot_id: "BOTHER", app_id: "AOTHER", channel: "C1", text: "ready" };
+    expect(await trigger.verify(signedRequest(envelope(bot, "Ev-bot-ok")), secrets)).not.toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, bot_id: "" }, "Ev-bot-empty")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, subtype: "file_share" }, "Ev-bot-subtype")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, bot_id: "BVALET" }, "Ev-bot-own")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope({ ...bot, user: "UVALET" }, "Ev-bot-user")), secrets)).toBeNull();
+    expect(await trigger.verify(signedRequest(envelope(bot, "Ev-bot-legacy")), { webhookSecret: SECRET })).toBeNull();
+  });
+
+  it("canonicalizes bot_profile.id", async () => {
+    const trigger = findTrigger("slack.bot_message");
+    const event = { type: "message", subtype: "bot_message", bot_profile: { id: "BOTHER", name: "not an identity" } };
+    const verified = await trigger.verify(signedRequest(envelope(event, "Ev-profile")), { webhookSecret: SECRET, botId: "BVALET" });
+    expect(verified?.payload).toMatchObject({ bot_id: "BOTHER" });
+  });
+
   it("drops non-post message subtypes (edits/deletes) but keeps file_share", async () => {
     const trigger = findTrigger("slack.message");
     const edited = { type: "message", subtype: "message_changed", channel: "C1", message: { user: "U1", text: "new" } };
@@ -233,6 +252,7 @@ describe("slackTriggerDefs catalog", () => {
     expect(keys).toEqual(
       [
         "slack.app_mention",
+        "slack.bot_message",
         "slack.message",
         "slack.reaction_added",
         "slack.reaction_removed",

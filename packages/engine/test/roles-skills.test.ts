@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect } from "vitest";
 import { Type, fauxAssistantMessage, registerFauxProvider, type Context, type StreamOptions } from "@earendil-works/pi-ai/compat";
 import {
@@ -41,7 +42,7 @@ describe("roles: per-prompt overlay reaches the LLM via systemPrompt", () => {
     // response factory. The faux provider passes us the full Context.
     faux.setResponses([
       (ctx: Context, _opts: StreamOptions | undefined, _state, model) => {
-        observed.systemPrompt = ctx.systemPrompt;
+        observed.systemPrompt = getCurrentSystemPrompt(ctx.messages);
         return {
           role: "assistant" as const,
           content: [{ type: "text", text: "ack" }],
@@ -88,7 +89,7 @@ You are a careful code reviewer. Always cite file paths.
     const observed2: { systemPrompt?: string } = {};
     faux.setResponses([
       (ctx: Context, _opts, _state, model) => {
-        observed2.systemPrompt = ctx.systemPrompt;
+        observed2.systemPrompt = getCurrentSystemPrompt(ctx.messages);
         return {
           role: "assistant" as const,
           content: [{ type: "text", text: "ack2" }],
@@ -124,12 +125,48 @@ You are a careful code reviewer. Always cite file paths.
     faux.unregister();
   });
 
+  it("keeps a second-turn role overlay after the first turn in provider input", async () => {
+    const faux = registerFauxProvider({ provider: "roles-transcript-order" });
+    let observed: { firstUser: number; firstAssistant: number; role: number } | undefined;
+    faux.setResponses([
+      fauxAssistantMessage("first response"),
+      (ctx: Context, _opts, _state, model) => {
+        const firstUser = ctx.messages.findIndex((message) => message.role === "user");
+        const firstAssistant = ctx.messages.findIndex((message) => message.role === "assistant");
+        const role = ctx.messages.findIndex((message) =>
+          message.role === "system" && message.sections?.["valet-role"] !== undefined,
+        );
+        observed = { firstUser, firstAssistant, role };
+        return fauxAssistantMessage("second response", { model });
+      },
+    ]);
+
+    const role = loadRoleFromMarkdown("---\nname: second-turn\n---\n\nSecond-turn instructions.\n");
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(), roles: [role],
+    });
+    const first = await session.thread().submitPrompt("first", {});
+    await waitForIdle(events, first.threadId);
+    await session.thread().submitPrompt("second", { role: "second-turn" });
+    const start = Date.now();
+    while (!observed) {
+      if (Date.now() - start > 2_000) throw new Error("timed out waiting for second provider call");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(observed.firstUser).toBeGreaterThanOrEqual(0);
+    expect(observed.firstAssistant).toBeGreaterThan(observed.firstUser);
+    expect(observed.role).toBeGreaterThan(observed.firstAssistant);
+    faux.unregister();
+  });
+
   it("unknown role name emits an error event and runs without overlay", async () => {
     const observed: { systemPrompt?: string } = {};
     const faux = registerFauxProvider({ provider: "roles-unknown" });
     faux.setResponses([
       (ctx: Context, _opts, _state, model) => {
-        observed.systemPrompt = ctx.systemPrompt;
+        observed.systemPrompt = getCurrentSystemPrompt(ctx.messages);
         return {
           role: "assistant" as const,
           content: [{ type: "text", text: "ack" }],

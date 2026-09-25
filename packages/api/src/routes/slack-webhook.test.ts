@@ -332,8 +332,6 @@ describe("POST /api/channels/slack/webhook", () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
 
-    // Ingest is match-gated: an unsubscribed event must never reach the
-    // events table.
     const unsubscribed = envelope(dmMessage(), "Ev-msg-1");
     expect((await post(api.baseUrl, unsubscribed, sign(unsubscribed))).status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -343,6 +341,26 @@ describe("POST /api/channels/slack/webhook", () => {
     const subscribed = envelope(dmMessage(), "Ev-msg-2");
     expect((await post(api.baseUrl, subscribed, sign(subscribed))).status).toBe(200);
     await expect.poll(() => eventCount(api!, "Ev-msg-2"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("records only bounded metadata for an unmatched Slack form submission", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    const payload = encodeURIComponent(JSON.stringify({ type: "block_actions", token: "legacy-secret", team: { id: TEAM_ID }, user: { id: "U100" } }));
+    const body = `payload=${payload}`;
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("slack_interaction_unmatched");
+    const drops = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "slack_interaction_unmatched"));
+    expect(drops).toHaveLength(1);
+    expect(JSON.stringify(drops[0])).not.toContain("legacy-secret");
+    const list = await fetch(`${api.baseUrl}/api/events/drops`);
+    expect(JSON.stringify(await list.json())).not.toContain("legacy-secret");
+    expect(await api.providers.db.select().from(events)).toHaveLength(0);
+    expect(await api.providers.db.select().from(eventDeliveries)).toHaveLength(0);
+
+    expect((await post(api.baseUrl, body, { ...sign(body), "x-slack-retry-num": "1" })).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "slack_interaction_unmatched"))).toHaveLength(1);
   });
 
   it("ingests a signed reaction_added and queues a delivery for a matching subscription", async () => {

@@ -8,7 +8,10 @@
  * action in its detail.
  */
 import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Button } from "~/components/primitives";
+import { SearchInput } from "~/components/search-input";
 import { useEventDrops } from "~/api/events";
+import { useState } from "react";
 import { relativeTime } from "~/lib/relative-time";
 
 /** Human labels for the reasons ingest and the webhook routes record. An
@@ -21,11 +24,30 @@ const REASON_LABEL: Record<string, string> = {
   unknown_org: "Not connected",
   transport_unavailable: "Transport down",
   slack_retry: "Slow response",
+  slack_interaction_unmatched: "Slack form did not start a workflow",
   unlinked_sender: "Unlinked sender",
 };
 
-export function DropsPanel() {
-  const dropsQ = useEventDrops();
+export function DropsPanel({
+  query = "",
+  cursor,
+  direction,
+  onQueryChange,
+  onPrevious,
+  onNext,
+}: {
+  query?: string;
+  cursor?: string;
+  direction?: "previous";
+  onQueryChange?: (query: string) => void;
+  onPrevious?: (cursor: string) => void;
+  onNext?: (cursor: string) => void;
+}) {
+  const searchTooLong = query.length > 200;
+  const dropsQ = useEventDrops(
+    { q: query, cursor, direction },
+    { enabled: !searchTooLong },
+  );
 
   return (
     <div className="space-y-4">
@@ -42,27 +64,58 @@ export function DropsPanel() {
         </p>
       )}
 
-      {dropsQ.isPending && <LoadingRow label="Loading problems…" />}
-      {dropsQ.error != null && <ErrorRow>Failed to load. Press refresh to try again.</ErrorRow>}
+      <SearchInput
+        value={query}
+        onSettled={(next) => onQueryChange?.(next)}
+        placeholder="Search problems"
+        aria-label="Search problems"
+        maxLength={200}
+      />
+
+      {searchTooLong && (
+        <ErrorRow>Search is too long. Shorten the search to 200 characters or fewer.</ErrorRow>
+      )}
+      {!searchTooLong && dropsQ.isPending && <LoadingRow label="Loading problems…" />}
+      {dropsQ.error != null && !searchTooLong && (
+        <ErrorRow>
+          {cursor ? <><span>That page is no longer available. </span><button type="button" className="underline" onClick={() => onPrevious?.("")}>Return to the first page</button></> : "Failed to load. Reload the page and try again."}
+        </ErrorRow>
+      )}
       {dropsQ.data && dropsQ.data.drops.length === 0 && (
-        <EmptyRow>No problems in the recent window. Every event that arrived was handled.</EmptyRow>
+        <EmptyRow>
+          {query ? "No problems match this search." : "No problems in the recent window. Every event that arrived was handled."}
+        </EmptyRow>
       )}
 
       {dropsQ.data && dropsQ.data.drops.length > 0 && (
         <ul className="divide-y divide-line border-t border-line">
-          {dropsQ.data.drops.map((drop) => (
-            <li key={drop.id} className="flex flex-col items-start justify-between gap-2 py-3 sm:flex-row sm:gap-3">
-              <div className="min-w-0 space-y-0.5">
-                <div className="text-sm font-medium text-ink">
-                  {REASON_LABEL[drop.reason] ?? drop.reason}
-                </div>
-                <p className="break-words text-xs leading-relaxed text-muted">{drop.detail}</p>
-              </div>
-              <span className="shrink-0 text-xs text-muted">{relativeTime(drop.createdAt)}</span>
-            </li>
-          ))}
+          {dropsQ.data.drops.map((drop) => <DropRow key={drop.id} drop={drop} />)}
         </ul>
       )}
+
+      <nav className="flex gap-2" aria-label="Problems pages">
+        <Button type="button" variant="secondary" disabled={!dropsQ.data?.previousCursor} aria-busy={dropsQ.isPending} onClick={() => !dropsQ.isPending && dropsQ.data?.previousCursor && onPrevious?.(dropsQ.data.previousCursor)}>
+          Previous
+        </Button>
+        <Button type="button" variant="secondary" disabled={!dropsQ.data?.nextCursor} aria-busy={dropsQ.isPending} onClick={() => !dropsQ.isPending && dropsQ.data?.nextCursor && onNext?.(dropsQ.data.nextCursor)}>
+          Next
+        </Button>
+      </nav>
     </div>
   );
+}
+
+function DropRow({ drop }: { drop: { id: string; reason: string; detail: string; createdAt: number } }) {
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = `problem-details-${drop.id}`;
+  return <li className="flex flex-col items-start justify-between gap-2 py-3 sm:flex-row sm:gap-3">
+    <div className="min-w-0 space-y-1">
+      <div className="text-sm font-medium text-ink">{REASON_LABEL[drop.reason] ?? drop.reason}</div>
+      <button type="button" className="text-xs text-muted underline" aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded((value) => !value)}>
+        {expanded ? "Hide details" : "Details"}
+      </button>
+      {expanded && <p id={detailsId} className="break-words text-xs leading-relaxed text-muted">{drop.detail}</p>}
+    </div>
+    <span className="shrink-0 text-xs text-muted">{relativeTime(drop.createdAt)}</span>
+  </li>;
 }

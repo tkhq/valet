@@ -54,7 +54,7 @@ export const qkEvents = {
   feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
     ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
   detail: (id: string) => ["events", "detail", id] as const,
-  drops: () => ["events", "drops"] as const,
+  drops: (q = "", cursor = "", direction = "") => ["events", "drops", q, cursor, direction] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
@@ -121,14 +121,23 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
   });
 }
 
+/** A substring search cannot use the paging index, so it loads once instead
+ * of polling. Unfiltered drops poll like the feed. */
+export function eventDropsRefetchInterval(q?: string): false | 30_000 {
+  return q ? false : 30_000;
+}
+
 /** Recent reasons an event arrived but did not become a feed row, plus the
- * last time any event reached ingest. Polls like the feed — new drops land
- * from external webhooks at any time. */
-export function useEventDrops(opts?: Partial<UseQueryOptions<ListEventDropsResponse>>) {
+ * last time any event reached ingest. */
+export function useEventDrops(
+  params: { q?: string; cursor?: string; direction?: "previous" } = {},
+  opts?: Partial<UseQueryOptions<ListEventDropsResponse>>,
+) {
   return useQuery<ListEventDropsResponse>({
-    queryKey: qkEvents.drops(),
-    queryFn: () => api.listEventDrops(),
-    refetchInterval: 30_000,
+    queryKey: qkEvents.drops(params.q, params.cursor, params.direction),
+    queryFn: () => api.listEventDrops(params),
+    placeholderData: (previousData) => previousData,
+    refetchInterval: eventDropsRefetchInterval(params.q),
     ...opts,
   });
 }
