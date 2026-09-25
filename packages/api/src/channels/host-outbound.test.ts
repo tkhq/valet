@@ -864,7 +864,7 @@ describe("ChannelHost outbound delivery", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const admit = vi.spyOn(engineStore, "admitSubmission");
     const send = vi.spyOn(keyedTransport, "send").mockRejectedValueOnce(new Error("rate_limited"));
-    vi.spyOn(engineHost, "liveSession").mockReturnValue(null);
+    const liveSession = vi.spyOn(engineHost, "liveSession").mockReturnValue(null);
     const { session } = await emitTerminalTurn({
       queueItemId: "qi-feedback-session-not-live",
       origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
@@ -875,6 +875,8 @@ describe("ChannelHost outbound delivery", () => {
       "[channels] reply-dropped feedback skipped: session is not live",
       { sessionId: session.id },
     ));
+    expect(liveSession).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledTimes(1);
     expect(admit).not.toHaveBeenCalled();
   });

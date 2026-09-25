@@ -141,6 +141,8 @@ context. The agent must call a channel action to post.
 contains assistant text but no successful channel action, the host submits one
 `channel.reply_dropped` signal on the same assistant thread. The signal uses
 manual delivery, bypasses overheard digests, and queues behind active work.
+Later inbound channel input can supersede a queued recovery item because its
+thread uses steer mode. Thus recovery is best effort when the thread is busy.
 It tells the agent to do nothing for intentional silence. It tells the agent to call
 `reply_to_origin` only
 when it intended to reply. The origin-agnostic body uses the signal's structured
