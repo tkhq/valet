@@ -18,6 +18,7 @@ import type {
   SandboxCreateOpts,
   SandboxProvider,
   SandboxStatus,
+  PluginActionContext,
   SignalContent,
 } from "@valet/engine";
 import { VirtualSandbox } from "@valet/engine";
@@ -41,6 +42,7 @@ import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILIN
 import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
+import { eventsActionPlugin } from "../events/actions.js";
 
 let api: TestApi | undefined;
 let githubFixture: ReturnType<typeof startGithubFixture> | undefined;
@@ -240,6 +242,63 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
+  });
+
+  it("keeps Problems metadata redacted in a child spawned from a channel turn", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const parent = await api.providers.engineHost.sessionFor("parent-channel-child", {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    const spawned = await buildChildSpawner(deps, new ChildWatcher(deps))(
+      { prompt: "inspect event problems" },
+      {
+        parentSessionId: parent.id,
+        parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+        origin: { channelType: "slack", threadKey: "slack:C1:1.2" },
+      },
+    );
+    const child = api.providers.engineHost.liveSession(spawned.childSessionId);
+    expect(child?.options.sharedTranscript).toBe(true);
+    api.providers.engineHost.evictCache(spawned.childSessionId);
+    const rebuilt = await api.providers.engineHost.sessionFor(spawned.childSessionId, {
+      userId: "local-user", orgId: "local-org", workspace: child?.options.workspace ?? "/tmp",
+    });
+    expect(rebuilt.options.sharedTranscript).toBe(true);
+    await api.providers.db.insert(eventDropLog).values([
+      {
+        id: "child-secret", orgId: "local-org", reason: "filter_excluded", eventKey: "slack.message",
+        eventMetadata: { channel: "C1", text: "secret payroll message", botId: "B_SECRET" },
+        detail: "filtered", createdAt: 2_000,
+      },
+      { id: "child-interaction", orgId: "local-org", reason: "slack_interaction_unmatched", detail: "form details", createdAt: 1_000 },
+    ]);
+    const action = eventsActionPlugin(api.providers.db).actions.find((entry) => entry.id === "events.list_problems");
+    if (!action) throw new Error("events.list_problems is not registered");
+    const actionContext = {
+      userId: "local-user",
+      orgId: "local-org",
+      actionId: "events.list_problems",
+      service: "events",
+      owner: { type: "user", id: "local-user" },
+      sharedTranscript: rebuilt.options.sharedTranscript,
+    } as PluginActionContext;
+
+    const result = await action.execute({}, actionContext);
+    expect(result.success).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("secret payroll message");
+    expect(JSON.stringify(result)).not.toContain("B_SECRET");
+    expect(JSON.stringify(result)).not.toContain("child-interaction");
+    expect(await action.execute({ text: "secret payroll message" }, actionContext)).toMatchObject({
+      success: false,
+      error: expect.stringMatching(/private session/),
+    });
+    expect(await action.execute({ bot_id: "B_SECRET" }, actionContext)).toMatchObject({
+      success: false,
+      error: expect.stringMatching(/private session/),
+    });
   });
 
   // A team orchestrator from before owner-mode resolution keeps resolving

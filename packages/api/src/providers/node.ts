@@ -41,6 +41,7 @@ import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { assistantsActionPlugin } from "../assistants/actions.js";
+import { eventsActionPlugin } from "../events/actions.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
 import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
@@ -384,6 +385,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // A persona write must evict the cached session, and the EngineHost does
   // not exist yet — same one-slot indirection as the workflows deps above.
   const evictRef: { current: ((sessionId: string) => void) | null } = { current: null };
+  const eventsActions: ValetPlugin = {
+    name: "events-actions",
+    version: "0.1.0",
+    description: "Agent-facing received event diagnostics.",
+    actions: [eventsActionPlugin(db)],
+  };
   const assistantsActions: ValetPlugin = {
     name: "assistants-actions",
     version: "0.1.0",
@@ -425,7 +432,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, assistantsActions],
+        [workflowsActions, skillsActions, eventsActions, assistantsActions],
       ]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),

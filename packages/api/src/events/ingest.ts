@@ -9,7 +9,7 @@ import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/eng
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { subscriptionNamesKey } from "./match.js";
-import { authorizedSubscriptionMatchesEvent } from "./team-slack-gate.js";
+import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
 export interface IngestDeps {
@@ -40,14 +40,17 @@ export interface IngestResult {
   /** True when the event matched no enabled subscription and was not
    * persisted. Valet retains an event only when a subscription asked for it. */
   skipped?: boolean;
+  /** True when an enabled subscription names the normalized key, regardless
+   * of whether its filters admitted this occurrence. */
+  namedSubscription?: boolean;
 }
 
 /**
  * Drop-logs the high-signal miss: a subscription NAMES this event key but its
  * filter excluded this occurrence — the "why didn't my trigger fire?" case.
  * Throttled per (org, event key): one row a minute is enough to diagnose a bad
- * filter without a busy key flooding the table. The row records only the event
- * KEY, never the payload or refs.
+ * filter without a busy key flooding the table. The row records the normalized
+ * key and small diagnostic metadata, never the source payload or refs.
  *
  * An event no subscription names at all is NOT logged here — for a high-volume
  * key like slack.message that is every message, so logging it would re-flood
@@ -63,18 +66,102 @@ export function __resetIngestDropThrottle(): void {
   filterDropLoggedAt.clear();
 }
 
-async function logFilterExcludedDrop(db: AppDb, orgId: string, eventKey: string): Promise<void> {
-  const throttleKey = `${orgId}:${eventKey}`;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function claimDropThrottle(orgId: string, suffix: string): boolean {
+  const throttleKey = `${orgId}:${suffix}`;
   const now = Date.now();
   const last = filterDropLoggedAt.get(throttleKey);
-  if (last !== undefined && now - last < FILTER_DROP_COOLDOWN_MS) return;
+  if (last !== undefined && now - last < FILTER_DROP_COOLDOWN_MS) return false;
   filterDropLoggedAt.set(throttleKey, now);
-  const detail = `A ${eventKey} event arrived, but every subscription for it excluded it by filter. Check the filters on your ${eventKey} subscription.`;
+  return true;
+}
+
+const EVENT_PROBLEM_TEXT_MAX_CHARS = 1_000;
+
+function diagnosticMetadata(payload: unknown): Record<string, string> {
+  if (!isRecord(payload)) return {};
+  const pick = (key: string): string | undefined => typeof payload[key] === "string" ? payload[key] : undefined;
+  const metadata: Record<string, string> = {};
+  const channel = pick("channel") ?? pick("channel_id");
+  const text = pick("text");
+  const botId = pick("bot_id");
+  const rawEventType = pick("type");
+  const rawSubtype = pick("subtype");
+  if (channel) metadata.channel = channel;
+  if (text) metadata.text = text.slice(0, EVENT_PROBLEM_TEXT_MAX_CHARS);
+  if (botId) metadata.botId = botId;
+  if (rawEventType) metadata.rawEventType = rawEventType;
+  if (rawSubtype) metadata.rawSubtype = rawSubtype;
+  return metadata;
+}
+
+async function logFilterExcludedDrop(
+  db: AppDb,
+  orgId: string,
+  eventKey: string,
+  payload: unknown,
+  detail?: string,
+  throttleKeySuffix = eventKey,
+  throttleClaimed = false,
+): Promise<void> {
+  if (!throttleClaimed && !claimDropThrottle(orgId, throttleKeySuffix)) return;
+  const message = detail ?? `A ${eventKey} event arrived, but every subscription for it excluded it by filter. Check the filters on your ${eventKey} subscription.`;
   try {
-    await writeDropLog(db, { orgId, reason: "filter_excluded", detail });
+    await writeDropLog(db, {
+      orgId,
+      reason: "filter_excluded",
+      eventKey,
+      eventMetadata: diagnosticMetadata(payload),
+      detail: message,
+    });
   } catch (err) {
     console.error("[ingest] filter-excluded drop-log failed", err);
   }
+}
+
+/**
+ * Records the specific Slack classifier near-miss where a bot message was
+ * normalized as `slack.bot_message` while an enabled subscription explicitly
+ * names `slack.message`. The raw event is not persisted; this is only the
+ * same bounded, throttled diagnostic as a filter miss. Calling this only for
+ * an enabled named key keeps ordinary bot traffic out of the drop log.
+ */
+export async function logSlackMessageBotNearMiss(
+  db: AppDb,
+  orgId: string,
+  payload: unknown,
+): Promise<void> {
+  const subs = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
+  const named = subs.filter((sub) => subscriptionNamesKey(sub, "slack.message"));
+  if (named.length === 0) return;
+  const detail = "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.";
+  const throttleKey = "slack.message:bot_near_miss";
+  const nonTeam = named.find((sub) => !isTeamAssistantRule(sub.ownerType, sub.target));
+  if (nonTeam) {
+    await logFilterExcludedDrop(db, orgId, "slack.message", payload, detail, throttleKey);
+    return;
+  }
+  // Slack bot messages normally have no user. Do not treat an absent sender as
+  // an unauthorized team member and do not create an authorization diagnostic.
+  if (!isRecord(payload) || typeof payload.user !== "string") return;
+  // Claim before membership lookups. A bot flood must not create one denial per
+  // message, and only an all-team candidate set reaches this gate.
+  if (!claimDropThrottle(orgId, throttleKey)) return;
+  for (const sub of named) {
+    if (await authorizedSlackDiagnosticSubscription(db, sub, payload, false)) {
+      await logFilterExcludedDrop(db, orgId, "slack.message", payload, detail, throttleKey, true);
+      return;
+    }
+  }
+  // Every named team subscription rejected the sender. Record exactly one
+  // metadata-free authorization diagnostic after the throttle claim.
+  await authorizedSlackDiagnosticSubscription(db, named[0], payload);
 }
 
 export async function ingestEvent(
@@ -112,13 +199,30 @@ export async function ingestEvent(
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
   const matched: typeof subs = [];
+  let authorizationDenied = false;
   for (const sub of subs) {
-    if (await authorizedSubscriptionMatchesEvent(deps.db, sub, event.key, event.payload, catalog)) matched.push(sub);
+    const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog);
+    if (outcome === "matched") matched.push(sub);
+    if (outcome === "authorization_denied") authorizationDenied = true;
   }
-  if (matched.length === 0 && subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
-    await logFilterExcludedDrop(deps.db, orgId, event.key);
+  const namedSubscriptions = subs.filter((sub) => subscriptionNamesKey(sub, event.key));
+  const namedSubscription = namedSubscriptions.length > 0;
+  // A sender denial is an authorization diagnostic, not a filter miss. Never
+  // retain the denied sender's payload as filter-excluded metadata.
+  if (matched.length === 0 && namedSubscription && !authorizationDenied) {
+    let diagnosticPayload: unknown = event.payload;
+    const teamOnly = namedSubscriptions.every((sub) => isTeamAssistantRule(sub.ownerType, sub.target));
+    if (teamOnly) {
+      const authorized = await Promise.all(namedSubscriptions.map((sub) =>
+        authorizedSlackDiagnosticSubscription(deps.db, sub, event.payload, false),
+      ));
+      // A team-only filter miss from an unauthorized sender can explain the
+      // missed rule, but must not retain their event-derived metadata.
+      if (!authorized.some(Boolean)) diagnosticPayload = undefined;
+    }
+    await logFilterExcludedDrop(deps.db, orgId, event.key, diagnosticPayload);
   }
-  if (matched.length === 0) return { eventId, duplicate: false, deliveries: 0, skipped: true };
+  if (matched.length === 0) return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription };
 
   const result = await deps.db.transaction(async (tx) => {
     const inserted = await tx

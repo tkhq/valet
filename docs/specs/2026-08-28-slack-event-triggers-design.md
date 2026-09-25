@@ -170,13 +170,34 @@ Ingest also drop-logs one match-gated miss: an event whose key a subscription
 **names** but whose filter excluded this occurrence (`filter_excluded`). That is
 the high-signal "my trigger didn't fire" case, and it is bounded by user intent
 (a subscription must exist). It is throttled per (org, event key) at one row a
-minute, and records only the event key — never the payload or refs, so the
-privacy rule holds.
+minute. A diagnostic retains the normalized event key and only these fields
+when the source supplies them: Slack channel ID, bot ID, raw event type and
+subtype, and message text truncated to 1,000 characters. It retains no raw
+payload object, refs, headers, signing secret, token, form values, dedupe key,
+or user ID. The bounded text exists solely so an administrator can identify the
+specific filter miss through `events.list_problems`; it is not copied into the
+event feed or a workflow run. A team sender authorization denial is not a
+filter miss. Valet writes only its metadata-free authorization diagnostic and
+never writes `filter_excluded` metadata for that sender.
 
-An event that **no** subscription names is deliberately NOT drop-logged. For a
-high-volume key like `slack.message` that is every message in the workspace, so
-logging it would re-flood the drop-log the privacy design keeps small. The "last
-event received" signal covers that case instead.
+A key that **no** subscription names is deliberately NOT drop-logged. For a
+high-volume key like `slack.message` that is every message in the workspace,
+logging it would re-flood the drop-log the privacy design keeps small. The one
+exception is the classifier near-miss: if an enabled subscription explicitly
+names `slack.message` and a third-party bot form message normalizes to
+`slack.bot_message`, Valet writes the same bounded, throttled diagnostic under
+`slack.message` and tells the administrator to subscribe to `slack.bot_message`.
+The near-miss uses a throttle key separate from ordinary `slack.message` filter
+misses, so either diagnostic cannot suppress the other. For a team-assistant
+subscription, Valet first applies the live Slack sender authorization gate. If a
+non-team subscription names the key, Valet records the near-miss without a team
+gate. Otherwise, it claims the near-miss throttle before it checks a team
+sender. A bot message with no sender skips the team gate and writes no
+diagnostic. An unauthorized sender can cause one throttled,
+metadata-free authorization diagnostic, but cannot cause retention of bot-message
+text or metadata. This diagnostic gate does not change event delivery. Unrelated
+bot messages remain silent. The "last event received" signal covers the ordinary
+no-subscription case instead.
 
 ### Slack form diagnostics
 
@@ -196,6 +217,35 @@ The diagnostic is not an event row. It cannot enter the activity feed, create a
 delivery, or be redelivered. Slack retries can run the normal channel consumer,
 but the one-minute diagnostic limit prevents retry traffic from growing the log.
 No Slack event is retained only for diagnostics.
+
+### Agent diagnostics
+
+The agent can call `events.list_problems` to inspect the same
+`event_drop_log` records as the Problems tab. It does not use a second event
+store. For a filter-excluded event, the record includes the normalized event
+key and small payload metadata: channel, text (limited to 1,000 characters),
+bot ID, raw event type, and raw subtype when present. It never stores the
+source payload.
+
+The action filters by normalized event key, channel, exact text, bot ID, and a
+receipt time window. Metadata predicates run before the result limit, so a
+matching older record is not hidden by newer unrelated rows. It returns newest
+records first and caps one call at 100 records. Every organization member can
+read ordinary Problems records, but their results expose only the allowlisted
+channel, raw event type, and raw subtype metadata. An organization admin can
+use text and bot ID filters and read those fields only from a private
+user-owned turn with no channel origin. Team-owned and organization-owned
+sessions have shared transcripts. A channel-originated turn also has a shared
+transcript, even when its session is user-owned. A child spawned by such a turn
+inherits the shared-transcript marker. Valet restores that marker from the
+child's stored channel origin after a cache eviction. Valet treats these results
+as member-visible, omits text and bot ID, and rejects those filters even when
+the acting member is an admin. If the action context has no owner, Valet also
+fails closed and applies the shared-transcript rules. The existing admin-only
+`slack_interaction_unmatched` rule follows this private-session boundary. These
+fields have no separate retention clock: they follow the existing
+`event_drop_log` lifecycle; this feature adds neither a second store nor an
+event-payload retention path.
 
 ## Mention scoping (TKAI-299, added 2026-09-01)
 

@@ -70,7 +70,7 @@ export class SignalEdgeDeniedError extends Error {
  */
 export async function writeDropLog(
   db: AppDb,
-  fields: { orgId: string; reason: string; conversationKey?: string; detail: string },
+  fields: { orgId: string; reason: string; conversationKey?: string; eventKey?: string; eventMetadata?: Record<string, string>; detail: string },
 ): Promise<void> {
   await db
     .insert(eventDropLog)
@@ -79,6 +79,8 @@ export async function writeDropLog(
       orgId: fields.orgId,
       reason: fields.reason,
       conversationKey: fields.conversationKey ?? null,
+      eventKey: fields.eventKey ?? null,
+      eventMetadata: fields.eventMetadata ?? null,
       detail: fields.detail,
       createdAt: Date.now(),
     });

@@ -98,6 +98,7 @@ import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
+  childWatches,
   orgs,
   securityCells,
   securityEngagements,
@@ -1031,6 +1032,12 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
+    let sharedTranscript = false;
+    if (existing?.parentSessionId !== undefined && this.opts.db) {
+      const [watch] = await this.opts.db.select({ originJson: childWatches.originJson }).from(childWatches)
+        .where(eq(childWatches.childSessionId, sessionId)).limit(1);
+      sharedTranscript = watch?.originJson !== null && watch?.originJson !== undefined;
+    }
     // `userId` stays in the cascade even for a team-owned row: this
     // builder makes member-started sessions, and the starting member's
     // personal default wins over the team's for their own session.
@@ -1194,6 +1201,7 @@ export class EngineHost {
             orgId: meta.orgId,
             owner: principal,
             workspace: meta.workspace,
+            sharedTranscript,
             sandbox: sandboxOpts,
             model,
             modelSpec,
@@ -1221,6 +1229,7 @@ export class EngineHost {
           orgId: meta.orgId,
           owner: principal,
           workspace: meta.workspace,
+          sharedTranscript,
           sandbox: sandboxOpts,
           model,
           modelSpec,
@@ -3503,6 +3512,8 @@ export class EngineHost {
       resources?: PrebuildResources;
       /** Non-fatal startup warnings returned by the task tool. */
       startupWarnings?: string[];
+      /** A channel-originated parent makes every child turn shared. */
+      sharedTranscript?: boolean;
       /**
        * The mode the spawner writes on the child's row. A child of a legacy
        * team orchestrator inherits `actor` and must resolve that way from
@@ -3542,6 +3553,8 @@ export class EngineHost {
       resources?: PrebuildResources;
       /** Non-fatal startup warnings returned by the task tool. */
       startupWarnings?: string[];
+      /** A channel-originated parent makes every child turn shared. */
+      sharedTranscript?: boolean;
       /**
        * The mode the spawner writes on the child's row. A child of a legacy
        * team orchestrator inherits `actor` and must resolve that way from
@@ -3709,6 +3722,7 @@ export class EngineHost {
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
+      sharedTranscript: opts.sharedTranscript,
       sandbox: {
         workspace: opts.workspace,
         // Single-lineage stock default, same fall-through as a REST-created

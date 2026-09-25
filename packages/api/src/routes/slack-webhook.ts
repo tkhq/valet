@@ -65,7 +65,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { ingestEvent } from "../events/ingest.js";
+import { ingestEvent, logSlackMessageBotNearMiss } from "../events/ingest.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EngineHost } from "../engine/host.js";
 import { handleFollowedMessage } from "../channels/follow-router.js";
@@ -184,10 +184,17 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
     for (const def of deps.triggerDefs) {
       const verified = await def.verify({ headers: deps.headers, rawBody: deps.rawBody }, { webhookSecret: deps.webhookSecret, ...(deps.botId ? { botId: deps.botId } : {}), ...(deps.botUserId ? { botUserId: deps.botUserId } : {}) });
       if (!verified) continue;
-      await ingestEvent(
+      const normalized = def.toEvent(verified);
+      const ingestResult = await ingestEvent(
         { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest },
-        { orgId: deps.orgId, service: "slack", event: def.toEvent(verified) },
+        { orgId: deps.orgId, service: "slack", event: normalized },
       );
+      // A bot-message subscription that matched or excluded this event owns
+      // its diagnostic. Only a classifier miss with no named bot subscription
+      // should suggest that a slack.message subscription use slack.bot_message.
+      if (normalized.key === "slack.bot_message" && ingestResult.skipped && !ingestResult.namedSubscription) {
+        await logSlackMessageBotNearMiss(deps.db, deps.orgId, normalized.payload);
+      }
       matchedTrigger = true;
       break;
     }

@@ -677,6 +677,8 @@ export interface ToolContext {
    * `reply_to_origin` / `react_to_origin` read it so the model supplies no ids.
    */
   origin?: ChannelOrigin;
+  /** A channel-originated ancestor makes this turn's transcript shared. */
+  sharedTranscript?: boolean;
   /**
    * Resolve the sending assistant's current outbound identity. Hosts keep this
    * dynamic so profile edits apply without rebuilding a cached session.
@@ -2251,6 +2253,8 @@ export interface CreateSessionOptions {
   purpose?: SessionPurpose;
   parentSessionId?: string;
   parentThreadId?: string;
+  /** A channel-originated ancestor makes every child turn's transcript shared. */
+  sharedTranscript?: boolean;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
   /**

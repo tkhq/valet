@@ -59,7 +59,7 @@ async function seedCredential(a: TestApi): Promise<void> {
   await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
     type: "bot_token",
     accessToken: "xoxb-test-token",
-    metadata: { webhookSecret: SECRET, teamId: TEAM_ID, botUserId: "U0BOT" },
+    metadata: { webhookSecret: SECRET, teamId: TEAM_ID, botUserId: "U0BOT", botId: "BVALET" },
   });
 }
 
@@ -92,6 +92,30 @@ function dmMessage(): Record<string, unknown> {
     text: "hello valet",
     ts: "1720000002.000100",
     event_ts: "1720000002.000100",
+  };
+}
+
+function botFormMessage(): Record<string, unknown> {
+  return {
+    type: "message",
+    subtype: "bot_message",
+    bot_id: "B_FORM",
+    app_id: "A_FORM",
+    channel: "C_FORM",
+    text: "Submitted intake",
+    ts: "1720000002.000100",
+    event_ts: "1720000002.000100",
+  };
+}
+
+function humanChannelMessage(): Record<string, unknown> {
+  return {
+    type: "message",
+    channel: "C_FORM",
+    user: "U100",
+    text: "Human intake",
+    ts: "1720000001.000100",
+    event_ts: "1720000001.000100",
   };
 }
 
@@ -341,6 +365,156 @@ describe("POST /api/channels/slack/webhook", () => {
     const subscribed = envelope(dmMessage(), "Ev-msg-2");
     expect((await post(api.baseUrl, subscribed, sign(subscribed))).status).toBe(200);
     await expect.poll(() => eventCount(api!, "Ev-msg-2"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("records a named slack.message near-miss for a normalized bot form message", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+
+    const body = envelope(botFormMessage(), "Ev-bot-form");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+
+    await expect.poll(async () => {
+      const rows = await api!.providers.db.select().from(eventDropLog)
+        .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")));
+      return rows;
+    }, { timeout: 5_000 }).toEqual([expect.objectContaining({
+      reason: "filter_excluded",
+      eventMetadata: {
+        channel: "C_FORM",
+        text: "Submitted intake",
+        botId: "B_FORM",
+        rawEventType: "message",
+        rawSubtype: "bot_message",
+      },
+    })]);
+    expect(await eventCount(api, "Ev-bot-form")).toBe(0);
+  });
+
+  it("does not let a slack.message filter miss suppress the bot-message near-miss", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"], [{ field: "channel", op: "eq", value: "C_OTHER" }]);
+
+    const human = envelope(humanChannelMessage(), "Ev-human-filtered");
+    const bot = envelope(botFormMessage(), "Ev-bot-near-miss-after-filter");
+    expect((await post(api.baseUrl, human, sign(human))).status).toBe(200);
+    await expect.poll(async () => (await api!.providers.db.select().from(eventDropLog)
+      .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")))).length, { timeout: 5_000 }).toBe(1);
+    expect((await post(api.baseUrl, bot, sign(bot))).status).toBe(200);
+    await expect.poll(async () => (await api!.providers.db.select().from(eventDropLog)
+      .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")))).length, { timeout: 5_000 }).toBe(2);
+    const rows = await api.providers.db.select().from(eventDropLog)
+      .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")));
+    expect(rows.map((row) => row.detail)).toEqual(expect.arrayContaining([
+      expect.stringContaining("every subscription"),
+      expect.stringContaining("bot message"),
+    ]));
+  });
+
+  it("does not retain a bot-message near-miss for an unauthorized team subscription", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    const now = Date.now();
+    await api.providers.db.insert(teams).values({ id: "team-near-miss", orgId: "local-org", name: "Restricted", createdAt: now });
+    await api.providers.db.insert(userIdentityLinks).values({
+      id: "link-near-miss", provider: "slack", externalId: "U_UNAUTHORIZED", userId: "test-member", createdAt: now,
+    });
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_team_near_miss", orgId: "local-org", ownerType: "team", ownerId: "team-near-miss",
+      name: "restricted messages", eventKeys: ["slack.message"], filters: [],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-near-miss" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+
+    const body = envelope({ ...botFormMessage(), user: "U_UNAUTHORIZED" }, "Ev-team-bot-near-miss");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => (await api!.providers.db.select().from(eventDropLog)
+      .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.reason, "not_team_member")))).length, { timeout: 5_000 }).toBe(1);
+    const diagnostics = await api.providers.db.select().from(eventDropLog)
+      .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")));
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("does not write authorization denials for repeated bot messages without a sender", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    const now = Date.now();
+    await api.providers.db.insert(teams).values({ id: "team-bot-flood", orgId: "local-org", name: "Restricted", createdAt: now });
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_team_bot_flood", orgId: "local-org", ownerType: "team", ownerId: "team-bot-flood",
+      name: "restricted messages", eventKeys: ["slack.message"], filters: [],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-bot-flood" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+
+    for (const eventId of ["Ev-bot-flood-1", "Ev-bot-flood-2"]) {
+      const body = envelope(botFormMessage(), eventId);
+      expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const rows = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
+    expect(rows).toEqual([]);
+  });
+
+  it("uses a non-team subscription without writing a team authorization denial", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+    const now = Date.now();
+    await api.providers.db.insert(teams).values({ id: "team-mixed-near-miss", orgId: "local-org", name: "Restricted", createdAt: now });
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_team_mixed_near_miss", orgId: "local-org", ownerType: "team", ownerId: "team-mixed-near-miss",
+      name: "restricted messages", eventKeys: ["slack.message"], filters: [],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-mixed-near-miss" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+
+    const body = envelope({ ...botFormMessage(), user: "U_UNLINKED" }, "Ev-bot-mixed-near-miss");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => (await api!.providers.db.select().from(eventDropLog)
+      .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")))).length, { timeout: 5_000 }).toBe(1);
+    expect(await dropReasons(api)).not.toContain("unlinked_sender");
+  });
+
+  it("does not create a slack.message near-miss when a slack.bot_message subscription delivers", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+    await seedSubscription(api, ["slack.bot_message"]);
+
+    const body = envelope(botFormMessage(), "Ev-bot-delivered");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => deliveryCount(api!, "Ev-bot-delivered"), { timeout: 5_000 }).toBe(1);
+
+    const nearMisses = await api.providers.db.select().from(eventDropLog)
+      .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")));
+    expect(nearMisses).toEqual([]);
+  });
+
+  it("uses the bot-message filter diagnostic instead of duplicating a near-miss", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+    await seedSubscription(api, ["slack.bot_message"], [{ field: "channel", op: "eq", value: "C_OTHER" }]);
+
+    const body = envelope(botFormMessage(), "Ev-bot-filtered");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => {
+      const rows = await api!.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
+      return rows.map((row) => row.eventKey);
+    }, { timeout: 5_000 }).toEqual(["slack.bot_message"]);
+  });
+
+  it("does not log unrelated normalized bot messages", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+
+    const body = envelope(botFormMessage(), "Ev-bot-unrelated");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await dropReasons(api)).not.toContain("filter_excluded");
   });
 
   it("records only bounded metadata for an unmatched Slack form submission", async () => {
