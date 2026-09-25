@@ -1902,7 +1902,7 @@ it("waits for the home layout when an old pod survives a rapid suspend/resume", 
     execApi: fakePodExecApi,
     podDeleteApi: { deletePod },
     podStatusApi: { getPodStatus: async () => ({ phase: "Running", conditions: [{ type: "Ready", status: "True" }],
-      homeLayoutVersion: upgraded ? "1" : undefined }) },
+      homeLayoutVersion: upgraded ? HOME_LAYOUT_VERSION : undefined }) },
   }, providerCfg);
   await provider.resume("resume-home");
   expect(deletePod).toHaveBeenCalledTimes(1);
@@ -1912,6 +1912,7 @@ it("waits for the home layout when an old pod survives a rapid suspend/resume", 
 describe("confirmed eviction reporting", () => {
   function setup(evictedInitially: boolean, disappear = false) {
     let evicted = evictedInitially;
+    const evictionTimestamp = Date.now();
     const execApi: PodExecApi = { exec: vi.fn(async (_ns, _pod, _container, _cmd, _stdout, _stderr, _stdin, _tty, cb) => {
       evicted = true;
       cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: "1" }] } });
@@ -1923,7 +1924,7 @@ describe("confirmed eviction reporting", () => {
       execApi, livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
       evictionApi: {
         getPod: async () => disappear && evicted ? null : { uid: "uid", reason: evicted ? "Evicted" : undefined, message: "docker-state exceeded 8Gi" },
-        listEvents: async () => [{ podName: "pod", uid: "uid", reason: "Evicted", message: "docker-state exceeded 8Gi", timestamp: Date.now() }],
+        listEvents: async () => [{ podName: "pod", uid: "uid", reason: "Evicted", message: "docker-state exceeded 8Gi", timestamp: evictionTimestamp }],
       },
     }, "sandbox");
     return { sandbox, execApi };

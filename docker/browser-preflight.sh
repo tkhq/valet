@@ -19,7 +19,10 @@ for browser_path in /usr/bin/bwrap /usr/bin/flock /usr/local/bin/valet-browser-c
     exit 78
   fi
 done
-install -d -m 0700 -o "$browser_uid" -g "$browser_gid" /var/lib/valet /var/lib/valet/browser
+# Kubernetes mounts persisted home state below this shared root. Keep the
+# parent traversable and restrict browser ownership to its private directory.
+install -d -m 0755 -o root -g root /var/lib/valet
+install -d -m 0700 -o "$browser_uid" -g "$browser_gid" /var/lib/valet/browser
 install -d -m 0755 -o dockerd -g dockerd /home/dockerd /workspace
 # The workload owns the working directory. Private browser state uses another UID.
 chown -R -h dockerd:dockerd /workspace

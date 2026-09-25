@@ -835,6 +835,15 @@ Docker uses a sibling durable host directory; Kubernetes uses a session-owned
 runtime-state volume. Final session deletion owns both working and runtime state.
 Keep this mount generic so other sandbox services can use private runtime state.
 
+The runtime-state root stays owned by root with mode `0755`. Browser startup
+owns only `/var/lib/valet/browser` as UID and GID 1501 with mode `0700`.
+Kubernetes mounts persisted home state at `/var/lib/valet/home` from the
+workspace claim. Browser startup must not change ownership below the shared
+runtime-state root. The dockerd user must be able to traverse the root and
+write its home state as UID and GID 1500. Home layout generation 2 repairs
+existing persisted entries before the workload starts. This repair recovers
+claims changed by the earlier recursive browser ownership setup.
+
 ### Provider adoption and replacement
 
 Docker's current in-memory restore map is insufficient for this design. Add
