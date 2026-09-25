@@ -62,6 +62,19 @@ const groups: Record<BrowserOperationClass, string[]> = {
   history: ['browser.history'],
   diagnostic: ['tab.logs', 'tab.network'],
 };
+export const FACADE_METHOD_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  'tab.export': 'tab.content.export',
+  'tab.assets': 'tab.content.assets',
+  'tab.bundleAssets': 'tab.content.bundleAssets',
+  'tab.clipboardRead': 'tab.clipboard.read',
+  'tab.clipboardWrite': 'tab.clipboard.write',
+  'tab.dialogRespond': 'tab.dialog.respond',
+  'tab.webmcpList': 'tab.webmcp.list',
+  'tab.webmcpCall': 'tab.webmcp.call',
+  'tab.logs': 'tab.dev.logs',
+  'tab.network': 'tab.dev.network',
+});
+
 export const METHOD_REGISTRY = Object.freeze(
   Object.fromEntries(
     Object.entries(groups).flatMap(([operationClass, methods]) =>
@@ -114,6 +127,6 @@ export function documentation() {
   return `Browser protocol 1.0. Persistent Node REPL bindings support top-level await. Lexical redeclarations fail; use a fresh variable name or reuse an existing binding. Use browser.reset only when you need to discard all bindings. Observation methods emit by default and also return their text. Use {emit:false} to return without emitting. Use output.write for other reads. Locators are strict. People and agents share normal input. References expire after navigation, replacement, reset, or human input. Keep an observation and its reference action in one cell when possible. An explicit pause blocks agent mutations until the user resumes shared use. Coordinates use viewport CSS pixels. evaluate reads an immutable snapshot and cannot access live page globals. Approval waits preserve the cell. Never repeat a failed mutation before checking its receipt and the page.\n\n${examples}\n\nAvailable methods:\n${Object.entries(
     METHOD_REGISTRY,
   )
-    .map(([name, meta]) => `${name === 'tab.logs' ? 'tab.dev.logs' : name === 'tab.network' ? 'tab.dev.network' : name}: ${meta.operationClass}`)
+    .map(([name, meta]) => `${FACADE_METHOD_NAMES[name] ?? name}: ${meta.operationClass}`)
     .join('\n')}`;
 }

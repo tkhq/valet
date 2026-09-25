@@ -62,3 +62,13 @@ it('revokes existing connections and rejects later destinations', async () => {
     /approved/,
   );
 });
+
+it('denies an approved hostname that cannot resolve', async () => {
+  const policy = new EgressPolicy([], async () => {
+    throw Error('DNS failure');
+  });
+  policy.allow('https://example.com');
+  await expect(policy.destination('example.com', 443)).rejects.toMatchObject({
+    detail: { code: 'ORIGIN_DENIED' },
+  });
+});

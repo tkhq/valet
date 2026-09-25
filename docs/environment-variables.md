@@ -9,7 +9,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic key for the agent loop. The server exits without it. You can add org-level LLM providers in the UI |
-| `PORT` | No | HTTP port (default `8787`. `make dev-local` sets `8788`) |
+| `PORT` | No | HTTP port (default `8788`). Deploy images and charts set `8787` explicitly |
 | `DATABASE_URL` | No | Postgres connection string. Set → node-postgres. Unset → embedded PGlite under the data dir |
 | `VALET_DATA_DIR` | No | Data root (default `~/.valet`): config, PGlite, blobs, serve.lock. When it, `VALET_PG_DATA_DIR`, and `DATABASE_URL` are all unset, `make dev-local` sets it to `.valet-dev/` in the worktree, so each worktree gets its own database |
 | `VALET_PG_DATA_DIR` / `VALET_BLOBS_DIR` | No | Override the PGlite and blob-store locations individually |

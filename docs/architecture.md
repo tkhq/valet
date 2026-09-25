@@ -404,8 +404,8 @@ Rancher Desktop flow. Every target pins `--context rancher-desktop`.
 
 | Port | What |
 |------|------|
-| 8787 | Legacy Worker default |
-| 8788 | API default (`PORT`) and `make dev-local` |
+| 8787 | Legacy Worker default. Deploy images and charts set this API port explicitly |
+| 8788 | API `PORT` default and `make dev-local` |
 | 5173 | Vite dev server (web) |
 | 9000 | Sandbox gateway (inside `full` sandboxes) |
 | 8765 | code-server (behind the gateway) |

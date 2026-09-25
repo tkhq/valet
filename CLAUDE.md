@@ -48,7 +48,7 @@ While iterating:
 pnpm typecheck                                  # all packages (worker excluded)
 pnpm --filter @valet/<pkg> test [<filter>]      # targeted suites (NO "--" before the filter
                         #   - vitest drops args after "--" and runs the FULL suite)
-pnpm exec vite --host 127.0.0.1                 # pass Vite flags directly; `pnpm run dev -- --flag` passes a literal `--`
+pnpm --filter @valet/web dev --host 0.0.0.0      # pass Vite flags directly; `pnpm run dev -- --flag` passes a literal `--`
 make smoke-orchestrator                         # fastest agent-loop-alive check (real Anthropic, no Docker)
 ```
 

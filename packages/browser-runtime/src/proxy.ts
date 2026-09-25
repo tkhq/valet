@@ -29,7 +29,7 @@ export function createNamespaceProxy(socketPath: string) {
           socket.destroy();
           if (response.startsWith('UNAVAILABLE ')) {
             const destination = response.slice(12);
-            const message = destination.startsWith('localhost:')
+            const message = /^(localhost|127\.0\.0\.1|\[::1\]):/.test(destination)
               ? `Nothing is listening on ${destination} (tried 127.0.0.1 and ::1).`
               : `Cannot connect to ${destination}.`;
             reject(new BrokerError(502, message));
