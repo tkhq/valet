@@ -627,6 +627,45 @@ describe("ChannelHost outbound delivery", () => {
     expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(1);
   });
 
+  it("queues manual feedback behind pending assistant work", async () => {
+    faux.setResponses([fauxAssistantMessage("later response"), fauxAssistantMessage("feedback response")]);
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "user", id: USER_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const threadId = session.thread("events").id;
+    const pending: QueueItem = {
+      id: "qi-pending-user-turn", threadId, content: "later user turn", status: "queued",
+      attemptCount: 0, maxAttempts: 10, timeoutAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    await engineStore.admitSubmission(session.id, threadId, pending);
+    const admit = vi.spyOn(engineStore, "admitSubmission");
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId: "qi-manual-feedback", signal: {
+        signalType: "keyed.message", tagName: "signal",
+        origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+      } }),
+      {
+        type: "message", id: "manual-feedback-response", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "internal response", queueItemId: "qi-manual-feedback", stopReason: "end_turn",
+      },
+    ]);
+    await eventStream.append(
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "message_end", threadId, messageId: "manual-feedback-response", reason: "end_turn" } },
+      `manual-feedback-${randomUUID()}`,
+    );
+
+    await vi.waitFor(async () => expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(1));
+    expect(admit).toHaveBeenLastCalledWith(
+      session.id,
+      threadId,
+      expect.anything(),
+      expect.objectContaining({ maxPending: expect.any(Number) }),
+    );
+    expect((await engineStore.getQueueItem(session.id, pending.id))?.supersededByItemId).toBeUndefined();
+  });
+
   it("deduplicates manual reminders cleanly across two origins on one assistant thread", async () => {
     faux.setResponses([fauxAssistantMessage("noted")]);
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -819,6 +858,25 @@ describe("ChannelHost outbound delivery", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(admit).toHaveBeenCalledTimes(2);
     expect(error.mock.calls.some(([message]) => message === "[channels] reply-dropped feedback failed")).toBe(true);
+  });
+
+  it("warns and does not retry feedback when the session is not live", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const admit = vi.spyOn(engineStore, "admitSubmission");
+    const send = vi.spyOn(keyedTransport, "send").mockRejectedValueOnce(new Error("rate_limited"));
+    vi.spyOn(engineHost, "liveSession").mockReturnValue(null);
+    const { session } = await emitTerminalTurn({
+      queueItemId: "qi-feedback-session-not-live",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+      content: "first response",
+    });
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+      "[channels] reply-dropped feedback skipped: session is not live",
+      { sessionId: session.id },
+    ));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(admit).not.toHaveBeenCalled();
   });
 
   it("deduplicates different addressed failure reasons without logging", async () => {

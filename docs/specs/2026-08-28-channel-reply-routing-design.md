@@ -140,8 +140,9 @@ context. The agent must call a channel action to post.
 **Dropped-reply feedback (TKAI-553).** When a terminal manual-delivery turn
 contains assistant text but no successful channel action, the host submits one
 `channel.reply_dropped` signal on the same assistant thread. The signal uses
-manual delivery and bypasses overheard digests. It tells the agent to do nothing
-for intentional silence. It tells the agent to call `reply_to_origin` only
+manual delivery, bypasses overheard digests, and queues behind active work.
+It tells the agent to do nothing for intentional silence. It tells the agent to call
+`reply_to_origin` only
 when it intended to reply. The origin-agnostic body uses the signal's structured
 origin for that action. The thread-scoped submission ID limits this reminder to
 one per assistant thread, even if later turns use another channel origin. A
@@ -156,7 +157,9 @@ change addressed first-response selection.
 If an addressed first-response send fails before text lands, the host submits queue-item-scoped feedback.
 The feedback contains an allowlisted public reason. The host makes at most three process-local admission attempts.
 It waits 50 ms and then 100 ms between attempts. Shutdown cancels either wait.
-Attempts keep one dispatch ID and never repeat the normal send. A reason mismatch deduplicates by that ID. This path does not survive shutdown.
+Attempts keep one dispatch ID and never repeat the normal send. A reason mismatch
+deduplicates by that ID. If the session is not live, the host logs a warning and
+does not retry. This path does not survive shutdown.
 
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the

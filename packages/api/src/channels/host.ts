@@ -839,7 +839,9 @@ export class ChannelHost {
     for (const delay of FEEDBACK_RETRY_DELAYS_MS) {
       if (delay > 0) await this.sleepOrAbort(delay, signal);
       if (signal.aborted) return false;
-      if (await this.submitReplyFeedback(sessionId, threadKey, origin, feedback)) return true;
+      const result = await this.submitReplyFeedback(sessionId, threadKey, origin, feedback);
+      if (result === "admitted") return true;
+      if (result === "not_live") return false;
     }
     return false;
   }
@@ -850,10 +852,13 @@ export class ChannelHost {
     threadKey: string,
     origin: ChannelOrigin,
     feedback: { dispatchId: string; body: string; acceptDispatchConflict?: boolean },
-  ): Promise<boolean> {
+  ): Promise<"admitted" | "retryable" | "not_live"> {
     try {
       const session = this.deps.engineHost.liveSession(sessionId);
-      if (!session) return false;
+      if (!session) {
+        console.warn("[channels] reply-dropped feedback skipped: session is not live", { sessionId });
+        return "not_live";
+      }
       await session.thread(threadKey).submitPrompt(
         {
           kind: "signal",
@@ -867,9 +872,9 @@ export class ChannelHost {
             reply: "manual",
           },
         },
-        { dispatchId: feedback.dispatchId },
+        { dispatchId: feedback.dispatchId, queueMode: "followup" },
       );
-      return true;
+      return "admitted";
     } catch (error) {
       if (
         feedback.acceptDispatchConflict === true &&
@@ -877,10 +882,10 @@ export class ChannelHost {
         error.details?.dispatchId === feedback.dispatchId &&
         typeof error.details.existingItemId === "string"
       ) {
-        return true;
+        return "admitted";
       }
       console.error("[channels] reply-dropped feedback failed", error);
-      return false;
+      return "retryable";
     }
   }
 
