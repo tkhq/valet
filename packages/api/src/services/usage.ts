@@ -486,72 +486,161 @@ export async function getUsageSessions(
 
 // ── CSV export ───────────────────────────────────────────────────────────────
 
-const USAGE_EXPORT_MAX_ROWS = 100_000;
+const TURN_EXPORT_BATCH_SIZE = 5_000;
 
-const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced,employee_name,employee_email,repository,channel_type,channel_id";
+const TURN_CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd,priced,employee_name,employee_email,repository,channel_type,channel_id";
+const AGGREGATE_CSV_HEADER = "bucket_start,use_case,provider,model,owner_type,owner_id,user_id,employee_name,employee_email,turns,unpriced_turns,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,cost_usd";
 
 function csvEscape(v: unknown): string {
   const value = v === null || v === undefined ? "" : String(v);
   const formulaPrefix = /^[-=+@\t\r]/.test(value);
   const safe = formulaPrefix ? `'${value}` : value;
-  // Formula-like values stay quoted after the neutralizing apostrophe.
   return formulaPrefix || /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** One CSV row per billable turn for the window/scope.
- * Identity is a current join. Repository bindings are durable session metadata,
- * and channel fields come from the queue item for the billed engine entry.
- * A plain member's team export blanks all employee attribution: per-member
- * attribution follows the breakdown's byUser rule, and the CSV must not let a
- * plain team member reconstruct it with one GROUP BY. */
-export async function getUsageExportCsv(
+interface AggregateExportRow {
+  bucket_start: unknown; use_case: string; provider: string | null; model: string | null;
+  owner_type: string | null; owner_id: string | null; user_id: string | null;
+  employee_name: string | null; employee_email: string | null; turns: unknown;
+  unpriced_turns: unknown; input_tokens: unknown; output_tokens: unknown;
+  cache_read_tokens: unknown; cache_write_tokens: unknown; total_tokens: unknown; cost_usd: unknown;
+}
+
+/** Aggregate CSV rows use UTC epoch buckets and the same ledger sums as the
+ * dashboard. A plain team member gets one aggregate across users: the query
+ * does not group by stable or human user identity. */
+export async function getUsageAggregateExportCsv(
   db: AppDb,
-  opts: UsagePeriodOpts & { scope: UsageScope },
-): Promise<{ ok: true; csv: string } | { ok: false; error: { code: "export_too_large"; message: string } }> {
+  opts: UsagePeriodOpts & { scope: UsageScope; granularity: "day" | "hour" },
+): Promise<string> {
   const period = periodFromOpts(opts);
-  const withholdUserId = opts.scope.scope === "team" && !opts.scope.byMember;
-  interface Row {
-    created_at: unknown; use_case: string; model: string | null; session_id: string | null; workflow_run_id: string | null;
-    user_id: string | null; employee_name: string | null; employee_email: string | null; repository: string | null;
-    channel_type: string | null; channel_id: string | null; input_tokens: unknown; output_tokens: unknown;
-    cache_read_tokens: unknown; cache_write_tokens: unknown; total_tokens: unknown; cost_total: unknown; priced: unknown;
-  }
+  const bucketMs = opts.granularity === "day" ? DAY_MS : 60 * 60 * 1000;
+  const withholdIdentity = opts.scope.scope === "team" && !opts.scope.byMember;
+  const identitySelect = withholdIdentity
+    ? sql`NULL::text AS user_id, NULL::text AS employee_name, NULL::text AS employee_email`
+    : sql`ce.user_id, u.name AS employee_name, u.email AS employee_email`;
+  const groupColumns = withholdIdentity ? sql`1,2,3,4,5,6` : sql`1,2,3,4,5,6,7,8,9`;
   const result = (await db.execute(sql`
-    SELECT ce.created_at, ce.use_case, ce.model, ce.session_id, ce.workflow_run_id, ce.user_id,
-           u.name AS employee_name, u.email AS employee_email,
-           (SELECT string_agg(sr.full_name, ';' ORDER BY sr.position)
-              FROM session_repos sr WHERE sr.session_id = ce.session_id) AS repository,
-           q.channel::jsonb->>'channelType' AS channel_type,
-           q.channel::jsonb->>'channelId' AS channel_id,
-           ce.input_tokens, ce.output_tokens, ce.cache_read_tokens, ce.cache_write_tokens,
-           ce.total_tokens, ce.cost_total, ce.priced
+    SELECT (floor(ce.created_at / ${bucketMs}) * ${bucketMs})::bigint AS bucket_start,
+           ce.use_case, ce.provider, ce.model, ce.owner_type, ce.owner_id,
+           ${identitySelect},
+           COUNT(*) AS turns, COUNT(*) FILTER (WHERE NOT ce.priced) AS unpriced_turns,
+           COALESCE(SUM(ce.input_tokens), 0) AS input_tokens,
+           COALESCE(SUM(ce.output_tokens), 0) AS output_tokens,
+           COALESCE(SUM(ce.cache_read_tokens), 0) AS cache_read_tokens,
+           COALESCE(SUM(ce.cache_write_tokens), 0) AS cache_write_tokens,
+           COALESCE(SUM(ce.total_tokens), 0) AS total_tokens,
+           COALESCE(SUM(ce.cost_total), 0) AS cost_usd
     FROM cost_entries ce
     LEFT JOIN "user" u ON u.id = ce.user_id
-    LEFT JOIN engine_entries e ON e.id = ce.entry_id AND e.session_id = ce.session_id
-    LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
     WHERE ${scopeWhere("ce.", period, opts.scope)}
-    ORDER BY ce.created_at DESC LIMIT ${USAGE_EXPORT_MAX_ROWS + 1}`)) as { rows: Row[] };
+    GROUP BY ${groupColumns}
+    ORDER BY 1 DESC, 2, 3 NULLS FIRST, 4 NULLS FIRST, 5 NULLS FIRST, 6 NULLS FIRST,
+             7 NULLS FIRST, 8 NULLS FIRST, 9 NULLS FIRST
+  `)) as { rows: AggregateExportRow[] };
 
-  if (result.rows.length > USAGE_EXPORT_MAX_ROWS) {
-    return {
-      ok: false,
-      error: {
-        code: "export_too_large",
-        message: "This export has more than 100,000 rows. Choose a shorter date range and try again.",
-      },
-    };
-  }
+  const lines = result.rows.map((row) => [
+    new Date(toNum(row.bucket_start)).toISOString(), row.use_case, row.provider, row.model,
+    row.owner_type, row.owner_id, row.user_id, row.employee_name, row.employee_email,
+    toNum(row.turns), toNum(row.unpriced_turns), toNum(row.input_tokens), toNum(row.output_tokens),
+    toNum(row.cache_read_tokens), toNum(row.cache_write_tokens), toNum(row.total_tokens), toNum(row.cost_usd),
+  ].map(csvEscape).join(","));
+  return `${AGGREGATE_CSV_HEADER}\n${lines.join("\n")}${lines.length > 0 ? "\n" : ""}`;
+}
 
-  const lines = result.rows.map((r) =>
-    [
-      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id,
-      withholdUserId ? "" : r.user_id, toNum(r.input_tokens), toNum(r.output_tokens), toNum(r.cache_read_tokens),
-      toNum(r.cache_write_tokens), toNum(r.total_tokens), r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
-      withholdUserId ? "" : r.employee_name, withholdUserId ? "" : r.employee_email,
-      r.repository, r.channel_type, r.channel_id,
-    ].map(csvEscape).join(","),
-  );
-  return { ok: true, csv: `${CSV_HEADER}\n${lines.join("\n")}\n` };
+interface TurnExportRow {
+  entry_id: string; created_at: unknown; use_case: string; model: string | null;
+  session_id: string | null; workflow_run_id: string | null; user_id: string | null;
+  employee_name: string | null; employee_email: string | null; repository: string | null;
+  channel_type: string | null; channel_id: string | null; input_tokens: unknown;
+  output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;
+  total_tokens: unknown; cost_total: unknown; priced: unknown;
+}
+
+function turnExportLine(row: TurnExportRow, withholdIdentity: boolean): string {
+  return [
+    new Date(toNum(row.created_at)).toISOString(), row.use_case, row.model, row.session_id, row.workflow_run_id,
+    withholdIdentity ? "" : row.user_id, toNum(row.input_tokens), toNum(row.output_tokens),
+    toNum(row.cache_read_tokens), toNum(row.cache_write_tokens), toNum(row.total_tokens),
+    row.cost_total === null ? "" : toNum(row.cost_total), row.priced,
+    withholdIdentity ? "" : row.employee_name, withholdIdentity ? "" : row.employee_email,
+    row.repository, row.channel_type, row.channel_id,
+  ].map(csvEscape).join(",");
+}
+
+/** Stream one CSV row per billable turn. Each pull loads one keyset page, so
+ * memory is bounded by the page size. The `(created_at, use_case, entry_id)`
+ * order is total across both ledger branches. A query error errors the stream;
+ * it never closes a truncated CSV as a successful response. */
+export function createUsageTurnExportStream(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): ReadableStream<Uint8Array> {
+  const period = periodFromOpts(opts);
+  const withholdIdentity = opts.scope.scope === "team" && !opts.scope.byMember;
+  const encoder = new TextEncoder();
+  let cursor: { createdAt: number; useCase: string; entryId: string } | undefined;
+  let finished = false;
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(`${TURN_CSV_HEADER}\n`));
+    },
+    async pull(controller) {
+      if (finished) return;
+      try {
+        const cursorWhere = cursor === undefined ? sql`` : sql`AND (
+          ce.created_at < ${cursor.createdAt}
+          OR (ce.created_at = ${cursor.createdAt} AND ce.use_case < ${cursor.useCase})
+          OR (ce.created_at = ${cursor.createdAt} AND ce.use_case = ${cursor.useCase} AND ce.entry_id < ${cursor.entryId})
+        )`;
+        const result = (await db.execute(sql`
+          WITH page AS (
+            SELECT ce.entry_id, ce.created_at, ce.use_case, ce.model, ce.session_id,
+                   ce.workflow_run_id, ce.user_id, ce.input_tokens, ce.output_tokens,
+                   ce.cache_read_tokens, ce.cache_write_tokens, ce.total_tokens,
+                   ce.cost_total, ce.priced
+            FROM cost_entries ce
+            WHERE ${scopeWhere("ce.", period, opts.scope)} ${cursorWhere}
+            ORDER BY ce.created_at DESC, ce.use_case DESC, ce.entry_id DESC
+            LIMIT ${TURN_EXPORT_BATCH_SIZE}
+          ), page_repositories AS (
+            SELECT sr.session_id, string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
+            FROM session_repos sr
+            JOIN (SELECT DISTINCT session_id FROM page WHERE session_id IS NOT NULL) ps
+              ON ps.session_id = sr.session_id
+            GROUP BY sr.session_id
+          )
+          SELECT page.*, u.name AS employee_name, u.email AS employee_email,
+                 pr.repository, q.channel::jsonb->>'channelType' AS channel_type,
+                 q.channel::jsonb->>'channelId' AS channel_id
+          FROM page
+          LEFT JOIN "user" u ON u.id = page.user_id
+          LEFT JOIN page_repositories pr ON pr.session_id = page.session_id
+          LEFT JOIN engine_entries e ON e.id = page.entry_id AND e.session_id = page.session_id
+          LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
+          ORDER BY page.created_at DESC, page.use_case DESC, page.entry_id DESC
+        `)) as { rows: TurnExportRow[] };
+
+        if (result.rows.length === 0) {
+          finished = true;
+          controller.close();
+          return;
+        }
+        const last = result.rows[result.rows.length - 1];
+        if (!last) throw new Error("Usage export page was unexpectedly empty.");
+        cursor = { createdAt: toNum(last.created_at), useCase: last.use_case, entryId: last.entry_id };
+        controller.enqueue(encoder.encode(`${result.rows.map((row) => turnExportLine(row, withholdIdentity)).join("\n")}\n`));
+        if (result.rows.length < TURN_EXPORT_BATCH_SIZE) {
+          finished = true;
+          controller.close();
+        }
+      } catch (error) {
+        finished = true;
+        controller.error(error);
+      }
+    },
+  });
 }
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────

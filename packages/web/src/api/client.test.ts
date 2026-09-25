@@ -125,7 +125,14 @@ describe("api client: usage period URLs", () => {
     expect(api.usageExportCsvUrl(
       { kind: "custom", start: "2024-02-01", end: "2024-02-29" },
       "team",
+      "turn",
       "team-x",
-    )).toBe("/api/usage/export.csv?start=2024-02-01&end=2024-02-29&scope=team&teamId=team-x");
+    )).toBe("/api/usage/export.csv?start=2024-02-01&end=2024-02-29&scope=team&teamId=team-x&granularity=turn");
+
+    const validateFetch = stubFetchOk();
+    await api.validateUsageExport({ kind: "lookback", window: "7d" }, "me", "day");
+    expect(validateFetch.mock.calls[0]?.[0]).toBe(
+      "/api/usage/export.csv?window=7d&scope=me&granularity=day&validate=1",
+    );
   });
 });

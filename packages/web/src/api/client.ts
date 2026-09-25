@@ -244,6 +244,7 @@ import type {
   UsageDrillResponse,
   UsageDrillItem,
   UsageScopeName,
+  UsageExportGranularity,
   UsagePeriodSelection,
   UsageUseCase,
   AddArtifactCommentRequest,
@@ -432,34 +433,6 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   const form = new FormData();
   form.append("file", file, file.name);
   return requestForm<ProfilePictureUploadResponse>(path, form);
-}
-
-async function requestText(path: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(`${BASE}${path}`, { signal: controller.signal });
-    const text = await res.text();
-    if (!res.ok) {
-      let payload: unknown = text;
-      try {
-        payload = JSON.parse(text);
-      } catch {}
-      if (res.status === 401) void maybeRedirectToLogin();
-      throw new ApiError(res.status, `GET ${path} → ${res.status}`, payload);
-    }
-    return text;
-  } catch (err) {
-    if (controller.signal.aborted) {
-      throw new ApiError(
-        NO_RESPONSE_STATUS,
-        `GET ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
-      );
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -1197,17 +1170,30 @@ export const api = {
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
   },
-  usageExportCsvUrl: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string): string => {
+  usageExportCsvUrl: (
+    period: UsagePeriodSelection,
+    scope: UsageScopeName,
+    granularity: UsageExportGranularity = "day",
+    teamId?: string,
+  ): string => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
+    qs.set("granularity", granularity);
     return `/api/usage/export.csv?${qs}`;
   },
-  usageExportCsv: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string): Promise<string> => {
+  validateUsageExport: (
+    period: UsagePeriodSelection,
+    scope: UsageScopeName,
+    granularity: UsageExportGranularity,
+    teamId?: string,
+  ): Promise<void> => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return requestText(`/usage/export.csv?${qs}`);
+    qs.set("granularity", granularity);
+    qs.set("validate", "1");
+    return request<void>("GET", `/usage/export.csv?${qs}`);
   },
   usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
     const qs = new URLSearchParams({ window });

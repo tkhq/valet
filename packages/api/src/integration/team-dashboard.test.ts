@@ -214,13 +214,13 @@ describe("GET /api/usage/breakdown?scope=team&teamId=", () => {
     await db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
 
     // Admin (local-user): the user_id column carries attribution.
-    const adminCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team&teamId=team_1`)).text();
+    const adminCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team&teamId=team_1&granularity=turn`)).text();
     expect(adminCsv).toContain("local-user");
 
     // Plain member: same rows, attribution blank — the breakdown hides
     // byUser from members and the export must not hand it back.
     const memberCsv = await (
-      await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team&teamId=team_1`, { headers: NON_MEMBER_HEADERS })
+      await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team&teamId=team_1&granularity=turn`, { headers: NON_MEMBER_HEADERS })
     ).text();
     expect(memberCsv).toContain("team-sess");
     expect(memberCsv).not.toContain("local-user");

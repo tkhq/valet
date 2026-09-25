@@ -132,3 +132,35 @@ from the queue item linked to the billable engine entry. Queue items and usage
 entries have the same session lifecycle. Historical rows without a linked queue
 item or channel stay blank. Proxy rows also have blank work context. The export
 does not infer a project or accounting category.
+
+## Usage CSV export modes (2026-09-25)
+
+`GET /api/usage/export.csv` accepts `granularity=day|hour|turn`. The default is
+`day`. The route rejects any other value before it sends CSV data.
+
+Daily and hourly exports aggregate the ledger in SQL. Each row uses a UTC
+bucket start and groups by use case, recorded provider, model, owner type,
+owner ID, and user identity. Provider is blank for engine entries because the
+engine ledger does not record it. Proxy rows use their recorded provider kind.
+The export includes turns, unpriced turns, each token type, total tokens, and
+the sum of priced cost. These sums use the same predicates as the Usage
+breakdown and reconcile for the same period and scope. Aggregate rows do not
+include session, repository, or channel fields.
+
+A plain team member gets no user identity dimensions. The SQL omits user ID,
+name, and email from the group, so multiple members merge into one row when
+the remaining dimensions match. Team admins and org admins keep the current
+identity join. CSV formula neutralization applies to all text dimensions.
+
+The `turn` mode keeps the itemized columns and descending time order. It has
+no row cap. The API reads keyset pages of 5,000 rows in the stable descending
+order `(created_at, use_case, entry_id)`. It never uses `OFFSET`. Repository
+bindings are aggregated once for each page instead of once for each row. The
+response stream holds at most one page of rows in application memory.
+
+The route completes authentication, scope, period, and granularity checks
+before it sends the CSV header. The web client also runs a validation request
+before it starts the native browser download. The download does not use a
+JavaScript response buffer or timeout. If a page query fails after streaming
+starts, the API errors the stream and closes the connection as failed. It does
+not end a truncated CSV as a successful file.

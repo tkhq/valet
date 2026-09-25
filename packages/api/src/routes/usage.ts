@@ -7,12 +7,13 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
-import type { UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
+import type { UsageDrillResponse, UsageExportGranularity, UsageSessionsResponse } from "../wire/types.js";
 import {
   getUsageBreakdown,
   getDailyAgentActivity,
   getUsageDrillItems,
-  getUsageExportCsv,
+  createUsageTurnExportStream,
+  getUsageAggregateExportCsv,
   getUsageSessions,
   getUsageSummary,
   isUsageUseCase,
@@ -115,17 +116,34 @@ usageRouter.get("/items", async (c) => {
   return c.json(body);
 });
 
+function granularityOrError(c: Context<AppEnv>): UsageExportGranularity | Response {
+  const value = c.req.query("granularity") ?? "day";
+  if (value === "day" || value === "hour" || value === "turn") return value;
+  return c.json({
+    error: {
+      code: "invalid_granularity",
+      message: "Choose granularity day, hour, or turn.",
+    },
+  }, 400);
+}
+
 usageRouter.get("/export.csv", async (c) => {
   const scope = await scopeOrError(c);
   if (scope instanceof Response) return scope;
   const period = periodOrError(c);
   if (period instanceof Response) return period;
-  const result = await getUsageExportCsv(c.var.providers.db, { period, scope });
-  if (!result.ok) return c.json({ error: result.error }, 422);
+  const granularity = granularityOrError(c);
+  if (granularity instanceof Response) return granularity;
+  if (c.req.query("validate") === "1") return c.body(null, 204);
+
   // Name the team in a team export's filename, or a member of two teams
   // downloads two indistinguishable files.
   const scopeLabel = scope.scope === "team" ? `team-${scope.teamId}` : scope.scope;
   c.header("Content-Type", "text/csv; charset=utf-8");
-  c.header("Content-Disposition", `attachment; filename="valet-usage-${scopeLabel}-${period.label}.csv"`);
-  return c.body(result.csv);
+  c.header("Content-Disposition",
+    `attachment; filename="valet-usage-${scopeLabel}-${period.label}-${granularity}.csv"`);
+  if (granularity === "turn") {
+    return c.body(createUsageTurnExportStream(c.var.providers.db, { period, scope }));
+  }
+  return c.body(await getUsageAggregateExportCsv(c.var.providers.db, { period, scope, granularity }));
 });
