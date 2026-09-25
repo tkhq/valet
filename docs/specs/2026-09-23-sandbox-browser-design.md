@@ -901,6 +901,8 @@ a handoff mark keeps it for the next turn. Marks are renewed by later work. Do n
 close user-created tabs or tabs controlled by another thread. Approval suspension
 is not turn completion. Use an explicit engine turn-lifecycle hook, not a timeout,
 to trigger cleanup. A missing cleanup event is an observable invariant failure.
+The base browser skill tells the agent to mark a page as deliverable when the user
+asks to finish on, leave open, show, or hand off that page.
 
 The host records cleanup before it finalizes the submission, including recovered settlements.
 If compute is absent, the host keeps cleanup pending without waking the sandbox.

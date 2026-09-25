@@ -60,8 +60,10 @@ Private sign-in also blocks observations until the user ends it. Expiry does not
 Future credential handoff should resolve valet-secrets references through the broker, without placing secret values in tool code or evidence.
 A team browser requires an explicit shared audience. Its screenshots and page text appear in the team transcript.
 
-Mark a tab as a deliverable or handoff when the user needs it after the turn.
-The runtime closes unmarked tabs owned by the completed thread. Human tabs and another thread's tabs remain open.
+If the user asks to finish on, leave open, show, or hand off a page, call
+`markDeliverable()` on that tab before replying. Use `markHandoff()` only when a
+later agent turn must continue the tab. The runtime closes unmarked tabs owned
+by the completed thread. Human tabs and another thread's tabs remain open.
 
 Screenshots returned by the browser tool become image evidence in the conversation.
 The viewer's continuous frames are temporary. They do not enter the model transcript.
