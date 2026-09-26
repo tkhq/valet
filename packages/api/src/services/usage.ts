@@ -183,12 +183,6 @@ function skillScopeWhere(scope: UsageScope): SQL {
   }
 }
 
-// JSON.stringify can persist a NUL as \u0000 in tool output. PostgreSQL jsonb
-// cannot decode it, so replace that escape before reading the call metadata.
-const TOOL_PARTS = sql`jsonb_array_elements(
-  replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb
-)`;
-
 /** Settled assistant tool calls and workflow tool nodes executed without a model. */
 export async function getUsageToolEfficiency(
   db: AppDb,
@@ -196,7 +190,7 @@ export async function getUsageToolEfficiency(
 ): Promise<UsageToolEfficiencyResponse> {
   const period = periodFromOpts(opts);
   const scope = opts.scope;
-  const engineScope = skillScopeWhere(scope);
+  const engineScope = scopeWhere("ce.", period, scope);
   const actionOwner = scope.scope === "team"
     ? sql`AND r.owner_type = 'team' AND r.owner_id = ${scope.teamId}`
     : scope.scope === "me"
@@ -205,23 +199,10 @@ export async function getUsageToolEfficiency(
   interface CountRow { use_case: string; calls: unknown }
   const [engine, workflow] = await Promise.all([
     db.execute(sql`
-      SELECT CASE
-        WHEN e.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
-        WHEN e.session_id LIKE 'wf:%' THEN 'workflow'
-        ELSE 'session'
-      END AS use_case, COUNT(*) AS calls
-      FROM engine_entries e
-      LEFT JOIN agent_sessions s ON s.id = e.session_id
-      LEFT JOIN workflow_runs r
-        ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
-      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-      CROSS JOIN LATERAL ${TOOL_PARTS} AS p(part)
-      WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
-        AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
-        AND ${engineScope}
-        AND p.part->>'type' = 'tool_call'
-        AND p.part->>'status' IN ('completed', 'error')
-      GROUP BY 1`) as Promise<{ rows: CountRow[] }>,
+      SELECT ce.use_case, SUM(ce.tool_calls) AS calls
+      FROM usage_entries ce
+      WHERE ${engineScope} AND ce.tool_calls > 0
+      GROUP BY ce.use_case`) as Promise<{ rows: CountRow[] }>,
     db.execute(sql`
       SELECT COUNT(*) AS calls
       FROM action_invocations ai
@@ -262,7 +243,7 @@ export async function getUsageOutcomes(
   const costScope = scopeWhere("", period, scope);
   interface OutcomeRow { parent: string; kind: string; count: unknown }
   interface CostRow { parent: string; cost_usd: unknown; unpriced_turns: unknown }
-  const [actions, terminal, costs] = await Promise.all([
+  const [actions, terminal] = await Promise.all([
     db.execute(sql`
       SELECT CASE WHEN r.id IS NOT NULL
           THEN 'w:' || r.id ELSE 's:' || ai.session_id END AS parent,
@@ -284,6 +265,8 @@ export async function getUsageOutcomes(
         AND COALESCE(ai.started_at, ai.created_at) < ${period.endMs}
         AND ai.org_id = ${scope.orgId} AND ${actionScope}
         AND ai.status = 'completed' AND ai.duration_ms IS NOT NULL
+        AND ai.action_id IN ('github.create_pull_request', 'github.create_review', 'slack.send_message',
+          'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user')
         AND ai.result::jsonb->>'success' = 'true'
         AND (ai.session_id IS NOT NULL OR ai.workflow_execution_id IS NOT NULL)
         AND (ai.action_id = 'github.create_pull_request'
@@ -292,31 +275,16 @@ export async function getUsageOutcomes(
           OR ai.action_id IN ('slack.send_message', 'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user'))
       GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
     db.execute(sql`
-      SELECT CASE WHEN r.id IS NOT NULL THEN 'w:' || r.id ELSE 's:' || e.session_id END AS parent,
-        p.part->'result'->'details'->'outcome'->>'kind' AS kind,
-        COUNT(*) AS count
-      FROM engine_entries e
-      LEFT JOIN agent_sessions s ON s.id = e.session_id
-      LEFT JOIN workflow_runs r
-        ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
-      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-      CROSS JOIN LATERAL ${TOOL_PARTS} AS p(part)
-      WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
-        AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
-        AND ${actionScope}
-        AND p.part->>'type' = 'tool_call' AND p.part->>'toolName' = 'bash'
-        AND p.part->>'status' = 'completed'
-        AND p.part->'result'->'details'->'outcome'->>'kind'
-          IN ('pull_request_created', 'review_submitted')
+      SELECT CASE WHEN ce.workflow_run_id IS NOT NULL THEN 'w:' || ce.workflow_run_id
+        ELSE 's:' || ce.session_id END AS parent,
+        outcome.kind, SUM(outcome.count) AS count
+      FROM usage_entries ce
+      CROSS JOIN LATERAL (VALUES
+        ('pull_request_created', ce.pull_requests), ('review_submitted', ce.reviews)
+      ) outcome(kind, count)
+      WHERE ${scopeWhere("ce.", period, scope)} AND outcome.count > 0
+        AND (ce.pull_requests > 0 OR ce.reviews > 0)
       GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
-    db.execute(sql`
-      SELECT CASE WHEN workflow_run_id IS NOT NULL THEN 'w:' || workflow_run_id
-        ELSE 's:' || session_id END AS parent,
-        COALESCE(SUM(cost_total), 0) AS cost_usd,
-        COUNT(*) FILTER (WHERE NOT priced) AS unpriced_turns
-      FROM cost_entries
-      WHERE ${costScope} AND session_id IS NOT NULL
-      GROUP BY 1`) as Promise<{ rows: CostRow[] }>,
   ]);
 
   const byParent = new Map<string, Map<UsageOutcomeKind, number>>();
@@ -327,6 +295,21 @@ export async function getUsageOutcomes(
     counts.set(kind, (counts.get(kind) ?? 0) + toNum(row.count));
     byParent.set(row.parent, counts);
   }
+  // Parents without outcomes need no cost allocation. Keep this query bounded
+  // to confirmed parents instead of aggregating every session in the org.
+  const sessions = [...byParent.keys()].filter((p) => p.startsWith("s:")).map((p) => p.slice(2));
+  const workflows = [...byParent.keys()].filter((p) => p.startsWith("w:")).map((p) => p.slice(2));
+  const parentFilters: SQL[] = [];
+  if (sessions.length) parentFilters.push(sql`(workflow_run_id IS NULL AND session_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(sessions)}::jsonb)))`);
+  if (workflows.length) parentFilters.push(sql`workflow_run_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(workflows)}::jsonb))`);
+  const costs = parentFilters.length ? await db.execute(sql`
+    SELECT CASE WHEN workflow_run_id IS NOT NULL THEN 'w:' || workflow_run_id
+      ELSE 's:' || session_id END AS parent,
+      COALESCE(SUM(cost_total), 0) AS cost_usd,
+      COUNT(*) FILTER (WHERE NOT priced) AS unpriced_turns
+    FROM cost_entries
+    WHERE ${costScope} AND (${sql.join(parentFilters, sql` OR `)})
+    GROUP BY 1`) as { rows: CostRow[] } : { rows: [] };
   const costByParent = new Map(costs.rows.map((row) => [row.parent, row]));
   const totals = new Map<UsageOutcomeKind, { count: number; cost: number }>(
     OUTCOME_KINDS.map((kind) => [kind, { count: 0, cost: 0 }]),
@@ -371,26 +354,38 @@ async function getSkillBreakdown(
   scope: UsageScope,
 ): Promise<SkillUsageBreakdown[]> {
   const where = skillScopeWhere(scope);
+  // Filter each source by its own time column before combining it. A skill
+  // invoked before this period can still contribute context during it.
   const result = (await db.execute(sql`
-    SELECT si.skill_key, si.skill_name, si.origin, si.plugin_name,
-           COUNT(DISTINCT si.id) FILTER (WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) AS invocations,
-           COUNT(DISTINCT si.invoker_user_id) FILTER (WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) AS unique_invokers,
-           COUNT(DISTINCT si.id) FILTER (
-             WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs} AND si.invoker_user_id IS NULL
-           ) AS unassigned_invocations,
-           COALESCE(SUM(sca.estimated_skill_tokens) FILTER (WHERE sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs}), 0)
-             AS attributed_context_tokens,
-           COUNT(DISTINCT sca.llm_request_id) FILTER (WHERE sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs})
-             AS carrying_calls
-    FROM skill_invocations si
-    LEFT JOIN skill_context_attributions sca ON sca.skill_invocation_id = si.id
-    LEFT JOIN agent_sessions s ON s.id = si.session_id
-    LEFT JOIN workflow_runs r
-      ON si.session_id LIKE 'wf:%' AND r.id = split_part(si.session_id, ':', 2)
-    LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-    WHERE ${where} AND ((si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) OR (sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs}))
-    GROUP BY si.skill_key, si.skill_name, si.origin, si.plugin_name
-    ORDER BY invocations DESC, si.skill_name ASC
+    WITH period_context AS MATERIALIZED (
+      SELECT * FROM skill_context_attributions
+      WHERE created_at >= ${period.startMs} AND created_at < ${period.endMs}
+    ), facts AS (
+      SELECT si.id, si.skill_key, si.skill_name, si.origin, si.plugin_name,
+        si.invoker_user_id, true AS invoked, 0 AS estimated_skill_tokens, NULL::text AS llm_request_id
+      FROM skill_invocations si
+      LEFT JOIN agent_sessions s ON s.id = si.session_id
+      LEFT JOIN workflow_runs r ON si.session_id LIKE 'wf:%' AND r.id = split_part(si.session_id, ':', 2)
+      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
+      WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs} AND ${where}
+      UNION ALL
+      SELECT si.id, si.skill_key, si.skill_name, si.origin, si.plugin_name,
+        si.invoker_user_id, false, sca.estimated_skill_tokens, sca.llm_request_id
+      FROM period_context sca
+      JOIN skill_invocations si ON si.id = sca.skill_invocation_id
+      LEFT JOIN agent_sessions s ON s.id = si.session_id
+      LEFT JOIN workflow_runs r ON si.session_id LIKE 'wf:%' AND r.id = split_part(si.session_id, ':', 2)
+      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
+      WHERE sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs} AND ${where}
+    )
+    SELECT skill_key, skill_name, origin, plugin_name,
+      COUNT(*) FILTER (WHERE invoked) AS invocations,
+      COUNT(DISTINCT invoker_user_id) FILTER (WHERE invoked) AS unique_invokers,
+      COUNT(*) FILTER (WHERE invoked AND invoker_user_id IS NULL) AS unassigned_invocations,
+      COALESCE(SUM(estimated_skill_tokens), 0) AS attributed_context_tokens,
+      COUNT(DISTINCT llm_request_id) AS carrying_calls
+    FROM facts GROUP BY skill_key, skill_name, origin, plugin_name
+    ORDER BY invocations DESC, skill_name ASC
   `)) as { rows: SkillBreakdownRow[] };
   return result.rows.map((row) => ({
     skillKey: row.skill_key,

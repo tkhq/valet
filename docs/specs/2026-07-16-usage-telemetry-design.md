@@ -194,3 +194,47 @@ The home dashboard counts Valet sessions, orchestrators, and workflows only.
 This filter applies to costs, tokens, turns, and unpriced counts.
 The Usage page, exports, and proxy request log retain external proxy activity.
 The home card states this scope so its totals need not match the full Usage page.
+
+## Indexed usage facts (2026-09-26)
+
+The Usage page reads compact facts instead of parsing transcript bodies on every request.
+`usage_entry_facts` has one row per engine entry. It stores model usage, model cost, and settled tool/outcome counts.
+A database trigger updates the fact in the same transaction as each relevant entry insert or update.
+The source foreign key cascades deletes. Repeated tool-result updates replace counts; they do not increment counters.
+The projection sanitizes escaped NUL characters with the same rule as the prior read query.
+
+`usage_entries` resolves current session or workflow ownership. Two exclusive branches preserve session precedence and allow scope filters into the joins.
+The `cost_entries` view uses these facts and retains the proxy branch and existing column contract.
+Ownership changes take effect without rebuilding facts. Tool efficiency and terminal outcomes use stored counts.
+Outcome allocation reads costs only for parents with confirmed outcomes in the requested period.
+Skill adoption and carried context use separate date-bounded inputs. Historical invocations can still carry context in the current period.
+
+Indexes cover fact date/session/workflow lookups, effective action time, confirmed outcome actions, skill-context dates, and session organization/user ownership.
+Effective action time remains `COALESCE(started_at, created_at)`, including delayed approvals.
+A broad organization query may scan compact facts when most rows match. It does not decode raw transcript bodies.
+This is an exact per-entry projection, not a periodically refreshed cache or an approximate daily rollup.
+
+### Existing database rollout
+
+Fresh databases create the projection in `0000_app.sql`. Existing databases use a resumable schema repair.
+
+1. Install the fact table and trigger in a short transaction with a five-second lock acquisition timeout.
+2. Build audit and skill indexes concurrently.
+3. Backfill at most 500 source entries per statement, releasing row locks between batches.
+4. Publish the new views after the backfill completes.
+
+Old API instances keep the original views during backfill. Writes after trigger installation maintain facts immediately.
+Backfill inserts skip facts already written by the trigger. Key-share locks prevent source deletion races within each batch.
+An interrupted upgrade resumes missing facts on the next startup. It does not publish a partial projection.
+The new API waits for the repair before serving requests. Initial DDL and final view replacement still require brief locks.
+No production upgrade was run during development.
+
+### Local performance evidence
+
+The disposable PGlite benchmark uses 100,000 transcript entries, 100,000 action audits, and 200,000 skill-context records.
+Before/after result payloads matched, allowing floating-point summation tolerance.
+Measured times were: breakdown 873 to 372 ms; tool efficiency 930 to 40 ms; outcomes 1,046 to 211 ms.
+These measurements are local evidence, not production latency guarantees. Production validation must measure the deployed database and its data distribution.
+The plans read compact facts and use the effective-time and outcome-action indexes. They do not scan transcript bodies for these endpoints.
+
+Run `BENCH_ROWS=100000 BENCH_EXPLAIN=1 pnpm --filter @valet/api exec node --import tsx scripts/benchmark-usage.ts` for timings and plans.

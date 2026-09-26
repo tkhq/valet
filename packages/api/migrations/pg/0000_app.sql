@@ -1500,3 +1500,119 @@ CREATE TABLE IF NOT EXISTS "team_deletion_requests" (
 CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");
+
+--> statement-breakpoint
+-- usage analytics projection v1
+DO $migration$
+BEGIN
+  -- usage analytics install
+  -- Fresh databases are empty. Existing databases use the batched repair.
+  LOCK TABLE engine_entries IN SHARE ROW EXCLUSIVE MODE;
+  CREATE TABLE IF NOT EXISTS usage_entry_facts (
+    entry_id text PRIMARY KEY REFERENCES engine_entries(id) ON DELETE CASCADE,
+    session_id text NOT NULL,
+    workflow_run_id text,
+    created_at bigint NOT NULL,
+    model text,
+    usage jsonb,
+    cost jsonb,
+    tool_calls bigint NOT NULL,
+    pull_requests bigint NOT NULL,
+    reviews bigint NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_window ON usage_entry_facts(created_at, session_id);
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_session_window ON usage_entry_facts(session_id, created_at);
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_workflow_window ON usage_entry_facts(workflow_run_id, created_at)
+    WHERE workflow_run_id IS NOT NULL;
+
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_cost_window ON usage_entry_facts(created_at, session_id) WHERE usage IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_tools_window ON usage_entry_facts(created_at, session_id) WHERE tool_calls > 0;
+  CREATE INDEX IF NOT EXISTS usage_entry_facts_outcomes_window ON usage_entry_facts(created_at, session_id) WHERE pull_requests > 0 OR reviews > 0;
+
+  CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
+  LANGUAGE sql IMMUTABLE AS $fact$
+    SELECT e.id, e.session_id,
+      CASE WHEN e.session_id LIKE 'wf:%' THEN split_part(e.session_id, ':', 2) END,
+      e.created_at, e.model, e.usage::jsonb, e.cost::jsonb,
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'status' IN ('completed', 'error')),
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
+        AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'pull_request_created'),
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
+        AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'review_submitted')
+    FROM jsonb_array_elements(CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
+      THEN COALESCE(replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb, '[]'::jsonb)
+      ELSE '[]'::jsonb END) p
+  $fact$;
+
+  CREATE OR REPLACE FUNCTION valet_sync_usage_fact() RETURNS trigger
+  LANGUAGE plpgsql AS $sync$
+  BEGIN
+    INSERT INTO usage_entry_facts SELECT f.* FROM valet_usage_fact(NEW) f
+    ON CONFLICT (entry_id) DO UPDATE SET
+      session_id = EXCLUDED.session_id, workflow_run_id = EXCLUDED.workflow_run_id,
+      created_at = EXCLUDED.created_at, model = EXCLUDED.model, usage = EXCLUDED.usage,
+      cost = EXCLUDED.cost, tool_calls = EXCLUDED.tool_calls,
+      pull_requests = EXCLUDED.pull_requests, reviews = EXCLUDED.reviews;
+    RETURN NEW;
+  END $sync$;
+  CREATE OR REPLACE TRIGGER engine_entries_usage_fact
+    AFTER INSERT OR UPDATE OF session_id, created_at, model, usage, cost, parts, entry_type, role
+    ON engine_entries FOR EACH ROW EXECUTE FUNCTION valet_sync_usage_fact();
+
+  -- usage analytics backfill
+  INSERT INTO usage_entry_facts SELECT f.* FROM engine_entries e
+    CROSS JOIN LATERAL valet_usage_fact(e) f ON CONFLICT (entry_id) DO NOTHING;
+
+  -- usage analytics publish
+  -- Separate ownership branches let PostgreSQL push scope filters into each join.
+  CREATE OR REPLACE VIEW usage_entries AS
+    SELECT f.entry_id, f.session_id, r.id AS workflow_run_id, f.created_at, f.model, f.usage, f.cost,
+      f.tool_calls, f.pull_requests, f.reviews, s.org_id, s.user_id, s.owner_type, NULLIF(s.owner_id, '') AS owner_id,
+      r.workflow_id,
+      CASE WHEN f.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
+        WHEN f.session_id LIKE 'wf:%' THEN 'workflow' ELSE 'session' END AS use_case
+    FROM usage_entry_facts f JOIN agent_sessions s ON s.id = f.session_id
+    LEFT JOIN workflow_runs r ON r.id = f.workflow_run_id
+    UNION ALL
+    SELECT f.entry_id, f.session_id, r.id, f.created_at, f.model, f.usage, f.cost,
+      f.tool_calls, f.pull_requests, f.reviews, d.org_id, CASE WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END,
+      r.owner_type, NULLIF(r.owner_id, ''), r.workflow_id, 'workflow'::text
+    FROM usage_entry_facts f JOIN workflow_runs r ON r.id = f.workflow_run_id
+    JOIN workflow_definitions d ON d.id = r.workflow_id
+    WHERE NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = f.session_id);
+
+  CREATE OR REPLACE VIEW cost_entries AS
+    SELECT entry_id, session_id, created_at, model, org_id, user_id, owner_type, owner_id,
+      workflow_id, workflow_run_id,
+      COALESCE((usage->>'input')::bigint,0) AS input_tokens,
+      COALESCE((usage->>'output')::bigint,0) AS output_tokens,
+      COALESCE((usage->>'cacheRead')::bigint,0) AS cache_read_tokens,
+      COALESCE((usage->>'cacheWrite')::bigint,0) AS cache_write_tokens,
+      COALESCE((usage->>'total')::bigint,0) AS total_tokens,
+      (cost->>'total')::float8 AS cost_total, (cost->>'total') IS NOT NULL AS priced,
+      use_case, NULL::text AS provider
+    FROM usage_entries WHERE usage IS NOT NULL
+    UNION ALL
+    SELECT id, NULL, created_at, model, org_id, user_id,
+      CASE WHEN team_id IS NOT NULL THEN 'team' ELSE 'user' END,
+      COALESCE(team_id,user_id), NULL, NULL,
+      input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens,
+      cost_usd, cost_usd IS NOT NULL, 'proxy', provider_kind
+    FROM llm_proxy_requests p WHERE total_tokens > 0;
+
+  -- usage analytics indexes
+  CREATE INDEX IF NOT EXISTS action_invocations_usage_time
+    ON action_invocations(org_id, (COALESCE(started_at, created_at)))
+    WHERE status IN ('completed', 'error') AND duration_ms IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS skill_context_attributions_window
+    ON skill_context_attributions(created_at, skill_invocation_id);
+  CREATE INDEX IF NOT EXISTS agent_sessions_usage_scope
+    ON agent_sessions(org_id, user_id, id);
+  CREATE INDEX IF NOT EXISTS skill_invocations_usage_window ON skill_invocations(created_at, session_id);
+  CREATE INDEX IF NOT EXISTS action_invocations_outcome_time
+    ON action_invocations(org_id, (COALESCE(started_at, created_at)))
+    WHERE status = 'completed' AND duration_ms IS NOT NULL
+      AND action_id IN ('github.create_pull_request', 'github.create_review', 'slack.send_message',
+        'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user');
+  ANALYZE usage_entry_facts;
+END $migration$;

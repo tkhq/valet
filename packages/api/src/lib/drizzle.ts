@@ -21,6 +21,7 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Pool } from "pg";
 import { applyEngineMigrations, isPgLockTimeout, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync } from "node:fs";
+import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
 import * as schema from "../schema/index.js";
 
 /** Application Drizzle handle. The engine's session store has its own
@@ -150,6 +151,8 @@ export async function expandLegacySlackWildcards(db: PgDb): Promise<void> {
  * where nothing is missing issues no DDL at all.
  */
 interface SchemaRepair {
+  /** Optional resumable preparation, outside the final DDL transaction. */
+  prepare?: (db: PgDb) => Promise<void>;
   /** Names the element in logs and errors, e.g. "orgs.sso_team_groups column". */
   describe: string;
   probe:
@@ -168,7 +171,7 @@ interface SchemaRepair {
   backfill?: string;
 }
 
-const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
+const LEGACY_COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
       SELECT
         e."id"                                                     AS "entry_id",
         e."session_id"                                             AS "session_id",
@@ -217,6 +220,15 @@ const COST_ENTRIES_VIEW_SQL = `CREATE OR REPLACE VIEW "cost_entries" AS
         p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case", p."provider_kind" AS "provider"
       FROM "llm_proxy_requests" p
       WHERE p."total_tokens" > 0`;
+
+// Older repairs must not restore the expensive ledger after projection rollout.
+const COST_ENTRIES_VIEW_SQL = `DO $cost_view$ BEGIN
+  IF to_regclass('usage_entries') IS NULL THEN
+    ${LEGACY_COST_ENTRIES_VIEW_SQL};
+  ELSE
+    ${projectedCostViewSql}
+  END IF;
+END $cost_view$`;
 
 /**
  * The pre-1.0 in-place-edit repair list. Add an entry when an edit to
@@ -1409,6 +1421,32 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       `UPDATE "agent_sessions" SET "credential_owner_mode" = 'actor' ` +
       `WHERE "owner_type" = 'team' AND "credential_owner_mode" IS NULL RETURNING "id"`,
   },
+  {
+    describe: "usage_entry_facts projection and indexes",
+    probe: { kind: "column", table: "usage_entries", column: "entry_id" },
+    prepare: prepareUsageAnalytics,
+    sql: usageAnalyticsPublishSql,
+  },
+  { describe: "usage_entry_facts_window", probe: { kind: "index", index: "usage_entry_facts_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_entry_facts_window ON usage_entry_facts(created_at, session_id);` },
+  { describe: "usage_entry_facts_session_window", probe: { kind: "index", index: "usage_entry_facts_session_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_entry_facts_session_window ON usage_entry_facts(session_id, created_at);` },
+  { describe: "usage_entry_facts_workflow_window", probe: { kind: "index", index: "usage_entry_facts_workflow_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_entry_facts_workflow_window ON usage_entry_facts(workflow_run_id, created_at)
+    WHERE workflow_run_id IS NOT NULL;` },
+  { describe: "action_invocations_usage_time", probe: { kind: "index", index: "action_invocations_usage_time" }, sql: `CREATE INDEX IF NOT EXISTS action_invocations_usage_time
+    ON action_invocations(org_id, (COALESCE(started_at, created_at)))
+    WHERE status IN ('completed', 'error') AND duration_ms IS NOT NULL;` },
+  { describe: "skill_context_attributions_window", probe: { kind: "index", index: "skill_context_attributions_window" }, sql: `CREATE INDEX IF NOT EXISTS skill_context_attributions_window
+    ON skill_context_attributions(created_at, skill_invocation_id);` },
+  { describe: "agent_sessions_usage_scope", probe: { kind: "index", index: "agent_sessions_usage_scope" }, sql: `CREATE INDEX IF NOT EXISTS agent_sessions_usage_scope
+    ON agent_sessions(org_id, user_id, id);` },
+  { describe: "skill_invocations_usage_window", probe: { kind: "index", index: "skill_invocations_usage_window" }, sql: `CREATE INDEX IF NOT EXISTS skill_invocations_usage_window ON skill_invocations(created_at, session_id);` },
+  { describe: "action_invocations_outcome_time", probe: { kind: "index", index: "action_invocations_outcome_time" }, sql: `CREATE INDEX IF NOT EXISTS action_invocations_outcome_time
+    ON action_invocations(org_id, (COALESCE(started_at, created_at)))
+    WHERE status = 'completed' AND duration_ms IS NOT NULL
+      AND action_id IN ('github.create_pull_request', 'github.create_review', 'slack.send_message',
+        'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user');` },
+  { describe: "usage_entry_facts_cost_window", probe: { kind: "index", index: "usage_entry_facts_cost_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_entry_facts_cost_window ON usage_entry_facts(created_at, session_id) WHERE usage IS NOT NULL" },
+  { describe: "usage_entry_facts_tools_window", probe: { kind: "index", index: "usage_entry_facts_tools_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_entry_facts_tools_window ON usage_entry_facts(created_at, session_id) WHERE tool_calls > 0" },
+  { describe: "usage_entry_facts_outcomes_window", probe: { kind: "index", index: "usage_entry_facts_outcomes_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_entry_facts_outcomes_window ON usage_entry_facts(created_at, session_id) WHERE pull_requests > 0 OR reviews > 0" },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per
@@ -1512,6 +1550,7 @@ async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
 async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
   for (let attempt = 1; attempt <= REPAIR_ATTEMPTS; attempt++) {
     try {
+      await repair.prepare?.(db);
       const backfilled = await db.transaction(async (tx) => {
         // SET LOCAL scopes the timeout to this transaction. Without it the
         // ALTER waits forever behind any open transaction on the table —

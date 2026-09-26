@@ -413,6 +413,7 @@ export const agentSessions = pgTable(
   },
   (t) => [
     index("agent_sessions_user").on(t.userId),
+    index("agent_sessions_usage_scope").on(t.orgId, t.userId, t.id),
     index("agent_sessions_status").on(t.status),
   ],
 );
@@ -1063,6 +1064,7 @@ export const skillInvocations = pgTable(
     index("skill_invocations_org_created").on(t.orgId, t.createdAt),
     index("skill_invocations_session_thread_created").on(t.sessionId, t.threadId, t.createdAt),
     index("skill_invocations_skill_created").on(t.skillKey, t.createdAt),
+    index("skill_invocations_usage_window").on(t.createdAt, t.sessionId),
   ],
 );
 
@@ -1076,7 +1078,8 @@ export const skillContextAttributions = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     estimatedSkillTokens: integer("estimated_skill_tokens").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.skillInvocationId, t.llmRequestId] })],
+  (t) => [primaryKey({ columns: [t.skillInvocationId, t.llmRequestId] }),
+    index("skill_context_attributions_window").on(t.createdAt, t.skillInvocationId)],
 );
 
 /** What one tracked repository mirrors. `skills` is the kind that ships; the
@@ -1571,7 +1574,12 @@ export const actionInvocations = pgTable(
   },
   (t) => [
     index("action_invocations_session").on(t.sessionId),
+    index("action_invocations_outcome_time").on(t.orgId, sql`COALESCE(${t.startedAt}, ${t.createdAt})`)
+      .where(sql`${t.status} = 'completed' AND ${t.durationMs} IS NOT NULL AND ${t.actionId} IN
+        ('github.create_pull_request', 'github.create_review', 'slack.send_message', 'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user')`),
     index("action_invocations_org_created").on(t.orgId, t.createdAt),
+    index("action_invocations_usage_time").on(t.orgId, sql`COALESCE(${t.startedAt}, ${t.createdAt})`)
+      .where(sql`${t.status} IN ('completed', 'error') AND ${t.durationMs} IS NOT NULL`),
   ],
 );
 
@@ -2483,4 +2491,25 @@ export const teamDeletionRequests = pgTable("team_deletion_requests", {
 }, (t) => [
   uniqueIndex("team_deletion_requests_pending").on(t.teamId, t.resourceType, t.resourceId).where(sql`${t.status} = 'pending'`),
   index("team_deletion_requests_team_status").on(t.teamId, t.status),
+]);
+
+/** Database-maintained projection. The migration owns its source FK and trigger. */
+export const usageEntryFacts = pgTable("usage_entry_facts", {
+  entryId: text("entry_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  workflowRunId: text("workflow_run_id"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  model: text("model"),
+  usage: jsonb("usage"),
+  cost: jsonb("cost"),
+  toolCalls: bigint("tool_calls", { mode: "number" }).notNull(),
+  pullRequests: bigint("pull_requests", { mode: "number" }).notNull(),
+  reviews: bigint("reviews", { mode: "number" }).notNull(),
+}, (t) => [
+  index("usage_entry_facts_window").on(t.createdAt, t.sessionId),
+  index("usage_entry_facts_cost_window").on(t.createdAt, t.sessionId).where(sql`${t.usage} IS NOT NULL`),
+  index("usage_entry_facts_tools_window").on(t.createdAt, t.sessionId).where(sql`${t.toolCalls} > 0`),
+  index("usage_entry_facts_outcomes_window").on(t.createdAt, t.sessionId).where(sql`${t.pullRequests} > 0 OR ${t.reviews} > 0`),
+  index("usage_entry_facts_session_window").on(t.sessionId, t.createdAt),
+  index("usage_entry_facts_workflow_window").on(t.workflowRunId, t.createdAt).where(sql`${t.workflowRunId} IS NOT NULL`),
 ]);
