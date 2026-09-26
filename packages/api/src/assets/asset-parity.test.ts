@@ -14,6 +14,12 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
  * byte-equal the asset file on disk.
  */
 const CASES = [
+  ...["usage-analytics-migration", "usage-hourly-migration", "usage-aux-rollups", "usage-member-activity"].map(name => ({
+    name: `api ${name} migration (.sql)`,
+    sourceFile: resolve(repoRoot, `packages/api/src/lib/${name}.ts`),
+    literal: "../../migrations/pg/0000_app.sql",
+    assetFile: resolve(repoRoot, "packages/api/migrations/pg/0000_app.sql"),
+  })),
   {
     name: "plugin-github SKILL.md",
     sourceFile: resolve(repoRoot, "packages/plugin-github/src/plugin.ts"),

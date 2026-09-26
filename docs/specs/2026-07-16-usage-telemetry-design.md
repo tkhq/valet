@@ -343,3 +343,7 @@ These are local measurements, not cold-cache or production guarantees.
 Four simultaneous main-fixture dashboards finish in 1,834 ms. Each dashboard requests all four endpoints.
 The existing hourly-only projection builds its daily layer in 2.33 seconds on this fixture.
 Full source backfill has a separate, data-dependent cost. Interrupted backfill resumes from its committed cursor.
+
+
+Usage repair helpers share migration SQL with fresh installs. The server build embeds this SQL, including formatter-added trailing commas in asset reads.
+Asset parity and bundle guards reject migration paths that would require source files at runtime.
