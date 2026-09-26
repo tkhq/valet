@@ -504,6 +504,7 @@ export async function updateInvocationOutcome(
     result?: unknown;
     error?: string;
     durationMs?: number;
+    startedAt?: number;
     resolvedBy?: string;
   },
 ): Promise<void> {
@@ -521,6 +522,7 @@ export async function updateInvocationOutcome(
         resultTruncated: result ? result.truncated : null,
         error,
         durationMs: outcome.durationMs ?? null,
+        ...(outcome.startedAt !== undefined ? { startedAt: outcome.startedAt } : {}),
         ...(outcome.resolvedBy !== undefined ? { resolvedBy: outcome.resolvedBy } : {}),
       })
       // Org-scoped: `invocationId` embeds the workflow node id, which the

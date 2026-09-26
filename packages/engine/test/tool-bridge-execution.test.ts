@@ -110,3 +110,21 @@ describe("tool bridge: empty-result marker (TKAI-318)", () => {
     expect(result.content).toEqual([{ type: "text", text: "hello" }]);
   });
 });
+
+describe("tool bridge: terminal outcomes", () => {
+  it("keeps a recognized side effect in persisted result details", async () => {
+    const tool = toAgentTool(
+      defineTool({
+        name: "bash",
+        description: "runs a command",
+        parameters: Type.Object({}),
+        execute: async () => ({ text: "https://github.com/acme/repo/pull/42", outcome: {
+          kind: "pull_request_created" as const, url: "https://github.com/acme/repo/pull/42",
+        } }),
+      }),
+      buildCtx,
+    );
+    const result = await tool.execute("tc-pr", {}, new AbortController().signal, () => {});
+    expect(result.details).toEqual({ outcome: { kind: "pull_request_created", url: "https://github.com/acme/repo/pull/42" } });
+  });
+});

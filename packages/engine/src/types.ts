@@ -641,6 +641,8 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 export interface ToolResult {
   text: string;
   attachments?: ToolAttachment[];
+  /** Confirmed side effect from a successful, recognized terminal command. */
+  outcome?: { kind: "pull_request_created" | "review_submitted"; url?: string };
   /**
    * Action-level outcome, set by action-backed tools (`call_tool`): `false`
    * when the action reported failure without throwing. An action failure is

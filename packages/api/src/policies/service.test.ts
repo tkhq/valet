@@ -280,6 +280,14 @@ describe("persistInvocationAudit", () => {
 // ── updateInvocationOutcome ───────────────────────────────────────
 
 describe("updateInvocationOutcome", () => {
+  it("records execution start after a workflow approval wait", async () => {
+    await persistInvocationAudit(db, { invocationId: "inv-start", orgId: ORG, status: "pending", createdAt: 1000 });
+    await updateInvocationOutcome(db, "inv-start", ORG, { status: "completed", startedAt: 9000, durationMs: 20 });
+    const row = (await db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "inv-start")))[0];
+    expect(row.createdAt).toBe(1000);
+    expect(row.startedAt).toBe(9000);
+  });
+
   it("stamps resolvedBy on a row when provided", async () => {
     // Seed an invocation row
     await persistInvocationAudit(db, { invocationId: "inv1", orgId: ORG, status: "pending" });

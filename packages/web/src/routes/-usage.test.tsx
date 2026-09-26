@@ -22,6 +22,8 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 
 import type {
   UsageBreakdownResponse,
+  UsageToolEfficiencyResponse,
+  UsageOutcomesResponse,
   UsageDrillResponse,
   ProxyRequestListItem,
   UsagePeriodSelection,
@@ -131,6 +133,33 @@ const mockBreakdown: UsageBreakdownResponse = {
     { dayMs: DAY_A_MS, costUsd: 0.07, totalTokens: 7_000 },
     { dayMs: DAY_B_MS, costUsd: 0.0534, totalTokens: 8_000 },
   ],
+};
+
+const mockToolEfficiency: UsageToolEfficiencyResponse = {
+  windowMs: 7 * 86_400_000,
+  scope: "me",
+  byUseCase: [
+    { useCase: "orchestrator", modelDirectedCalls: 10, modelFreeActions: 0 },
+    { useCase: "session", modelDirectedCalls: 80, modelFreeActions: 0 },
+    { useCase: "workflow", modelDirectedCalls: 2, modelFreeActions: 20 },
+    { useCase: "proxy", modelDirectedCalls: 0, modelFreeActions: 0 },
+  ],
+};
+let toolEfficiencyResult: { data: UsageToolEfficiencyResponse | undefined; isLoading: boolean; error: null | Error } = {
+  data: mockToolEfficiency, isLoading: false, error: null,
+};
+const mockOutcomes: UsageOutcomesResponse = {
+  scope: "me",
+  unpricedTurns: 0,
+  byOutcome: [
+    { kind: "pull_request_created", count: 2, estimatedCostUsd: 1.5, estimatedCostPerOutcomeUsd: 0.75 },
+    { kind: "review_submitted", count: 3, estimatedCostUsd: 0.6, estimatedCostPerOutcomeUsd: 0.2 },
+    { kind: "slack_message_sent", count: 4, estimatedCostUsd: 0.4, estimatedCostPerOutcomeUsd: 0.1 },
+    { kind: "slack_dm_sent", count: 1, estimatedCostUsd: 0.1, estimatedCostPerOutcomeUsd: 0.1 },
+  ],
+};
+let outcomesResult: { data: UsageOutcomesResponse | undefined; isLoading: boolean; error: null | Error } = {
+  data: mockOutcomes, isLoading: false, error: null,
 };
 
 const mockBreakdownWithUnpriced: UsageBreakdownResponse = {
@@ -304,6 +333,8 @@ vi.mock("~/api/usage", () => ({
     breakdownCalls.push(args);
     return breakdownResult;
   },
+  useUsageToolEfficiency: () => toolEfficiencyResult,
+  useUsageOutcomes: () => outcomesResult,
   useUsageItems: (_period: UsagePeriodSelection, _scope: string, useCase: string) =>
     itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null },
   qkUsage: {
@@ -404,6 +435,8 @@ import { UsagePage } from "./usage";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  toolEfficiencyResult = { data: mockToolEfficiency, isLoading: false, error: null };
+  outcomesResult = { data: mockOutcomes, isLoading: false, error: null };
   breakdownResult = { data: mockBreakdown, isLoading: false, error: null };
   itemsResults = {
     orchestrator: { data: mockOrchestratorItems, isLoading: false, error: null },
@@ -424,6 +457,31 @@ beforeEach(() => {
   breakdownCalls = [];
   lastProxyRequestsOpts = undefined;
   lastProxySettingsOpts = undefined;
+});
+
+describe("UsagePage — tool work", () => {
+  it("shows model-directed calls and model-free workflow actions", () => {
+    render(<UsagePage />);
+    expect(screen.getByText("Tool work per model token")).toBeTruthy();
+    const rows = screen.getAllByRole("row");
+    const session = rows.find((row) => row.textContent?.includes("Sessions") && row.textContent?.includes("80"));
+    const workflow = rows.find((row) => row.textContent?.includes("Workflows") && row.textContent?.includes("20"));
+    expect(session?.textContent).toContain("10,000");
+    expect(session?.textContent).toContain("8,000");
+    expect(workflow?.textContent).toContain("2,000");
+  });
+});
+
+describe("UsagePage — outcomes", () => {
+  it("shows confirmed outcome types and allocated model spend", () => {
+    render(<UsagePage />);
+    expect(screen.getByText("Outcomes")).toBeTruthy();
+    const row = screen.getByRole("row", { name: /PRs created/ });
+    expect(row.textContent).toContain("2");
+    expect(row.textContent).toContain("$1.5000");
+    expect(row.textContent).toContain("$0.7500");
+    expect(screen.getByRole("row", { name: /Slack DMs sent/ })).toBeTruthy();
+  });
 });
 
 describe("UsagePage — spend summary", () => {
@@ -617,8 +675,8 @@ describe("UsagePage — by-use-case table", () => {
   it("renders all four use-case labels", () => {
     render(<UsagePage />);
     expect(screen.getByText("Orchestrator")).toBeTruthy();
-    expect(screen.getByText("Sessions")).toBeTruthy();
-    expect(screen.getByText("Workflows")).toBeTruthy();
+    expect(screen.getAllByText("Sessions").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Workflows").length).toBeGreaterThan(0);
     expect(screen.getByText("Proxy (external tools)")).toBeTruthy();
   });
 

@@ -2594,3 +2594,7 @@ The prose in this spec defines intent; executable contract suites define conform
 - **EventStream contract** — monotonic offsets, replay-from-offset, live subscription ordering, eventKey-idempotent append, gap-refetch on lossy fan-out.
 
 A backend (SQLite, D1, PostgreSQL) is supported when its store passes these suites, not when it has been manually verified. New invariants added to this spec must land with a corresponding contract test in the same change.
+
+## Terminal outcome evidence (2026-09-25)
+
+The built-in `bash` tool records a small outcome marker in result `details` for a recognized, successful GitHub CLI write. The marker is not model-visible text. PR creation requires a zero exit code and a returned PR URL. Review submission requires a zero exit code and a submission flag. The command must be direct, with an optional `cd ... &&` prefix; compound scripts are not classified. The usage dashboard reads these persisted markers. Calls made before this change have no marker and are not backfilled from command text.
