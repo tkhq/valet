@@ -225,6 +225,9 @@ When \`addressed="false"\` (you are receiving manual delivery from a thread you 
 - If the conversation context shows you are the only other participant, treat
   that person's follow-ups as addressed. Reply with reply_to_origin.
 
+A \`delivery_failure\` note means your response was not posted. Follow the note.
+Call the origin service's reply_to_origin action if you intended to reply.
+
 A channel thread is a group conversation, not a chat with one person. On your
 first turn, earlier messages appear under "Conversation so far in this thread".
 Each line has the form "Name: message". Read who said what. Answer the person

@@ -121,13 +121,14 @@ or the final result. The agent uses `reply_to_origin` for progress updates
 and results. Slack also provides `reply_file_to_origin` for sandbox files.
 The `react_to_origin` action remains the explicit reaction path.
 
-**One delivery.** The host evaluates origin-reply calls across every
-assistant entry in the submission, including text-less entries before the first
-eligible text. Any completed call with persisted `details.ok=true` owns
-delivery. Otherwise, any running call defers automatic delivery. Only after all
-attempted origin replies become terminal failures does the host post the
-original first eligible text once as a fallback. An aborted submission never
-posts this fallback. Event redelivery cannot post it twice.
+**One delivery.** The host evaluates text `reply_to_origin` calls across
+every assistant entry in the submission. This includes text-less entries before
+the first eligible text. Any completed text reply with persisted
+`details.ok=true` owns delivery. Otherwise, any running text reply defers
+automatic delivery. Only after all attempted text replies become terminal
+failures does the host post the original first eligible text once as a fallback.
+A file reply does not suppress this addressed first text. An aborted submission
+never posts this fallback. Event redelivery cannot post it twice.
 
 **Manual delivery and overheard turns.** A turn with `reply="manual"` has no
 automatic reply. Manual delivery does not itself mean the message is
@@ -135,6 +136,32 @@ unaddressed. Slack `.message` turns receive shared guidance to stay silent by
 default for actual overheard content. They can reply to an explicit mention, a
 direct request, or a follow-up from the only other participant shown in thread
 context. The agent must call a channel action to post.
+
+**Dropped-reply feedback (TKAI-553).** When a terminal manual-delivery turn
+contains assistant text but no successful channel action, the host submits one
+`channel.reply_dropped` signal on the same assistant thread. The signal uses
+manual delivery, bypasses overheard digests, and queues behind active work.
+Later inbound channel input can supersede a queued recovery item because its
+thread uses steer mode. Thus recovery is best effort when the thread is busy.
+It tells the agent to do nothing for intentional silence. It tells the agent to call
+`reply_to_origin` only
+when it intended to reply. The origin-agnostic body uses the signal's structured
+origin for that action. The thread-scoped submission ID limits this reminder to
+one per assistant thread, even if later turns use another channel origin. A
+feedback-triggered turn cannot submit another feedback signal.
+
+A successful text or file origin reply, reaction, send, or DM suppresses the
+manual signal. A successful same-service send suppresses it for every
+destination. For a Slack origin, successful personal Slack posts, DMs, file
+uploads, and reactions also suppress it. These manual suppression rules do not
+change addressed first-response selection.
+
+If an addressed first-response send fails before text lands, the host submits queue-item-scoped feedback.
+The feedback contains an allowlisted public reason. The host makes at most three process-local admission attempts.
+It waits 50 ms and then 100 ms between attempts. Shutdown cancels either wait.
+Attempts keep one dispatch ID and never repeat the normal send. A reason mismatch
+deduplicates by that ID. If the session is not live, the host logs a warning and
+does not retry. This path does not survive shutdown.
 
 Direct channel messages and channel events use `SignalContent`. It carries the
 origin and supported image attachments. The engine gives this origin to the
@@ -274,7 +301,7 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
 ## Testing
 
 - **Engine.** Channel-signal origins reach the tool context.
-- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. A manual-delivery turn has no automatic post.
+- **API.** An addressed turn posts its first assistant text once. Later and final text stays internal. Swallowed manual turns submit at most one feedback signal per assistant thread. Successful bot and connected-user delivery actions suppress it. Failed addressed delivery submits one actionable signal. Admission retries do not repeat the normal send. Duplicate terminal events and feedback turns do not create extra signals.
   Command results and gate cards retain their existing surface checks.
 - **Slack.** `reply_to_origin` posts text exactly once.
   `reply_file_to_origin` uploads a sandbox file exactly once.
@@ -287,9 +314,11 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
 ## Deviations (Part 1, as built)
 
 - **Only the first addressed response posts automatically.** Final-message fallback delivery remains removed. A successful explicit origin reply anywhere in the submission suppresses the automatic copy. A pending call anywhere in the submission defers it. When all calls fail, the host falls back to the original first text.
-- **`child.settled` inherits the spawning submission's origin.** The parent
-  can post the child result with `reply_to_origin`. The settlement itself does
-  not post.
+- **`child.settled` inherits the spawning submission's origin.** A manual
+  settlement does not post automatically. It uses the same once-per-thread
+  silence reminder as other manual turns. PR #772 is the complementary owner
+  for durable automatic child replies. Its dispatcher must bypass this live
+  feedback path and retain provider send errors for retry.
 - **Telegram has an explicit text reply action.** `telegram.reply_to_origin`
   sends text to the origin DM through the organization bot credential.
 - **Slack text uses the CommonMark converter.** The channel transport,

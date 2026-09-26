@@ -249,6 +249,32 @@ digest. A redelivery whose recomputed body differs from the first delivery
 (the cursor advanced, so the prefix is gone) hits the dispatchId content
 check; the follow-router swallows that `ConflictError` as a clean dedup.
 
+### Dropped-reply feedback (TKAI-553, restored 2026-09-23)
+
+A terminal manual-delivery turn that writes assistant text without a successful
+channel action submits one `channel.reply_dropped` signal on the same assistant
+thread. The thread-scoped submission ID limits the reminder to one per
+assistant thread, even if later turns use another channel origin. The signal
+uses manual delivery and bypasses overheard digests. Its origin-agnostic body
+tells the agent to do nothing for intentional silence. It names the current
+signal origin's `reply_to_origin` action only when the agent intended to reply.
+A feedback-triggered turn cannot submit more feedback.
+
+Successful Slack text replies, file replies, reactions, sends, and DMs suppress
+the manual signal for every destination. Successful personal Slack posts, DMs,
+file uploads, and reactions also suppress the manual signal. An addressed file
+reply does not suppress the first assistant text. Only a text
+`reply_to_origin` call suppresses addressed automatic posting.
+
+An addressed automatic send failure submits queue-item-scoped feedback with an allowlisted public reason.
+The host makes three process-local admission attempts with bounded backoff. Shutdown cancels the retry.
+Attempts use one dispatch ID, never repeat the normal send, and do not survive process shutdown.
+
+Manual `child.settled` turns use the same once-per-thread reminder and remain
+non-automatic. PR #772 separately owns durable automatic child completion. Its
+dispatcher must retain send errors and must not route automatic failures through
+this live best-effort feedback path.
+
 ### First-turn seed hardening (TKAI-284, added 2026-09-01)
 
 `deliverToAssistantThread` serializes deliveries per assistant thread with an
@@ -270,7 +296,8 @@ admit and claim. Two rapid mentions on one new thread seed the transcript once.
 ## Testing
 
 - Origin `reply`/`messageTs` round-trip. Addressed turns post only the first
-  assistant text. Overheard turns stay internal without an explicit action.
+  assistant text. A swallowed manual-delivery response submits one deduplicated
+  feedback signal. Successful channel actions and feedback turns submit none.
 - Dispatcher writes a `followed_threads` row for a follow-enabled mention;
   writes none when `follow` is off.
 - Follow-router: a threaded channel message on a followed thread delivers to the
