@@ -3,8 +3,7 @@
  * server) with sensible packaged defaults.
  *
  * Design (single-binary CLI plan, T5, spec decision 2):
- * - Serve default port is **8788** (distinct from `main.ts`'s own 8787
- *   fallback — the serve command owns the 8788 default and sets `PORT`).
+ * - Serve default port is **8788**. It matches `main.ts` and sets `PORT`.
  * - Sandbox backend auto-detects: with no explicit choice, `docker` if a
  *   reachable daemon is found, else `local`.
  * - Auth defaults to the stub (`VALET_LOCAL_AUTH=1`) unless a real
@@ -28,7 +27,7 @@ import { detectDockerDaemon } from "../docker-detect.js";
 import type { CliContext } from "../types.js";
 import type { ServerHandle } from "../../main.js";
 
-/** Serve default port (spec decision 2) — NOT main.ts's 8787 fallback. */
+/** Serve default port (spec decision 2). */
 const SERVE_DEFAULT_PORT = 8788;
 
 const SANDBOX_KINDS: readonly SandboxKind[] = ["docker", "local", "kubernetes"];

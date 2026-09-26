@@ -111,7 +111,11 @@ export class EgressPolicy {
       ['localhost', '127.0.0.1', '::1'].includes(host) &&
       this.developmentPorts.includes(port)
     )
-      return { address: '127.0.0.1', port };
+      return {
+        address: '127.0.0.1',
+        addresses: ['127.0.0.1', '::1'],
+        port,
+      };
     if (port !== 443)
       throw new BrowserFault(
         'ORIGIN_DENIED',
@@ -120,7 +124,13 @@ export class EgressPolicy {
       );
     const addresses = isIP(host)
       ? [{ address: host, family: isIP(host) }]
-      : await this.resolve(host);
+      : await this.resolve(host).catch(() => {
+          throw new BrowserFault(
+            'ORIGIN_DENIED',
+            'The destination hostname could not be resolved.',
+            'Use a resolvable approved origin.',
+          );
+        });
     if (!addresses.length || addresses.some((v) => !isPublicAddress(v.address)))
       throw new BrowserFault(
         'ORIGIN_DENIED',
@@ -131,7 +141,13 @@ export class EgressPolicy {
   }
 }
 /** The private broker connects to a validated literal IP, so DNS cannot rebind between validation and connect. */
-export async function serveEgress(path: string, policy: EgressPolicy) {
+export async function serveEgress(
+  path: string,
+  policy: EgressPolicy,
+  connect: (options: { host: string; port: number }) => Socket =
+    createConnection,
+  connectTimeoutMs = 5_000,
+) {
   const sockets = new Set<Socket>();
   const unsubscribe = policy.onRevoke(() => {
     for (const socket of sockets) socket.destroy();
@@ -142,6 +158,12 @@ export async function serveEgress(path: string, policy: EgressPolicy) {
     socket.on('error', () => {});
     socket.setTimeout(60_000, () => socket.destroy());
     let buffer = Buffer.alloc(0);
+    let targetHost: string | undefined;
+    let targetPort: number | undefined;
+    const candidates = new Set<Socket>();
+    socket.on('close', () => {
+      for (const candidate of candidates) candidate.destroy();
+    });
     const handshake = (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       if (buffer.length > 4096) {
@@ -160,24 +182,61 @@ export async function serveEgress(path: string, policy: EgressPolicy) {
           port = Reflect.get(raw, 'port');
         if (typeof host !== 'string' || typeof port !== 'number')
           throw Error('Invalid proxy target');
+        targetHost = host;
+        targetPort = port;
         const destination = await policy.destination(host, port);
-        const upstream = createConnection({
-          host: destination.address,
-          port: destination.port,
-        });
-        sockets.add(upstream);
-        upstream.on('close', () => sockets.delete(upstream));
+        const addresses = destination.addresses ?? [destination.address];
+        let upstream: Socket | undefined;
+        for (const address of addresses) {
+          if (socket.destroyed) break;
+          try {
+            upstream = await new Promise<Socket>((resolve, reject) => {
+              const candidate = connect({ host: address, port: destination.port });
+              candidates.add(candidate);
+              sockets.add(candidate);
+              candidate.on('close', () => {
+                candidates.delete(candidate);
+                sockets.delete(candidate);
+              });
+              const timeout = setTimeout(
+                () => candidate.destroy(Error('Upstream connection timed out')),
+                connectTimeoutMs,
+              );
+              const rejectPending = (error: Error) => {
+                clearTimeout(timeout);
+                reject(error);
+              };
+              candidate.once('connect', () => {
+                clearTimeout(timeout);
+                if (socket.destroyed) {
+                  candidate.destroy();
+                  reject(Error('Proxy client closed.'));
+                } else resolve(candidate);
+              });
+              candidate.once('error', rejectPending);
+              candidate.once('close', () =>
+                rejectPending(Error('Upstream connection closed.')),
+              );
+            });
+            break;
+          } catch {
+            // Development servers can bind only one loopback address.
+          }
+        }
+        if (!upstream) throw Error('Upstream connection failed');
         upstream.on('error', () => socket.destroy());
-        upstream.on('connect', () => {
-          socket.write('OK\n');
-          const rest = buffer.subarray(end + 1);
-          if (rest.length) upstream.write(rest);
-          socket.pipe(upstream);
-          upstream.pipe(socket);
-          socket.resume();
-        });
+        socket.write('OK\n');
+        const rest = buffer.subarray(end + 1);
+        if (rest.length) upstream.write(rest);
+        socket.pipe(upstream);
+        upstream.pipe(socket);
+        socket.resume();
         socket.on('close', () => upstream.destroy());
-      })().catch(() => socket.end('DENIED\n'));
+      })().catch((error: unknown) => {
+        if (error instanceof BrowserFault || !targetHost || !targetPort)
+          socket.end('DENIED\n');
+        else socket.end(`UNAVAILABLE ${targetHost}:${targetPort}\n`);
+      });
     };
     socket.on('data', handshake);
   });

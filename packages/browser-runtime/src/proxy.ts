@@ -1,5 +1,14 @@
 import { createServer, request } from 'node:http';
 import { createConnection, type Socket } from 'node:net';
+
+class BrokerError extends Error {
+  constructor(
+    readonly statusCode: 403 | 502,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 export function createNamespaceProxy(socketPath: string) {
   function connect(host: string, port: number, signal?: AbortSignal): Promise<Socket> {
     return new Promise((resolve, reject) => {
@@ -15,9 +24,16 @@ export function createNamespaceProxy(socketPath: string) {
         const end = buffered.indexOf(10);
         if (end < 0) return;
         socket.off('data', handshake);
-        if (buffered.subarray(0, end).toString() !== 'OK') {
+        const response = buffered.subarray(0, end).toString();
+        if (response !== 'OK') {
           socket.destroy();
-          reject(Error('Browser origin denied.'));
+          if (response.startsWith('UNAVAILABLE ')) {
+            const destination = response.slice(12);
+            const message = /^(localhost|127\.0\.0\.1|\[::1\]):/.test(destination)
+              ? `Nothing is listening on ${destination} (tried 127.0.0.1 and ::1).`
+              : `Cannot connect to ${destination}.`;
+            reject(new BrokerError(502, message));
+          } else reject(new BrokerError(403, 'Browser origin denied.'));
           return;
         }
         const rest = buffered.subarray(end + 1);
@@ -54,9 +70,10 @@ export function createNamespaceProxy(socketPath: string) {
         outgoing.end();
       });
       incoming.pipe(upstream);
-    })().catch(() => {
-      outgoing.writeHead(403);
-      outgoing.end('Browser origin denied.');
+    })().catch((error: unknown) => {
+      const brokerError = error instanceof BrokerError ? error : new BrokerError(403, 'Browser origin denied.');
+      outgoing.writeHead(brokerError.statusCode);
+      outgoing.end(brokerError.message);
     });
   });
   proxy.on('connect', (incoming, client, head) => {
@@ -74,8 +91,10 @@ export function createNamespaceProxy(socketPath: string) {
       upstream.pipe(client);
       upstream.on('error', () => client.destroy());
       upstream.on('close', () => { if (!upstream.readableEnded) client.destroy(); });
-    })().catch(() => {
-      if (!client.destroyed) client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    })().catch((error: unknown) => {
+      const brokerError = error instanceof BrokerError ? error : new BrokerError(403, 'Browser origin denied.');
+      if (!client.destroyed)
+        client.end(`HTTP/1.1 ${brokerError.statusCode} ${brokerError.statusCode === 403 ? 'Forbidden' : 'Bad Gateway'}\r\nContent-Length: ${Buffer.byteLength(brokerError.message)}\r\n\r\n${brokerError.message}`);
     });
   });
   proxy.on('upgrade', (incoming, client, head) => {
@@ -104,7 +123,11 @@ export function createNamespaceProxy(socketPath: string) {
       upstream.pipe(client);
       upstream.on('error', () => client.destroy());
       upstream.on('close', () => { if (!upstream.readableEnded) client.destroy(); });
-    })().catch(() => client.destroy());
+    })().catch((error: unknown) => {
+      const brokerError = error instanceof BrokerError ? error : new BrokerError(403, 'Browser origin denied.');
+      if (!client.destroyed)
+        client.end(`HTTP/1.1 ${brokerError.statusCode} ${brokerError.statusCode === 403 ? 'Forbidden' : 'Bad Gateway'}\r\nContent-Length: ${Buffer.byteLength(brokerError.message)}\r\n\r\n${brokerError.message}`);
+    });
   });
   return proxy;
 }

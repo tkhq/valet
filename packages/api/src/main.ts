@@ -3,7 +3,7 @@
  *
  *   ANTHROPIC_API_KEY=sk-... VALET_LOCAL_AUTH=1 pnpm --filter @valet/api dev
  *
- * `startServer()` boots the API on `PORT` (default 8787) reading all effective
+ * `startServer()` boots the API on `PORT` (default 8788) reading all effective
  * values from `process.env`, and returns a handle whose `close()` performs the
  * graceful shutdown. Importing this module has NO side effects — the server
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
@@ -165,7 +165,7 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
  * ready flip, so in Kubernetes the pod dies NotReady.
  */
 export async function startServer(): Promise<ServerHandle> {
-const port = Number.parseInt(process.env.PORT ?? "8787", 10);
+const port = Number.parseInt(process.env.PORT ?? "8788", 10);
 const dataDir = process.env.VALET_DATA_DIR ?? resolve(homedir(), ".valet");
 const databaseUrl = process.env.DATABASE_URL;
 const pgDataDir = process.env.VALET_PG_DATA_DIR ?? resolve(dataDir, "pg");

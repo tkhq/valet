@@ -17,6 +17,7 @@ export default defineConfig({
     valetServiceWorker(),
   ],
   server: {
+    host: '127.0.0.1',
     port: 5173,
     // Fail instead of auto-incrementing to :5174: the /api proxy target is
     // fixed, so a drifted port silently serves this checkout's frontend
