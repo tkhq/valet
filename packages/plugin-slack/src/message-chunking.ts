@@ -12,6 +12,14 @@
 
 import { containsSlackSpans, linkGitHubReferencesInMarkdown, markdownToSlackMrkdwn, type MarkdownToSlackMrkdwnOptions } from "./transport/format.js";
 import { isTableDelimiterRow, tablesToLabeledRows } from "./table-format.js";
+import { tablesToTableBlocks } from "./table-blocks.js";
+
+export { hasTableBlock } from "./table-blocks.js";
+
+export interface ContentBlockOptions extends MarkdownToSlackMrkdwnOptions {
+  /** Render pipe tables as native `table` blocks. Defaults to true. */
+  nativeTables?: boolean;
+}
 
 /** Max characters in the `text` field of chat.postMessage before we switch to blocks. */
 export const SLACK_TEXT_LIMIT = 4000;
@@ -84,31 +92,37 @@ export function splitText(text: string, maxLen: number): string[] {
 }
 
 /**
- * Build content blocks for a message. Prefers a single `markdown` block (which
- * renders tables, headers, code blocks natively). Falls back to `section` blocks
- * with mrkdwn for native spans or messages exceeding the markdown limit.
+ * Build content blocks for a message. Pipe tables become native `table`
+ * blocks with `markdown` blocks for the prose around them, so a cell can
+ * hold one line per entry. Otherwise a single `markdown` block renders the
+ * text (headers, code blocks, and tables Slack's limits cannot hold). Falls
+ * back to `section` blocks with mrkdwn for native spans or messages
+ * exceeding the markdown limit.
  *
  * @param text Raw markdown text (NOT pre-converted to Slack mrkdwn).
  * @param mrkdwnText Slack mrkdwn-formatted text, used only for section block fallback.
  * @param maxBlocks Cap the number of blocks returned.
- * @param options Native-span policy for the labeled-row fallback.
+ * @param options Native-span policy for the labeled-row fallback, and
+ *   `nativeTables: false` to keep tables in the `markdown` block.
  */
 export function buildContentBlocks(
   text: string,
   mrkdwnText: string,
   maxBlocks: number = SLACK_MAX_BLOCKS,
-  options: MarkdownToSlackMrkdwnOptions = {},
+  options: ContentBlockOptions = {},
 ): Record<string, unknown>[] {
+  const { nativeTables = true, ...mrkdwnOptions } = options;
   let truncatedRows = false;
   if (containsSlackSpans(text)) {
     // Reuse the documented mrkdwn path and its complete control-token policy.
     const rows = tablesToLabeledRows(text, SLACK_BLOCK_TEXT_LIMIT * maxBlocks);
     truncatedRows = rows.truncated;
-    mrkdwnText = markdownToSlackMrkdwn(rows.text, options);
+    mrkdwnText = markdownToSlackMrkdwn(rows.text, mrkdwnOptions);
   } else if (text.length <= SLACK_MARKDOWN_LIMIT) {
     const markdown = linkGitHubReferencesInMarkdown(text);
     if (markdown.length <= SLACK_MARKDOWN_LIMIT) {
-      return [{ type: 'markdown', text: markdown }];
+      const blocks = nativeTables ? tablesToTableBlocks(markdown, maxBlocks) : undefined;
+      return blocks ?? [{ type: 'markdown', text: markdown }];
     }
   }
 

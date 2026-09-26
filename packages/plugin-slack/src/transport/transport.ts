@@ -42,6 +42,7 @@ import {
 } from "@valet/engine";
 import {
   buildContentBlocks,
+  hasTableBlock,
   needsContentBlocks,
   SLACK_HEADER_LIMIT,
   SLACK_MAX_BLOCKS,
@@ -812,18 +813,25 @@ export class SlackTransport implements ChannelTransport {
    * chat.postMessage, retried once without a rejected identity override.
    * Provider error responses are safe to retry because Slack rejected them.
    * Network errors and malformed success responses remain single-attempt.
+   *
+   * If Slack rejects a generated table block, `fallbackBlocks` (its Markdown
+   * rendering) is posted instead. That happens before the identity retry, so
+   * a rejected identity override retries the content Slack accepted.
    */
   private async postMessageAs(
     opts: Parameters<SlackApi["postMessage"]>[0],
+    fallbackBlocks?: Record<string, unknown>[],
   ): Promise<{ ts: string }> {
     try {
       return await this.api.postMessage(opts);
     } catch (err) {
+      if (!(err instanceof SlackApiError) || err.method !== "chat.postMessage") throw err;
+      if (fallbackBlocks && err.detail === "invalid_blocks") {
+        return this.postMessageAs({ ...opts, blocks: fallbackBlocks });
+      }
       const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
       if (
         hadOverride &&
-        err instanceof SlackApiError &&
-        err.method === "chat.postMessage" &&
         err.providerRejected &&
         err.status !== undefined &&
         err.status >= 200 &&
@@ -842,11 +850,15 @@ export class SlackTransport implements ChannelTransport {
     const formatted = markdownToSlackMrkdwn(message.markdown);
     let text = formatted;
     let blocks: Record<string, unknown>[] | undefined;
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
     if (needsContentBlocks(message.markdown)) {
       // One API call with blocks — never several messages (chat.postMessage is
       // limited to 1/sec/channel; see message-chunking.ts).
       blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
       text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+      if (hasTableBlock(blocks)) {
+        fallbackBlocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS, { nativeTables: false });
+      }
     }
     const res = await this.postMessageAs({
       channel: target.channelId,
@@ -854,7 +866,7 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       blocks,
       ...slackIdentityOverride(message.sender),
-    });
+    }, fallbackBlocks);
     return { conversationKey, messageId: res.ts };
   }
 
