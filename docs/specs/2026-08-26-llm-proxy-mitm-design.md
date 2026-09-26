@@ -372,3 +372,32 @@ In pass-through mode the third statement adds that the member must also supply a
 The copy speaks about a team, so the panel shows it only in a team workspace. A caller that blocks creation in another scope gets no team instructions.
 
 The blocked button is inert, not disabled: it carries `aria-disabled` and points at the explanation with `aria-describedby`. A `disabled` button leaves the tab order, so a keyboard reader never lands on it and never hears the reason. The click handler refuses the click. A pending create still uses `disabled`, because that state is short and a second create must not queue.
+
+## Cache pricing correction (2026-09-26)
+
+OpenAI reports cached input as a subset of input tokens in Responses and Chat Completions.
+The recorder keeps these provider counts. Before pricing, subtract cached input from input tokens for pi-ai.
+Anthropic input already excludes cache tokens and needs no subtraction.
+Proxy dollar values are estimates from catalog rates, not reconciled provider invoices.
+The Usage page identifies this distinction. The home dashboard excludes all proxy activity from its windows and member rankings.
+
+### Repair stored estimates
+
+New pricing does not change existing `cost_usd` values. Use the explicit repair command for historical OpenAI rows with cached input.
+The command requires an organization and an exclusive cutoff. It uses current catalog rates, which can differ from historical rates.
+It skips unknown models and unpriced rows. It preserves token counts and raw recordings.
+Repeated runs with the same catalog do not change corrected rows. Concurrent cost changes are skipped.
+The repair does not rewrite exported telemetry counters or provider invoices.
+Historical rows lack payment-source metadata, so the repair cannot classify organization versus personal charges.
+
+1. Set `DATABASE_URL` for the target database.
+2. Run the dry run from `packages/api`:
+
+   ```sh
+   node --import tsx scripts/reprice-proxy.ts --org <org-id> --before <ISO-date>
+   ```
+
+3. Review the changed count and old and new estimate totals.
+4. Add `--apply` to update those estimates.
+
+The command processes 500 rows per batch. A stopped run can resume by repeating the command.

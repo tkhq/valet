@@ -184,3 +184,13 @@ The terminal path counts a `bash` call only when the engine stored a recognized 
 The tool-call queries replace serialized NUL escapes before they parse stored parts. This lets a binary tool result leave call counts available. Workflow session actions resolve the parent run from the `wf:<run>:<node>` session ID. Review counts use the successful result state, because the audit can cap long request parameters. Member spend rows sort by descending cost.
 
 An outcome belongs to its session or workflow run. For each parent, the endpoint divides priced model spend in the selected period evenly across that parent's counted outcomes. Each outcome type gets its share. Spend from parents with no counted outcomes stays unallocated. The UI calls this allocated model spend, not marginal cost or ROI. Unpriced turns make the estimate a floor. Audit writes are best effort, so outcome counts can be incomplete.
+
+Tool-result context bypass needs a separate trace of which result bytes entered a model prompt. A tool result's size alone cannot establish tokens saved.
+
+## Home dashboard proxy exclusion (2026-09-26)
+
+The home dashboard counts Valet sessions, orchestrators, and workflows only.
+`GET /api/usage/summary` excludes proxy rows from personal windows and organization member rankings.
+This filter applies to costs, tokens, turns, and unpriced counts.
+The Usage page, exports, and proxy request log retain external proxy activity.
+The home card states this scope so its totals need not match the full Usage page.

@@ -864,6 +864,9 @@ export function UsagePage() {
           <h2 className="text-sm font-medium text-ink mb-1">
             Proxy (external tools) — request log
           </h2>
+          <p className="text-sm text-muted mb-3">
+            Proxy costs are estimates from model rates, not provider invoices. Requests can use organization or personal provider keys.
+          </p>
           <p className="text-xs text-muted mb-3">
             Recorded prompts from external tools routed through the gateway.
           </p>

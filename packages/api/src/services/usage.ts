@@ -844,12 +844,14 @@ function toWindow(row: WindowAggRow | undefined): UsageWindow {
 }
 
 /** Per-user token/cost aggregate since a cutoff, one row per user. `onlyUserId`
- * scopes to a single user; omit it for the org-wide member list. */
+ * scopes to a single user; omit it for the org-wide member list.
+ * Home dashboard windows and rankings count only Valet activity. */
 async function windowAggregate(db: AppDb, orgId: string, sinceMs: number, onlyUserId?: string): Promise<WindowAggRow[]> {
   const result = (await db.execute(sql`
     SELECT user_id, ${BUCKET_COLS}
     FROM cost_entries
     WHERE created_at >= ${sinceMs} AND org_id = ${orgId} AND user_id IS NOT NULL
+      AND use_case <> 'proxy'
       ${onlyUserId ? sql`AND user_id = ${onlyUserId}` : sql``}
     GROUP BY user_id`)) as { rows: WindowAggRow[] };
   return result.rows;
