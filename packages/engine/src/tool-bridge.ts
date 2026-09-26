@@ -95,10 +95,13 @@ function toAgentToolResult(result: ToolResult, toolName: string): AgentToolResul
   if (content.length === 0) {
     content.push({ type: "text", text: `(${toolName} completed with no output)` });
   }
-  // The action-level outcome rides in details so it survives persistence:
-  // the channel host reads part.result.details.ok to tell a successful
-  // reply_to_origin from a completed-but-failed one.
-  return { content, details: result.ok === undefined ? undefined : { ok: result.ok } };
+  // Action success and recognized terminal side effects ride in details so
+  // both survive transcript persistence without changing model-visible text.
+  const details = {
+    ...(result.ok === undefined ? {} : { ok: result.ok }),
+    ...(result.outcome === undefined ? {} : { outcome: result.outcome }),
+  };
+  return { content, details: Object.keys(details).length === 0 ? undefined : details };
 }
 
 function attachmentToContent(att: ToolAttachment): TextContent | ImageContent | null {

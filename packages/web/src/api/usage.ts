@@ -10,6 +10,8 @@ import type {
   UsageBreakdownResponse,
   UsageSessionsResponse,
   UsageScopeName,
+  UsageToolEfficiencyResponse,
+  UsageOutcomesResponse,
   UsageUseCase,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
@@ -21,7 +23,39 @@ export const qkUsage = {
     ["usage", "sessions", window, useCase] as const,
   items: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
     ["usage", "items", period, scope, useCase, teamId] as const,
+  toolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>
+    ["usage", "tool-efficiency", period, scope, teamId] as const,
+  outcomes: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>
+    ["usage", "outcomes", period, scope, teamId] as const,
 };
+
+export function useUsageOutcomes(
+  period: UsagePeriodSelection,
+  scope: UsageScopeName,
+  teamId?: string,
+  opts?: Partial<UseQueryOptions<UsageOutcomesResponse>>,
+) {
+  return useQuery<UsageOutcomesResponse>({
+    queryKey: qkUsage.outcomes(period, scope, teamId),
+    queryFn: () => api.usageOutcomes(period, scope, teamId),
+    staleTime: 60_000,
+    ...opts,
+  });
+}
+
+export function useUsageToolEfficiency(
+  period: UsagePeriodSelection,
+  scope: UsageScopeName,
+  teamId?: string,
+  opts?: Partial<UseQueryOptions<UsageToolEfficiencyResponse>>,
+) {
+  return useQuery<UsageToolEfficiencyResponse>({
+    queryKey: qkUsage.toolEfficiency(period, scope, teamId),
+    queryFn: () => api.usageToolEfficiency(period, scope, teamId),
+    staleTime: 60_000,
+    ...opts,
+  });
+}
 
 export function useUsageBreakdown(
   period: UsagePeriodSelection,

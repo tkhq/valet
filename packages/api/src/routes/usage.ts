@@ -16,6 +16,8 @@ import {
   getUsageAggregateExportCsv,
   getUsageSessions,
   getUsageSummary,
+  getUsageOutcomes,
+  getUsageToolEfficiency,
   isUsageUseCase,
   resolveUsageScope,
   type UsageScope,
@@ -83,6 +85,22 @@ usageRouter.get("/breakdown", async (c) => {
   if (period instanceof Response) return period;
   const body = await getUsageBreakdown(c.var.providers.db, { period, scope });
   return c.json(body);
+});
+
+usageRouter.get("/tool-efficiency", async (c) => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await getUsageToolEfficiency(c.var.providers.db, { period, scope }));
+});
+
+usageRouter.get("/outcomes", async (c) => {
+  const scope = await scopeOrError(c);
+  if (scope instanceof Response) return scope;
+  const period = periodOrError(c);
+  if (period instanceof Response) return period;
+  return c.json(await getUsageOutcomes(c.var.providers.db, { period, scope }));
 });
 
 /** Superseded by `/items`; kept while the dashboard migrates. */

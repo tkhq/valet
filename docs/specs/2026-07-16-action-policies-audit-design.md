@@ -223,3 +223,7 @@ Policy edits apply on the next action; no session restart is required.
 
 If a team policy read fails, chat and workflow actions remain blocked until
 a successful check. A prior approval cannot bypass an unread team deny.
+
+### Workflow action execution time (2026-09-25)
+
+The workflow action invoker writes `started_at` when it records an action outcome. An approval gate can create an audit row days before execution. Usage queries use `started_at` to place the action in a time window and fall back to `created_at` for old rows. A denied or pending action has no execution duration and does not count as an executed tool action.

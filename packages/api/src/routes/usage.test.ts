@@ -18,7 +18,7 @@ import {
   teams,
   teamMembers,
 } from "../schema/index.js";
-import type { DailyAgentActivityResponse, UsageBreakdownResponse, UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
+import type { DailyAgentActivityResponse, UsageBreakdownResponse, UsageDrillResponse, UsageOutcomesResponse, UsageSessionsResponse, UsageToolEfficiencyResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -296,6 +296,102 @@ describe("GET /api/usage — scope=team", () => {
     expect(memberText).not.toContain("local-user");
     expect(memberText).not.toContain("Local Dev");
     expect(memberText).not.toContain("local@dev");
+  });
+});
+
+describe("GET /api/usage/tool-efficiency", () => {
+  it("separates settled model-directed calls from workflow tool actions and scopes both", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Tools team", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "team-1", userId: "local-user", role: "member" });
+    await db.insert(agentSessions).values([
+      { id: "s-tools", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
+      { id: "s-other", userId: "test-member", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "test-member", createdAt: now, updatedAt: now },
+    ]);
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at) VALUES ('wf-tools','local-org','user','local-user','Tools','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-tools','wf-tools','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-team','wf-tools','v1','{}'::jsonb,'{}'::jsonb,'team','team-1',${now},${now})`);
+    const parts = JSON.stringify([
+      { type: "tool_call", callId: "c1", toolName: "bash", status: "completed" },
+      { type: "tool_call", callId: "c2", toolName: "call_tool", status: "error" },
+      { type: "tool_call", callId: "c3", toolName: "bash", status: "running" },
+    ]);
+    await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, parts, created_at) VALUES
+      ('e-tools','s-tools','th','message','assistant',${parts},${now}),
+      ('e-wf-tools','wf:run-tools:node','th','message','assistant',${parts},${now}),
+      ('e-team-tools','wf:run-team:node','th','message','assistant',${parts},${now}),
+      ('e-other-tools','s-other','th','message','assistant',${parts},${now}),
+      ('e-user-tools','s-tools','th','message','user',${parts},${now})`);
+    await db.execute(sql`INSERT INTO action_invocations (invocation_id, created_at, org_id, workflow_execution_id, service, action_id, status, duration_ms)
+      VALUES ('a-tool',${now},'local-org','run-tools','slack','slack.send_message','completed',10),
+             ('a-team',${now},'local-org','run-team','slack','slack.send_message','completed',10),
+             ('a-failed',${now},'local-org','run-tools','slack','slack.send_message','error',5),
+             ('a-invalid',${now},'local-org','run-tools','slack','slack.send_message','error',NULL),
+             ('a-denied',${now},'local-org','run-tools','slack','slack.send_message','denied',NULL),
+             ('a-session',${now},'local-org',NULL,'slack','slack.send_message','completed',10)`);
+    await db.execute(sql`INSERT INTO action_invocations (invocation_id, created_at, started_at, org_id, workflow_execution_id, service, action_id, status, duration_ms)
+      VALUES ('a-approved-late',${now - 8 * 86_400_000},${now},'local-org','run-tools','slack','slack.send_message','completed',10)`);
+
+    const mine = (await (await fetch(`${api.baseUrl}/api/usage/tool-efficiency?window=7d`)).json()) as UsageToolEfficiencyResponse;
+    expect(mine.byUseCase.find((r) => r.useCase === "session")).toMatchObject({ modelDirectedCalls: 2, modelFreeActions: 0 });
+    expect(mine.byUseCase.find((r) => r.useCase === "workflow")).toMatchObject({ modelDirectedCalls: 2, modelFreeActions: 3 });
+
+    const forbidden = await fetch(`${api.baseUrl}/api/usage/tool-efficiency?window=7d&scope=org`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(forbidden.status).toBe(403);
+
+    const org = (await (await fetch(`${api.baseUrl}/api/usage/tool-efficiency?window=7d&scope=org`)).json()) as UsageToolEfficiencyResponse;
+    expect(org.byUseCase.find((r) => r.useCase === "session")?.modelDirectedCalls).toBe(4);
+    expect(org.byUseCase.find((r) => r.useCase === "workflow")?.modelFreeActions).toBe(4);
+    const team = (await (await fetch(`${api.baseUrl}/api/usage/tool-efficiency?scope=team&teamId=team-1&window=7d`)).json()) as UsageToolEfficiencyResponse;
+    expect(team.scope).toBe("team");
+    expect(team.byUseCase.find((r) => r.useCase === "workflow")).toMatchObject({ modelDirectedCalls: 2, modelFreeActions: 1 });
+    const missingTeam = await fetch(`${api.baseUrl}/api/usage/tool-efficiency?scope=team`);
+    expect(missingTeam.status).toBe(400);
+  });
+});
+
+describe("GET /api/usage/outcomes", () => {
+  it("counts confirmed actions and allocates parent model cost once", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.insert(agentSessions).values([
+      { id: "outcome-session", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
+      { id: "idle-session", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
+    ]);
+    await seedEngineEntry(api, "cost-a", "outcome-session", now);
+    await seedEngineEntry(api, "cost-b", "outcome-session", now);
+    await seedEngineEntry(api, "cost-idle", "idle-session", now);
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('outcome-wf','local-org','user','local-user','Report','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('outcome-run','outcome-wf','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await seedEngineEntry(api, "cost-wf", "wf:outcome-run:node", now);
+    const prPart = JSON.stringify([{ type: "tool_call", callId: "pr", toolName: "bash", status: "completed",
+      args: { command: "gh pr create --fill" },
+      result: { details: { outcome: { kind: "pull_request_created", url: "https://github.com/acme/repo/pull/1" } } } }]);
+    await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, parts, created_at)
+      VALUES ('outcome-pr','outcome-session','th','message','assistant',${prPart},${now})`);
+    const success = JSON.stringify({ success: true, data: { id: 1 } });
+    const slack = JSON.stringify({ success: true, data: { channel: "C123", ts: "1.2" } });
+    const failure = JSON.stringify({ success: false, error: "denied" });
+    await db.execute(sql`INSERT INTO action_invocations
+      (invocation_id, created_at, org_id, session_id, workflow_execution_id, service, action_id, params, result, status, duration_ms)
+      VALUES ('review-ok',${now},'local-org','outcome-session',NULL,'github','github.create_review','{"event":"APPROVE"}'::jsonb,${success}::jsonb,'completed',10),
+        ('review-pending',${now},'local-org','outcome-session',NULL,'github','github.create_review','{}'::jsonb,${success}::jsonb,'completed',10),
+        ('pr-failed',${now},'local-org','outcome-session',NULL,'github','github.create_pull_request','{}'::jsonb,${failure}::jsonb,'completed',10),
+        ('slack-ok',${now},'local-org',NULL,'outcome-run','slack','slack.send_message','{}'::jsonb,${slack}::jsonb,'completed',10)`);
+
+    const response = await fetch(`${api.baseUrl}/api/usage/outcomes?window=7d`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as UsageOutcomesResponse;
+    expect(body.byOutcome.find((row) => row.kind === "pull_request_created")).toMatchObject({ count: 1, estimatedCostUsd: 0.003 });
+    expect(body.byOutcome.find((row) => row.kind === "review_submitted")).toMatchObject({ count: 1, estimatedCostUsd: 0.003 });
+    expect(body.byOutcome.find((row) => row.kind === "slack_message_sent")).toMatchObject({ count: 1, estimatedCostUsd: 0.003 });
+    expect(body.byOutcome.find((row) => row.kind === "slack_dm_sent")?.count).toBe(0);
   });
 });
 

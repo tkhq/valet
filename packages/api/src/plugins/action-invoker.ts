@@ -412,6 +412,7 @@ async function computeResult(
       await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
         status: "error",
         error: message,
+        startedAt,
         durationMs: (opts.clock ?? Date.now)() - startedAt,
       });
     }
@@ -428,6 +429,7 @@ async function computeResult(
       status: result.success ? "completed" : "error",
       result,
       error: result.success ? undefined : (result.error ?? "failed with no error detail"),
+      startedAt,
       durationMs: (opts.clock ?? Date.now)() - startedAt,
     });
   }

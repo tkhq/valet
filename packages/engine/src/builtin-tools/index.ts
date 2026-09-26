@@ -3,6 +3,7 @@ import type { TSchema } from "typebox";
 import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired } from "../decision-gate.js";
+import { terminalOutcome } from "./terminal-outcome.js";
 import type {
   ChildReader,
   ChildSender,
@@ -112,6 +113,7 @@ async function bestEffortCancel(cancelJob: (execId: string) => Promise<void>, ex
  */
 async function pollJobToCompletion(
   ctx: ToolContext,
+  command: string,
   pollJob: (execId: string, offset: number) => Promise<JobPoll>,
   cancelJob: (execId: string) => Promise<void>,
   execId: string,
@@ -143,7 +145,8 @@ async function pollJobToCompletion(
     if (poll.status === "done") {
       const exitNote = poll.exitCode !== undefined && poll.exitCode !== 0 ? `\n[exit ${poll.exitCode}]` : "";
       const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}${exitNote}` };
+      const outcome = terminalOutcome(command, output, poll.exitCode);
+      return { text: `${output}${truncNote}${exitNote}`, ...(outcome ? { outcome } : {}) };
     }
     if (poll.status === "failed") {
       const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
@@ -330,14 +333,15 @@ export const bashTool = defineTool({
         // Underlying sandbox doesn't support job mode — fall through to sync exec.
       }
       if (handle) {
-        return pollJobToCompletion(ctx, pollJob, cancelJob, handle.execId, timeoutMs);
+        return pollJobToCompletion(ctx, args.command, pollJob, cancelJob, handle.execId, timeoutMs);
       }
     }
 
     const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
     const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}` };
+    const outcome = terminalOutcome(args.command, result.stdout, result.exitCode);
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}`, ...(outcome ? { outcome } : {}) };
   },
 });
 

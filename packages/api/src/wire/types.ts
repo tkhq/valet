@@ -3688,6 +3688,36 @@ export interface UsageBreakdownResponse {
   byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
 }
 
+/** Settled engine tool calls and directly executed workflow tool actions.
+ * Counts are activity proxies, not successful business outcomes. */
+export interface UsageToolEfficiencyResponse {
+  windowMs: number;
+  scope: UsageScopeName;
+  byUseCase: {
+    useCase: UsageUseCase;
+    modelDirectedCalls: number;
+    modelFreeActions: number;
+  }[];
+}
+
+export type UsageOutcomeKind =
+  | "pull_request_created"
+  | "review_submitted"
+  | "slack_message_sent"
+  | "slack_dm_sent";
+
+/** Confirmed side effects and an allocation of observed model cost. */
+export interface UsageOutcomesResponse {
+  scope: UsageScopeName;
+  byOutcome: {
+    kind: UsageOutcomeKind;
+    count: number;
+    estimatedCostUsd: number;
+    estimatedCostPerOutcomeUsd: number | null;
+  }[];
+  unpricedTurns: number;
+}
+
 /** `GET /api/usage/items?window=&scope=&useCase=` — drill-down rows for ONE use
  * case: sessions (title, child-nested via `child_watches`), workflow runs
  * (workflow name), or proxy (by harness). `sessionId` is set only for

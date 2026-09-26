@@ -20,7 +20,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { useUsageBreakdown, useUsageItems } from "~/api/usage";
+import { useUsageBreakdown, useUsageItems, useUsageOutcomes, useUsageToolEfficiency } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
@@ -274,6 +274,8 @@ export function UsagePage() {
   const currentMonthUtc = todayUtc.slice(0, 7);
 
   const breakdownQ = useUsageBreakdown(period, scope, teamId, { enabled: scopeKnown });
+  const toolEfficiencyQ = useUsageToolEfficiency(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess });
+  const outcomesQ = useUsageOutcomes(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess });
   // Proxy traffic is personal; every consumer of these two queries renders
   // only in the personal workspace, so do not fetch outside it.
   const requestsQ = useProxyRequests({ limit: 25, cursor }, { enabled: personalWorkspace });
@@ -555,6 +557,91 @@ export function UsagePage() {
             <div>
               <h2 className="text-sm font-medium text-ink mb-3">Daily spend</h2>
               <SpendChart buckets={chartBuckets} />
+            </div>
+
+            <div>
+              <h2 className="text-sm font-medium text-ink mb-2">Tool work per model token</h2>
+              <p className="text-xs text-muted mb-3">
+                Settled tool calls include handled failures. Workflow tool actions run without a model call at that node.
+              </p>
+              {toolEfficiencyQ.isLoading ? (
+                <p className="text-xs text-muted">Loading tool work…</p>
+              ) : toolEfficiencyQ.error ? (
+                <p className="text-xs text-danger-600">Tool work could not load. Refresh the page to try again.</p>
+              ) : (
+                <div className="overflow-x-auto rounded border border-line">
+                  <table className="w-full text-sm">
+                    <thead className="bg-paper-muted text-muted">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Use case</th>
+                        <th className="px-3 py-2 text-right font-medium">Model-directed calls</th>
+                        <th className="px-3 py-2 text-right font-medium">Model tokens</th>
+                        <th className="px-3 py-2 text-right font-medium">Calls / 1M tokens</th>
+                        <th className="px-3 py-2 text-right font-medium">Model-free actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(["session", "workflow"] as const).map((useCase) => {
+                        const tool = toolEfficiencyQ.data?.byUseCase.find((r) => r.useCase === useCase);
+                        const tokens = breakdown.byUseCase.find((r) => r.useCase === useCase)?.totalTokens ?? 0;
+                        const rate = tokens > 0 && tool ? Math.round(tool.modelDirectedCalls * 1_000_000 / tokens) : null;
+                        return (
+                          <tr key={useCase} className="border-t border-line">
+                            <th scope="row" className="px-3 py-2 text-left font-medium">{USE_CASE_LABELS[useCase]}</th>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmt(tool?.modelDirectedCalls ?? 0)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmt(tokens)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{rate === null ? "—" : fmt(rate)}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{fmt(tool?.modelFreeActions ?? 0)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h2 className="text-sm font-medium text-ink mb-2">Outcomes</h2>
+              <p className="text-xs text-muted mb-3">
+                Confirmed GitHub actions and Slack deliveries. Model spend is allocated evenly across outcomes in each session or workflow run during this period.
+              </p>
+              {outcomesQ.isLoading ? (
+                <p className="text-xs text-muted">Loading outcomes…</p>
+              ) : outcomesQ.error ? (
+                <p className="text-xs text-danger-600">Outcomes could not load. Refresh the page to try again.</p>
+              ) : (
+                <div className="overflow-x-auto rounded border border-line">
+                  <table className="w-full text-sm">
+                    <thead className="bg-paper-muted text-muted">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Outcome</th>
+                        <th className="px-3 py-2 text-right font-medium">Count</th>
+                        <th className="px-3 py-2 text-right font-medium">Allocated model spend</th>
+                        <th className="px-3 py-2 text-right font-medium">Est. spend / outcome</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {outcomesQ.data?.byOutcome.map((row) => (
+                        <tr key={row.kind} className="border-t border-line">
+                          <th scope="row" className="px-3 py-2 text-left font-medium">{{
+                            pull_request_created: "PRs created",
+                            review_submitted: "Reviews submitted",
+                            slack_message_sent: "Slack messages sent",
+                            slack_dm_sent: "Slack DMs sent",
+                          }[row.kind]}</th>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmt(row.count)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(row.estimatedCostUsd)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{row.estimatedCostPerOutcomeUsd === null ? "—" : fmtUsd(row.estimatedCostPerOutcomeUsd)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {outcomesQ.data && outcomesQ.data.unpricedTurns > 0 && (
+                <p className="text-xs text-muted mt-2">{fmt(outcomesQ.data.unpricedTurns)} unpriced model turns make these spend estimates a floor.</p>
+              )}
             </div>
 
             {/* By use case — all four rows expandable. Keyed by the WORKSPACE

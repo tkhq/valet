@@ -2040,6 +2040,7 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     // The decision row is stamped with the execution outcome + full
     // PluginActionResult after execute (spec T6 #6, fixed).
     expect(audit[0].status).toBe("completed");
+    expect(audit[0].startedAt).toBeGreaterThanOrEqual(audit[0].createdAt);
     expect(audit[0].result).toEqual({ success: true, data: { deployed: true } });
     expect(audit[0].matchedGrantId).toBe("gr");
   });

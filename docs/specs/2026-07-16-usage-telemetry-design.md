@@ -164,3 +164,21 @@ before it starts the native browser download. The download does not use a
 JavaScript response buffer or timeout. If a page query fails after streaming
 starts, the API errors the stream and closes the connection as failed. It does
 not end a truncated CSV as a successful file.
+
+## Tool work and query cost (2026-09-25)
+
+The usage page compares settled assistant tool calls with model tokens. It counts stored assistant `tool_call` parts with `completed` or `error` status. A handled failure can count, so this is an activity measure. It counts completed or failed workflow tool nodes with an execution duration as model-free actions. It excludes session action audit rows to avoid counting a model-directed call twice.
+
+The page shows model-directed calls per million model tokens and lists model-free actions separately. A zero-token use case has no rate. Unpriced turns still add tokens. These measures do not establish task quality or business value. The store does not record whether tool-result bytes entered a model prompt, so result size cannot establish tokens saved.
+
+`GET /api/usage/tool-efficiency` uses the same personal, organization, team, and date-range rules as the cost breakdown. It starts after the breakdown response. Assistant calls use entry time. Workflow actions use execution start time, with creation time as a fallback for old audit rows.
+
+The cost breakdown computes use-case, model, day, member, and total aggregates with one `GROUPING SETS` query over `cost_entries`. A scratch PGlite sample of 30,000 rows reduced the earlier five-query aggregate from about 0.9 seconds to about 0.23 seconds. Production latency and the tool-parts query still need measurement before adding an index.
+
+## Confirmed outcomes (2026-09-25)
+
+`GET /api/usage/outcomes` uses the same scope and period checks as the breakdown. It counts successful GitHub PR creation, submitted PR reviews, Slack channel messages, and Slack DMs from `action_invocations`. A completed audit row counts only when its plugin result reports `success: true`. Pending reviews and failed actions do not count. The Slack rows describe delivery actions; they do not claim a message was a report.
+
+The terminal path counts a `bash` call only when the engine stored a recognized outcome in the tool result. A direct `gh pr create` needs exit code zero and a PR URL. A direct `gh pr review` needs exit code zero and a submission flag. Compound shell commands are excluded. Old terminal transcripts have no outcome marker, so this path starts counting when the marker ships.
+
+An outcome belongs to its session or workflow run. For each parent, the endpoint divides priced model spend in the selected period evenly across that parent's counted outcomes. Each outcome type gets its share. Spend from parents with no counted outcomes stays unallocated. The UI calls this allocated model spend, not marginal cost or ROI. Unpriced turns make the estimate a floor. Audit writes are best effort, so outcome counts can be incomplete.

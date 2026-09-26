@@ -19,6 +19,9 @@ import type {
   UsageSessionRow,
   SkillUsageBreakdown,
   UsageSummaryResponse,
+  UsageOutcomesResponse,
+  UsageOutcomeKind,
+  UsageToolEfficiencyResponse,
   UsageUseCase,
   UsageWindow,
 } from "../wire/types.js";
@@ -180,6 +183,168 @@ function skillScopeWhere(scope: UsageScope): SQL {
   }
 }
 
+/** Settled assistant tool calls and workflow tool nodes executed without a model. */
+export async function getUsageToolEfficiency(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): Promise<UsageToolEfficiencyResponse> {
+  const period = periodFromOpts(opts);
+  const scope = opts.scope;
+  const engineScope = skillScopeWhere(scope);
+  const actionOwner = scope.scope === "team"
+    ? sql`AND r.owner_type = 'team' AND r.owner_id = ${scope.teamId}`
+    : scope.scope === "me"
+      ? sql`AND r.owner_type = 'user' AND r.owner_id = ${scope.userId}`
+      : sql``;
+  interface CountRow { use_case: string; calls: unknown }
+  const [engine, workflow] = await Promise.all([
+    db.execute(sql`
+      SELECT CASE
+        WHEN e.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
+        WHEN e.session_id LIKE 'wf:%' THEN 'workflow'
+        ELSE 'session'
+      END AS use_case, COUNT(*) AS calls
+      FROM engine_entries e
+      LEFT JOIN agent_sessions s ON s.id = e.session_id
+      LEFT JOIN workflow_runs r
+        ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
+      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
+      CROSS JOIN LATERAL jsonb_array_elements(e.parts::jsonb) AS p(part)
+      WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
+        AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
+        AND ${engineScope}
+        AND p.part->>'type' = 'tool_call'
+        AND p.part->>'status' IN ('completed', 'error')
+      GROUP BY 1`) as Promise<{ rows: CountRow[] }>,
+    db.execute(sql`
+      SELECT COUNT(*) AS calls
+      FROM action_invocations ai
+      JOIN workflow_runs r ON r.id = ai.workflow_execution_id
+      JOIN workflow_definitions d ON d.id = r.workflow_id
+      WHERE COALESCE(ai.started_at, ai.created_at) >= ${period.startMs}
+        AND COALESCE(ai.started_at, ai.created_at) < ${period.endMs}
+        AND ai.org_id = ${scope.orgId} AND d.org_id = ${scope.orgId}
+        ${actionOwner}
+        AND ai.service IS NOT NULL AND ai.action_id IS NOT NULL
+        AND ai.status IN ('completed', 'error') AND ai.duration_ms IS NOT NULL`) as Promise<{ rows: { calls: unknown }[] }>,
+  ]);
+  const directed = new Map(engine.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => [r.use_case as UsageUseCase, toNum(r.calls)]));
+  return {
+    windowMs: period.windowMs ?? period.endMs - period.startMs,
+    scope: scope.scope,
+    byUseCase: USE_CASES.map((useCase) => ({
+      useCase,
+      modelDirectedCalls: directed.get(useCase) ?? 0,
+      modelFreeActions: useCase === "workflow" ? toNum(workflow.rows[0]?.calls) : 0,
+    })),
+  };
+}
+
+const OUTCOME_KINDS: readonly UsageOutcomeKind[] = [
+  "pull_request_created", "review_submitted", "slack_message_sent", "slack_dm_sent",
+];
+
+/** Count confirmed writes, then allocate each parent's observed model cost
+ * across its outcomes in the selected period. This is a cost estimate. */
+export async function getUsageOutcomes(
+  db: AppDb,
+  opts: UsagePeriodOpts & { scope: UsageScope },
+): Promise<UsageOutcomesResponse> {
+  const period = periodFromOpts(opts);
+  const { scope } = opts;
+  const actionScope = skillScopeWhere(scope);
+  const costScope = scopeWhere("", period, scope);
+  interface OutcomeRow { parent: string; kind: string; count: unknown }
+  interface CostRow { parent: string; cost_usd: unknown; unpriced_turns: unknown }
+  const [actions, terminal, costs] = await Promise.all([
+    db.execute(sql`
+      SELECT CASE WHEN ai.workflow_execution_id IS NOT NULL
+          THEN 'w:' || ai.workflow_execution_id ELSE 's:' || ai.session_id END AS parent,
+        CASE
+          WHEN ai.action_id = 'github.create_pull_request' THEN 'pull_request_created'
+          WHEN ai.action_id = 'github.create_review' THEN 'review_submitted'
+          WHEN ai.action_id IN ('slack.dm_owner', 'slack.dm_user')
+            OR ai.result::jsonb->'data'->>'channel' LIKE 'D%' THEN 'slack_dm_sent'
+          ELSE 'slack_message_sent'
+        END AS kind,
+        COUNT(*) AS count
+      FROM action_invocations ai
+      LEFT JOIN agent_sessions s ON s.id = ai.session_id
+      LEFT JOIN workflow_runs r ON r.id = ai.workflow_execution_id
+      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
+      WHERE COALESCE(ai.started_at, ai.created_at) >= ${period.startMs}
+        AND COALESCE(ai.started_at, ai.created_at) < ${period.endMs}
+        AND ai.org_id = ${scope.orgId} AND ${actionScope}
+        AND ai.status = 'completed' AND ai.duration_ms IS NOT NULL
+        AND ai.result::jsonb->>'success' = 'true'
+        AND (ai.session_id IS NOT NULL OR ai.workflow_execution_id IS NOT NULL)
+        AND (ai.action_id = 'github.create_pull_request'
+          OR (ai.action_id = 'github.create_review'
+            AND ai.params::jsonb->>'event' IN ('APPROVE', 'REQUEST_CHANGES', 'COMMENT'))
+          OR ai.action_id IN ('slack.send_message', 'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user'))
+      GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
+    db.execute(sql`
+      SELECT CASE WHEN r.id IS NOT NULL THEN 'w:' || r.id ELSE 's:' || e.session_id END AS parent,
+        p.part->'result'->'details'->'outcome'->>'kind' AS kind,
+        COUNT(*) AS count
+      FROM engine_entries e
+      LEFT JOIN agent_sessions s ON s.id = e.session_id
+      LEFT JOIN workflow_runs r
+        ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
+      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
+      CROSS JOIN LATERAL jsonb_array_elements(e.parts::jsonb) AS p(part)
+      WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
+        AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
+        AND ${actionScope}
+        AND p.part->>'type' = 'tool_call' AND p.part->>'toolName' = 'bash'
+        AND p.part->>'status' = 'completed'
+        AND p.part->'result'->'details'->'outcome'->>'kind'
+          IN ('pull_request_created', 'review_submitted')
+      GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
+    db.execute(sql`
+      SELECT CASE WHEN workflow_run_id IS NOT NULL THEN 'w:' || workflow_run_id
+        ELSE 's:' || session_id END AS parent,
+        COALESCE(SUM(cost_total), 0) AS cost_usd,
+        COUNT(*) FILTER (WHERE NOT priced) AS unpriced_turns
+      FROM cost_entries
+      WHERE ${costScope} AND session_id IS NOT NULL
+      GROUP BY 1`) as Promise<{ rows: CostRow[] }>,
+  ]);
+
+  const byParent = new Map<string, Map<UsageOutcomeKind, number>>();
+  for (const row of [...actions.rows, ...terminal.rows]) {
+    if (!OUTCOME_KINDS.includes(row.kind as UsageOutcomeKind)) continue;
+    const kind = row.kind as UsageOutcomeKind;
+    const counts = byParent.get(row.parent) ?? new Map<UsageOutcomeKind, number>();
+    counts.set(kind, (counts.get(kind) ?? 0) + toNum(row.count));
+    byParent.set(row.parent, counts);
+  }
+  const costByParent = new Map(costs.rows.map((row) => [row.parent, row]));
+  const totals = new Map<UsageOutcomeKind, { count: number; cost: number }>(
+    OUTCOME_KINDS.map((kind) => [kind, { count: 0, cost: 0 }]),
+  );
+  let unpricedTurns = 0;
+  for (const [parent, counts] of byParent) {
+    const parentCount = [...counts.values()].reduce((sum, count) => sum + count, 0);
+    const cost = costByParent.get(parent);
+    unpricedTurns += toNum(cost?.unpriced_turns);
+    for (const [kind, count] of counts) {
+      const total = totals.get(kind);
+      if (!total) continue;
+      total.count += count;
+      total.cost += toNum(cost?.cost_usd) * count / parentCount;
+    }
+  }
+  return {
+    scope: scope.scope,
+    byOutcome: OUTCOME_KINDS.map((kind) => {
+      const { count, cost } = totals.get(kind) ?? { count: 0, cost: 0 };
+      return { kind, count, estimatedCostUsd: cost, estimatedCostPerOutcomeUsd: count ? cost / count : null };
+    }),
+    unpricedTurns,
+  };
+}
+
 interface SkillBreakdownRow {
   skill_key: string;
   skill_name: string;
@@ -326,32 +491,39 @@ export async function getUsageBreakdown(
       }
     : undefined;
 
-  const [byUseCase, byModel, byDay, totals, byUser, skillBreakdown, agentDays] = await Promise.all([
-    db.execute(sql`SELECT use_case, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY use_case`) as Promise<{ rows: (BucketRow & { use_case: string })[] }>,
-    db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
-    // `floor` truncates the day index deterministically whether Postgres infers
-    // the `${DAY_MS}` parameter as integer or float (a plain `bigint / param`
-    // could do float division on real Postgres → one bucket per row).
-    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
-    // Only the engine branch of cost_entries carries session_id. Count across
-    // the whole rolling window, not member/day buckets; unpriced usage counts.
-    db.execute(sql`SELECT ${BUCKET_COLS}, COUNT(DISTINCT session_id) FILTER (
-      WHERE session_id IS NOT NULL AND total_tokens > 0
-    ) AS active_agents FROM cost_entries WHERE ${where}`) as Promise<{ rows: (BucketRow & { active_agents: unknown })[] }>,
-    opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)
-      ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
-        // workflow runs) so the per-member sum reconciles with the total —
-        // dropping it made Σ byUser < totalCostUsd.
-        (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
-      : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
+  interface GroupRow extends BucketRow {
+    grouping_key: unknown; use_case: string | null; model: string | null;
+    day_ms: unknown; user_id: string | null; active_agents: unknown;
+  }
+  // One cost view scan produces the use-case, model, day, member, and total
+  // buckets. GROUPING distinguishes a real NULL value from an omitted column.
+  const [grouped, skillBreakdown, agentDays] = await Promise.all([
+    db.execute(sql`
+      WITH scoped AS (
+        SELECT use_case, model, user_id, session_id,
+          (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+          cost_total, total_tokens, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, priced
+        FROM cost_entries WHERE ${where}
+      )
+      SELECT GROUPING(use_case, model, day_ms, user_id) AS grouping_key,
+        use_case, model, day_ms, user_id, ${BUCKET_COLS},
+        COUNT(DISTINCT session_id) FILTER (
+          WHERE session_id IS NOT NULL AND total_tokens > 0
+        ) AS active_agents
+      FROM scoped
+      GROUP BY GROUPING SETS ((use_case), (model), (day_ms), (user_id), ())
+    `) as Promise<{ rows: GroupRow[] }>,
     getSkillBreakdown(db, period, opts.scope),
     agentWindow ? getMemberAgentDays(db, opts.scope, { ...period, startMs: agentWindow.sinceMs }) : Promise.resolve([]),
   ]);
 
-  const total = toBucket(totals.rows[0]);
+  const groups = (key: number) => grouped.rows.filter((r) => toNum(r.grouping_key) === key);
+  const totals = groups(15)[0];
+  const total = toBucket(totals);
   let byUserOut: UsageBreakdownResponse["byUser"];
   if (opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)) {
-    const memberBuckets = new Map(byUser.rows.map((r) => [r.user_id, toBucket(r)]));
+    const memberBuckets = new Map(groups(14).map((r) => [r.user_id, toBucket(r)]));
     const agentDaysByUser = new Map(agentDays.map((r) => [r.actor_id, toNum(r.agent_days)]));
     // Prompt actors can differ from the member billed for a shared session.
     // Keep their activity even when they have no attributed spend.
@@ -370,7 +542,7 @@ export async function getUsageBreakdown(
   return {
     windowMs: period.windowMs ?? period.endMs - period.startMs,
     scope: opts.scope.scope,
-    activeAgents: toNum(totals.rows[0]?.active_agents),
+    activeAgents: toNum(totals?.active_agents),
     totalCostUsd: total.costUsd,
     totalTokens: total.totalTokens,
     totalInputTokens: total.inputTokens,
@@ -380,11 +552,11 @@ export async function getUsageBreakdown(
     totalTurns: total.turns,
     unpricedTurns: total.unpricedTurns,
     skillBreakdown,
-    byUseCase: byUseCase.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case as UsageUseCase, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
-    byModel: byModel.rows.map((r) => ({ model: r.model, ...toBucket(r) })),
+    byUseCase: groups(7).filter((r): r is GroupRow & { use_case: UsageUseCase } => r.use_case !== null && isUsageUseCase(r.use_case)).map((r) => ({ useCase: r.use_case, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
+    byModel: groups(11).map((r) => ({ model: r.model, ...toBucket(r) })).sort((a, b) => b.costUsd - a.costUsd),
     byUser: byUserOut,
     dailyAgentWindow: agentWindow,
-    byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
+    byDay: groups(13).map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })).sort((a, b) => a.dayMs - b.dayMs),
   };
 }
 

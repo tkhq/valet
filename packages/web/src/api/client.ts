@@ -244,6 +244,8 @@ import type {
   UsageDrillResponse,
   UsageDrillItem,
   UsageScopeName,
+  UsageToolEfficiencyResponse,
+  UsageOutcomesResponse,
   UsageExportGranularity,
   UsagePeriodSelection,
   UsageUseCase,
@@ -1162,6 +1164,18 @@ export const api = {
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+  },
+  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`);
+  },
+  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+    const qs = usagePeriodSearchParams(period);
+    qs.set("scope", scope);
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`);
   },
   usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
     const qs = usagePeriodSearchParams(period);
