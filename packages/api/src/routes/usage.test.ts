@@ -19,7 +19,7 @@ import {
   teams,
   teamMembers,
 } from "../schema/index.js";
-import type { DailyAgentActivityResponse, UsageBreakdownResponse, UsageDrillResponse, UsageOutcomesResponse, UsageSessionsResponse, UsageToolEfficiencyResponse } from "../wire/types.js";
+import type { DailyAgentActivityResponse, UsageBreakdownResponse, UsageDrillResponse, UsageOutcomesResponse, UsageSummaryResponse, UsageSessionsResponse, UsageToolEfficiencyResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -751,6 +751,34 @@ describe("GET /api/usage/export.csv", () => {
 });
 
 describe("GET /api/usage/summary", () => {
+  it("excludes proxy usage from home windows and member rankings, but keeps its detail", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(agentSessions).values({ id: "s-home", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    await seedEngineEntry(api, "e-home", "s-home", now);
+    for (const userId of ["local-user", "test-member"]) {
+      await db.insert(llmProxyRequests).values({
+        id: `proxy-${userId}`, createdAt: now, orgId: "local-org", userId, apiKeyId: "k",
+        providerKind: "openai", model: "gpt-5", harness: "codex", endpoint: "/v1/responses",
+        stream: false, statusCode: 200, requestBody: "{}", inputTokens: 1000, totalTokens: 1000, costUsd: 100,
+      });
+    }
+    const res = await fetch(`${api.baseUrl}/api/usage/summary`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as UsageSummaryResponse;
+    for (const window of [body.me.day, body.me.week, body.me.month]) {
+      expect(window.costUsd).toBeCloseTo(0.003, 6);
+      expect(window.totalTokens).toBe(120);
+      expect(window.turns).toBe(1);
+    }
+    expect(body.org?.members).toHaveLength(1);
+    expect(body.org?.members[0]).toMatchObject({ userId: "local-user", totalTokens: 120, turns: 1 });
+    expect(body.org?.members[0].costUsd).toBeCloseTo(0.003, 6);
+    const detail = await (await fetch(`${api.baseUrl}/api/usage/breakdown`)).json() as UsageBreakdownResponse;
+    expect(detail.byUseCase.find((row) => row.useCase === "proxy")?.costUsd).toBe(100);
+  });
   it("returns the caller's day/week/month windows from cost_entries", async () => {
     api = await bootTestApi();
     const now = Date.now();

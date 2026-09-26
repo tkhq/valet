@@ -4,6 +4,16 @@ import { priceUsage, resolveCanonicalModel } from "./pricing.js";
 const usage = { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, total: 1500 };
 
 describe("priceUsage", () => {
+  it("charges cached OpenAI input only at the cache rate", () => {
+    expect(priceUsage("openai", "gpt-5", {
+      input: 1_000_000, output: 1000, cacheRead: 900_000, cacheWrite: 0, total: 1_001_000,
+    })).toBeCloseTo(0.2475, 8);
+  });
+  it("keeps Anthropic cache tokens separate from input", () => {
+    expect(priceUsage("anthropic", "claude-sonnet-4-5", {
+      input: 100, output: 20, cacheRead: 900, cacheWrite: 0, total: 1020,
+    })).toBeCloseTo(0.00087, 8);
+  });
   it("prices a known Anthropic model to a positive number", () => {
     const cost = priceUsage("anthropic", "claude-sonnet-4-5-20250929", usage);
     expect(cost).not.toBeNull();

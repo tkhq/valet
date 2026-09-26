@@ -27,7 +27,10 @@
     },
     "registry": {
       "type": "object",
-      "required": ["minFreeGb", "minFreePercent"],
+      "required": [
+        "minFreeGb",
+        "minFreePercent"
+      ],
       "properties": {
         "minFreeGb": {
           "description": "Set the absolute free-space reserve to zero or a positive number of GB.",
@@ -39,6 +42,26 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "exclusiveMaximum": 100
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "startupProbe": {
+          "type": "object",
+          "properties": {
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Positive number of failed startup probes allowed during database upgrades."
+            }
+          }
+        },
+        "progressDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Positive rollout progress deadline in seconds. Allow more time than the startup probe budget."
         }
       }
     }

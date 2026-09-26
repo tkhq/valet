@@ -259,6 +259,22 @@ echo "$STARTUP_BLOCK" | grep -q 'path: /api/health' \
   || fail "startupProbe does not hit /api/health — startup must never wait on boot-restore work"
 pass "probe split: readiness /api/ready, startup+liveness /api/health"
 
+# Database upgrades run before the listener binds. Keep a separate rollout budget.
+echo "$API_DEPLOY_BLOCK" | grep -q '^  progressDeadlineSeconds: 2100$' \
+  || fail "default api rollout must allow 35 minutes for database upgrades"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'failureThreshold: 360' \
+  || fail "default startup probe must allow 30 minutes at its 5-second period"
+helm --kube-context rancher-desktop template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/deployment.yaml \
+  --set api.startupProbe.failureThreshold=480 --set api.progressDeadlineSeconds=2700 \
+  > "$TMP_DIR/upgrade-budget.yaml"
+grep -q '^  progressDeadlineSeconds: 2700$' "$TMP_DIR/upgrade-budget.yaml" \
+  || fail "api rollout deadline override was lost"
+grep -A6 'startupProbe:' "$TMP_DIR/upgrade-budget.yaml" | grep -q 'failureThreshold: 480' \
+  || fail "api startup probe threshold override was lost"
+pass "database upgrade startup and rollout budgets support overrides"
+
+
 # --- lookup-retain helper present in Secret template ---------------------
 grep -q 'define "valet.retainedSecretValue"' "$CHART_DIR/templates/_helpers.tpl" \
   || fail "retained-secret-value helper not found in _helpers.tpl"

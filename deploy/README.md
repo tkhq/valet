@@ -95,6 +95,10 @@ Postgres StatefulSet's readiness, because the api runs migrations at boot.
 `helm upgrade --install --wait` therefore returns only once the api pod is
 `Running` and `Ready`.
 
+Database upgrades run before the API binds its HTTP listener. The chart allows 30 minutes for startup and 35 minutes for rollout progress.
+For the first usage-rollup upgrade, use `helm upgrade --install --wait --timeout 40m` with the existing context and release values.
+The Helm timeout must be at least 35 minutes. See [database upgrade budgets](chart/valet/README.md#database-upgrade-startup-budget) for the configurable limits.
+
 ## Pre-deploy DDL — sandbox-reconcile schema restructure
 
 Run this DDL ONCE against the live database before you roll the api to the

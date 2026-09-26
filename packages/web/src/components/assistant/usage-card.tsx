@@ -58,6 +58,7 @@ export function UsageCard() {
 
         {data && (
           <>
+            <p className="text-xs text-muted">Valet usage only. External proxy usage is excluded.</p>
             <div className="grid grid-cols-3 gap-2">
               <WindowStat label="Today" window={data.me.day} />
               <WindowStat label="7 days" window={data.me.week} />

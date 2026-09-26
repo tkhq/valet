@@ -32,6 +32,28 @@ session-provision time, not at chart-install time. The RBAC is scoped for
 the CRs, but the CRD itself will not exist, and Helm does not validate CRD
 existence for API groups it does not own.
 
+## Database upgrade startup budget
+
+The API completes database upgrades before it binds the HTTP listener.
+Large retained usage histories can require several minutes of backfill.
+The startup probe permits 30 minutes by default: `api.startupProbe.failureThreshold: 360` at a fixed five-second interval.
+`api.progressDeadlineSeconds: 2100` permits 35 minutes of Deployment rollout progress.
+These limits cover database initialization. Session restore runs after the listener binds and remains controlled by readiness.
+During a rolling upgrade, the old ready pod continues to serve traffic until the new pod becomes ready.
+
+For the first usage-rollup upgrade, set the Helm timeout to at least 35 minutes.
+Use `--wait --timeout 40m` to allow additional deployment work:
+
+```sh
+helm upgrade --install valet deploy/chart/valet \
+  --kube-context rancher-desktop --namespace valet \
+  --wait --timeout 40m
+```
+
+Keep the existing release values and image settings when you run the upgrade.
+If measured database upgrade time exceeds 30 minutes, increase both API budgets and the Helm timeout before deployment.
+The database repair resumes completed batches after a restart.
+
 ## What's in the chart
 
 - **api Deployment**, Service, and Ingress (Traefik, TLS terminated at the

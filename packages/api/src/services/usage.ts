@@ -6,6 +6,10 @@
  * and Grafana cannot drift.
  */
 import { eq, inArray, sql, type SQL } from "drizzle-orm";
+import { usageRead } from "./usage-read.js";
+import { getMemberAgentDays } from "./usage-member-activity.js";
+import { getActionToolCalls, getActionOutcomes, getSkillBreakdown } from "./usage-aux-rollups.js";
+import { proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
@@ -17,7 +21,6 @@ import type {
   UsageBucket,
   UsageDrillItem,
   UsageSessionRow,
-  SkillUsageBreakdown,
   UsageSummaryResponse,
   UsageOutcomesResponse,
   UsageOutcomeKind,
@@ -137,16 +140,6 @@ function scopeWhere(prefix: "" | "ce.", period: ResolvedUsagePeriod, s: UsageSco
 
 // ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
 
-const BUCKET_COLS = sql`
-  COALESCE(SUM(cost_total),0)            AS cost_usd,
-  COALESCE(SUM(total_tokens),0)         AS total_tokens,
-  COALESCE(SUM(input_tokens),0)         AS input_tokens,
-  COALESCE(SUM(output_tokens),0)        AS output_tokens,
-  COALESCE(SUM(cache_read_tokens),0)    AS cache_read_tokens,
-  COALESCE(SUM(cache_write_tokens),0)   AS cache_write_tokens,
-  COUNT(*)                              AS turns,
-  COUNT(*) FILTER (WHERE NOT priced)    AS unpriced_turns`;
-
 interface BucketRow {
   cost_usd: unknown; total_tokens: unknown; input_tokens: unknown; output_tokens: unknown;
   cache_read_tokens: unknown; cache_write_tokens: unknown; turns: unknown; unpriced_turns: unknown;
@@ -164,75 +157,22 @@ function toBucket(r: BucketRow | undefined): UsageBucket {
   };
 }
 
-function skillScopeWhere(scope: UsageScope): SQL {
-  const orgId = sql`COALESCE(s.org_id, d.org_id)`;
-  const ownerType = sql`COALESCE(s.owner_type, r.owner_type)`;
-  const ownerId = sql`COALESCE(s.owner_id, r.owner_id)`;
-  const userId = sql`CASE
-    WHEN s.id IS NOT NULL THEN s.user_id
-    WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '')
-  END`;
-  const base = sql`${orgId} = ${scope.orgId}`;
-  switch (scope.scope) {
-    case "team":
-      return sql`${base} AND ${ownerType} = 'team' AND ${ownerId} = ${scope.teamId}`;
-    case "me":
-      return sql`${base} AND ${userId} = ${scope.userId}`;
-    case "org":
-      return base;
-  }
-}
-
-// JSON.stringify can persist a NUL as \u0000 in tool output. PostgreSQL jsonb
-// cannot decode it, so replace that escape before reading the call metadata.
-const TOOL_PARTS = sql`jsonb_array_elements(
-  replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb
-)`;
-
 /** Settled assistant tool calls and workflow tool nodes executed without a model. */
-export async function getUsageToolEfficiency(
+async function queryUsageToolEfficiency(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<UsageToolEfficiencyResponse> {
   const period = periodFromOpts(opts);
   const scope = opts.scope;
-  const engineScope = skillScopeWhere(scope);
-  const actionOwner = scope.scope === "team"
-    ? sql`AND r.owner_type = 'team' AND r.owner_id = ${scope.teamId}`
-    : scope.scope === "me"
-      ? sql`AND r.owner_type = 'user' AND r.owner_id = ${scope.userId}`
-      : sql``;
+  const engineScope = scopeWhere("ce.", period, scope);
   interface CountRow { use_case: string; calls: unknown }
   const [engine, workflow] = await Promise.all([
     db.execute(sql`
-      SELECT CASE
-        WHEN e.session_id LIKE 'orchestrator:%' THEN 'orchestrator'
-        WHEN e.session_id LIKE 'wf:%' THEN 'workflow'
-        ELSE 'session'
-      END AS use_case, COUNT(*) AS calls
-      FROM engine_entries e
-      LEFT JOIN agent_sessions s ON s.id = e.session_id
-      LEFT JOIN workflow_runs r
-        ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
-      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-      CROSS JOIN LATERAL ${TOOL_PARTS} AS p(part)
-      WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
-        AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
-        AND ${engineScope}
-        AND p.part->>'type' = 'tool_call'
-        AND p.part->>'status' IN ('completed', 'error')
-      GROUP BY 1`) as Promise<{ rows: CountRow[] }>,
-    db.execute(sql`
-      SELECT COUNT(*) AS calls
-      FROM action_invocations ai
-      JOIN workflow_runs r ON r.id = ai.workflow_execution_id
-      JOIN workflow_definitions d ON d.id = r.workflow_id
-      WHERE COALESCE(ai.started_at, ai.created_at) >= ${period.startMs}
-        AND COALESCE(ai.started_at, ai.created_at) < ${period.endMs}
-        AND ai.org_id = ${scope.orgId} AND d.org_id = ${scope.orgId}
-        ${actionOwner}
-        AND ai.service IS NOT NULL AND ai.action_id IS NOT NULL
-        AND ai.status IN ('completed', 'error') AND ai.duration_ms IS NOT NULL`) as Promise<{ rows: { calls: unknown }[] }>,
+      SELECT ce.use_case, SUM(ce.tool_calls) AS calls
+      FROM ${usagePeriodRows(period, true)} ce
+      WHERE ${engineScope} AND ce.tool_calls > 0
+      GROUP BY ce.use_case`) as Promise<{ rows: CountRow[] }>,
+    getActionToolCalls(db, period, scope),
   ]);
   const directed = new Map(engine.rows.filter((r) => isUsageUseCase(r.use_case)).map((r) => [r.use_case as UsageUseCase, toNum(r.calls)]));
   return {
@@ -241,7 +181,7 @@ export async function getUsageToolEfficiency(
     byUseCase: USE_CASES.map((useCase) => ({
       useCase,
       modelDirectedCalls: directed.get(useCase) ?? 0,
-      modelFreeActions: useCase === "workflow" ? toNum(workflow.rows[0]?.calls) : 0,
+      modelFreeActions: useCase === "workflow" ? workflow : 0,
     })),
   };
 }
@@ -252,81 +192,53 @@ const OUTCOME_KINDS: readonly UsageOutcomeKind[] = [
 
 /** Count confirmed writes, then allocate each parent's observed model cost
  * across its outcomes in the selected period. This is a cost estimate. */
-export async function getUsageOutcomes(
+async function queryUsageOutcomes(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<UsageOutcomesResponse> {
   const period = periodFromOpts(opts);
   const { scope } = opts;
-  const actionScope = skillScopeWhere(scope);
   const costScope = scopeWhere("", period, scope);
   interface OutcomeRow { parent: string; kind: string; count: unknown }
   interface CostRow { parent: string; cost_usd: unknown; unpriced_turns: unknown }
-  const [actions, terminal, costs] = await Promise.all([
+  const [actions, terminal] = await Promise.all([
+    getActionOutcomes(db, period, scope),
     db.execute(sql`
-      SELECT CASE WHEN r.id IS NOT NULL
-          THEN 'w:' || r.id ELSE 's:' || ai.session_id END AS parent,
-        CASE
-          WHEN ai.action_id = 'github.create_pull_request' THEN 'pull_request_created'
-          WHEN ai.action_id = 'github.create_review' THEN 'review_submitted'
-          WHEN ai.action_id IN ('slack.dm_owner', 'slack.dm_user')
-            OR ai.result::jsonb->'data'->>'channel' LIKE 'D%' THEN 'slack_dm_sent'
-          ELSE 'slack_message_sent'
-        END AS kind,
-        COUNT(*) AS count
-      FROM action_invocations ai
-      LEFT JOIN agent_sessions s ON s.id = ai.session_id
-      LEFT JOIN workflow_runs r ON r.id = COALESCE(
-        ai.workflow_execution_id,
-        CASE WHEN ai.session_id LIKE 'wf:%' THEN split_part(ai.session_id, ':', 2) END)
-      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-      WHERE COALESCE(ai.started_at, ai.created_at) >= ${period.startMs}
-        AND COALESCE(ai.started_at, ai.created_at) < ${period.endMs}
-        AND ai.org_id = ${scope.orgId} AND ${actionScope}
-        AND ai.status = 'completed' AND ai.duration_ms IS NOT NULL
-        AND ai.result::jsonb->>'success' = 'true'
-        AND (ai.session_id IS NOT NULL OR ai.workflow_execution_id IS NOT NULL)
-        AND (ai.action_id = 'github.create_pull_request'
-          OR (ai.action_id = 'github.create_review'
-            AND ai.result::jsonb->'data'->>'state' IN ('APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'))
-          OR ai.action_id IN ('slack.send_message', 'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user'))
+      SELECT CASE WHEN ce.workflow_run_id IS NOT NULL THEN 'w:' || ce.workflow_run_id
+        ELSE 's:' || ce.session_id END AS parent,
+        outcome.kind, SUM(outcome.count) AS count
+      FROM ${usagePeriodRows(period, true)} ce
+      CROSS JOIN LATERAL (VALUES
+        ('pull_request_created', ce.pull_requests), ('review_submitted', ce.reviews)
+      ) outcome(kind, count)
+      WHERE ${scopeWhere("ce.", period, scope)} AND outcome.count > 0
+        AND (ce.pull_requests > 0 OR ce.reviews > 0)
       GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
-    db.execute(sql`
-      SELECT CASE WHEN r.id IS NOT NULL THEN 'w:' || r.id ELSE 's:' || e.session_id END AS parent,
-        p.part->'result'->'details'->'outcome'->>'kind' AS kind,
-        COUNT(*) AS count
-      FROM engine_entries e
-      LEFT JOIN agent_sessions s ON s.id = e.session_id
-      LEFT JOIN workflow_runs r
-        ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
-      LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-      CROSS JOIN LATERAL ${TOOL_PARTS} AS p(part)
-      WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
-        AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
-        AND ${actionScope}
-        AND p.part->>'type' = 'tool_call' AND p.part->>'toolName' = 'bash'
-        AND p.part->>'status' = 'completed'
-        AND p.part->'result'->'details'->'outcome'->>'kind'
-          IN ('pull_request_created', 'review_submitted')
-      GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
-    db.execute(sql`
-      SELECT CASE WHEN workflow_run_id IS NOT NULL THEN 'w:' || workflow_run_id
-        ELSE 's:' || session_id END AS parent,
-        COALESCE(SUM(cost_total), 0) AS cost_usd,
-        COUNT(*) FILTER (WHERE NOT priced) AS unpriced_turns
-      FROM cost_entries
-      WHERE ${costScope} AND session_id IS NOT NULL
-      GROUP BY 1`) as Promise<{ rows: CostRow[] }>,
   ]);
 
   const byParent = new Map<string, Map<UsageOutcomeKind, number>>();
-  for (const row of [...actions.rows, ...terminal.rows]) {
+  for (const row of [...actions, ...terminal.rows]) {
     if (!OUTCOME_KINDS.includes(row.kind as UsageOutcomeKind)) continue;
     const kind = row.kind as UsageOutcomeKind;
     const counts = byParent.get(row.parent) ?? new Map<UsageOutcomeKind, number>();
     counts.set(kind, (counts.get(kind) ?? 0) + toNum(row.count));
     byParent.set(row.parent, counts);
   }
+  // Parents without outcomes need no cost allocation. Keep this query bounded
+  // to confirmed parents instead of aggregating every session in the org.
+  const sessions = [...byParent.keys()].filter((p) => p.startsWith("s:")).map((p) => p.slice(2));
+  const workflows = [...byParent.keys()].filter((p) => p.startsWith("w:")).map((p) => p.slice(2));
+  const parentFilters: SQL[] = [];
+  if (sessions.length) parentFilters.push(sql`(workflow_run_id IS NULL AND session_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(sessions)}::jsonb)))`);
+  if (workflows.length) parentFilters.push(sql`workflow_run_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(workflows)}::jsonb))`);
+  const costs = parentFilters.length ? await db.execute(sql`
+    SELECT CASE WHEN workflow_run_id IS NOT NULL THEN 'w:' || workflow_run_id
+      ELSE 's:' || session_id END AS parent,
+      COALESCE(SUM(cost_total), 0) AS cost_usd,
+      COALESCE(SUM(unpriced_turns),0) AS unpriced_turns
+    FROM ${usagePeriodRows(period)} ce
+    WHERE ${costScope} AND (${sql.join(parentFilters, sql` OR `)})
+    GROUP BY 1`) as { rows: CostRow[] } : { rows: [] };
   const costByParent = new Map(costs.rows.map((row) => [row.parent, row]));
   const totals = new Map<UsageOutcomeKind, { count: number; cost: number }>(
     OUTCOME_KINDS.map((kind) => [kind, { count: 0, cost: 0 }]),
@@ -353,62 +265,10 @@ export async function getUsageOutcomes(
   };
 }
 
-interface SkillBreakdownRow {
-  skill_key: string;
-  skill_name: string;
-  origin: "plugin" | "local" | "repo";
-  plugin_name: string | null;
-  invocations: unknown;
-  unique_invokers: unknown;
-  unassigned_invocations: unknown;
-  attributed_context_tokens: unknown;
-  carrying_calls: unknown;
-}
-
-async function getSkillBreakdown(
-  db: AppDb,
-  period: ResolvedUsagePeriod,
-  scope: UsageScope,
-): Promise<SkillUsageBreakdown[]> {
-  const where = skillScopeWhere(scope);
-  const result = (await db.execute(sql`
-    SELECT si.skill_key, si.skill_name, si.origin, si.plugin_name,
-           COUNT(DISTINCT si.id) FILTER (WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) AS invocations,
-           COUNT(DISTINCT si.invoker_user_id) FILTER (WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) AS unique_invokers,
-           COUNT(DISTINCT si.id) FILTER (
-             WHERE si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs} AND si.invoker_user_id IS NULL
-           ) AS unassigned_invocations,
-           COALESCE(SUM(sca.estimated_skill_tokens) FILTER (WHERE sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs}), 0)
-             AS attributed_context_tokens,
-           COUNT(DISTINCT sca.llm_request_id) FILTER (WHERE sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs})
-             AS carrying_calls
-    FROM skill_invocations si
-    LEFT JOIN skill_context_attributions sca ON sca.skill_invocation_id = si.id
-    LEFT JOIN agent_sessions s ON s.id = si.session_id
-    LEFT JOIN workflow_runs r
-      ON si.session_id LIKE 'wf:%' AND r.id = split_part(si.session_id, ':', 2)
-    LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-    WHERE ${where} AND ((si.created_at >= ${period.startMs} AND si.created_at < ${period.endMs}) OR (sca.created_at >= ${period.startMs} AND sca.created_at < ${period.endMs}))
-    GROUP BY si.skill_key, si.skill_name, si.origin, si.plugin_name
-    ORDER BY invocations DESC, si.skill_name ASC
-  `)) as { rows: SkillBreakdownRow[] };
-  return result.rows.map((row) => ({
-    skillKey: row.skill_key,
-    name: row.skill_name,
-    origin: row.origin,
-    ...(row.plugin_name ? { pluginName: row.plugin_name } : {}),
-    invocations: toNum(row.invocations),
-    uniqueInvokers: toNum(row.unique_invokers),
-    unassignedInvocations: toNum(row.unassigned_invocations),
-    attributedContextTokens: toNum(row.attributed_context_tokens),
-    carryingCalls: toNum(row.carrying_calls),
-  }));
-}
-
 /** Distinct sessions with positive token usage, grouped into UTC calendar days.
  * Reads retained usage; page views, idle sessions and proxy calls do not count.
  */
-export async function getDailyAgentActivity(
+async function queryDailyAgentActivity(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<DailyAgentActivityResponse> {
@@ -435,10 +295,10 @@ export async function getDailyAgentActivity(
         ELSE 'session'
       END AS kind,
       COUNT(DISTINCT ce.session_id) AS active_agents
-    FROM cost_entries ce
+    FROM ${usagePeriodRows(activityPeriod)} ce
     LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
     WHERE ${where}
-      AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
+      AND ce.session_id IS NOT NULL AND ce.positive_turns > 0
     GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
   `) as { rows: ActivityRow[] };
   return {
@@ -453,38 +313,9 @@ export async function getDailyAgentActivity(
 
 // ── Breakdown ────────────────────────────────────────────────────────────────
 
-/** Count session-days per actor, not turns or distinct sessions over the range.
- * Shared assistants must not be credited to the first member who opened them.
- * A session used by two members on one day counts once for each member.
- */
-async function getMemberAgentDays(db: AppDb, scope: UsageScope, period: ResolvedUsagePeriod) {
-  // The raw query result type describes columns selected below on both DB backends.
-  const result = await db.execute(sql`
-    WITH active AS (
-      SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
-        ce.session_id,
-        COALESCE(NULLIF(q.author::jsonb->>'id', ''), NULLIF(cw.actor_user_id, ''),
-          CASE WHEN a.id IS NULL AND ce.session_id NOT LIKE 'orchestrator:%'
-            THEN ce.user_id END) AS actor_id
-      FROM cost_entries ce
-      JOIN engine_entries e ON e.id = ce.entry_id AND e.session_id = ce.session_id
-      LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
-      LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id AND cw.org_id = ce.org_id
-      LEFT JOIN assistants a ON a.session_id = ce.session_id AND a.org_id = ce.org_id
-      WHERE ${scopeWhere("ce.", period, scope)}
-        AND ce.session_id IS NOT NULL AND ce.total_tokens > 0
-    ), daily AS (
-      SELECT actor_id, day_ms, COUNT(DISTINCT session_id) AS active_agents
-      FROM active GROUP BY actor_id, day_ms
-    )
-    SELECT actor_id, SUM(active_agents) AS agent_days FROM daily GROUP BY actor_id
-  `) as { rows: { actor_id: string | null; agent_days: unknown }[] };
-  return result.rows;
-}
-
 /** All-use-case spend for a window: totals, by use case, by model, by day, and
  * (org scope) by member. */
-export async function getUsageBreakdown(
+async function queryUsageBreakdown(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope },
 ): Promise<UsageBreakdownResponse> {
@@ -507,20 +338,20 @@ export async function getUsageBreakdown(
   // buckets. GROUPING distinguishes a real NULL value from an omitted column.
   const [grouped, skillBreakdown, agentDays] = await Promise.all([
     db.execute(sql`
-      WITH scoped AS (
+      WITH scoped AS MATERIALIZED (
         SELECT use_case, model, user_id, session_id,
           (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
           cost_total, total_tokens, input_tokens, output_tokens,
-          cache_read_tokens, cache_write_tokens, priced
-        FROM cost_entries WHERE ${where}
-      )
+          cache_read_tokens, cache_write_tokens, turns, unpriced_turns, positive_turns
+        FROM ${usagePeriodRows(period)} ce WHERE ${where}
+      ), grouped AS (
       SELECT GROUPING(use_case, model, day_ms, user_id) AS grouping_key,
-        use_case, model, day_ms, user_id, ${BUCKET_COLS},
-        COUNT(DISTINCT session_id) FILTER (
-          WHERE session_id IS NOT NULL AND total_tokens > 0
-        ) AS active_agents
+        use_case, model, day_ms, user_id, ${HOURLY_BUCKET_COLS}
       FROM scoped
       GROUP BY GROUPING SETS ((use_case), (model), (day_ms), (user_id), ())
+      ) SELECT grouped.*, CASE WHEN grouping_key=15 THEN
+        (SELECT COUNT(DISTINCT session_id) FROM scoped WHERE session_id IS NOT NULL AND positive_turns>0)
+        ELSE 0 END AS active_agents FROM grouped
     `) as Promise<{ rows: GroupRow[] }>,
     getSkillBreakdown(db, period, opts.scope),
     agentWindow ? getMemberAgentDays(db, opts.scope, { ...period, startMs: agentWindow.sinceMs }) : Promise.resolve([]),
@@ -572,7 +403,7 @@ export async function getUsageBreakdown(
 
 /** Drill-down rows for ONE use case: sessions (title + child nesting), workflow
  * runs (workflow name), or proxy (by harness). */
-export async function getUsageDrillItems(
+async function queryUsageDrillItems(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope; useCase: UsageUseCase },
 ): Promise<UsageDrillItem[]> {
@@ -584,8 +415,8 @@ export async function getUsageDrillItems(
     interface Row { session_id: string; title: string | null; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.session_id, s.title, cw.parent_session_id,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
-      FROM cost_entries ce
+             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COALESCE(SUM(ce.turns),0) AS turns
+      FROM ${usagePeriodRows(period)} ce
       LEFT JOIN agent_sessions s ON s.id = ce.session_id
       LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
       WHERE ${whereCe} AND ce.session_id IS NOT NULL AND ce.use_case = ${useCase}
@@ -601,8 +432,8 @@ export async function getUsageDrillItems(
     interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
     const r = (await db.execute(sql`
       SELECT ce.workflow_run_id, wd.name,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
-      FROM cost_entries ce
+             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COALESCE(SUM(ce.turns),0) AS turns
+      FROM ${usagePeriodRows(period)} ce
       LEFT JOIN workflow_definitions wd ON wd.id = ce.workflow_id
       WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_run_id IS NOT NULL
       GROUP BY ce.workflow_run_id, wd.name
@@ -612,14 +443,14 @@ export async function getUsageDrillItems(
       parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
     }));
   }
-  // proxy — group the raw proxy rows by harness (cost_entries has no harness).
+  // Proxy hours retain harness identity; partial hours retain exact timestamps.
   const whereProxy = scope.scope === "team"
     ? sql`created_at >= ${period.startMs} AND created_at < ${period.endMs} AND org_id = ${scope.orgId} AND team_id = ${scope.teamId}`
     : scopeWhere("", period, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
-    SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns
-    FROM llm_proxy_requests
+    SELECT harness, COALESCE(SUM(cost_usd),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COALESCE(SUM(turns),0) AS turns
+    FROM ${proxyPeriodRows(period)} proxy_usage
     WHERE ${whereProxy} AND total_tokens > 0
     GROUP BY harness ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
   return r.rows.map((x) => ({
@@ -631,7 +462,7 @@ export async function getUsageDrillItems(
 /** Superseded by `getUsageDrillItems` (which covers all use cases); kept while
  * the dashboard migrates. Per-session spend for the agent-session use cases,
  * child-nested via `child_watches`, scoped to the caller. */
-export async function getUsageSessions(
+async function queryUsageSessions(
   db: AppDb,
   opts: UsagePeriodOpts & { orgId: string; userId: string; useCase?: string },
 ): Promise<UsageSessionRow[]> {
@@ -643,8 +474,8 @@ export async function getUsageSessions(
   interface Row { session_id: string; title: string | null; use_case: string; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const result = (await db.execute(sql`
     SELECT ce.session_id, s.title, ce.use_case, cw.parent_session_id,
-           COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COUNT(*) AS turns
-    FROM cost_entries ce
+           COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COALESCE(SUM(ce.turns),0) AS turns
+    FROM ${usagePeriodRows(period)} ce
     LEFT JOIN agent_sessions s ON s.id = ce.session_id
     LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
     WHERE ce.created_at >= ${period.startMs} AND ce.created_at < ${period.endMs} AND ce.org_id = ${opts.orgId} AND ce.user_id = ${opts.userId}
@@ -689,7 +520,7 @@ interface AggregateExportRow {
 /** Aggregate CSV rows use UTC epoch buckets and the same ledger sums as the
  * dashboard. A plain team member gets one aggregate across users: the query
  * does not group by stable or human user identity. */
-export async function getUsageAggregateExportCsv(
+async function queryUsageAggregateExportCsv(
   db: AppDb,
   opts: UsagePeriodOpts & { scope: UsageScope; granularity: "day" | "hour" },
 ): Promise<string> {
@@ -704,14 +535,14 @@ export async function getUsageAggregateExportCsv(
     SELECT (floor(ce.created_at / ${bucketMs}) * ${bucketMs})::bigint AS bucket_start,
            ce.use_case, ce.provider, ce.model, ce.owner_type, ce.owner_id,
            ${identitySelect},
-           COUNT(*) AS turns, COUNT(*) FILTER (WHERE NOT ce.priced) AS unpriced_turns,
+           COALESCE(SUM(ce.turns),0) AS turns, COALESCE(SUM(ce.unpriced_turns),0) AS unpriced_turns,
            COALESCE(SUM(ce.input_tokens), 0) AS input_tokens,
            COALESCE(SUM(ce.output_tokens), 0) AS output_tokens,
            COALESCE(SUM(ce.cache_read_tokens), 0) AS cache_read_tokens,
            COALESCE(SUM(ce.cache_write_tokens), 0) AS cache_write_tokens,
            COALESCE(SUM(ce.total_tokens), 0) AS total_tokens,
            COALESCE(SUM(ce.cost_total), 0) AS cost_usd
-    FROM cost_entries ce
+    FROM ${usagePeriodRows(period, false, opts.granularity === "day")} ce
     LEFT JOIN "user" u ON u.id = ce.user_id
     WHERE ${scopeWhere("ce.", period, opts.scope)}
     GROUP BY ${groupColumns}
@@ -844,12 +675,14 @@ function toWindow(row: WindowAggRow | undefined): UsageWindow {
 }
 
 /** Per-user token/cost aggregate since a cutoff, one row per user. `onlyUserId`
- * scopes to a single user; omit it for the org-wide member list. */
+ * scopes to a single user; omit it for the org-wide member list.
+ * Home dashboard windows and rankings count only Valet activity. */
 async function windowAggregate(db: AppDb, orgId: string, sinceMs: number, onlyUserId?: string): Promise<WindowAggRow[]> {
   const result = (await db.execute(sql`
-    SELECT user_id, ${BUCKET_COLS}
-    FROM cost_entries
+    SELECT user_id, ${HOURLY_BUCKET_COLS}
+    FROM ${usagePeriodRows({startMs:sinceMs,endMs:8640000000000000,kind:"lookback",label:"home"})} ce
     WHERE created_at >= ${sinceMs} AND org_id = ${orgId} AND user_id IS NOT NULL
+      AND use_case <> 'proxy'
       ${onlyUserId ? sql`AND user_id = ${onlyUserId}` : sql``}
     GROUP BY user_id`)) as { rows: WindowAggRow[] };
   return result.rows;
@@ -857,7 +690,7 @@ async function windowAggregate(db: AppDb, orgId: string, sinceMs: number, onlyUs
 
 /** The `/api/usage/summary` body: the caller's day/week/month windows, plus an
  * org-wide member comparison when the organizations feature is on. */
-export async function getUsageSummary(db: AppDb, opts: { orgId: string; userId: string; now: number }): Promise<UsageSummaryResponse> {
+async function queryUsageSummary(db: AppDb, opts: { orgId: string; userId: string; now: number }): Promise<UsageSummaryResponse> {
   const { orgId, userId, now } = opts;
   const [day, week, month] = await Promise.all([
     windowAggregate(db, orgId, now - DAY_MS, userId),
@@ -884,3 +717,19 @@ export async function getUsageSummary(db: AppDb, opts: { orgId: string; userId: 
   }
   return body;
 }
+
+export const getUsageToolEfficiency = usageRead(queryUsageToolEfficiency);
+
+export const getUsageOutcomes = usageRead(queryUsageOutcomes);
+
+export const getDailyAgentActivity = usageRead(queryDailyAgentActivity);
+
+export const getUsageBreakdown = usageRead(queryUsageBreakdown);
+
+export const getUsageDrillItems = usageRead(queryUsageDrillItems);
+
+export const getUsageSessions = usageRead(queryUsageSessions);
+
+export const getUsageAggregateExportCsv = usageRead(queryUsageAggregateExportCsv);
+
+export const getUsageSummary = usageRead(queryUsageSummary);

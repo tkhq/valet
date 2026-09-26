@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   check,
   doublePrecision,
+  numeric,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { ParamMatcher } from "../policies/matchers.js";
@@ -413,6 +414,7 @@ export const agentSessions = pgTable(
   },
   (t) => [
     index("agent_sessions_user").on(t.userId),
+    index("agent_sessions_usage_scope").on(t.orgId, t.userId, t.id),
     index("agent_sessions_status").on(t.status),
   ],
 );
@@ -1063,6 +1065,7 @@ export const skillInvocations = pgTable(
     index("skill_invocations_org_created").on(t.orgId, t.createdAt),
     index("skill_invocations_session_thread_created").on(t.sessionId, t.threadId, t.createdAt),
     index("skill_invocations_skill_created").on(t.skillKey, t.createdAt),
+    index("skill_invocations_usage_window").on(t.createdAt, t.sessionId),
   ],
 );
 
@@ -1076,7 +1079,8 @@ export const skillContextAttributions = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     estimatedSkillTokens: integer("estimated_skill_tokens").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.skillInvocationId, t.llmRequestId] })],
+  (t) => [primaryKey({ columns: [t.skillInvocationId, t.llmRequestId] }),
+    index("skill_context_attributions_window").on(t.createdAt, t.skillInvocationId)],
 );
 
 /** What one tracked repository mirrors. `skills` is the kind that ships; the
@@ -1571,7 +1575,12 @@ export const actionInvocations = pgTable(
   },
   (t) => [
     index("action_invocations_session").on(t.sessionId),
+    index("action_invocations_outcome_time").on(t.orgId, sql`COALESCE(${t.startedAt}, ${t.createdAt})`)
+      .where(sql`${t.status} = 'completed' AND ${t.durationMs} IS NOT NULL AND ${t.actionId} IN
+        ('github.create_pull_request', 'github.create_review', 'slack.send_message', 'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user')`),
     index("action_invocations_org_created").on(t.orgId, t.createdAt),
+    index("action_invocations_usage_time").on(t.orgId, sql`COALESCE(${t.startedAt}, ${t.createdAt})`)
+      .where(sql`${t.status} IN ('completed', 'error') AND ${t.durationMs} IS NOT NULL`),
   ],
 );
 
@@ -1671,6 +1680,7 @@ export const llmProxyRequests = pgTable(
     latencyMs: integer("latency_ms"),
     error: text("error"),
     parsed: jsonb("parsed"),
+    hourlyAccounted: boolean("hourly_accounted").notNull().default(false),
     parseVersion: integer("parse_version"),
     parseError: text("parse_error"),
   },
@@ -2484,3 +2494,184 @@ export const teamDeletionRequests = pgTable("team_deletion_requests", {
   uniqueIndex("team_deletion_requests_pending").on(t.teamId, t.resourceType, t.resourceId).where(sql`${t.status} = 'pending'`),
   index("team_deletion_requests_team_status").on(t.teamId, t.status),
 ]);
+
+/** Database-maintained projection. The migration owns its source FK and trigger. */
+export const usageEntryFacts = pgTable("usage_entry_facts", {
+  entryId: text("entry_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  workflowRunId: text("workflow_run_id"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  model: text("model"),
+  usage: jsonb("usage"),
+  cost: jsonb("cost"),
+  hourlyAccounted: boolean("hourly_accounted").notNull().default(false),
+  toolCalls: bigint("tool_calls", { mode: "number" }).notNull(),
+  pullRequests: bigint("pull_requests", { mode: "number" }).notNull(),
+  reviews: bigint("reviews", { mode: "number" }).notNull(),
+}, (t) => [
+  index("usage_entry_facts_window").on(t.createdAt, t.sessionId),
+  index("usage_entry_facts_cost_window").on(t.createdAt, t.sessionId).where(sql`${t.usage} IS NOT NULL`),
+  index("usage_entry_facts_tools_window").on(t.createdAt, t.sessionId).where(sql`${t.toolCalls} > 0`),
+  index("usage_entry_facts_outcomes_window").on(t.createdAt, t.sessionId).where(sql`${t.pullRequests} > 0 OR ${t.reviews} > 0`),
+  index("usage_entry_facts_session_window").on(t.sessionId, t.createdAt),
+  index("usage_entry_facts_workflow_window").on(t.workflowRunId, t.createdAt).where(sql`${t.workflowRunId} IS NOT NULL`),
+]);
+
+/** Exact hourly source totals. Ownership is resolved through the summary view. */
+export const usageHourly = pgTable("usage_hourly", {
+ dimensions: jsonb("dimensions").notNull(), sourceKind: text("source_kind").notNull(),
+ sessionId:text("session_id"),orgId:text("org_id"),userId:text("user_id"),teamId:text("team_id"),
+ model:text("model"),provider:text("provider"),createdAt:bigint("created_at",{mode:"number"}).notNull(),
+ turns:bigint("turns",{mode:"number"}).notNull(),
+ unpricedTurns:bigint("unpriced_turns",{mode:"number"}).notNull(),
+ positiveTurns:bigint("positive_turns",{mode:"number"}).notNull(),
+ inputTokens:bigint("input_tokens",{mode:"number"}).notNull(),
+ outputTokens:bigint("output_tokens",{mode:"number"}).notNull(),
+ cacheReadTokens:bigint("cache_read_tokens",{mode:"number"}).notNull(),
+ cacheWriteTokens:bigint("cache_write_tokens",{mode:"number"}).notNull(),
+ totalTokens:bigint("total_tokens",{mode:"number"}).notNull(),
+ toolCalls:bigint("tool_calls",{mode:"number"}).notNull(),
+ pullRequests:bigint("pull_requests",{mode:"number"}).notNull(),
+ reviews:bigint("reviews",{mode:"number"}).notNull(),
+ costTotal:numeric("cost_total").notNull(),
+},t=>[primaryKey({columns:[t.dimensions,t.createdAt]}),
+ index("usage_hourly_window").on(t.createdAt,t.sessionId),
+ index("usage_hourly_session_window").on(t.sessionId,t.createdAt),
+ index("usage_hourly_org_window").on(t.orgId,t.createdAt),
+ index("usage_hourly_outcomes").on(t.createdAt,t.sessionId).where(sql`${t.pullRequests}>0 OR ${t.reviews}>0`),
+ index("usage_hourly_empty").on(t.createdAt).where(sql`${t.turns}=0 AND ${t.toolCalls}=0 AND ${t.pullRequests}=0 AND ${t.reviews}=0`)]);
+
+export const usageActionFacts = pgTable("usage_action_facts", {
+  invocationId: text("invocation_id").primaryKey().references(() => actionInvocations.invocationId, { onDelete: "cascade" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  orgId: text("org_id"),
+  sessionId: text("session_id"),
+  workflowExecutionId: text("workflow_execution_id"),
+  toolCalls: bigint("tool_calls", { mode: "number" }).notNull(),
+  outcomeKind: text("outcome_kind"),
+}, t => [
+  index("usage_action_facts_window").on(t.orgId, t.createdAt)
+]);
+
+export const usageActionHourly = pgTable("usage_action_hourly", {
+  dimensionKey: text("dimension_key").notNull(),
+  hourMs: bigint("hour_ms", { mode: "number" }).notNull(),
+  orgId: text("org_id"),
+  sessionId: text("session_id"),
+  workflowExecutionId: text("workflow_execution_id"),
+  outcomeKind: text("outcome_kind"),
+  toolCalls: bigint("tool_calls", { mode: "number" }).notNull(),
+  outcomes: bigint("outcomes", { mode: "number" }).notNull(),
+  facts: bigint("facts", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.dimensionKey, t.hourMs] }),
+  index("usage_action_hourly_window").on(t.orgId, t.hourMs)
+]);
+
+export const usageSkillFacts = pgTable("usage_skill_facts", {
+  factKey: text("fact_key").primaryKey(),
+  invocationId: text("invocation_id").notNull().references(() => skillInvocations.id, { onDelete: "cascade" }),
+  requestId: text("request_id"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  sessionId: text("session_id").notNull(),
+  skillKey: text("skill_key").notNull(),
+  skillName: text("skill_name").notNull(),
+  origin: text("origin").notNull(),
+  pluginName: text("plugin_name"),
+  invokerUserId: text("invoker_user_id"),
+  tokens: bigint("tokens", { mode: "number" }).notNull(),
+  invoked: bigint("invoked", { mode: "number" }).notNull(),
+}, t => [
+  index("usage_skill_facts_window").on(t.createdAt),
+  index("usage_skill_facts_session_window").on(t.sessionId, t.createdAt),
+  index("usage_skill_facts_invocation").on(t.invocationId)
+]);
+
+export const usageSkillHourly = pgTable("usage_skill_hourly", {
+  dimensionKey: text("dimension_key").notNull(),
+  hourMs: bigint("hour_ms", { mode: "number" }).notNull(),
+  sessionId: text("session_id").notNull(),
+  skillKey: text("skill_key").notNull(),
+  skillName: text("skill_name").notNull(),
+  origin: text("origin").notNull(),
+  pluginName: text("plugin_name"),
+  invokerUserId: text("invoker_user_id"),
+  tokens: bigint("tokens", { mode: "number" }).notNull(),
+  invocations: bigint("invocations", { mode: "number" }).notNull(),
+  carryingCalls: bigint("carrying_calls", { mode: "number" }).notNull(),
+  facts: bigint("facts", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.dimensionKey, t.hourMs] }),
+  index("usage_skill_hourly_window").on(t.hourMs, t.sessionId),
+  index("usage_skill_hourly_session_window").on(t.sessionId, t.hourMs)
+]);
+
+export const usageSkillRequestMemberships = pgTable("usage_skill_request_memberships", {
+  dimensionKey: text("dimension_key").notNull(),
+  hourMs: bigint("hour_ms", { mode: "number" }).notNull(),
+  requestKey: text("request_key").notNull(),
+  requestId: text("request_id").notNull(),
+  refs: bigint("refs", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.dimensionKey, t.hourMs, t.requestKey] }),
+  index("usage_skill_membership_request").on(t.requestKey)
+]);
+
+export const usageSkillRequests = pgTable("usage_skill_requests", {
+  requestKey: text("request_key").primaryKey(),
+  memberships: bigint("memberships", { mode: "number" }).notNull(),
+}, t => [
+  index("usage_skill_requests_duplicates").on(t.requestKey).where(sql`memberships > 1`)
+]);
+
+/** Positive usage entry attribution for exact partial-hour member activity. */
+export const usageMemberFacts = pgTable('usage_member_facts', {
+  entryId: text('entry_id').primaryKey(),
+  sessionId: text('session_id').notNull(),
+  queueItemId: text('queue_item_id'),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  actorId: text('actor_id').notNull(),
+}, (t) => [
+  index('usage_member_facts_queue').on(t.queueItemId, t.sessionId),
+  index('usage_member_facts_window').on(t.createdAt, t.sessionId),
+  index('usage_member_facts_session_window').on(t.sessionId, t.createdAt),
+]);
+
+/** Per-session and queue-actor hourly positive usage counts. */
+export const usageMemberHourly = pgTable('usage_member_hourly', {
+  sessionId: text('session_id').notNull(),
+  actorId: text('actor_id').notNull(),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  positiveTurns: bigint('positive_turns', { mode: 'number' }).notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.sessionId, t.actorId, t.createdAt] }),
+  index('usage_member_hourly_window').on(t.createdAt, t.sessionId),
+  index('usage_member_hourly_empty').on(t.createdAt).where(sql`${t.positiveTurns}=0`),
+]);
+
+export const usageHourlyProgress=pgTable("usage_hourly_progress", {
+ sourceKind:text("source_kind").primaryKey(),watermark:text("watermark").notNull(),
+});
+
+export const usageDaily = pgTable("usage_daily", {
+ dimensions: jsonb("dimensions").notNull(), sourceKind: text("source_kind").notNull(),
+ sessionId:text("session_id"),orgId:text("org_id"),userId:text("user_id"),teamId:text("team_id"),
+ model:text("model"),provider:text("provider"),createdAt:bigint("created_at",{mode:"number"}).notNull(),
+ turns:bigint("turns",{mode:"number"}).notNull(),
+ unpricedTurns:bigint("unpriced_turns",{mode:"number"}).notNull(),
+ positiveTurns:bigint("positive_turns",{mode:"number"}).notNull(),
+ inputTokens:bigint("input_tokens",{mode:"number"}).notNull(),
+ outputTokens:bigint("output_tokens",{mode:"number"}).notNull(),
+ cacheReadTokens:bigint("cache_read_tokens",{mode:"number"}).notNull(),
+ cacheWriteTokens:bigint("cache_write_tokens",{mode:"number"}).notNull(),
+ totalTokens:bigint("total_tokens",{mode:"number"}).notNull(),
+ toolCalls:bigint("tool_calls",{mode:"number"}).notNull(),
+ pullRequests:bigint("pull_requests",{mode:"number"}).notNull(),
+ reviews:bigint("reviews",{mode:"number"}).notNull(),
+ costTotal:numeric("cost_total").notNull(),
+},t=>[primaryKey({columns:[t.dimensions,t.createdAt]}),
+ index("usage_daily_window").on(t.createdAt,t.sessionId),
+ index("usage_daily_session_window").on(t.sessionId,t.createdAt),
+ index("usage_daily_org_window").on(t.orgId,t.createdAt),
+ index("usage_daily_outcomes").on(t.createdAt,t.sessionId).where(sql`${t.pullRequests}>0 OR ${t.reviews}>0`),
+ index("usage_daily_empty").on(t.createdAt).where(sql`${t.turns}=0 AND ${t.toolCalls}=0 AND ${t.pullRequests}=0 AND ${t.reviews}=0`)]);
