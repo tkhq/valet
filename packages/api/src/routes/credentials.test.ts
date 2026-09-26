@@ -489,6 +489,70 @@ describe("PUT /api/credentials/:service — unconfigured services", () => {
   });
 });
 
+describe("PUT /api/credentials/onepassword — a personal token is never gated", () => {
+  // The rule: a person can always connect their OWN 1Password, for their own
+  // sessions. Only the org and team tokens are administered. A member's
+  // vaults are not the org's vaults, so an org token is no substitute and its
+  // presence must not stand in the way.
+  it("a member connects a personal token while the org already has one", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    // An admin connects the organization token first.
+    const org = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_org_token", scope: "org" }),
+    });
+    expect(org.status).toBe(200);
+
+    // A plain member now connects their own, and must not be refused.
+    const personal = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_personal_token" }),
+    });
+    expect(personal.status).toBe(200);
+
+    const stored = await api.providers.engineCredentials.get(
+      { type: "user", id: "test-member" },
+      "onepassword",
+    );
+    expect(stored?.apiKey).toBe("ops_personal_token");
+  });
+
+  it("a member connects a personal token when the org has none", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const personal = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_personal_token" }),
+    });
+    expect(personal.status).toBe(200);
+  });
+
+  it("a member removes their own personal token", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+    await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_personal_token" }),
+    });
+
+    const del = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "DELETE",
+      headers: MEMBER_HEADERS,
+    });
+    expect(del.status).toBe(200);
+    expect(
+      await api.providers.engineCredentials.get({ type: "user", id: "test-member" }, "onepassword"),
+    ).toBeNull();
+  });
+});
+
 describe("PUT /api/credentials/:service — onepassword reference extension", () => {
   it("happy path: org-scoped by admin saves a reference row and calls resolveReference once", async () => {
     api = await bootTestApi();

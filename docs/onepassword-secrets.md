@@ -39,6 +39,19 @@ In 1Password:
    [Get started with 1Password Service Accounts](https://www.1password.dev/service-accounts/get-started/).
 4. Copy the token. 1Password shows it once.
 
+Step 3 needs a 1Password account permission. If 1Password tells you to contact
+your administrator, your account cannot create service accounts, and no Valet
+setting changes that: the permission lives in 1Password. Ask an admin for
+either of two things.
+
+- Permission to create and manage service accounts, so you make your own.
+- A service account scoped to that vault alone, with the token sent to you
+  privately.
+
+The second keeps the token's reach narrow, which is the point of a service
+account. Do not paste a token into Slack, a Valet chat, memory, or a
+repository.
+
 In Valet, a token lives on the page that owns it.
 
 | Token | Where it lives | Who can change it | What it covers |
