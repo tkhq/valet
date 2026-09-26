@@ -181,4 +181,6 @@ The cost breakdown computes use-case, model, day, member, and total aggregates w
 
 The terminal path counts a `bash` call only when the engine stored a recognized outcome in the tool result. A direct `gh pr create` needs exit code zero and a PR URL. A direct `gh pr review` needs exit code zero and a submission flag. Compound shell commands are excluded. Old terminal transcripts have no outcome marker, so this path starts counting when the marker ships.
 
+The tool-call queries replace serialized NUL escapes before they parse stored parts. This lets a binary tool result leave call counts available. Workflow session actions resolve the parent run from the `wf:<run>:<node>` session ID. Review counts use the successful result state, because the audit can cap long request parameters. Member spend rows sort by descending cost.
+
 An outcome belongs to its session or workflow run. For each parent, the endpoint divides priced model spend in the selected period evenly across that parent's counted outcomes. Each outcome type gets its share. Spend from parents with no counted outcomes stays unallocated. The UI calls this allocated model spend, not marginal cost or ROI. Unpriced turns make the estimate a floor. Audit writes are best effort, so outcome counts can be incomplete.

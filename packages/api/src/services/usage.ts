@@ -183,6 +183,12 @@ function skillScopeWhere(scope: UsageScope): SQL {
   }
 }
 
+// JSON.stringify can persist a NUL as \u0000 in tool output. PostgreSQL jsonb
+// cannot decode it, so replace that escape before reading the call metadata.
+const TOOL_PARTS = sql`jsonb_array_elements(
+  replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb
+)`;
+
 /** Settled assistant tool calls and workflow tool nodes executed without a model. */
 export async function getUsageToolEfficiency(
   db: AppDb,
@@ -209,7 +215,7 @@ export async function getUsageToolEfficiency(
       LEFT JOIN workflow_runs r
         ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
       LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-      CROSS JOIN LATERAL jsonb_array_elements(e.parts::jsonb) AS p(part)
+      CROSS JOIN LATERAL ${TOOL_PARTS} AS p(part)
       WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
         AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
         AND ${engineScope}
@@ -258,8 +264,8 @@ export async function getUsageOutcomes(
   interface CostRow { parent: string; cost_usd: unknown; unpriced_turns: unknown }
   const [actions, terminal, costs] = await Promise.all([
     db.execute(sql`
-      SELECT CASE WHEN ai.workflow_execution_id IS NOT NULL
-          THEN 'w:' || ai.workflow_execution_id ELSE 's:' || ai.session_id END AS parent,
+      SELECT CASE WHEN r.id IS NOT NULL
+          THEN 'w:' || r.id ELSE 's:' || ai.session_id END AS parent,
         CASE
           WHEN ai.action_id = 'github.create_pull_request' THEN 'pull_request_created'
           WHEN ai.action_id = 'github.create_review' THEN 'review_submitted'
@@ -270,7 +276,9 @@ export async function getUsageOutcomes(
         COUNT(*) AS count
       FROM action_invocations ai
       LEFT JOIN agent_sessions s ON s.id = ai.session_id
-      LEFT JOIN workflow_runs r ON r.id = ai.workflow_execution_id
+      LEFT JOIN workflow_runs r ON r.id = COALESCE(
+        ai.workflow_execution_id,
+        CASE WHEN ai.session_id LIKE 'wf:%' THEN split_part(ai.session_id, ':', 2) END)
       LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
       WHERE COALESCE(ai.started_at, ai.created_at) >= ${period.startMs}
         AND COALESCE(ai.started_at, ai.created_at) < ${period.endMs}
@@ -280,7 +288,7 @@ export async function getUsageOutcomes(
         AND (ai.session_id IS NOT NULL OR ai.workflow_execution_id IS NOT NULL)
         AND (ai.action_id = 'github.create_pull_request'
           OR (ai.action_id = 'github.create_review'
-            AND ai.params::jsonb->>'event' IN ('APPROVE', 'REQUEST_CHANGES', 'COMMENT'))
+            AND ai.result::jsonb->'data'->>'state' IN ('APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'))
           OR ai.action_id IN ('slack.send_message', 'slack.reply_to_origin', 'slack.dm_owner', 'slack.dm_user'))
       GROUP BY 1, 2`) as Promise<{ rows: OutcomeRow[] }>,
     db.execute(sql`
@@ -292,7 +300,7 @@ export async function getUsageOutcomes(
       LEFT JOIN workflow_runs r
         ON e.session_id LIKE 'wf:%' AND r.id = split_part(e.session_id, ':', 2)
       LEFT JOIN workflow_definitions d ON d.id = r.workflow_id
-      CROSS JOIN LATERAL jsonb_array_elements(e.parts::jsonb) AS p(part)
+      CROSS JOIN LATERAL ${TOOL_PARTS} AS p(part)
       WHERE e.created_at >= ${period.startMs} AND e.created_at < ${period.endMs}
         AND e.entry_type = 'message' AND e.role = 'assistant' AND e.parts IS NOT NULL
         AND ${actionScope}
@@ -536,7 +544,7 @@ export async function getUsageBreakdown(
       name: userId === null ? "Team / shared" : (nameById.get(userId) ?? userId),
       ...bucket,
       ...(agentWindow ? { avgDailyActiveAgents: (agentDaysByUser.get(userId) ?? 0) / agentWindow.days } : {}),
-    }));
+    })).sort((a, b) => b.costUsd - a.costUsd || a.userId.localeCompare(b.userId));
   }
 
   return {

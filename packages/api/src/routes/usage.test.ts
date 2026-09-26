@@ -6,6 +6,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { capAuditField } from "../policies/service.js";
 import { createUsageTurnExportStream, getUsageBreakdown } from "../services/usage.js";
 import {
   agentSessions,
@@ -157,6 +158,24 @@ describe("GET /api/usage/breakdown", () => {
     expect(body.byUser?.length).toBe(2); // both users
     expect(body.totalCostUsd).toBeCloseTo(0.006, 6); // both sessions
   });
+
+  it("sorts organization members by descending model spend", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(agentSessions).values([
+      { id: "cheap", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now },
+      { id: "expensive", userId: "test-member", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "test-member", createdAt: now, updatedAt: now },
+    ]);
+    await seedEngineEntry(api, "cheap-cost", "cheap", now);
+    await seedEngineEntry(api, "expensive-cost-1", "expensive", now);
+    await seedEngineEntry(api, "expensive-cost-2", "expensive", now);
+    const response = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=org&window=7d`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as UsageBreakdownResponse;
+    expect(body.byUser?.map((row) => row.userId)).toEqual(["test-member", "local-user"]);
+  });
 });
 
 describe("GET /api/usage — scope=team", () => {
@@ -300,6 +319,20 @@ describe("GET /api/usage — scope=team", () => {
 });
 
 describe("GET /api/usage/tool-efficiency", () => {
+  it("counts tool calls when a different result field contains a NUL", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.insert(agentSessions).values({ id: "binary-tool", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    const parts = JSON.stringify([{ type: "tool_call", toolName: "bash", status: "completed", result: { text: "a\0b" } }]);
+    await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, parts, created_at)
+      VALUES ('binary-part','binary-tool','th','message','assistant',${parts},${now})`);
+    const response = await fetch(`${api.baseUrl}/api/usage/tool-efficiency?window=7d`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as UsageToolEfficiencyResponse;
+    expect(body.byUseCase.find((row) => row.useCase === "session")?.modelDirectedCalls).toBe(1);
+  });
+
   it("separates settled model-directed calls from workflow tool actions and scopes both", async () => {
     api = await bootTestApi();
     const now = Date.now();
@@ -372,16 +405,17 @@ describe("GET /api/usage/outcomes", () => {
     await seedEngineEntry(api, "cost-wf", "wf:outcome-run:node", now);
     const prPart = JSON.stringify([{ type: "tool_call", callId: "pr", toolName: "bash", status: "completed",
       args: { command: "gh pr create --fill" },
-      result: { details: { outcome: { kind: "pull_request_created", url: "https://github.com/acme/repo/pull/1" } } } }]);
+      result: { text: "a\0b", details: { outcome: { kind: "pull_request_created", url: "https://github.com/acme/repo/pull/1" } } } }]);
     await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, parts, created_at)
       VALUES ('outcome-pr','outcome-session','th','message','assistant',${prPart},${now})`);
-    const success = JSON.stringify({ success: true, data: { id: 1 } });
+    const success = JSON.stringify({ success: true, data: { state: "COMMENTED" } });
+    const pending = JSON.stringify({ success: true, data: { state: "PENDING" } });
     const slack = JSON.stringify({ success: true, data: { channel: "C123", ts: "1.2" } });
     const failure = JSON.stringify({ success: false, error: "denied" });
     await db.execute(sql`INSERT INTO action_invocations
       (invocation_id, created_at, org_id, session_id, workflow_execution_id, service, action_id, params, result, status, duration_ms)
       VALUES ('review-ok',${now},'local-org','outcome-session',NULL,'github','github.create_review','{"event":"APPROVE"}'::jsonb,${success}::jsonb,'completed',10),
-        ('review-pending',${now},'local-org','outcome-session',NULL,'github','github.create_review','{}'::jsonb,${success}::jsonb,'completed',10),
+        ('review-pending',${now},'local-org','outcome-session',NULL,'github','github.create_review','{}'::jsonb,${pending}::jsonb,'completed',10),
         ('pr-failed',${now},'local-org','outcome-session',NULL,'github','github.create_pull_request','{}'::jsonb,${failure}::jsonb,'completed',10),
         ('slack-ok',${now},'local-org',NULL,'outcome-run','slack','slack.send_message','{}'::jsonb,${slack}::jsonb,'completed',10)`);
 
@@ -392,6 +426,36 @@ describe("GET /api/usage/outcomes", () => {
     expect(body.byOutcome.find((row) => row.kind === "review_submitted")).toMatchObject({ count: 1, estimatedCostUsd: 0.003 });
     expect(body.byOutcome.find((row) => row.kind === "slack_message_sent")).toMatchObject({ count: 1, estimatedCostUsd: 0.003 });
     expect(body.byOutcome.find((row) => row.kind === "slack_dm_sent")?.count).toBe(0);
+  });
+
+  it("attributes workflow session actions and submitted reviews with capped params", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-outcomes','local-org','user','local-user','Outcomes','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-outcomes','wf-outcomes','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await seedEngineEntry(api, "workflow-cost", "wf:run-outcomes:agent", now);
+    const slack = JSON.stringify({ success: true, data: { channel: "D123", ts: "1.2" } });
+    const review = JSON.stringify({ success: true, data: { state: "CHANGES_REQUESTED", review_id: 1 } });
+    const capped = capAuditField({ event: "REQUEST_CHANGES", body: "x".repeat(9000) });
+    expect(capped.truncated).toBe(true);
+    const cappedParams = JSON.stringify(capped.value);
+    await db.execute(sql`INSERT INTO action_invocations
+      (invocation_id, created_at, org_id, session_id, service, action_id, params, params_truncated, result, status, duration_ms)
+      VALUES ('workflow-dm',${now},'local-org','wf:run-outcomes:agent','slack','slack.send_message','{}'::jsonb,false,${slack}::jsonb,'completed',10),
+        ('long-review',${now},'local-org','wf:run-outcomes:agent','github','github.create_review',${cappedParams}::jsonb,true,${review}::jsonb,'completed',10)`);
+    const response = await fetch(`${api.baseUrl}/api/usage/outcomes?window=7d`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as UsageOutcomesResponse;
+    expect(body.byOutcome.find((row) => row.kind === "slack_dm_sent")).toMatchObject({ count: 1, estimatedCostUsd: 0.0015 });
+    expect(body.byOutcome.find((row) => row.kind === "review_submitted")).toMatchObject({ count: 1, estimatedCostUsd: 0.0015 });
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    const orgResponse = await fetch(`${api.baseUrl}/api/usage/outcomes?scope=org&window=7d`);
+    expect(orgResponse.status).toBe(200);
+    const org = (await orgResponse.json()) as UsageOutcomesResponse;
+    expect(org.byOutcome.find((row) => row.kind === "slack_dm_sent")?.count).toBe(1);
   });
 });
 
