@@ -9,6 +9,7 @@ spec:
   # Pinned to 1 — see values.yaml's api.replicas comment. The engine is a
   # stateful singleton (in-memory submission claim loop); do not scale.
   replicas: {{ .Values.api.replicas }}
+  progressDeadlineSeconds: {{ .Values.api.progressDeadlineSeconds | default 2100 }}
   selector:
     matchLabels:
       {{- include "valet.selectorLabels" . | nindent 6 }}
@@ -148,22 +149,16 @@ spec:
           # traffic-protecting steps (session restore, config reconcile)
           # finish; best-effort service starts run after the ready flip.
           #
-          #   startup + liveness → /api/health ("port bound, event loop
-          #     alive"). Pre-bind work is only DB connect + migrations +
-          #     provider construction, so 90s covers a slow disk with
-          #     room. The old 300s window existed because restore work ran
-          #     in front of the port; keeping it would mask the next
-          #     boot-ordering regression.
-          #   readiness → /api/ready. A pod still restoring stays NotReady
-          #     (the old pod keeps serving) — it is never killed for slow
-          #     boot work, and a bad instance config exits before ready,
-          #     so traffic never moves to it.
+          # Database upgrades finish before the listener binds. The startup
+          # budget permits those upgrades; session restore still runs after bind.
+          # Startup and liveness use /api/health. Readiness uses /api/ready,
+          # so the old ready pod serves traffic until the new boot chain finishes.
           startupProbe:
             httpGet:
               path: /api/health
               port: http
             periodSeconds: 5
-            failureThreshold: 18
+            failureThreshold: {{ (.Values.api.startupProbe | default dict).failureThreshold | default 360 }}
           readinessProbe:
             httpGet:
               path: /api/ready

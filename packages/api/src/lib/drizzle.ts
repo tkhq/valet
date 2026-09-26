@@ -21,6 +21,9 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Pool } from "pg";
 import { applyEngineMigrations, isPgLockTimeout, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync } from "node:fs";
+import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-member-activity.js";
+import { prepareAuxUsageRollups, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
+import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
 import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
 import * as schema from "../schema/index.js";
 
@@ -1447,6 +1450,36 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "usage_entry_facts_cost_window", probe: { kind: "index", index: "usage_entry_facts_cost_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_entry_facts_cost_window ON usage_entry_facts(created_at, session_id) WHERE usage IS NOT NULL" },
   { describe: "usage_entry_facts_tools_window", probe: { kind: "index", index: "usage_entry_facts_tools_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_entry_facts_tools_window ON usage_entry_facts(created_at, session_id) WHERE tool_calls > 0" },
   { describe: "usage_entry_facts_outcomes_window", probe: { kind: "index", index: "usage_entry_facts_outcomes_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_entry_facts_outcomes_window ON usage_entry_facts(created_at, session_id) WHERE pull_requests > 0 OR reviews > 0" },
+  { describe: "usage hourly summaries", probe: { kind: "column", table: "usage_hourly_ready", column: "version" }, prepare: prepareUsageHourly, sql: usageHourlyPublishSql },
+  { describe: "usage action and skill summaries", probe: { kind: "column", table: "usage_aux_rollups_ready", column: "version" }, prepare: prepareAuxUsageRollups, sql: AUX_USAGE_PUBLISH_SQL },
+  { describe: "usage member activity summaries", probe: { kind: "column", table: "usage_member_activity_ready", column: "version" }, prepare: prepareMemberActivity, sql: MEMBER_ACTIVITY_PUBLISH_SQL },
+  { describe: "usage_action_facts_window", probe: { kind: "index", index: "usage_action_facts_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_action_facts_window ON usage_action_facts(org_id, created_at);` },
+  { describe: "usage_action_hourly_window", probe: { kind: "index", index: "usage_action_hourly_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_action_hourly_window ON usage_action_hourly(org_id, hour_ms);` },
+  { describe: "usage_skill_facts_window", probe: { kind: "index", index: "usage_skill_facts_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_facts_window ON usage_skill_facts(created_at);` },
+  { describe: "usage_skill_facts_session_window", probe: { kind: "index", index: "usage_skill_facts_session_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_facts_session_window ON usage_skill_facts(session_id,created_at);` },
+  { describe: "usage_skill_facts_invocation", probe: { kind: "index", index: "usage_skill_facts_invocation" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_facts_invocation ON usage_skill_facts(invocation_id);` },
+  { describe: "usage_skill_hourly_window", probe: { kind: "index", index: "usage_skill_hourly_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_hourly_window ON usage_skill_hourly(hour_ms,session_id);` },
+  { describe: "usage_skill_hourly_session_window", probe: { kind: "index", index: "usage_skill_hourly_session_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_hourly_session_window ON usage_skill_hourly(session_id,hour_ms);` },
+  { describe: "usage_skill_membership_request", probe: { kind: "index", index: "usage_skill_membership_request" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_membership_request ON usage_skill_request_memberships(request_key);` },
+  { describe: "usage_skill_requests_duplicates", probe: { kind: "index", index: "usage_skill_requests_duplicates" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_requests_duplicates ON usage_skill_requests(request_key) WHERE memberships > 1;` },
+{ describe: "usage_member_facts_queue", probe: { kind: "index", index: "usage_member_facts_queue" }, sql: "CREATE INDEX IF NOT EXISTS usage_member_facts_queue ON usage_member_facts(queue_item_id,session_id)" },
+{ describe: "usage_member_facts_window", probe: { kind: "index", index: "usage_member_facts_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_member_facts_window ON usage_member_facts(created_at,session_id)" },
+{ describe: "usage_member_facts_session_window", probe: { kind: "index", index: "usage_member_facts_session_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_member_facts_session_window ON usage_member_facts(session_id,created_at)" },
+{ describe: "usage_member_hourly_window", probe: { kind: "index", index: "usage_member_hourly_window" }, sql: "CREATE INDEX IF NOT EXISTS usage_member_hourly_window ON usage_member_hourly(created_at,session_id)" },
+{ describe: "usage_member_hourly_empty", probe: { kind: "index", index: "usage_member_hourly_empty" }, sql: "CREATE INDEX IF NOT EXISTS usage_member_hourly_empty ON usage_member_hourly(created_at) WHERE positive_turns=0" },
+  {describe:"usage_hourly_window",probe:{kind:"index",index:"usage_hourly_window"},sql:"CREATE INDEX IF NOT EXISTS usage_hourly_window ON usage_hourly(created_at,session_id)"},
+  {describe:"usage_hourly_session_window",probe:{kind:"index",index:"usage_hourly_session_window"},sql:"CREATE INDEX IF NOT EXISTS usage_hourly_session_window ON usage_hourly(session_id,created_at)"},
+  {describe:"usage_hourly_org_window",probe:{kind:"index",index:"usage_hourly_org_window"},sql:"CREATE INDEX IF NOT EXISTS usage_hourly_org_window ON usage_hourly(org_id,created_at)"},
+  {describe:"usage_hourly_empty",probe:{kind:"index",index:"usage_hourly_empty"},sql:"CREATE INDEX IF NOT EXISTS usage_hourly_empty ON usage_hourly(created_at) WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0"},
+  {describe:"usage_hourly_outcomes",probe:{kind:"index",index:"usage_hourly_outcomes"},sql:"CREATE INDEX IF NOT EXISTS usage_hourly_outcomes ON usage_hourly(created_at,session_id) WHERE pull_requests>0 OR reviews>0"},
+
+  {describe:"usage daily summaries",probe:{kind:"column",table:"usage_daily_ready",column:"version"},prepare:prepareUsageDaily,sql:"SELECT 1"},
+  {describe:"usage_daily_window",probe:{kind:"index",index:"usage_daily_window"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_window ON usage_daily(created_at,session_id)"},
+  {describe:"usage_daily_session_window",probe:{kind:"index",index:"usage_daily_session_window"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_session_window ON usage_daily(session_id,created_at)"},
+  {describe:"usage_daily_org_window",probe:{kind:"index",index:"usage_daily_org_window"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_org_window ON usage_daily(org_id,created_at)"},
+  {describe:"usage_daily_empty",probe:{kind:"index",index:"usage_daily_empty"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_empty ON usage_daily(created_at) WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0"},
+  {describe:"usage_daily_outcomes",probe:{kind:"index",index:"usage_daily_outcomes"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_outcomes ON usage_daily(created_at,session_id) WHERE pull_requests>0 OR reviews>0"},
+
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

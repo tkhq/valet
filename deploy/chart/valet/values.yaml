@@ -8,6 +8,13 @@ api:
   # election or shared engine state across pods.
   replicas: 1
 
+  # Database upgrades run before the HTTP listener binds. Allow 30 minutes
+  # for that work and 35 minutes for rollout progress. Session restore runs
+  # after bind and remains controlled by readiness.
+  startupProbe:
+    failureThreshold: 360 # 5 seconds per probe = 30 minutes.
+  progressDeadlineSeconds: 2100
+
   # Defaults target the local reference env (`make k8s-build` images, visible
   # to k3s via Rancher Desktop moby mode). CI publishes multi-arch images to
   # GHCR on every dev-v2 merge (.github/workflows/docker-publish.yml) — for a

@@ -238,3 +238,108 @@ These measurements are local evidence, not production latency guarantees. Produc
 The plans read compact facts and use the effective-time and outcome-action indexes. They do not scan transcript bodies for these endpoints.
 
 Run `BENCH_ROWS=100000 BENCH_EXPLAIN=1 pnpm --filter @valet/api exec node --import tsx scripts/benchmark-usage.ts` for timings and plans.
+
+
+## Maintained daily and hourly summaries (2026-09-26)
+
+Individual indexed facts still scale with event volume. A ten-million-fact PostgreSQL diagnostic took 45.8 seconds for breakdown.
+Dashboard aggregates read complete UTC days from daily summaries and remaining complete hours from hourly summaries.
+They read indexed facts only for the two partial boundary hours.
+Periods shorter than one hour use one exact source range. The ranges never overlap.
+
+`usage_hourly` stores numeric cost, token, turn, tool, and terminal outcome totals per session, model, and hour.
+Statement triggers maintain the same dimensions in `usage_daily`, grouped by UTC day.
+Hourly CSV exports use hourly summaries to preserve their requested resolution.
+Proxy groups retain organization, user, team, model, provider, and harness dimensions. Home dashboard totals continue to exclude proxy usage.
+Session and workflow ownership is resolved at read time, including workflow fallback and session precedence.
+Distinct active agents count session identities across the selected range. They do not sum hourly distinct counts.
+The breakdown computes that distinct count once, separately from its additive grouping sets.
+Session, workflow, and proxy harness drill totals and aggregate CSV exports use the same period relation.
+Per-turn exports retain keyset pagination over individual facts.
+
+Action summaries retain source organization, session, workflow, and confirmed outcome kind.
+Skill summaries retain invocation metadata, session, and invoker identity.
+Request membership reference counts preserve exact carrying-call counts across duplicate contexts.
+Only requests that cross hourly groups need a duplicate correction query.
+Member activity summaries retain session and prompt actor identity. Queue-author corrections update their contributions.
+Current child-session, assistant, and ownership relationships determine actor fallbacks at read time.
+
+Database statement triggers apply grouped old/new deltas in stable key order.
+Upserts contribute once. Corrections subtract the old contribution before adding the new contribution.
+Deletes remove contributions. Bulk imports update each affected summary group once per statement.
+Aggregate reads use read-only READ COMMITTED transactions with local `jit=off` and `work_mem=16MB` settings.
+The settings expire with the transaction and do not change pooled connections.
+The application uses READ COMMITTED transactions. Historical hourly-row mutations and related skill or queue attribution reject stale isolation levels with SQLSTATE 40001.
+The error instructs callers to retry at READ COMMITTED isolation.
+
+### Rollout and repair
+
+The repair installs tracking in short transactions. The existing API can keep serving its prior queries during backfill.
+Hourly backfill locks at most 10,000 source rows per batch and advances a durable primary-key cursor atomically with the aggregate writes.
+Live writes mark their own contributions, so backfill skips them. Old unmarked rows below the committed cursor are already counted.
+Each batch seeks through the primary-key index. It does not scan all preceding rows or rewrite every source row and index.
+Fresh installs maintain daily summaries during the hourly backfill.
+An existing hourly-only install builds daily summaries once while holding a SHARE ROW EXCLUSIVE lock on hourly summaries.
+This transaction has a five-second lock acquisition timeout and a thirty-second statement timeout.
+Action, skill, and member projections backfill in independent bounded batches.
+Readiness views publish only after their backfills complete. Repairs resume after an interrupted process.
+Database initialization precedes the HTTP listener. The chart permits a configurable startup budget for this one-time backfill.
+Readiness continues to keep traffic on the previous pod until the new instance finishes initialization.
+
+Schema repair creates missing indexes independently. It reports missing parts of an existing projection instead of silently creating inconsistent totals.
+Restore missing projection tables from backup before restarting. Manual deletion or truncation of projection data is not a supported reset procedure.
+Backfill remains a one-time operation proportional to retained data. Dashboard reads scale with summary groups and boundary facts.
+A workload with one event per session/model/day has little daily compression and requires separate capacity validation.
+Action, skill, and member queries retain hourly summaries; their compression depends on those dimensions.
+
+### Validation
+
+Regression coverage includes exact boundary timestamps, upserts, corrections, deletes, ownership changes, interrupted repairs, and duplicate skill requests.
+PostgreSQL race checks cover updates and deletes waiting on backfill, concurrent queue-author changes, and stale-snapshot rejection.
+The scale harness compares endpoint payloads with the previous implementation before measuring concurrent dashboard loads.
+Run the benchmark only against its explicitly named disposable loopback database. It never reads the application's DATABASE_URL.
+
+
+### PostgreSQL scale validation
+
+The disposable PostgreSQL 17 container has two CPUs, 2 GiB of memory, and 512 MiB of shared-memory capacity.
+The main fixture has ten million usage facts, 10,000 sessions, five models plus unknown models, and 35 days of history.
+It includes 100,000 proxy requests, 100,000 actions, 10,000 skill invocations, and 200,000 skill-context records.
+One percent of sessions are long-running orchestrators. Other sessions concentrate their activity within a day.
+The selected organization owns 90 percent of sessions. The thirty-day range selects about 7.7 million facts.
+
+The fixture omits transcript bodies and workflow-run rows. It measures aggregate reads and summary initialization, not complete ingestion throughput.
+Correctness tests cover workflow ownership separately. A separate million-entry benchmark covers member attribution with real engine entries.
+The main fixture produces 83,136 daily groups and 523,948 hourly groups.
+Nine organization, personal, and proxy-drill response comparisons match the previous implementation.
+Integer counts match exactly. Fractional costs permit floating-point summation tolerance.
+
+A second fixture spreads one million facts across the same session, model, and date dimensions with almost no summary compression.
+This fixture tests the cost of many reporting groups. Row count alone does not establish a production latency guarantee.
+The initial concurrent run exceeded Docker's default 64 MiB shared-memory capacity.
+The repeated run uses 512 MiB shared-memory capacity within the same 2 GiB container limit.
+All nine response comparisons pass in that run. Four concurrent dashboards complete in 11.8 seconds.
+Warm organization reads take 2,229 ms for breakdown, 243 ms for tools, 598 ms for outcomes, and 1,316 ms for activity.
+This workload produces about one million daily groups from one million facts.
+Partial outcome indexes avoid scanning unrelated summaries for sparse outcome counts.
+
+Run `packages/api/scripts/benchmark-usage-scale.ts` with an explicit `BENCH_DATABASE_URL` for a disposable loopback database.
+The database name must start with `usage_rollup_bench_`. The seed phase refuses a nonempty database.
+Use `BENCH_ROWS=10000000 BENCH_SHAPE=sessions` for the main fixture.
+Use `BENCH_ROWS=1000000 BENCH_SHAPE=dispersed` for the high-cardinality fixture.
+Set `BENCH_EXPLAIN=1` to capture query plans with the same transaction-local settings as the endpoint reads.
+
+
+The final main-fixture measurements are milliseconds. Baseline reads use the previous indexed-fact implementation; summary reads use warmed data.
+These are local measurements, not cold-cache or production guarantees.
+
+| Organization endpoint | Baseline | Daily/hourly summaries |
+| --- | ---: | ---: |
+| Breakdown | 33,074 | 1,149 |
+| Tool efficiency | 1,226 | 239 |
+| Outcomes | 6,413 | 463 |
+| Agent activity | 14,897 | 542 |
+
+Four simultaneous main-fixture dashboards finish in 1,834 ms. Each dashboard requests all four endpoints.
+The existing hourly-only projection builds its daily layer in 2.33 seconds on this fixture.
+Full source backfill has a separate, data-dependent cost. Interrupted backfill resumes from its committed cursor.

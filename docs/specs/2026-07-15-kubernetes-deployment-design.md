@@ -308,3 +308,17 @@ Rollout matches the TKAI-349 note above: existing pods keep their old shape
 until their next `create()` adoption, where the resource fingerprint
 mismatch rolls the pod ("CPU/memory changed"). Deploys should pair this
 with a monitoring alert on sandboxes sustained above their memory request.
+
+## Update (2026-09-26): database upgrade startup budget
+
+Database upgrades run during provider construction, before the API binds its HTTP listener.
+The usage-rollup repair can require several minutes for large retained histories.
+Chart 0.10.18 replaces the previous 90-second startup window with a configurable database upgrade budget.
+`api.startupProbe.failureThreshold` defaults to 360 at a fixed five-second interval, allowing 30 minutes.
+`api.progressDeadlineSeconds` defaults to 2100, allowing 35 minutes of rollout progress.
+The startup and liveness probes still use `/api/health`. Readiness still uses `/api/ready`.
+Session restore remains after bind; it does not account for the longer startup budget.
+During a rolling upgrade, the old ready pod serves traffic until the new pod becomes ready.
+For the first usage-rollup upgrade, operators must set the Helm timeout to at least 35 minutes.
+The runbook uses `--wait --timeout 40m` to allow additional deployment work.
+Golden chart tests verify the default budgets and explicit overrides without contacting a cluster.

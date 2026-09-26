@@ -1156,7 +1156,7 @@ describe("pg app schema + migrations", () => {
       // and llm_proxy_requests is ABSENT. The old view does not reference the
       // table, so drop the new view, drop the table, then seed the old view.
       await db.query('DROP VIEW "cost_entries"'); // the new view references the table
-      await db.query('DROP TABLE "llm_proxy_requests"'); // drops its indexes too
+      await db.query('DROP TABLE "llm_proxy_requests" CASCADE'); // drops its indexes too
       await db.query(PRE_432_COST_ENTRIES);
       expect(await columnExists("cost_entries", "use_case")).toBe(false); // old shape
 

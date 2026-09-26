@@ -8,7 +8,7 @@ function section(start: string, end: string): string {
   if (!content) throw new Error("Usage analytics migration missing. Restore 0000_app.sql from the release.");
   return content;
 }
-const installSql = section("install", "-- usage analytics backfill");
+export const usageAnalyticsInstallSql = section("install", "-- usage analytics backfill");
 const indexSql = section("indexes", "END $migration$");
 export const projectedCostViewSql = 'CREATE OR REPLACE VIEW cost_entries AS' +
   section("publish", "-- usage analytics indexes").split('CREATE OR REPLACE VIEW cost_entries AS')[1];
@@ -22,7 +22,7 @@ END $publish$`;
 export async function prepareUsageAnalytics(db: PgDb): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.query("SET LOCAL lock_timeout = '5s'");
-    await tx.query(`DO $install$ BEGIN ${installSql} END $install$`);
+    await tx.query(`DO $install$ BEGIN ${usageAnalyticsInstallSql} END $install$`);
   });
   // Build indexes on existing audit/skill tables without blocking writers.
   for (const statement of indexSql.split(';').map((s) => s.trim()).filter((s) => s.startsWith('CREATE INDEX'))) {
