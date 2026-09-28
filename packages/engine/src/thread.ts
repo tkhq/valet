@@ -4299,8 +4299,9 @@ export class Thread {
   }
 
   private emitDeferredProviderFailoverError(message: AgentMessage | undefined): void {
-    if (!this.deferProviderFailoverError || message?.role !== "assistant" ||
-        message.stopReason !== "error" || !isSafeFailoverError(message.errorMessage)) return;
+    if (!this.deferProviderFailoverError || this.turnToolCallCount !== 0 ||
+        message?.role !== "assistant" || message.stopReason !== "error" ||
+        !isSafeFailoverError(message.errorMessage)) return;
     this.deferProviderFailoverError = false;
     this.emitError("error", message.errorMessage ?? "provider request failed");
   }

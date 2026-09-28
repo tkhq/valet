@@ -274,6 +274,34 @@ describe("turn-level transient retry (TKAI-319)", () => {
   });
 
 
+  it("emits one safe provider error after a tool call", async () => {
+    const faux = registerFauxProvider({ provider: "failover-tool-error" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("mark", {}, { id: "mark-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
+    ]);
+    const markerTool: ToolDef = {
+      name: "mark",
+      description: "records a completed tool call",
+      parameters: Type.Object({}),
+      execute: async () => ({ text: "marked" }),
+    };
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      tools: [markerTool],
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("run the marker");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    )).toHaveLength(1);
+    faux.unregister();
+  });
+
   it("surfaces an actionable error when no equivalent candidate exists", async () => {
     const faux = registerFauxProvider({ provider: "failover-none" });
     faux.setResponses([
