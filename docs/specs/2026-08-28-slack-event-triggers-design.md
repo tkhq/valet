@@ -410,6 +410,6 @@ Valet keeps `slack.message` for human messages. It adds `slack.bot_message` for 
 
 The connect check stores the installed bot ID as credential metadata. The bot trigger rejects that ID and the installed bot user ID. This rule is independent of subscription filters. A legacy credential without the bot ID rejects bot messages. An administrator must reconnect Slack in Settings to refresh the credential metadata. Human messages continue to work.
 
-For an enabled bot-message subscription, the webhook records `slack_bot_identity_missing` when the installed bot ID is missing. It applies the existing diagnostic authorization, bounded metadata, and throttle rules. The Problems record includes the channel and bot ID so channel-scoped queries can find it.
+For an enabled bot-message subscription, the webhook records `slack_bot_identity_missing` when the installed bot ID is missing. It retains bounded metadata and applies the existing throttle. Team-owned bot subscriptions do not require a linked human sender for this diagnostic, matching bot-event delivery. For team-only subscriptions, an event excluded by their filters produces a diagnostic without message metadata. The Problems record includes the channel and bot ID so channel-scoped queries can find it.
 
 Before the catalog exposes this key, startup expands existing `slack.*` subscription rows to the prior explicit Slack keys. Those rows do not begin to match bot messages. The Slack manifest stays unchanged because both classifiers use the existing raw `message` subscription.

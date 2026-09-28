@@ -8,7 +8,7 @@ import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
-import { subscriptionNamesKey } from "./match.js";
+import { subscriptionMatchesEvent, subscriptionNamesKey } from "./match.js";
 import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
@@ -140,9 +140,9 @@ export async function logSlackMessageBotNearMiss(
 }
 
 /** Keep the fail-closed identity check visible without retaining unsubscribed traffic. */
-export async function logSlackBotIdentityMissing(db: AppDb, orgId: string, payload: unknown): Promise<void> {
-  await logSlackBotDiagnostic(db, orgId, payload, "slack.bot_message", "slack_bot_identity_missing",
-    "A Slack bot message arrived, but the installed Valet bot ID is missing. Reconnect Slack in Settings to refresh its identity.");
+export async function logSlackBotIdentityMissing(deps: IngestDeps, orgId: string, payload: unknown): Promise<void> {
+  await logSlackBotDiagnostic(deps.db, orgId, payload, "slack.bot_message", "slack_bot_identity_missing",
+    "A Slack bot message arrived, but the installed Valet bot ID is missing. Reconnect Slack in Settings to refresh its identity.", catalogForService(deps.plugins, "slack"));
 }
 
 async function logSlackBotDiagnostic(
@@ -152,6 +152,7 @@ async function logSlackBotDiagnostic(
   eventKey: string,
   reason: string,
   detail: string,
+  catalog: EventCatalogEntry[] = [],
 ): Promise<void> {
   const subs = await db
     .select()
@@ -161,6 +162,13 @@ async function logSlackBotDiagnostic(
   if (named.length === 0) return;
   const throttleKey = `${eventKey}:${reason}:bot_near_miss`;
   const nonTeam = named.find((sub) => !isTeamAssistantRule(sub.ownerType, sub.target));
+  // Bot delivery does not require a human sender. Keep team-only metadata
+  // within the same subscription filters that would admit the bot post.
+  if (eventKey === "slack.bot_message") {
+    const retainMetadata = nonTeam || named.some((sub) => subscriptionMatchesEvent(sub, eventKey, payload, catalog));
+    await logFilterExcludedDrop(db, orgId, eventKey, retainMetadata ? payload : undefined, detail, throttleKey, false, reason);
+    return;
+  }
   if (nonTeam) {
     await logFilterExcludedDrop(db, orgId, eventKey, payload, detail, throttleKey, false, reason);
     return;

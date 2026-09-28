@@ -207,7 +207,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
           : isRecord(event.bot_profile) && typeof event.bot_profile.id === "string" ? event.bot_profile.id : undefined;
         if (event.type === "message" && (event.subtype === undefined || event.subtype === "bot_message") && botId
           && (!deps.botUserId || event.user !== deps.botUserId)) {
-          await logSlackBotIdentityMissing(deps.db, deps.orgId, { ...event, bot_id: botId });
+          await logSlackBotIdentityMissing(deps, deps.orgId, { ...event, bot_id: botId });
         }
       }
     }

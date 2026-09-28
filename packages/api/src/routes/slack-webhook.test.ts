@@ -510,7 +510,12 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(await deliveryCount(api, "Ev-nda")).toBe(1);
   });
 
-  it("reports a missing installation bot ID for a subscribed bot callback", async () => {
+  it.each([
+    { owner: "org", user: undefined, channel: "C_FORM" },
+    { owner: "team", user: undefined, channel: "C_FORM" },
+    { owner: "team", user: "U_UNLINKED", channel: "C_FORM" },
+    { owner: "team", user: undefined, channel: "C_OTHER" },
+  ])("reports a missing installation bot ID for a subscribed bot callback: %j", async ({ owner, user, channel }) => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
     await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
@@ -518,13 +523,22 @@ describe("POST /api/channels/slack/webhook", () => {
       metadata: { webhookSecret: SECRET, teamId: TEAM_ID, botUserId: "U0BOT" },
     });
     await seedSubscription(api, ["slack.bot_message"]);
-    const body = envelope(botFormMessage(), "Ev-missing-identity");
+    if (owner === "team") {
+      await api.providers.db.insert(teams).values({ id: "team-bot-identity", orgId: "local-org", name: "Bot workflows", createdAt: Date.now() });
+      await api.providers.db.update(eventSubscriptions).set({
+        ownerType: "team", ownerId: "team-bot-identity",
+        filters: [{ field: "channel", op: "eq", value: channel }],
+        target: { kind: "orchestrator", orchestrator: "team", teamId: "team-bot-identity" },
+      }).where(eq(eventSubscriptions.id, "sub_slack_bot_message"));
+    }
+    const body = envelope({ ...botFormMessage(), user }, "Ev-missing-identity");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
     await expect.poll(async () => api!.providers.db.select().from(eventDropLog)
       .where(eq(eventDropLog.eventKey, "slack.bot_message")), { timeout: 5_000 }).toEqual([
-      expect.objectContaining({ reason: "slack_bot_identity_missing", detail: expect.stringContaining("Reconnect Slack"), eventMetadata: expect.objectContaining({ channel: "C_FORM", botId: "B_FORM" }) }),
+      expect.objectContaining({ reason: "slack_bot_identity_missing", detail: expect.stringContaining("Reconnect Slack"), eventMetadata: channel === "C_FORM" ? expect.objectContaining({ channel: "C_FORM", botId: "B_FORM" }) : {} }),
     ]);
     expect(await eventCount(api, "Ev-missing-identity")).toBe(0);
+    expect(await dropReasons(api)).not.toContain("unlinked_sender");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 100));
     const rows = await api.providers.db.select().from(eventDropLog)
