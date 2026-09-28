@@ -493,6 +493,60 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(nearMisses).toEqual([]);
   });
 
+  it.each(["bot_message", undefined])("delivers an NDA bot callback with subtype %s exactly once", async (subtype) => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.bot_message"], [
+      { field: "channel", op: "eq", value: "C0BND4A8ZUK" },
+      { field: "bot_id", op: "eq", value: "B0C492869S4" },
+      { field: "text", op: "contains", value: "New NDA Review Request" },
+    ]);
+    const body = envelope({ ...botFormMessage(), subtype, channel: "C0BND4A8ZUK", bot_id: "B0C492869S4", text: "New NDA Review Request: example" }, "Ev-nda");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => deliveryCount(api!, "Ev-nda"), { timeout: 5_000 }).toBe(1);
+    expect((await post(api.baseUrl, body, { ...sign(body), "X-Slack-Retry-Num": "1" })).status).toBe(200);
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("slack_retry");
+    expect(await eventCount(api, "Ev-nda")).toBe(1);
+    expect(await deliveryCount(api, "Ev-nda")).toBe(1);
+  });
+
+  it("reports a missing installation bot ID for a subscribed bot callback", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-test-token",
+      metadata: { webhookSecret: SECRET, teamId: TEAM_ID, botUserId: "U0BOT" },
+    });
+    await seedSubscription(api, ["slack.bot_message"]);
+    const body = envelope(botFormMessage(), "Ev-missing-identity");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => api!.providers.db.select().from(eventDropLog)
+      .where(eq(eventDropLog.eventKey, "slack.bot_message")), { timeout: 5_000 }).toEqual([
+      expect.objectContaining({ reason: "slack_bot_identity_missing", detail: expect.stringContaining("Reconnect Slack"), eventMetadata: expect.objectContaining({ channel: "C_FORM", botId: "B_FORM" }) }),
+    ]);
+    expect(await eventCount(api, "Ev-missing-identity")).toBe(0);
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const rows = await api.providers.db.select().from(eventDropLog)
+      .where(eq(eventDropLog.eventKey, "slack.bot_message"));
+    expect(rows).toHaveLength(1);
+    expect(JSON.stringify(rows)).not.toContain("ignored");
+  });
+
+  it("does not retain missing-identity diagnostics for unsubscribed bot traffic", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-test-token",
+      metadata: { webhookSecret: SECRET, teamId: TEAM_ID, botUserId: "U0BOT" },
+    });
+    const body = envelope(botFormMessage(), "Ev-unsubscribed-missing-identity");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await dropReasons(api)).toEqual([]);
+    expect(await eventCount(api, "Ev-unsubscribed-missing-identity")).toBe(0);
+  });
+
   it("uses the bot-message filter diagnostic instead of duplicating a near-miss", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);

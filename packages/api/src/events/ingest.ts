@@ -106,13 +106,14 @@ async function logFilterExcludedDrop(
   detail?: string,
   throttleKeySuffix = eventKey,
   throttleClaimed = false,
+  reason = "filter_excluded",
 ): Promise<void> {
   if (!throttleClaimed && !claimDropThrottle(orgId, throttleKeySuffix)) return;
   const message = detail ?? `A ${eventKey} event arrived, but every subscription for it excluded it by filter. Check the filters on your ${eventKey} subscription.`;
   try {
     await writeDropLog(db, {
       orgId,
-      reason: "filter_excluded",
+      reason,
       eventKey,
       eventMetadata: diagnosticMetadata(payload),
       detail: message,
@@ -134,17 +135,34 @@ export async function logSlackMessageBotNearMiss(
   orgId: string,
   payload: unknown,
 ): Promise<void> {
+  await logSlackBotDiagnostic(db, orgId, payload, "slack.message", "filter_excluded",
+    "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.");
+}
+
+/** Keep the fail-closed identity check visible without retaining unsubscribed traffic. */
+export async function logSlackBotIdentityMissing(db: AppDb, orgId: string, payload: unknown): Promise<void> {
+  await logSlackBotDiagnostic(db, orgId, payload, "slack.bot_message", "slack_bot_identity_missing",
+    "A Slack bot message arrived, but the installed Valet bot ID is missing. Reconnect Slack in Settings to refresh its identity.");
+}
+
+async function logSlackBotDiagnostic(
+  db: AppDb,
+  orgId: string,
+  payload: unknown,
+  eventKey: string,
+  reason: string,
+  detail: string,
+): Promise<void> {
   const subs = await db
     .select()
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
-  const named = subs.filter((sub) => subscriptionNamesKey(sub, "slack.message"));
+  const named = subs.filter((sub) => subscriptionNamesKey(sub, eventKey));
   if (named.length === 0) return;
-  const detail = "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.";
-  const throttleKey = "slack.message:bot_near_miss";
+  const throttleKey = `${eventKey}:${reason}:bot_near_miss`;
   const nonTeam = named.find((sub) => !isTeamAssistantRule(sub.ownerType, sub.target));
   if (nonTeam) {
-    await logFilterExcludedDrop(db, orgId, "slack.message", payload, detail, throttleKey);
+    await logFilterExcludedDrop(db, orgId, eventKey, payload, detail, throttleKey, false, reason);
     return;
   }
   // Slack bot messages normally have no user. Do not treat an absent sender as
@@ -155,7 +173,7 @@ export async function logSlackMessageBotNearMiss(
   if (!claimDropThrottle(orgId, throttleKey)) return;
   for (const sub of named) {
     if (await authorizedSlackDiagnosticSubscription(db, sub, payload, false)) {
-      await logFilterExcludedDrop(db, orgId, "slack.message", payload, detail, throttleKey, true);
+      await logFilterExcludedDrop(db, orgId, eventKey, payload, detail, throttleKey, true, reason);
       return;
     }
   }
