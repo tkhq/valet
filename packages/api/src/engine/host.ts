@@ -95,7 +95,7 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { clampToMax, getOrgReasoningSettings, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
-import { TIER_SET } from "../services/model-tiers.js";
+import { TIER_SET, failoverSpecs } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
@@ -1051,6 +1051,7 @@ export class EngineHost {
       ownerTeamId: meta.ownerTeamId,
     });
     const resolveModel = this.makeResolveModel(meta.orgId);
+    const resolveModelFailover = this.makeResolveModelFailover(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
@@ -1208,6 +1209,7 @@ export class EngineHost {
             model,
             modelSpec,
             resolveModel,
+            resolveModelFailover,
             ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
             systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
@@ -1237,6 +1239,7 @@ export class EngineHost {
           model,
           modelSpec,
           resolveModel,
+          resolveModelFailover,
           ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
           systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
@@ -2718,6 +2721,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
+      resolveModelFailover: this.makeResolveModelFailover(meta.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -3212,6 +3216,33 @@ export class EngineHost {
    */
   private makeResolveModel(orgId: string): (spec: string) => Promise<ResolvedModel | null> {
     return (spec: string) => resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
+  }
+
+  /** User overrides the organization default. Both default to enabled so an
+   * exhausted provider does not block an equivalent tier target. */
+  private makeResolveModelFailover(orgId: string) {
+    return async ({ spec, userId }: { spec: string; userId?: string }) => {
+      if (!this.opts.db) return { candidates: [], enabled: false };
+      const [org] = await this.opts.db.select({ enabled: orgs.modelFailoverEnabled }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
+      const [user] = userId
+        ? await this.opts.db.select({ enabled: users.modelFailoverEnabled }).from(users).where(eq(users.id, userId)).limit(1)
+        : [];
+      if ((user?.enabled ?? org?.enabled ?? true) === false) return { candidates: [], enabled: false };
+      const specs = await failoverSpecs(this.opts.db, orgId, spec);
+      const resolved: ResolvedModel[] = [];
+      for (const candidate of specs) {
+        try {
+          const model = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, candidate);
+          if (model) resolved.push(model);
+        } catch (err) {
+          // Disabled, deleted, keyless, and inactive tier targets are not
+          // candidates. Keep trying; the engine keeps the original error if
+          // none can serve the request.
+          continue;
+        }
+      }
+      return { candidates: resolved, enabled: true };
+    };
   }
 
   /**
@@ -3795,6 +3826,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveModelFailover: this.makeResolveModelFailover(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
@@ -3970,6 +4002,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveModelFailover: this.makeResolveModelFailover(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: extras.tools.length ? extras.tools : undefined,

@@ -186,3 +186,27 @@ export async function resolvableTiers(
   }
   return usable;
 }
+
+/**
+ * Return ordered, same-tier replacements for a selected spec. The selected
+ * target remains first in the tier map; callers remove the model that failed.
+ * A concrete selection belongs to every tier that names it, with the first
+ * match defining its class. This never guesses from provider model names.
+ */
+function canonicalFailoverSpec(spec: string): string {
+  const normalized = spec.trim().toLowerCase();
+  const { namespace, modelId } = parseModelId(normalized);
+  return `${namespace}/${modelId}`;
+}
+
+export async function failoverSpecs(db: AppQueryable, orgId: string, spec: string): Promise<string[]> {
+  const normalized = spec.trim().toLowerCase();
+  const canonical = canonicalFailoverSpec(spec);
+  const map = await getOrgTierMap(db, orgId);
+  const targets = TIER_SET.has(normalized)
+    ? map[normalized as SizeTier]
+    : TIER_TOKENS.map((tier) => map[tier]).find((entries) =>
+        entries.some((entry) => canonicalFailoverSpec(entry) === canonical),
+      );
+  return targets ? [...targets] : [];
+}

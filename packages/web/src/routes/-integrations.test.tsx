@@ -276,6 +276,7 @@ function org(callerRole: "admin" | "member", organizations = true): OrgResponse 
     allowPublicArtifacts: false,
     plugins: [],
     callerRole,
+    modelFailoverEnabled: true,
   };
 }
 

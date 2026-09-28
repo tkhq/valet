@@ -118,6 +118,7 @@ async function loadOrgResponse(
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    modelFailoverEnabled: row.modelFailoverEnabled,
     plugins,
     callerRole,
   };

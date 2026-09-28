@@ -370,3 +370,25 @@ Recorded during implementation (2026-09-03):
   boot with a corrective message (`InstanceConfigError`, "unknown key") —
   intentional: config-driven org preferences no longer exist, so the
   loader must not silently accept and drop the key.
+
+## Provider failover
+
+A size tier can contain ordered targets from different providers. Valet retries
+only a no-tool model call after a provider reports credit exhaustion, rate
+limits, or service unavailability. It then uses the next resolvable target in
+the selected tier. Valet does not infer a tier from a model name. An explicit
+model has candidates only when that model is listed in a tier.
+
+`orgs.model_failover_enabled` defaults to true. A user can set
+`users.model_failover_enabled` to true or false, or clear it to inherit the
+organization setting. The submitting user's value wins. This lookup occurs
+at turn time, so shared sessions use the setting of the user who sent the
+submission. If failover is disabled or no same-tier target can run, Valet
+reports that the selected model could not service the request. The error tells
+the user to select another model in the model picker. Provider error details
+remain in logs and traces.
+
+Valet excludes the concrete provider model that failed. A role model uses only
+its own mapped tier. It cannot fall back through the session default tier. If a
+fallback candidate runs a tool, Valet keeps that candidate transcript and does
+not retry the original request after a later provider error.

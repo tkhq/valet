@@ -174,6 +174,7 @@ function org(organizations: boolean): OrgResponse {
     allowPublicArtifacts: false,
     plugins: [],
     callerRole: "member",
+    modelFailoverEnabled: true,
     features: { organizations, ssoTeamSync: false },
   };
 }
@@ -189,6 +190,7 @@ function me(orgRole: "admin" | "member" = "member"): MeResponse {
     orgRole,
     defaultModel: null,
     defaultReasoning: null,
+    modelFailoverEnabled: null,
     newThreadBehavior: "keep_current",
   };
 }

@@ -6,7 +6,9 @@
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
+  fauxToolCall,
   registerFauxProvider,
+  Type,
 } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import {
@@ -16,6 +18,7 @@ import {
   VirtualSandboxProvider,
   formatTransientRetryMessage,
   type BusEvent,
+  type ToolDef,
 } from "../src/index.js";
 
 function makeEngine() {
@@ -205,6 +208,333 @@ describe("turn-level transient retry (TKAI-319)", () => {
     );
     expect(retries).toHaveLength(2);
     faux.unregister();
+  });
+
+  it("keeps a fallback tool result and does not retry after its provider error", async () => {
+    const primary = registerFauxProvider({
+      provider: "failover-primary-tool",
+      models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const fallback = registerFauxProvider({
+      provider: "failover-fallback-tool",
+      models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    primary.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" }),
+      fauxAssistantMessage("must not run"),
+    ]);
+    fallback.setResponses([
+      fauxAssistantMessage([fauxToolCall("mark", {}, { id: "mark-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+    ]);
+    let toolCalls = 0;
+    const markerTool: ToolDef = {
+      name: "mark",
+      description: "records a side effect",
+      parameters: Type.Object({}),
+      execute: async () => {
+        toolCalls++;
+        return { text: "marked" };
+      },
+    };
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: primary.getModel("m")!,
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      tools: [markerTool],
+      resolveModelFailover: async () => ({ candidates: [{ model: fallback.getModel("m")! }], enabled: true }),
+    });
+    const receipt = await session.prompt("run the marker");
+    await waitFor(() =>
+      events.filter((e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId).length >= 2,
+    );
+
+    expect(toolCalls).toBe(1);
+    expect(primary.getPendingResponseCount()).toBe(1);
+    const entries = await store.getEntries(session.id, receipt.threadId);
+    const toolAssistant = entries.find((entry) =>
+      entry.type === "message" && entry.role === "assistant" && entry.parts?.some((part) => part.type === "tool_call"),
+    );
+    expect(toolAssistant).toBeDefined();
+    if (toolAssistant?.type !== "message") throw new Error("missing tool assistant message");
+    const toolCall = toolAssistant.parts?.find((part) => part.type === "tool_call");
+    expect(toolCall).toMatchObject({ status: "completed", result: { text: "marked" } });
+    const lastAssistant = [...entries].reverse().find(
+      (entry) => entry.type === "message" && entry.role === "assistant",
+    );
+    expect(lastAssistant).toMatchObject({ stopReason: "error" });
+    expect(events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")).toBe(false);
+    primary.unregister();
+    fallback.unregister();
+  });
+
+
+  it("emits one safe provider error after a tool call", async () => {
+    const faux = registerFauxProvider({ provider: "failover-tool-error" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("mark", {}, { id: "mark-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
+    ]);
+    const markerTool: ToolDef = {
+      name: "mark",
+      description: "records a completed tool call",
+      parameters: Type.Object({}),
+      execute: async () => ({ text: "marked" }),
+    };
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      tools: [markerTool],
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("run the marker");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    )).toHaveLength(1);
+    faux.unregister();
+  });
+
+  it("surfaces an actionable error when no equivalent candidate exists", async () => {
+    const faux = registerFauxProvider({ provider: "failover-none" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    const receipt = await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable" && event.event.threadId === receipt.threadId,
+    ));
+    const errors = events.filter((event) => event.event.type === "error").map((event) =>
+      event.event.type === "error" ? event.event.error : "",
+    );
+    expect(errors.some((error) =>
+      error.includes("The selected model (failover-none/") &&
+      error.includes("No equivalent model is available.") &&
+      error.includes("Select another model in the model picker."),
+    )).toBe(true);
+    expect(errors).not.toContain("no credits remaining");
+    faux.unregister();
+  });
+
+  it("surfaces the original provider error when the failover resolver throws", async () => {
+    const faux = registerFauxProvider({ provider: "failover-resolver-error-interactive" });
+    faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" })]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModelFailover: async () => { throw new Error("tier lookup unavailable"); },
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    )).toHaveLength(1);
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "agent_failed",
+    )).toBe(false);
+    faux.unregister();
+  });
+
+  it("retries a provider error when the failover resolver throws", async () => {
+    const faux = registerFauxProvider({ provider: "failover-resolver-error-retry" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      fauxAssistantMessage("recovered after resolver failure"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => { throw new Error("settings lookup unavailable"); },
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "turn_end" && event.event.reason === "end_turn",
+    ));
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "turn_transient_retry",
+    )).toBe(true);
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "agent_failed",
+    )).toBe(false);
+    faux.unregister();
+  });
+
+  it("retries an exhausted failover for an unattended session", async () => {
+    const faux = registerFauxProvider({ provider: "failover-retry-unattended" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      fauxAssistantMessage("recovered after transient retry"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "turn_end" && event.event.reason === "end_turn",
+    ));
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "turn_transient_retry",
+    )).toBe(true);
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    )).toBe(false);
+    faux.unregister();
+  });
+
+  it("surfaces a safe error after retrying a non-safe provider error", async () => {
+    const faux = registerFauxProvider({ provider: "failover-retry-safe-final" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "HTTP 500 internal server error" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    )).toHaveLength(1);
+    faux.unregister();
+  });
+
+  it("surfaces the restored original error after a fallback candidate fails unsafely", async () => {
+    const primary = registerFauxProvider({ provider: "failover-candidate-non-safe-primary" });
+    const fallback = registerFauxProvider({ provider: "failover-candidate-non-safe-fallback" });
+    primary.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" })]);
+    fallback.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "HTTP 500 internal server error" })]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: primary.getModel(),
+      resolveModelFailover: async () => ({ candidates: [{ model: fallback.getModel() }], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "503 service unavailable",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "503 service unavailable",
+    )).toHaveLength(1);
+    primary.unregister();
+    fallback.unregister();
+  });
+
+  it("reports an actionable error after an unattended failover retry fails", async () => {
+    const faux = registerFauxProvider({ provider: "failover-retry-exhausted" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    )).toHaveLength(1);
+    faux.unregister();
+  });
+
+  it("surfaces the disabled fallback state instead of the provider exhaustion text", async () => {
+    const faux = registerFauxProvider({ provider: "failover-disabled" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModelFailover: async () => ({ candidates: [], enabled: false }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    ));
+    const unavailable = events.find((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    )?.event;
+    expect(unavailable?.type === "error" && unavailable.error).toContain("Provider fallback is disabled.");
+    faux.unregister();
+  });
+
+  it("surfaces an actionable error after every fallback candidate is unusable", async () => {
+    const primary = registerFauxProvider({ provider: "failover-exhausted-primary" });
+    const fallback = registerFauxProvider({ provider: "failover-exhausted-fallback" });
+    primary.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" })]);
+    fallback.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" })]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: primary.getModel(),
+      resolveModelFailover: async () => ({ candidates: [{ model: fallback.getModel() }], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    ));
+    expect(events.filter((event) => event.event.type === "error" && event.event.code === "model_failover_unavailable")).toHaveLength(1);
+    primary.unregister();
+    fallback.unregister();
+  });
+
+  it("uses a user-selected model on the turn after failover exhaustion", async () => {
+    const failed = registerFauxProvider({ provider: "failover-switch-failed" });
+    const selected = registerFauxProvider({ provider: "failover-switch-selected" });
+    failed.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" })]);
+    selected.setResponses([fauxAssistantMessage("switched model succeeded")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: failed.getModel(), modelSpec: "failed",
+      resolveModel: async (spec) => spec === "failed"
+        ? { model: failed.getModel() }
+        : spec === "selected" ? { model: selected.getModel() } : null,
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    const thread = await session.ensureDefaultThread();
+    const first = await thread.submitPrompt("fail", {});
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable" && event.event.threadId === first.threadId,
+    ));
+    await thread.setModel("selected");
+    const second = await thread.submitPrompt("succeed", {});
+    await waitFor(() => events.some((event) =>
+      event.event.type === "turn_end" && event.event.threadId === second.threadId && event.event.reason === "end_turn",
+    ));
+    const entries = await thread.readEntries();
+    expect(entries.at(-1)).toMatchObject({ type: "message", role: "assistant", content: "switched model succeeded" });
+    failed.unregister();
+    selected.unregister();
   });
 
   it("an interactive session does not auto-retry", async () => {

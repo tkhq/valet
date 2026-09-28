@@ -1831,7 +1831,7 @@ describe("compaction: summarizer input covers the head", () => {
       // The turn overflows, which is what starts reactive compaction.
       fauxAssistantMessage("", {
         stopReason: "error",
-        errorMessage: "prompt is too long: 100 tokens > 50 maximum",
+        errorMessage: "503 service unavailable: prompt is too long: 100 tokens > 50 maximum",
       }),
       // Queued to prove the retry did NOT run. A retry would consume it.
       fauxAssistantMessage("retried response"),
@@ -1843,6 +1843,7 @@ describe("compaction: summarizer input covers the head", () => {
       workspace: "/",
       sandbox: {},
       model: faux.getModel("tiny")!,
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
       compaction: { tailTurns: 1, autoContinue: false },
     });
     const thread = session.thread();
@@ -1862,6 +1863,7 @@ describe("compaction: summarizer input covers the head", () => {
     // oversized context and must not run a second pass over it, which would
     // print the identical error again for one turn.
     expect(codes.filter((c) => c === "compaction_coverage_gap")).toHaveLength(1);
+    expect(codes.filter((c) => c === "error")).toHaveLength(1);
     // The recorded overflow response stands. Retrying the turn would just
     // overflow again, so the retry response is still queued.
     expect(faux.getPendingResponseCount()).toBe(1);

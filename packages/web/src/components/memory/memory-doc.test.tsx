@@ -59,6 +59,7 @@ const meFixture = {
   orgRole: "member" as const,
   defaultModel: null,
   defaultReasoning: null,
+  modelFailoverEnabled: null,
   newThreadBehavior: "keep_current" as const,
 };
 
@@ -71,6 +72,7 @@ const orgFixture = {
   allowPublicArtifacts: false,
   plugins: [],
   callerRole: "member" as const,
+  modelFailoverEnabled: true,
 };
 
 function renderedDoc(rendered: string) {

@@ -110,6 +110,8 @@ import type {
   MessageEntry,
   MessageQuery,
   MessageUsage,
+  ModelFailoverRequest,
+  ModelFailoverResult,
   Principal,
   PromptAuthor,
   PromptContent,
@@ -337,6 +339,51 @@ export function formatTransientRetryMessage(args: {
   return primary + detail;
 }
 
+/** Only upstream exhaustion/availability responses can switch providers. */
+export function isSafeFailoverError(message: string | undefined): boolean {
+  return /(?:no credits|insufficient[_ ](?:quota|credits)|quota exceeded|out of budget|available balance|billing|rate limit|overloaded|capacity|service unavailable|\b(?:429|503)\b)/i.test(message ?? "");
+}
+
+export function formatModelFailoverUnavailable(args: {
+  provider: string;
+  model: string;
+  enabled: boolean;
+}): string {
+  const selected = args.provider + "/" + args.model;
+  const fallback = args.enabled ? "No equivalent model is available." : "Provider fallback is disabled.";
+  return "The selected model (" + selected + ") could not service this request. " + fallback + " Select another model in the model picker.";
+}
+
+export function failoverSpecForTurn(
+  roleModelSpec: string | undefined,
+  assignedModelSpec: string | undefined,
+  fallback: string,
+): string {
+  return roleModelSpec ?? assignedModelSpec ?? fallback;
+}
+
+export function isDistinctFailoverCandidate(
+  candidate: { provider: string; id: string },
+  failed: { provider: string; id: string },
+): boolean {
+  return candidate.provider !== failed.provider || candidate.id !== failed.id;
+}
+
+export function modelFailoverRequestForTurn(args: {
+  roleModelSpec?: string;
+  assignedModelSpec?: string;
+  fallbackSpec: string;
+  authorId?: string;
+  sessionUserId: string;
+  failedModel: { provider: string; id: string };
+}): ModelFailoverRequest {
+  return {
+    spec: failoverSpecForTurn(args.roleModelSpec, args.assignedModelSpec, args.fallbackSpec),
+    userId: args.authorId ?? args.sessionUserId,
+    failedModel: args.failedModel,
+  };
+}
+
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
@@ -485,7 +532,10 @@ export class Thread {
    * per-round — it clears on each assistant message_start). */
   private turnToolCallCount = 0;
   /** True while a reactive (overflow) compaction is rerunning the failed turn. */
+  private pendingModelFailoverUnavailable: { provider: string; id: string; enabled: boolean } | undefined;
   private overflowRetryInProgress = false;
+  /** True only while runAgent will handle a safe provider error. */
+  private deferProviderFailoverError = false;
   /**
    * Set when a compaction pass in this turn reported an outcome that no
    * second pass can change: the newest turn is too large, or the head holds
@@ -3762,6 +3812,7 @@ export class Thread {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
+    this.pendingModelFailoverUnavailable = undefined;
     // Per-turn: the next turn may hold a transcript compaction can help.
     this.turnCompactionBlocked = false;
     this.currentAssistantMessageId = undefined;
@@ -4089,12 +4140,14 @@ export class Thread {
   ): Promise<void> {
     if (!(await this.canRunCurrentSubmission())) return;
     const content = userContentBlocks(text, attachments, sender);
-    await this.agent.prompt({
-      role: "user",
-      content,
-      timestamp: Date.now(),
-    });
-    await this.agent.waitForIdle();
+    this.deferProviderFailoverError = !!this.session.options.resolveModelFailover;
+    try {
+      await this.agent.prompt({
+        role: "user",
+        content,
+        timestamp: Date.now(),
+      });
+      await this.agent.waitForIdle();
 
     const last = this.agent.state.messages[this.agent.state.messages.length - 1];
     if (
@@ -4116,6 +4169,9 @@ export class Thread {
         try {
           outcome = await this.compactThread({ mode: "reactive" });
         } catch (err) {
+          // This path cannot attempt provider failover. Surface the deferred
+          // provider error before reporting the compaction failure.
+          this.emitDeferredProviderFailoverError(last);
           this.emitError(
             "compaction_failed",
             err instanceof Error ? err.message : String(err),
@@ -4138,8 +4194,14 @@ export class Thread {
           // or an unhelpable thread runs a doomed pass on every turn.
           this.turnCompactionBlocked = true;
           this.bumpCompactionFailureBreaker();
+          // No reactive retry follows this outcome, so failover cannot consume
+          // the deferred provider error.
+          this.emitDeferredProviderFailoverError(last);
           return;
         }
+        // This path does not run provider failover. Re-emit the deferred
+        // provider error before replacing it with the compaction retry.
+        this.emitDeferredProviderFailoverError(last);
         // Drop the failed assistant message from the agent transcript and retry.
         this.agent.state.messages = this.agent.state.messages.slice(0, -1);
         await this.agent.prompt({
@@ -4148,13 +4210,129 @@ export class Thread {
           timestamp: Date.now(),
         });
         await this.agent.waitForIdle();
+        const retried = this.agent.state.messages[this.agent.state.messages.length - 1];
+        this.emitDeferredProviderFailoverError(retried);
       } finally {
         this.overflowRetryInProgress = false;
       }
       return;
     }
 
+    const failover = await this.failOverProviderError();
+    if (failover === "tool") return;
     await this.retryTransientTurnError();
+    if (failover === "exhausted") {
+      this.emitExhaustedModelFailoverError();
+    } else {
+      // A retry can replace a non-safe error with a safe provider error. The
+      // event handler deferred that final error, but no failover path owns it.
+      this.emitDeferredProviderFailoverError(
+        this.agent.state.messages[this.agent.state.messages.length - 1],
+      );
+    }
+    } finally {
+      this.deferProviderFailoverError = false;
+    }
+  }
+
+  /** A provider failover retries only an untouched model call. A tool could
+   * have side effects, so a turn that made one always preserves its error. */
+  private async failOverProviderError(): Promise<"none" | "tool" | "exhausted"> {
+    const resolver = this.session.options.resolveModelFailover;
+    const original = this.agent.state.messages[this.agent.state.messages.length - 1];
+    if (!resolver || this.turnToolCallCount !== 0 || !original || original.role !== "assistant" || original.stopReason !== "error" || !isSafeFailoverError(original.errorMessage)) return "none";
+    const originalMessages = [...this.agent.state.messages];
+    const originalModel = this.agent.state.model;
+    const originalApiKey = this.turnApiKey;
+    const restore = async () => {
+      this.agent.state.messages = originalMessages;
+      this.agent.state.model = originalModel;
+      this.turnApiKey = originalApiKey;
+      const itemId = this.runningItem?.id;
+      if (itemId) await this.publishActiveModelState(itemId, originalModel);
+    };
+    const failedModel = { provider: originalModel.provider, id: originalModel.id };
+    const toolCallCountBeforeFailover = this.turnToolCallCount;
+    let result: ModelFailoverResult;
+    try {
+      result = await resolver(modelFailoverRequestForTurn({
+        roleModelSpec: this.roleModelSpec,
+        assignedModelSpec: this.assignedModelSpec,
+        fallbackSpec: this.turnModelSpec(this.runningItem ?? undefined),
+        authorId: this.runningItem?.author?.id,
+        sessionUserId: this.session.options.userId,
+        failedModel,
+      }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[engine] model failover resolver failed session=${this.session.id} thread=${this.id}: ${message}`,
+      );
+      this.turnSpan?.setAttribute("valet.model_failover.resolver_error", attrTruncate(message, 300));
+      return "none";
+    }
+    const attemptedCandidates = new Set<string>();
+    for (const candidate of result.candidates) {
+      if (this.aborted || !(await this.canRunCurrentSubmission())) {
+        await restore();
+        return "none";
+      }
+      if (!isDistinctFailoverCandidate(candidate.model, failedModel)) continue;
+      const candidateKey = `${candidate.model.provider}/${candidate.model.id}`;
+      if (attemptedCandidates.has(candidateKey)) continue;
+      attemptedCandidates.add(candidateKey);
+      this.agent.state.messages = this.agent.state.messages.slice(0, -1);
+      this.agent.state.model = candidate.model;
+      this.turnApiKey = candidate.apiKey;
+      const itemId = this.runningItem?.id;
+      if (!itemId || !(await this.publishActiveModelState(itemId, candidate.model))) {
+        await restore();
+        return "none";
+      }
+      this.emitError("model_failover", `The selected provider is unavailable. Valet is trying an equivalent ${this.assignedModelSpec ?? "model class"} target.`);
+      // The retry reuses the transcript with another provider. Cache deltas
+      // cannot be compared across providers.
+      this.prevCacheSnapshot = undefined;
+      await this.agent.continue();
+      await this.agent.waitForIdle();
+      const retried = this.agent.state.messages[this.agent.state.messages.length - 1];
+      // A candidate that ran a tool owns the live transcript. Do not rewind
+      // its tool result or retry the original request, which could repeat a
+      // side effect after this candidate's later provider error.
+      if (this.turnToolCallCount > toolCallCountBeforeFailover) return "tool";
+      if (!retried || retried.role !== "assistant" || retried.stopReason !== "error") return "none";
+      if (!isSafeFailoverError(retried.errorMessage)) {
+        await restore();
+        return "none";
+      }
+    }
+    // No equivalent target worked. Restore before the ordinary unattended
+    // retry policy runs. The actionable error is emitted after that policy.
+    await restore();
+    this.pendingModelFailoverUnavailable = { ...failedModel, enabled: result.enabled };
+    return "exhausted";
+  }
+
+  private emitDeferredProviderFailoverError(message: AgentMessage | undefined): void {
+    if (!this.deferProviderFailoverError || this.turnToolCallCount !== 0 ||
+        message?.role !== "assistant" || message.stopReason !== "error" ||
+        !isSafeFailoverError(message.errorMessage)) return;
+    this.deferProviderFailoverError = false;
+    this.emitError("error", message.errorMessage ?? "provider request failed");
+  }
+
+  private emitExhaustedModelFailoverError(): void {
+    const pending = this.pendingModelFailoverUnavailable;
+    this.pendingModelFailoverUnavailable = undefined;
+    if (!pending) return;
+    const last = this.agent.state.messages[this.agent.state.messages.length - 1];
+    if (last?.role !== "assistant" || last.stopReason !== "error" || !isSafeFailoverError(last.errorMessage)) return;
+    last.errorMessage = formatModelFailoverUnavailable({
+      provider: pending.provider,
+      model: pending.id,
+      enabled: pending.enabled,
+    });
+    this.emitError("model_failover_unavailable", last.errorMessage);
   }
 
   /**
@@ -5407,6 +5585,11 @@ export class Thread {
             }
           }
         }
+        const deferProviderFailoverError =
+          this.deferProviderFailoverError &&
+          this.turnToolCallCount === 0 &&
+          stopReason === "error" &&
+          isSafeFailoverError(errorMessage);
         if (errorMessage) {
           // Same stdout mirror as `emitError`: the event is best-effort (a
           // dead WS drops it), and this is the path provider failures take
@@ -5415,16 +5598,18 @@ export class Thread {
           console.error(
             `[engine] agent error session=${this.session.id} thread=${this.id} ${stopReason ?? "agent_error"}: ${errorMessage}`,
           );
-          await this.fencedEmit(
-            {
-              type: "error",
-              threadId: this.id,
-              code: stopReason ?? "agent_error",
-              error: errorMessage,
-              recoverable: stopReason !== "error",
-            },
-            { queueItemId: this.runningItem?.id },
-          );
+          if (!deferProviderFailoverError) {
+            await this.fencedEmit(
+              {
+                type: "error",
+                threadId: this.id,
+                code: stopReason ?? "agent_error",
+                error: errorMessage,
+                recoverable: stopReason !== "error",
+              },
+              { queueItemId: this.runningItem?.id },
+            );
+          }
         }
         const reason: "end_turn" | "error" | "abort" =
           stopReason === "aborted"
