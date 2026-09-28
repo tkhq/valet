@@ -326,6 +326,73 @@ describe("turn-level transient retry (TKAI-319)", () => {
     faux.unregister();
   });
 
+  it("surfaces a safe error after retrying a non-safe provider error", async () => {
+    const faux = registerFauxProvider({ provider: "failover-retry-safe-final" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "HTTP 500 internal server error" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    )).toHaveLength(1);
+    faux.unregister();
+  });
+
+  it("surfaces the restored original error after a fallback candidate fails unsafely", async () => {
+    const primary = registerFauxProvider({ provider: "failover-candidate-non-safe-primary" });
+    const fallback = registerFauxProvider({ provider: "failover-candidate-non-safe-fallback" });
+    primary.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" })]);
+    fallback.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "HTTP 500 internal server error" })]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: primary.getModel(),
+      resolveModelFailover: async () => ({ candidates: [{ model: fallback.getModel() }], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "503 service unavailable",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "503 service unavailable",
+    )).toHaveLength(1);
+    primary.unregister();
+    fallback.unregister();
+  });
+
+  it("reports an actionable error after an unattended failover retry fails", async () => {
+    const faux = registerFauxProvider({ provider: "failover-retry-exhausted" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    )).toHaveLength(1);
+    faux.unregister();
+  });
+
   it("surfaces the disabled fallback state instead of the provider exhaustion text", async () => {
     const faux = registerFauxProvider({ provider: "failover-disabled" });
     faux.setResponses([

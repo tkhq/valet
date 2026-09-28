@@ -4220,7 +4220,15 @@ export class Thread {
     const failover = await this.failOverProviderError();
     if (failover === "tool") return;
     await this.retryTransientTurnError();
-    if (failover === "exhausted") this.emitExhaustedModelFailoverError();
+    if (failover === "exhausted") {
+      this.emitExhaustedModelFailoverError();
+    } else {
+      // A retry can replace a non-safe error with a safe provider error. The
+      // event handler deferred that final error, but no failover path owns it.
+      this.emitDeferredProviderFailoverError(
+        this.agent.state.messages[this.agent.state.messages.length - 1],
+      );
+    }
     } finally {
       this.deferProviderFailoverError = false;
     }
