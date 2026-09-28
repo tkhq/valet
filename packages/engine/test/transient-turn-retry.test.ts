@@ -328,6 +328,53 @@ describe("turn-level transient retry (TKAI-319)", () => {
     faux.unregister();
   });
 
+  it("surfaces the original provider error when the failover resolver throws", async () => {
+    const faux = registerFauxProvider({ provider: "failover-resolver-error-interactive" });
+    faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" })]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModelFailover: async () => { throw new Error("tier lookup unavailable"); },
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    ));
+    expect(events.filter((event) =>
+      event.event.type === "error" && event.event.error === "429 rate limit exceeded",
+    )).toHaveLength(1);
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "agent_failed",
+    )).toBe(false);
+    faux.unregister();
+  });
+
+  it("retries a provider error when the failover resolver throws", async () => {
+    const faux = registerFauxProvider({ provider: "failover-resolver-error-retry" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      fauxAssistantMessage("recovered after resolver failure"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => { throw new Error("settings lookup unavailable"); },
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "turn_end" && event.event.reason === "end_turn",
+    ));
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "turn_transient_retry",
+    )).toBe(true);
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "agent_failed",
+    )).toBe(false);
+    faux.unregister();
+  });
+
   it("retries an exhausted failover for an unattended session", async () => {
     const faux = registerFauxProvider({ provider: "failover-retry-unattended" });
     faux.setResponses([

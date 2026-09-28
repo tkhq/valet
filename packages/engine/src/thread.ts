@@ -111,6 +111,7 @@ import type {
   MessageQuery,
   MessageUsage,
   ModelFailoverRequest,
+  ModelFailoverResult,
   Principal,
   PromptAuthor,
   PromptContent,
@@ -4252,20 +4253,34 @@ export class Thread {
     };
     const failedModel = { provider: originalModel.provider, id: originalModel.id };
     const toolCallCountBeforeFailover = this.turnToolCallCount;
-    const result = await resolver(modelFailoverRequestForTurn({
-      roleModelSpec: this.roleModelSpec,
-      assignedModelSpec: this.assignedModelSpec,
-      fallbackSpec: this.turnModelSpec(this.runningItem ?? undefined),
-      authorId: this.runningItem?.author?.id,
-      sessionUserId: this.session.options.userId,
-      failedModel,
-    }));
+    let result: ModelFailoverResult;
+    try {
+      result = await resolver(modelFailoverRequestForTurn({
+        roleModelSpec: this.roleModelSpec,
+        assignedModelSpec: this.assignedModelSpec,
+        fallbackSpec: this.turnModelSpec(this.runningItem ?? undefined),
+        authorId: this.runningItem?.author?.id,
+        sessionUserId: this.session.options.userId,
+        failedModel,
+      }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[engine] model failover resolver failed session=${this.session.id} thread=${this.id}: ${message}`,
+      );
+      this.turnSpan?.setAttribute("valet.model_failover.resolver_error", attrTruncate(message, 300));
+      return "none";
+    }
+    const attemptedCandidates = new Set<string>();
     for (const candidate of result.candidates) {
       if (this.aborted || !(await this.canRunCurrentSubmission())) {
         await restore();
         return "none";
       }
       if (!isDistinctFailoverCandidate(candidate.model, failedModel)) continue;
+      const candidateKey = `${candidate.model.provider}/${candidate.model.id}`;
+      if (attemptedCandidates.has(candidateKey)) continue;
+      attemptedCandidates.add(candidateKey);
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
       this.agent.state.model = candidate.model;
       this.turnApiKey = candidate.apiKey;
