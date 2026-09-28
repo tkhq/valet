@@ -18,7 +18,7 @@ import {
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
-import { buildContentBlocks, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
+import { buildContentBlocks, hasTableBlock, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn } from "../transport/format.js";
@@ -57,12 +57,15 @@ async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: st
 
 /**
  * Post with the current assistant identity. If Slack rejects cosmetic override
- * fields, retry once without them so the message body still lands.
+ * fields, retry once without them so the message body still lands. If Slack
+ * rejects a generated native table block, post the same content once more
+ * with `fallbackBlocks`, its Markdown rendering, instead of losing it.
  */
 async function postActionMessage(
   token: string,
   body: Record<string, unknown>,
   ctx: PluginActionContext,
+  fallbackBlocks?: Record<string, unknown>[],
 ): Promise<{ res: Response; data: SlackPostData }> {
   const override = await actionIdentity(ctx);
   const post = async (postBody: Record<string, unknown>) => {
@@ -79,14 +82,34 @@ async function postActionMessage(
     }
   };
   const { iconUrl, ...rest } = override;
-  const first = await post({ ...body, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
+  const withIdentity = (postBody: Record<string, unknown>) =>
+    ({ ...postBody, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
+  // The table rejection comes first, so the Markdown rendering is what any
+  // later identity retry sends.
+  let sent = body;
+  let result = await post(withIdentity(sent));
+  if (fallbackBlocks && result.data.error === 'invalid_blocks') {
+    sent = { ...body, blocks: fallbackBlocks };
+    result = await post(withIdentity(sent));
+  }
   if (
-    !first.providerRejected ||
+    !result.providerRejected ||
     (override.username === undefined && override.iconUrl === undefined)
   ) {
-    return first;
+    return result;
   }
-  return post(body);
+  return post(sent);
+}
+
+/** The Markdown rendering of generated blocks, for a table block Slack rejects. */
+function markdownFallbackBlocks(
+  blocks: Record<string, unknown>[] | undefined,
+  text: string,
+  formattedText: string,
+  maxBlocks: number,
+): Record<string, unknown>[] | undefined {
+  if (!hasTableBlock(blocks)) return undefined;
+  return buildContentBlocks(text, formattedText, maxBlocks, { preserveSlackNativeSpans: true, nativeTables: false });
 }
 
 /** Build a descriptive error from a Slack API response. */
@@ -325,15 +348,17 @@ async function openAndSendDM(
   const formattedText = markdownToSlackMrkdwn(text, { preserveSlackNativeSpans: true });
   const body: Record<string, unknown> = { channel: openData.channel.id, text: formattedText, mrkdwn: true };
 
-  // Use blocks for tables and long messages.
-  // Prefer Markdown blocks for table rendering. Fall back to
+  // Use blocks for tables and long messages: native table blocks with
+  // Markdown blocks around them, a single Markdown block otherwise, and
   // section blocks for very long messages (> 12K).
+  let fallbackBlocks: Record<string, unknown>[] | undefined;
   if (needsContentBlocks(text)) {
     body.blocks = buildContentBlocks(text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
     body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+    fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], text, formattedText, SLACK_MAX_BLOCKS);
   }
 
-  const { res, data } = await postActionMessage(token, body, ctx);
+  const { res, data } = await postActionMessage(token, body, ctx, fallbackBlocks);
   if (!res.ok) return slackError(res);
   if (!data.ok) return slackError(res, data);
 
@@ -1037,15 +1062,19 @@ const sendMessage = action(Type.Object({
     const ownerSlackId = ownerSlackUserId(cred);
     const hasAttribution = Boolean(ownerSlackId) && !channelId.startsWith('D');
     const needsGeneratedBlocks = !userBlocks && needsContentBlocks(p.text);
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
 
     if (hasAttribution || needsGeneratedBlocks) {
       const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
+      const attribution = { type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] };
       const contentBlocks = userBlocks
         ? userBlocks.slice(0, blockBudget)
         : buildContentBlocks(p.text, formattedText, blockBudget, { preserveSlackNativeSpans: true });
-      if (hasAttribution) {
-        contentBlocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] });
+      if (!userBlocks) {
+        fallbackBlocks = markdownFallbackBlocks(contentBlocks, p.text, formattedText, blockBudget);
+        if (fallbackBlocks && hasAttribution) fallbackBlocks.push(attribution);
       }
+      if (hasAttribution) contentBlocks.push(attribution);
       body.blocks = contentBlocks;
       if (needsGeneratedBlocks) {
         body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
@@ -1054,7 +1083,7 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
-    const { res, data } = await postActionMessage(token, body, ctx);
+    const { res, data } = await postActionMessage(token, body, ctx, fallbackBlocks);
     if (!res.ok || !data.ok) {
       return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
     }
@@ -1211,16 +1240,25 @@ const updateMessage = action(Type.Object({
       text: formattedText,
       parse: 'none',
     };
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
     if (needsContentBlocks(args.text)) {
       body.blocks = buildContentBlocks(args.text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
       body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+      fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], args.text, formattedText, SLACK_MAX_BLOCKS);
     } else {
       body.blocks = [];
     }
 
-    const res = await slackFetch('chat.update', token, body);
+    type UpdateData = { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
+    let res = await slackFetch('chat.update', token, body);
     if (!res.ok) return slackError(res);
-    const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
+    let data = (await res.json()) as UpdateData;
+    if (!data.ok && data.error === 'invalid_blocks' && fallbackBlocks) {
+      // Slack rejected the generated table block; edit with its Markdown rendering.
+      res = await slackFetch('chat.update', token, { ...body, blocks: fallbackBlocks });
+      if (!res.ok) return slackError(res);
+      data = (await res.json()) as UpdateData;
+    }
     if (!data.ok) {
       if (data.error === 'cant_update_message') {
         return { success: false, error: 'Slack rejected the edit (cant_update_message): Valet can only edit its own messages. Check that ts belongs to a message Valet sent.' };

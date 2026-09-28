@@ -5,12 +5,60 @@ import { markdownToSlackMrkdwn } from "./transport/format.js";
 describe("GitHub references in content blocks", () => {
   it("links visible Markdown while retaining tables and bullet layout", () => {
     const text = "**Releases**\n\n- tkhq/gitops#5169\n- `tkhq/mono#8158`\n\n| State | Count |\n| --- | --- |\n| Merged | 1 |";
-    expect(buildContentBlocks(text, markdownToSlackMrkdwn(text))).toEqual([{
-      type: "markdown",
-      text: text.replace("tkhq/gitops#5169", "[tkhq/gitops#5169](https://github.com/tkhq/gitops/issues/5169)"),
-    }]);
+    expect(buildContentBlocks(text, markdownToSlackMrkdwn(text))).toEqual([
+      { type: "markdown", text: "**Releases**\n\n- [tkhq/gitops#5169](https://github.com/tkhq/gitops/issues/5169)\n- `tkhq/mono#8158`" },
+      {
+        type: "table",
+        column_settings: [{ align: "left", is_wrapped: true }, { align: "left", is_wrapped: true }],
+        rows: [
+          [{ type: "raw_text", text: "State" }, { type: "raw_text", text: "Count" }],
+          [
+            { type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "Merged" }] }] },
+            { type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "1" }] }] },
+          ],
+        ],
+      },
+    ]);
   });
 
+  it("links references inside native table cells", () => {
+    const text = "| PR | Related |\n| --- | --- |\n| tkhq/mono#8240 | tkhq/mono#8241<br>tkhq/mono#8242 |";
+    const blocks = buildContentBlocks(text, markdownToSlackMrkdwn(text));
+    expect(blocks[0]).toMatchObject({
+      type: "table",
+      rows: [[{ text: "PR" }, { text: "Related" }], [
+        { elements: [{ elements: [{ type: "link", url: "https://github.com/tkhq/mono/issues/8240", text: "tkhq/mono#8240" }] }] },
+        { elements: [{ elements: [
+          { type: "link", url: "https://github.com/tkhq/mono/issues/8241", text: "tkhq/mono#8241" },
+          { type: "text", text: "\n" },
+          { type: "link", url: "https://github.com/tkhq/mono/issues/8242", text: "tkhq/mono#8242" },
+        ] }] },
+      ]],
+    });
+  });
+});
+
+
+describe("native table blocks", () => {
+  const text = "Intro\n\n| a | b |\n|-|-|\n| 1 | 2 |";
+
+  it("keeps a single Markdown block when native tables are disabled", () => {
+    expect(buildContentBlocks(text, markdownToSlackMrkdwn(text), undefined, { nativeTables: false }))
+      .toEqual([{ type: "markdown", text }]);
+  });
+
+  it("keeps the Markdown block for a table beyond Slack's table limits", () => {
+    const rows = "| a |\n|-|\n" + "| x |\n".repeat(100);
+    expect(buildContentBlocks(rows, markdownToSlackMrkdwn(rows))).toEqual([{ type: "markdown", text: rows }]);
+  });
+
+  it("keeps the Markdown block when the table blocks exceed the block budget", () => {
+    expect(buildContentBlocks(text, markdownToSlackMrkdwn(text), 1)).toEqual([{ type: "markdown", text }]);
+  });
+});
+
+
+describe("GitHub references beyond the Markdown limit", () => {
   it("uses the mrkdwn fallback when expanded links exceed the Markdown limit", () => {
     const text = "x".repeat(SLACK_MARKDOWN_LIMIT - 15) + " tkhq/mono#12";
     expect(text.length).toBeLessThanOrEqual(SLACK_MARKDOWN_LIMIT);
