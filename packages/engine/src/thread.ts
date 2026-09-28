@@ -4190,16 +4190,16 @@ export class Thread {
       return;
     }
 
-    await this.failOverProviderError();
+    if (await this.failOverProviderError()) return;
     await this.retryTransientTurnError();
   }
 
   /** A provider failover retries only an untouched model call. A tool could
    * have side effects, so a turn that made one always preserves its error. */
-  private async failOverProviderError(): Promise<void> {
+  private async failOverProviderError(): Promise<boolean> {
     const resolver = this.session.options.resolveModelFailover;
     const original = this.agent.state.messages[this.agent.state.messages.length - 1];
-    if (!resolver || this.turnToolCallCount !== 0 || !original || original.role !== "assistant" || original.stopReason !== "error" || !isSafeFailoverError(original.errorMessage)) return;
+    if (!resolver || this.turnToolCallCount !== 0 || !original || original.role !== "assistant" || original.stopReason !== "error" || !isSafeFailoverError(original.errorMessage)) return false;
     const originalMessages = [...this.agent.state.messages];
     const originalModel = this.agent.state.model;
     const originalApiKey = this.turnApiKey;
@@ -4211,6 +4211,7 @@ export class Thread {
       if (itemId) await this.publishActiveModelState(itemId, originalModel);
     };
     const failedModel = { provider: originalModel.provider, id: originalModel.id };
+    const toolCallCountBeforeFailover = this.turnToolCallCount;
     const candidates = await resolver(modelFailoverRequestForTurn({
       roleModelSpec: this.roleModelSpec,
       assignedModelSpec: this.assignedModelSpec,
@@ -4222,7 +4223,7 @@ export class Thread {
     for (const candidate of candidates) {
       if (this.aborted || !(await this.canRunCurrentSubmission())) {
         await restore();
-        return;
+        return false;
       }
       if (!isDistinctFailoverCandidate(candidate.model, failedModel)) continue;
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
@@ -4231,7 +4232,7 @@ export class Thread {
       const itemId = this.runningItem?.id;
       if (!itemId || !(await this.publishActiveModelState(itemId, candidate.model))) {
         await restore();
-        return;
+        return false;
       }
       this.emitError("model_failover", `The selected provider is unavailable. Valet is trying an equivalent ${this.assignedModelSpec ?? "model class"} target.`);
       // The retry reuses the transcript with another provider. Cache deltas
@@ -4240,14 +4241,19 @@ export class Thread {
       await this.agent.continue();
       await this.agent.waitForIdle();
       const retried = this.agent.state.messages[this.agent.state.messages.length - 1];
-      if (!retried || retried.role !== "assistant" || retried.stopReason !== "error") return;
+      // A candidate that ran a tool owns the live transcript. Do not rewind
+      // its tool result or retry the original request, which could repeat a
+      // side effect after this candidate's later provider error.
+      if (this.turnToolCallCount > toolCallCountBeforeFailover) return true;
+      if (!retried || retried.role !== "assistant" || retried.stopReason !== "error") return false;
       if (!isSafeFailoverError(retried.errorMessage)) {
         await restore();
-        return;
+        return false;
       }
     }
     // No equivalent target worked. Preserve the selected provider's error.
     await restore();
+    return false;
   }
 
   /**

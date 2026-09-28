@@ -387,4 +387,6 @@ submission. If failover is disabled, Valet keeps the selected provider error.
 If no same-tier target can run, Valet keeps the original actionable error.
 
 Valet excludes the concrete provider model that failed. A role model uses only
-its own mapped tier. It cannot fall back through the session default tier.
+its own mapped tier. It cannot fall back through the session default tier. If a
+fallback candidate runs a tool, Valet keeps that candidate transcript and does
+not retry the original request after a later provider error.

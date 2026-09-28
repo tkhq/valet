@@ -6,7 +6,9 @@
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
+  fauxToolCall,
   registerFauxProvider,
+  Type,
 } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import {
@@ -16,6 +18,7 @@ import {
   VirtualSandboxProvider,
   formatTransientRetryMessage,
   type BusEvent,
+  type ToolDef,
 } from "../src/index.js";
 
 function makeEngine() {
@@ -205,6 +208,69 @@ describe("turn-level transient retry (TKAI-319)", () => {
     );
     expect(retries).toHaveLength(2);
     faux.unregister();
+  });
+
+  it("keeps a fallback tool result and does not retry after its provider error", async () => {
+    const primary = registerFauxProvider({
+      provider: "failover-primary-tool",
+      models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const fallback = registerFauxProvider({
+      provider: "failover-fallback-tool",
+      models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    primary.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" }),
+      fauxAssistantMessage("must not run"),
+    ]);
+    fallback.setResponses([
+      fauxAssistantMessage([fauxToolCall("mark", {}, { id: "mark-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+    ]);
+    let toolCalls = 0;
+    const markerTool: ToolDef = {
+      name: "mark",
+      description: "records a side effect",
+      parameters: Type.Object({}),
+      execute: async () => {
+        toolCalls++;
+        return { text: "marked" };
+      },
+    };
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: primary.getModel("m")!,
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      tools: [markerTool],
+      resolveModelFailover: async () => [{ model: fallback.getModel("m")! }],
+    });
+    const receipt = await session.prompt("run the marker");
+    await waitFor(() =>
+      events.filter((e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId).length >= 2,
+    );
+
+    expect(toolCalls).toBe(1);
+    expect(primary.getPendingResponseCount()).toBe(1);
+    const entries = await store.getEntries(session.id, receipt.threadId);
+    const toolAssistant = entries.find((entry) =>
+      entry.type === "message" && entry.role === "assistant" && entry.parts?.some((part) => part.type === "tool_call"),
+    );
+    expect(toolAssistant).toBeDefined();
+    if (toolAssistant?.type !== "message") throw new Error("missing tool assistant message");
+    const toolCall = toolAssistant.parts?.find((part) => part.type === "tool_call");
+    expect(toolCall).toMatchObject({ status: "completed", result: { text: "marked" } });
+    const lastAssistant = [...entries].reverse().find(
+      (entry) => entry.type === "message" && entry.role === "assistant",
+    );
+    expect(lastAssistant).toMatchObject({ stopReason: "error" });
+    expect(events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")).toBe(false);
+    primary.unregister();
+    fallback.unregister();
   });
 
   it("an interactive session does not auto-retry", async () => {
