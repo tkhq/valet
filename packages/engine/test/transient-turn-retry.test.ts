@@ -300,6 +300,32 @@ describe("turn-level transient retry (TKAI-319)", () => {
     faux.unregister();
   });
 
+  it("retries an exhausted failover for an unattended session", async () => {
+    const faux = registerFauxProvider({ provider: "failover-retry-unattended" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      fauxAssistantMessage("recovered after transient retry"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "child",
+      turnRetry: { maxAttempts: 1, backoffMs: [1] },
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "turn_end" && event.event.reason === "end_turn",
+    ));
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "turn_transient_retry",
+    )).toBe(true);
+    expect(events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    )).toBe(false);
+    faux.unregister();
+  });
+
   it("surfaces the disabled fallback state instead of the provider exhaustion text", async () => {
     const faux = registerFauxProvider({ provider: "failover-disabled" });
     faux.setResponses([

@@ -60,7 +60,7 @@ function renderCard(g: DecisionGate = gate()) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current" };
+  meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, modelFailoverEnabled: null, newThreadBehavior: "keep_current" };
 });
 
 describe("DecisionGateCard — action rendering", () => {

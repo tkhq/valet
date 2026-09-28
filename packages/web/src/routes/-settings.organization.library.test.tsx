@@ -39,6 +39,7 @@ let orgData: OrgResponse = {
   name: "Acme",
   createdAt: 0,
   callerRole: "admin",
+  modelFailoverEnabled: true,
   allowPublicArtifacts: false,
   plugins: [],
   features: { organizations: true, ssoTeamSync: false },
