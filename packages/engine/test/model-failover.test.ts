@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   failoverSpecForTurn,
+  formatModelFailoverUnavailable,
   isDistinctFailoverCandidate,
   isSafeFailoverError,
   modelFailoverRequestForTurn,
@@ -28,6 +29,13 @@ describe("provider failover classification", () => {
   it("uses the role model class instead of the session selection", () => {
     expect(failoverSpecForTurn("anthropic/claude-opus-4-7", "s", "openai/gpt-4.1-mini"))
       .toBe("anthropic/claude-opus-4-7");
+  });
+
+  it("gives actionable text for exhausted and disabled fallback", () => {
+    expect(formatModelFailoverUnavailable({ provider: "openai", model: "gpt-4.1-mini", enabled: true }))
+      .toBe("The selected model (openai/gpt-4.1-mini) could not service this request. No equivalent model is available. Select another model in the model picker.");
+    expect(formatModelFailoverUnavailable({ provider: "openai", model: "gpt-4.1-mini", enabled: false }))
+      .toContain("Provider fallback is disabled.");
   });
 
   it("uses the submitting user rather than the shared session owner", () => {

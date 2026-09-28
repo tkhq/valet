@@ -2295,6 +2295,13 @@ export interface ModelFailoverRequest {
   failedModel: { provider: string; id: string };
 }
 
+export interface ModelFailoverResult {
+  /** Equivalent candidates in configured order. */
+  candidates: ResolvedModel[];
+  /** False when the submitting user or organization disabled failover. */
+  enabled: boolean;
+}
+
 export interface CreateSessionOptions {
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
@@ -2342,7 +2349,7 @@ export interface CreateSessionOptions {
   /** Resolve ordered equivalent-class fallback models after a safe provider
    * exhaustion or availability failure. It is never called for arbitrary
    * model errors or after a tool call. */
-  resolveModelFailover?: (request: ModelFailoverRequest) => Promise<ResolvedModel[]>;
+  resolveModelFailover?: (request: ModelFailoverRequest) => Promise<ModelFailoverResult>;
   /**
    * Optional host-provided model resolver. Absent === the engine's current
    * internal resolution (`resolveModelId`): every existing path is unchanged

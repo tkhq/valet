@@ -3221,13 +3221,13 @@ export class EngineHost {
   /** User overrides the organization default. Both default to enabled so an
    * exhausted provider does not block an equivalent tier target. */
   private makeResolveModelFailover(orgId: string) {
-    return async ({ spec, userId }: { spec: string; userId?: string }): Promise<ResolvedModel[]> => {
-      if (!this.opts.db) return [];
+    return async ({ spec, userId }: { spec: string; userId?: string }) => {
+      if (!this.opts.db) return { candidates: [], enabled: false };
       const [org] = await this.opts.db.select({ enabled: orgs.modelFailoverEnabled }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
       const [user] = userId
         ? await this.opts.db.select({ enabled: users.modelFailoverEnabled }).from(users).where(eq(users.id, userId)).limit(1)
         : [];
-      if ((user?.enabled ?? org?.enabled ?? true) === false) return [];
+      if ((user?.enabled ?? org?.enabled ?? true) === false) return { candidates: [], enabled: false };
       const specs = await failoverSpecs(this.opts.db, orgId, spec);
       const resolved: ResolvedModel[] = [];
       for (const candidate of specs) {
@@ -3241,7 +3241,7 @@ export class EngineHost {
           continue;
         }
       }
-      return resolved;
+      return { candidates: resolved, enabled: true };
     };
   }
 

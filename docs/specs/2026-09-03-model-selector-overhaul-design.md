@@ -383,8 +383,10 @@ model has candidates only when that model is listed in a tier.
 `users.model_failover_enabled` to true or false, or clear it to inherit the
 organization setting. The submitting user's value wins. This lookup occurs
 at turn time, so shared sessions use the setting of the user who sent the
-submission. If failover is disabled, Valet keeps the selected provider error.
-If no same-tier target can run, Valet keeps the original actionable error.
+submission. If failover is disabled or no same-tier target can run, Valet
+reports that the selected model could not service the request. The error tells
+the user to select another model in the model picker. Provider error details
+remain in logs and traces.
 
 Valet excludes the concrete provider model that failed. A role model uses only
 its own mapped tier. It cannot fall back through the session default tier. If a

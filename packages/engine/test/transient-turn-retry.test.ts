@@ -247,7 +247,7 @@ describe("turn-level transient retry (TKAI-319)", () => {
       purpose: "child",
       turnRetry: { maxAttempts: 1, backoffMs: [1] },
       tools: [markerTool],
-      resolveModelFailover: async () => [{ model: fallback.getModel("m")! }],
+      resolveModelFailover: async () => ({ candidates: [{ model: fallback.getModel("m")! }], enabled: true }),
     });
     const receipt = await session.prompt("run the marker");
     await waitFor(() =>
@@ -271,6 +271,102 @@ describe("turn-level transient retry (TKAI-319)", () => {
     expect(events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")).toBe(false);
     primary.unregister();
     fallback.unregister();
+  });
+
+
+  it("surfaces an actionable error when no equivalent candidate exists", async () => {
+    const faux = registerFauxProvider({ provider: "failover-none" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    const receipt = await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable" && event.event.threadId === receipt.threadId,
+    ));
+    const errors = events.filter((event) => event.event.type === "error").map((event) =>
+      event.event.type === "error" ? event.event.error : "",
+    );
+    expect(errors.some((error) =>
+      error.includes("The selected model (failover-none/") &&
+      error.includes("No equivalent model is available.") &&
+      error.includes("Select another model in the model picker."),
+    )).toBe(true);
+    expect(errors).not.toContain("no credits remaining");
+    faux.unregister();
+  });
+
+  it("surfaces the disabled fallback state instead of the provider exhaustion text", async () => {
+    const faux = registerFauxProvider({ provider: "failover-disabled" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" }),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveModelFailover: async () => ({ candidates: [], enabled: false }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    ));
+    const unavailable = events.find((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    )?.event;
+    expect(unavailable?.type === "error" && unavailable.error).toContain("Provider fallback is disabled.");
+    faux.unregister();
+  });
+
+  it("surfaces an actionable error after every fallback candidate is unusable", async () => {
+    const primary = registerFauxProvider({ provider: "failover-exhausted-primary" });
+    const fallback = registerFauxProvider({ provider: "failover-exhausted-fallback" });
+    primary.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" })]);
+    fallback.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" })]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: primary.getModel(),
+      resolveModelFailover: async () => ({ candidates: [{ model: fallback.getModel() }], enabled: true }),
+    });
+    await session.prompt("help");
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable",
+    ));
+    expect(events.filter((event) => event.event.type === "error" && event.event.code === "model_failover_unavailable")).toHaveLength(1);
+    primary.unregister();
+    fallback.unregister();
+  });
+
+  it("uses a user-selected model on the turn after failover exhaustion", async () => {
+    const failed = registerFauxProvider({ provider: "failover-switch-failed" });
+    const selected = registerFauxProvider({ provider: "failover-switch-selected" });
+    failed.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "no credits remaining" })]);
+    selected.setResponses([fauxAssistantMessage("switched model succeeded")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: failed.getModel(), modelSpec: "failed",
+      resolveModel: async (spec) => spec === "failed"
+        ? { model: failed.getModel() }
+        : spec === "selected" ? { model: selected.getModel() } : null,
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    });
+    const thread = await session.ensureDefaultThread();
+    const first = await thread.submitPrompt("fail", {});
+    await waitFor(() => events.some((event) =>
+      event.event.type === "error" && event.event.code === "model_failover_unavailable" && event.event.threadId === first.threadId,
+    ));
+    await thread.setModel("selected");
+    const second = await thread.submitPrompt("succeed", {});
+    await waitFor(() => events.some((event) =>
+      event.event.type === "turn_end" && event.event.threadId === second.threadId && event.event.reason === "end_turn",
+    ));
+    const entries = await thread.readEntries();
+    expect(entries.at(-1)).toMatchObject({ type: "message", role: "assistant", content: "switched model succeeded" });
+    failed.unregister();
+    selected.unregister();
   });
 
   it("an interactive session does not auto-retry", async () => {

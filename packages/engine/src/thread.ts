@@ -343,6 +343,16 @@ export function isSafeFailoverError(message: string | undefined): boolean {
   return /(?:no credits|insufficient[_ ](?:quota|credits)|quota exceeded|out of budget|available balance|billing|rate limit|overloaded|capacity|service unavailable|\b(?:429|503)\b)/i.test(message ?? "");
 }
 
+export function formatModelFailoverUnavailable(args: {
+  provider: string;
+  model: string;
+  enabled: boolean;
+}): string {
+  const selected = args.provider + "/" + args.model;
+  const fallback = args.enabled ? "No equivalent model is available." : "Provider fallback is disabled.";
+  return "The selected model (" + selected + ") could not service this request. " + fallback + " Select another model in the model picker.";
+}
+
 export function failoverSpecForTurn(
   roleModelSpec: string | undefined,
   assignedModelSpec: string | undefined,
@@ -4212,7 +4222,7 @@ export class Thread {
     };
     const failedModel = { provider: originalModel.provider, id: originalModel.id };
     const toolCallCountBeforeFailover = this.turnToolCallCount;
-    const candidates = await resolver(modelFailoverRequestForTurn({
+    const result = await resolver(modelFailoverRequestForTurn({
       roleModelSpec: this.roleModelSpec,
       assignedModelSpec: this.assignedModelSpec,
       fallbackSpec: this.turnModelSpec(this.runningItem ?? undefined),
@@ -4220,7 +4230,7 @@ export class Thread {
       sessionUserId: this.session.options.userId,
       failedModel,
     }));
-    for (const candidate of candidates) {
+    for (const candidate of result.candidates) {
       if (this.aborted || !(await this.canRunCurrentSubmission())) {
         await restore();
         return false;
@@ -4251,9 +4261,16 @@ export class Thread {
         return false;
       }
     }
-    // No equivalent target worked. Preserve the selected provider's error.
+    // No equivalent target worked. Keep the raw provider cause in logs and
+    // tracing, but replace the user-facing provider text with next steps.
     await restore();
-    return false;
+    original.errorMessage = formatModelFailoverUnavailable({
+      provider: failedModel.provider,
+      model: failedModel.id,
+      enabled: result.enabled,
+    });
+    this.emitError("model_failover_unavailable", original.errorMessage);
+    return true;
   }
 
   /**
@@ -5506,6 +5523,11 @@ export class Thread {
             }
           }
         }
+        const deferProviderFailoverError =
+          !!this.session.options.resolveModelFailover &&
+          this.turnToolCallCount === 0 &&
+          stopReason === "error" &&
+          isSafeFailoverError(errorMessage);
         if (errorMessage) {
           // Same stdout mirror as `emitError`: the event is best-effort (a
           // dead WS drops it), and this is the path provider failures take
@@ -5514,16 +5536,18 @@ export class Thread {
           console.error(
             `[engine] agent error session=${this.session.id} thread=${this.id} ${stopReason ?? "agent_error"}: ${errorMessage}`,
           );
-          await this.fencedEmit(
-            {
-              type: "error",
-              threadId: this.id,
-              code: stopReason ?? "agent_error",
-              error: errorMessage,
-              recoverable: stopReason !== "error",
-            },
-            { queueItemId: this.runningItem?.id },
-          );
+          if (!deferProviderFailoverError) {
+            await this.fencedEmit(
+              {
+                type: "error",
+                threadId: this.id,
+                code: stopReason ?? "agent_error",
+                error: errorMessage,
+                recoverable: stopReason !== "error",
+              },
+              { queueItemId: this.runningItem?.id },
+            );
+          }
         }
         const reason: "end_turn" | "error" | "abort" =
           stopReason === "aborted"
