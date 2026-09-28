@@ -4169,27 +4169,46 @@ export class Thread {
     const resolver = this.session.options.resolveModelFailover;
     const original = this.agent.state.messages[this.agent.state.messages.length - 1];
     if (!resolver || this.turnToolCallCount !== 0 || !original || original.role !== "assistant" || original.stopReason !== "error" || !isSafeFailoverError(original.errorMessage)) return;
+    const originalMessages = [...this.agent.state.messages];
+    const originalModel = this.agent.state.model;
+    const originalApiKey = this.turnApiKey;
+    const restore = async () => {
+      this.agent.state.messages = originalMessages;
+      this.agent.state.model = originalModel;
+      this.turnApiKey = originalApiKey;
+      const itemId = this.runningItem?.id;
+      if (itemId) await this.publishActiveModelState(itemId, originalModel);
+    };
     const candidates = await resolver(this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined));
     for (const candidate of candidates) {
-      if (this.aborted || !(await this.canRunCurrentSubmission())) return;
+      if (this.aborted || !(await this.canRunCurrentSubmission())) {
+        await restore();
+        return;
+      }
       if (candidate.model.provider === this.agent.state.model.provider && candidate.model.id === this.agent.state.model.id) continue;
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
       this.agent.state.model = candidate.model;
       this.turnApiKey = candidate.apiKey;
       const itemId = this.runningItem?.id;
-      if (!itemId || !(await this.publishActiveModelState(itemId, candidate.model))) return;
+      if (!itemId || !(await this.publishActiveModelState(itemId, candidate.model))) {
+        await restore();
+        return;
+      }
       this.emitError("model_failover", `The selected provider is unavailable. Valet is trying an equivalent ${this.assignedModelSpec ?? "model class"} target.`);
+      // The retry reuses the transcript with another provider. Cache deltas
+      // cannot be compared across providers.
+      this.prevCacheSnapshot = undefined;
       await this.agent.continue();
       await this.agent.waitForIdle();
       const retried = this.agent.state.messages[this.agent.state.messages.length - 1];
       if (!retried || retried.role !== "assistant" || retried.stopReason !== "error") return;
       if (!isSafeFailoverError(retried.errorMessage)) {
-        this.agent.state.messages = [...this.agent.state.messages.slice(0, -1), original];
+        await restore();
         return;
       }
     }
     // No equivalent target worked. Preserve the selected provider's error.
-    this.agent.state.messages = [...this.agent.state.messages.slice(0, -1), original];
+    await restore();
   }
 
   /**

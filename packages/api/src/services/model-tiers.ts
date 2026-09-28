@@ -198,6 +198,6 @@ export async function failoverSpecs(db: AppQueryable, orgId: string, spec: strin
   const map = await getOrgTierMap(db, orgId);
   const targets = TIER_SET.has(normalized)
     ? map[normalized as SizeTier]
-    : TIER_TOKENS.map((tier) => map[tier]).find((entries) => entries.includes(spec));
+    : TIER_TOKENS.map((tier) => map[tier]).find((entries) => entries.includes(normalized));
   return targets ? [...targets] : [];
 }

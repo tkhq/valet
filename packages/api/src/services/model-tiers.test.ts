@@ -353,6 +353,9 @@ describe("same-tier failover candidates", () => {
     expect(await failoverSpecs(appDb, "org-failover", "openai/gpt-4.1-mini")).toEqual([
       "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5",
     ]);
+    expect(await failoverSpecs(appDb, "org-failover", "  OPENAI/GPT-4.1-MINI  ")).toEqual([
+      "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5",
+    ]);
   });
 
   it("does not cross a size tier for an unassigned explicit model", async () => {
