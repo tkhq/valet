@@ -105,7 +105,7 @@ describe("DecisionGateCard — always_allow admin gate", () => {
   });
 
   it("enables Always allow for an org admin and submits actionId on click", async () => {
-    meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "admin", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current" };
+    meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "admin", defaultModel: null, defaultReasoning: null, modelFailoverEnabled: null, newThreadBehavior: "keep_current" };
     const user = userEvent.setup();
     renderCard();
 
