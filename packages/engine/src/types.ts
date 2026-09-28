@@ -2330,7 +2330,10 @@ export interface CreateSessionOptions {
    * start-ref recorded (this session is not eval-replayable).
    */
   startRef?: SessionStartRef;
-  modelFailover?: Model<any>[];
+  /** Resolve ordered equivalent-class fallback models after a safe provider
+   * exhaustion or availability failure. It is never called for arbitrary
+   * model errors or after a tool call. */
+  resolveModelFailover?: (spec: string) => Promise<ResolvedModel[]>;
   /**
    * Optional host-provided model resolver. Absent === the engine's current
    * internal resolution (`resolveModelId`): every existing path is unchanged

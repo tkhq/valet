@@ -370,3 +370,17 @@ Recorded during implementation (2026-09-03):
   boot with a corrective message (`InstanceConfigError`, "unknown key") —
   intentional: config-driven org preferences no longer exist, so the
   loader must not silently accept and drop the key.
+
+## Provider failover
+
+A size tier can contain ordered targets from different providers. Valet retries
+only a no-tool model call after a provider reports credit exhaustion, rate
+limits, or service unavailability. It then uses the next resolvable target in
+the selected tier. Valet does not infer a tier from a model name. An explicit
+model has candidates only when that model is listed in a tier.
+
+`orgs.model_failover_enabled` defaults to true. A user can set
+`users.model_failover_enabled` to true or false, or clear it to inherit the
+organization setting. The user value wins. If failover is disabled, Valet
+keeps the selected provider error. If no same-tier target can run, Valet keeps
+the original actionable error.

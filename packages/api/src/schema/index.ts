@@ -69,6 +69,8 @@ export const orgs = pgTable("orgs", {
   // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
   // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
   modelTiers: jsonb("model_tiers"),
+  /** Try another target in the same size tier after safe provider exhaustion. */
+  modelFailoverEnabled: boolean("model_failover_enabled").notNull().default(true),
   /** Org allowlist of selectable model ids. Null = whole catalog approved.
    * Empty array is rejected at the API. Admins bypass the list. */
   approvedModels: jsonb("approved_models"),
@@ -109,6 +111,8 @@ export const users = pgTable("user", {
   // Nullable user preference feeding `EngineHost`'s model override seam;
   // null falls back to the host default (split-settings design, decision 9).
   defaultModel: text("default_model"),
+  /** Null inherits the organization model failover setting. */
+  modelFailoverEnabled: boolean("model_failover_enabled"),
   /** Personal default reasoning level. Null = inherit. */
   defaultReasoning: text("default_reasoning"),
   /** Controls whether a new thread keeps active settings or uses defaults. */

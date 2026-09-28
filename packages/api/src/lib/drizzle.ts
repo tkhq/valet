@@ -617,6 +617,18 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "model_tiers" jsonb',
   },
   {
+    // Safe provider failover is on by default. Existing organizations retain
+    // that default when this column is added during a rolling deployment.
+    describe: "orgs.model_failover_enabled column",
+    probe: { kind: "column", table: "orgs", column: "model_failover_enabled" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "model_failover_enabled" boolean DEFAULT true NOT NULL',
+  },
+  {
+    describe: "user.model_failover_enabled column",
+    probe: { kind: "column", table: "user", column: "model_failover_enabled" },
+    sql: 'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "model_failover_enabled" boolean',
+  },
+  {
     // Which compiler produced `rendered` (artifact-pages design). 'markdown'
     // matches every pre-pages row, whose content was always markdown.
     describe: "artifacts.format column",

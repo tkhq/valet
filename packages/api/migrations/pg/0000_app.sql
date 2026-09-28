@@ -9,6 +9,7 @@ CREATE TABLE "orgs" (
 	"allow_anonymous_image_bakes" boolean NOT NULL DEFAULT false,
 	"allow_personal_installations" boolean NOT NULL DEFAULT true,
 	"model_tiers" jsonb,
+	"model_failover_enabled" boolean DEFAULT true NOT NULL,
 	"approved_models" jsonb,
 	"reasoning_settings" jsonb
 );
@@ -23,6 +24,7 @@ CREATE TABLE "user" (
 	"updated_at" timestamp DEFAULT now() NOT NULL,
 	"role" text DEFAULT 'member' NOT NULL,
 	"default_model" text,
+	"model_failover_enabled" boolean,
 	"default_reasoning" text,
 	"new_thread_behavior" text DEFAULT 'keep_current' NOT NULL
 );

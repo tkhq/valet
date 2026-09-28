@@ -3269,6 +3269,8 @@ export interface MeResponse {
   orgId: string;
   orgRole: "admin" | "member";
   defaultModel: string | null;
+  /** Null inherits the organization setting. */
+  modelFailoverEnabled: boolean | null;
   /** User's default reasoning/thinking level. */
   defaultReasoning: string | null;
   /** Controls the model and thinking settings for a new thread. */
@@ -3296,6 +3298,8 @@ export interface PatchMeRequest {
   name?: string;
   avatarUrl?: string;
   defaultModel?: string | null;
+  /** Null inherits the organization setting. */
+  modelFailoverEnabled?: boolean | null;
   /** User's default reasoning/thinking level, or null to clear. */
   defaultReasoning?: string | null;
   /** Controls the model and thinking settings for a new thread. */
@@ -3312,6 +3316,8 @@ export interface OrgSettingsResponse {
   allowAnonymousImageBakes?: boolean;
   /** Whether members can install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean;
+  /** Automatically use an equivalent tier target after a safe provider failure. */
+  modelFailoverEnabled: boolean;
 }
 
 /** Org-level settings request for `PATCH /api/org/settings`. */
@@ -3320,6 +3326,7 @@ export interface PatchOrgSettingsRequest {
   allowPublicArtifacts?: boolean;
   allowAnonymousImageBakes?: boolean;
   allowPersonalInstallations?: boolean;
+  modelFailoverEnabled?: boolean;
 }
 
 // ─── Artifacts (2026-08-22 artifacts design; 2026-09-02 artifact-pages) ──

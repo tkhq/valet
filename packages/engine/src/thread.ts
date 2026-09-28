@@ -337,6 +337,11 @@ export function formatTransientRetryMessage(args: {
   return primary + detail;
 }
 
+/** Only upstream exhaustion/availability responses can switch providers. */
+export function isSafeFailoverError(message: string | undefined): boolean {
+  return /(?:no credits|insufficient[_ ](?:quota|credits)|billing|rate limit|overloaded|capacity|service unavailable|\b(?:429|503)\b)/i.test(message ?? "");
+}
+
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
@@ -4154,7 +4159,29 @@ export class Thread {
       return;
     }
 
+    await this.failOverProviderError();
     await this.retryTransientTurnError();
+  }
+
+  /** A provider failover retries only an untouched model call. A tool could
+   * have side effects, so a turn that made one always preserves its error. */
+  private async failOverProviderError(): Promise<void> {
+    const resolver = this.session.options.resolveModelFailover;
+    const last = this.agent.state.messages[this.agent.state.messages.length - 1];
+    if (!resolver || this.turnToolCallCount !== 0 || !last || last.role !== "assistant" || last.stopReason !== "error" || !isSafeFailoverError(last.errorMessage)) return;
+    const candidates = await resolver(this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined));
+    for (const candidate of candidates) {
+      if (candidate.model.provider === this.agent.state.model.provider && candidate.model.id === this.agent.state.model.id) continue;
+      this.agent.state.messages = this.agent.state.messages.slice(0, -1);
+      this.agent.state.model = candidate.model;
+      this.turnApiKey = candidate.apiKey;
+      this.emitError("model_failover", `The selected provider is unavailable. Valet is trying an equivalent ${this.assignedModelSpec ?? "model class"} target.`);
+      await this.agent.continue();
+      await this.agent.waitForIdle();
+      const retried = this.agent.state.messages[this.agent.state.messages.length - 1];
+      if (!retried || retried.role !== "assistant" || retried.stopReason !== "error") return;
+      if (!isSafeFailoverError(retried.errorMessage)) return;
+    }
   }
 
   /**

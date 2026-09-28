@@ -18,6 +18,7 @@ import {
   DEFAULT_TIER_MAP,
   TIER_TOKENS,
   type TierMap,
+  failoverSpecs,
 } from "./model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
 import { getApprovedModels, setApprovedModels } from "./approved-models.js";
@@ -338,5 +339,25 @@ describe("model-tiers", () => {
       const err = tierTargetsNotApproved(tierMap, approved);
       expect(err).toBeNull();
     });
+  });
+});
+
+describe("same-tier failover candidates", () => {
+  it("keeps a selected OpenAI small model and its Anthropic small replacement in order", async () => {
+    const { pgdb, appDb } = await freshTestPgDb();
+    await appDb.insert(orgs).values({ id: "org-failover", name: "Org", createdAt: Date.now() });
+    await setOrgTierMap(appDb, "org-failover", {
+      ...DEFAULT_TIER_MAP,
+      s: ["openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5"],
+    });
+    expect(await failoverSpecs(appDb, "org-failover", "openai/gpt-4.1-mini")).toEqual([
+      "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5",
+    ]);
+  });
+
+  it("does not cross a size tier for an unassigned explicit model", async () => {
+    const { appDb } = await freshTestPgDb();
+    await appDb.insert(orgs).values({ id: "org-no-class", name: "Org", createdAt: Date.now() });
+    expect(await failoverSpecs(appDb, "org-no-class", "openai/gpt-4.1")).toEqual([]);
   });
 });
