@@ -339,7 +339,7 @@ export function formatTransientRetryMessage(args: {
 
 /** Only upstream exhaustion/availability responses can switch providers. */
 export function isSafeFailoverError(message: string | undefined): boolean {
-  return /(?:no credits|insufficient[_ ](?:quota|credits)|billing|rate limit|overloaded|capacity|service unavailable|\b(?:429|503)\b)/i.test(message ?? "");
+  return /(?:no credits|insufficient[_ ](?:quota|credits)|quota exceeded|out of budget|available balance|billing|rate limit|overloaded|capacity|service unavailable|\b(?:429|503)\b)/i.test(message ?? "");
 }
 
 let nextId = 1;
@@ -4167,21 +4167,29 @@ export class Thread {
    * have side effects, so a turn that made one always preserves its error. */
   private async failOverProviderError(): Promise<void> {
     const resolver = this.session.options.resolveModelFailover;
-    const last = this.agent.state.messages[this.agent.state.messages.length - 1];
-    if (!resolver || this.turnToolCallCount !== 0 || !last || last.role !== "assistant" || last.stopReason !== "error" || !isSafeFailoverError(last.errorMessage)) return;
+    const original = this.agent.state.messages[this.agent.state.messages.length - 1];
+    if (!resolver || this.turnToolCallCount !== 0 || !original || original.role !== "assistant" || original.stopReason !== "error" || !isSafeFailoverError(original.errorMessage)) return;
     const candidates = await resolver(this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined));
     for (const candidate of candidates) {
+      if (this.aborted || !(await this.canRunCurrentSubmission())) return;
       if (candidate.model.provider === this.agent.state.model.provider && candidate.model.id === this.agent.state.model.id) continue;
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
       this.agent.state.model = candidate.model;
       this.turnApiKey = candidate.apiKey;
+      const itemId = this.runningItem?.id;
+      if (!itemId || !(await this.publishActiveModelState(itemId, candidate.model))) return;
       this.emitError("model_failover", `The selected provider is unavailable. Valet is trying an equivalent ${this.assignedModelSpec ?? "model class"} target.`);
       await this.agent.continue();
       await this.agent.waitForIdle();
       const retried = this.agent.state.messages[this.agent.state.messages.length - 1];
       if (!retried || retried.role !== "assistant" || retried.stopReason !== "error") return;
-      if (!isSafeFailoverError(retried.errorMessage)) return;
+      if (!isSafeFailoverError(retried.errorMessage)) {
+        this.agent.state.messages = [...this.agent.state.messages.slice(0, -1), original];
+        return;
+      }
     }
+    // No equivalent target worked. Preserve the selected provider's error.
+    this.agent.state.messages = [...this.agent.state.messages.slice(0, -1), original];
   }
 
   /**

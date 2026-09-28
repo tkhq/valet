@@ -3814,6 +3814,8 @@ export interface OrgResponse {
   allowAnonymousImageBakes?: boolean;
   /** Absent on older APIs. Defaults to true. */
   allowPersonalInstallations?: boolean;
+  /** Automatically use an equivalent tier target after a safe provider failure. */
+  modelFailoverEnabled: boolean;
   /**
    * The gateable plugins on this deployment, with this org's entitlement and
    * this caller's effective access (plugin-entitlements design). A plugin's

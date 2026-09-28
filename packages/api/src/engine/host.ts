@@ -2721,6 +2721,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
+      resolveModelFailover: this.makeResolveModelFailover(meta.orgId, meta.actorUserId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -3232,7 +3233,10 @@ export class EngineHost {
           const model = await resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, candidate);
           if (model) resolved.push(model);
         } catch (err) {
-          if (!(err instanceof NoCredentialsError)) throw err;
+          // Disabled, deleted, keyless, and inactive tier targets are not
+          // candidates. Keep trying; the engine keeps the original error if
+          // none can serve the request.
+          continue;
         }
       }
       return resolved;
@@ -3820,6 +3824,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveModelFailover: this.makeResolveModelFailover(opts.orgId, opts.actorUserId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
@@ -3995,6 +4000,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveModelFailover: this.makeResolveModelFailover(opts.orgId, opts.actorUserId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: extras.tools.length ? extras.tools : undefined,
