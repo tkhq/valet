@@ -131,12 +131,12 @@ async function logFilterExcludedDrop(
  * an enabled named key keeps ordinary bot traffic out of the drop log.
  */
 export async function logSlackMessageBotNearMiss(
-  db: AppDb,
+  deps: IngestDeps,
   orgId: string,
   payload: unknown,
 ): Promise<void> {
-  await logSlackBotDiagnostic(db, orgId, payload, "slack.message", "filter_excluded",
-    "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.");
+  await logSlackBotDiagnostic(deps.db, orgId, payload, "slack.message", "filter_excluded",
+    "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.", catalogForService(deps.plugins, "slack"));
 }
 
 /** Keep the fail-closed identity check visible without retaining unsubscribed traffic. */
@@ -152,7 +152,7 @@ async function logSlackBotDiagnostic(
   eventKey: string,
   reason: string,
   detail: string,
-  catalog: EventCatalogEntry[] = [],
+  catalog: EventCatalogEntry[],
 ): Promise<void> {
   const subs = await db
     .select()
@@ -162,32 +162,10 @@ async function logSlackBotDiagnostic(
   if (named.length === 0) return;
   const throttleKey = `${eventKey}:${reason}:bot_near_miss`;
   const nonTeam = named.find((sub) => !isTeamAssistantRule(sub.ownerType, sub.target));
-  // Bot delivery does not require a human sender. Keep team-only metadata
-  // within the same subscription filters that would admit the bot post.
-  if (eventKey === "slack.bot_message") {
-    const retainMetadata = nonTeam || named.some((sub) => subscriptionMatchesEvent(sub, eventKey, payload, catalog));
-    await logFilterExcludedDrop(db, orgId, eventKey, retainMetadata ? payload : undefined, detail, throttleKey, false, reason);
-    return;
-  }
-  if (nonTeam) {
-    await logFilterExcludedDrop(db, orgId, eventKey, payload, detail, throttleKey, false, reason);
-    return;
-  }
-  // Slack bot messages normally have no user. Do not treat an absent sender as
-  // an unauthorized team member and do not create an authorization diagnostic.
-  if (!isRecord(payload) || typeof payload.user !== "string") return;
-  // Claim before membership lookups. A bot flood must not create one denial per
-  // message, and only an all-team candidate set reaches this gate.
-  if (!claimDropThrottle(orgId, throttleKey)) return;
-  for (const sub of named) {
-    if (await authorizedSlackDiagnosticSubscription(db, sub, payload, false)) {
-      await logFilterExcludedDrop(db, orgId, eventKey, payload, detail, throttleKey, true, reason);
-      return;
-    }
-  }
-  // Every named team subscription rejected the sender. Record exactly one
-  // metadata-free authorization diagnostic after the throttle claim.
-  await authorizedSlackDiagnosticSubscription(db, named[0], payload);
+  // Both diagnostics describe bot traffic, not a human team mention. Keep
+  // team-only metadata within the filters of a subscription that names the key.
+  const retainMetadata = nonTeam || named.some((sub) => subscriptionMatchesEvent(sub, eventKey, payload, catalog));
+  await logFilterExcludedDrop(db, orgId, eventKey, retainMetadata ? payload : undefined, detail, throttleKey, false, reason);
 }
 
 export async function ingestEvent(

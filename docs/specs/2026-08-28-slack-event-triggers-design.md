@@ -188,16 +188,14 @@ names `slack.message` and a third-party bot form message normalizes to
 `slack.bot_message`, Valet writes the same bounded, throttled diagnostic under
 `slack.message` and tells the administrator to subscribe to `slack.bot_message`.
 The near-miss uses a throttle key separate from ordinary `slack.message` filter
-misses, so either diagnostic cannot suppress the other. For a team-assistant
-subscription, Valet first applies the live Slack sender authorization gate. If a
-non-team subscription names the key, Valet records the near-miss without a team
-gate. Otherwise, it claims the near-miss throttle before it checks a team
-sender. A bot message with no sender skips the team gate and writes no
-diagnostic. An unauthorized sender can cause one throttled,
-metadata-free authorization diagnostic, but cannot cause retention of bot-message
-text or metadata. This diagnostic gate does not change event delivery. Unrelated
-bot messages remain silent. The "last event received" signal covers the ordinary
-no-subscription case instead.
+misses, so either diagnostic cannot suppress the other. Bot traffic does not use
+the human team-sender authorization gate, even when Slack supplies a `user` ID.
+For team-only subscriptions, Valet retains metadata only when their filters match.
+Otherwise, it records the guidance without message metadata. A non-team
+subscription that names the key permits the existing bounded metadata.
+These diagnostics do not change event delivery. Unrelated bot messages remain
+silent. The "last event received" signal covers the ordinary no-subscription case
+instead.
 
 ### Slack form diagnostics
 

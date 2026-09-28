@@ -193,7 +193,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
       // its diagnostic. Only a classifier miss with no named bot subscription
       // should suggest that a slack.message subscription use slack.bot_message.
       if (normalized.key === "slack.bot_message" && ingestResult.skipped && !ingestResult.namedSubscription) {
-        await logSlackMessageBotNearMiss(deps.db, deps.orgId, normalized.payload);
+        await logSlackMessageBotNearMiss(deps, deps.orgId, normalized.payload);
       }
       matchedTrigger = true;
       break;
