@@ -556,6 +556,37 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(JSON.stringify(rows)).not.toContain("ignored");
   });
 
+  it.each([
+    { key: "slack.message", ownerType: "org" },
+    { key: "slack.message", ownerType: "user" },
+    { key: "slack.bot_message", ownerType: "org" },
+    { key: "slack.bot_message", ownerType: "user" },
+  ])("omits excluded-channel metadata from bot diagnostics: %j", async ({ key, ownerType }) => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    if (key === "slack.bot_message") {
+      await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+        type: "bot_token", accessToken: "xoxb-test-token",
+        metadata: { webhookSecret: SECRET, teamId: TEAM_ID, botUserId: "U0BOT" },
+      });
+    }
+    await seedSubscription(api, [key], [{ field: "channel", op: "eq", value: "C_HUMAN" }]);
+    if (ownerType === "user") {
+      await api.providers.db.update(eventSubscriptions).set({ ownerType: "user", ownerId: "local-user" })
+        .where(eq(eventSubscriptions.id, `sub_${key.replace(/\W/g, "_")}`));
+    }
+    const body = envelope({ ...botFormMessage(), subtype: undefined, channel: "C_ENG_PRIVATE", text: "Private deployment details" }, "Ev-excluded-bot");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => api!.providers.db.select().from(eventDropLog)
+      .where(eq(eventDropLog.orgId, "local-org")), { timeout: 5_000 }).toEqual([
+      expect.objectContaining({
+        eventKey: key, eventMetadata: {},
+        reason: key === "slack.message" ? "filter_excluded" : "slack_bot_identity_missing",
+      }),
+    ]);
+    expect(await eventCount(api, "Ev-excluded-bot")).toBe(0);
+  });
+
   it("does not retain missing-identity diagnostics for unsubscribed bot traffic", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);

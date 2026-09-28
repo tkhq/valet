@@ -161,10 +161,9 @@ async function logSlackBotDiagnostic(
   const named = subs.filter((sub) => subscriptionNamesKey(sub, eventKey));
   if (named.length === 0) return;
   const throttleKey = `${eventKey}:${reason}:bot_near_miss`;
-  const nonTeam = named.find((sub) => !isTeamAssistantRule(sub.ownerType, sub.target));
   // Both diagnostics describe bot traffic, not a human team mention. Keep
-  // team-only metadata within the filters of a subscription that names the key.
-  const retainMetadata = nonTeam || named.some((sub) => subscriptionMatchesEvent(sub, eventKey, payload, catalog));
+  // metadata within the filters of a subscription that names the key.
+  const retainMetadata = named.some((sub) => subscriptionMatchesEvent(sub, eventKey, payload, catalog));
   await logFilterExcludedDrop(db, orgId, eventKey, retainMetadata ? payload : undefined, detail, throttleKey, false, reason);
 }
 
