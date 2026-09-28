@@ -94,6 +94,7 @@
     "@valet/plugin-typefully": "workspace:*",
     "@valet/plugin-valet": "workspace:*",
     "@valet/plugin-workflows": "workspace:*",
+    "@valet/plugin-xors-brain": "workspace:*",
     "@valet/sandbox-docker": "workspace:*",
     "@valet/sandbox-gateway": "workspace:*",
     "@valet/sandbox-kubernetes": "workspace:*",

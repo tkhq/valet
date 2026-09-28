@@ -158,6 +158,9 @@ importers:
       '@valet/plugin-workflows':
         specifier: workspace:*
         version: link:../plugin-workflows
+      '@valet/plugin-xors-brain':
+        specifier: workspace:*
+        version: link:../plugin-xors-brain
       '@valet/sandbox-docker':
         specifier: workspace:*
         version: link:../sandbox-docker
@@ -1035,6 +1038,25 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@25.0.9)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/plugin-xors-brain:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+      typebox:
+        specifier: 1.3.7
+        version: 1.3.7
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.39
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/runner:
     dependencies:

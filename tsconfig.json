@@ -50,6 +50,7 @@
     { "path": "./packages/plugin-memory" },
     { "path": "./packages/plugin-native-documents" },
     { "path": "./packages/plugin-security" },
+    { "path": "./packages/plugin-xors-brain" },
     { "path": "./packages/sandbox-gateway" },
     { "path": "./packages/api" },
     // Deliberately LAST, after api and every plugin-*: about fifteen

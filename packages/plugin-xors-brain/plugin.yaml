@@ -1,0 +1,6 @@
+name: xors-brain
+version: 0.1.0
+description: XORS company brain (clients, projects, offerings, GTM, decisions)
+icon: "\U0001F9E0"
+authRequired: false
+v2: true
