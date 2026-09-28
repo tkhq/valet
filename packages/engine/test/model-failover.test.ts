@@ -3,6 +3,7 @@ import {
   failoverSpecForTurn,
   isDistinctFailoverCandidate,
   isSafeFailoverError,
+  modelFailoverRequestForTurn,
 } from "../src/thread.js";
 
 describe("provider failover classification", () => {
@@ -27,6 +28,15 @@ describe("provider failover classification", () => {
   it("uses the role model class instead of the session selection", () => {
     expect(failoverSpecForTurn("anthropic/claude-opus-4-7", "s", "openai/gpt-4.1-mini"))
       .toBe("anthropic/claude-opus-4-7");
+  });
+
+  it("uses the submitting user rather than the shared session owner", () => {
+    expect(modelFailoverRequestForTurn({
+      fallbackSpec: "s",
+      authorId: "submitter",
+      sessionUserId: "session-owner",
+      failedModel: { provider: "openai", id: "gpt-4.1-mini" },
+    }).userId).toBe("submitter");
   });
 
   it("rejects arbitrary model errors", () => {

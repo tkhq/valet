@@ -110,6 +110,7 @@ import type {
   MessageEntry,
   MessageQuery,
   MessageUsage,
+  ModelFailoverRequest,
   Principal,
   PromptAuthor,
   PromptContent,
@@ -355,6 +356,21 @@ export function isDistinctFailoverCandidate(
   failed: { provider: string; id: string },
 ): boolean {
   return candidate.provider !== failed.provider || candidate.id !== failed.id;
+}
+
+export function modelFailoverRequestForTurn(args: {
+  roleModelSpec?: string;
+  assignedModelSpec?: string;
+  fallbackSpec: string;
+  authorId?: string;
+  sessionUserId: string;
+  failedModel: { provider: string; id: string };
+}): ModelFailoverRequest {
+  return {
+    spec: failoverSpecForTurn(args.roleModelSpec, args.assignedModelSpec, args.fallbackSpec),
+    userId: args.authorId ?? args.sessionUserId,
+    failedModel: args.failedModel,
+  };
 }
 
 let nextId = 1;
@@ -4195,15 +4211,14 @@ export class Thread {
       if (itemId) await this.publishActiveModelState(itemId, originalModel);
     };
     const failedModel = { provider: originalModel.provider, id: originalModel.id };
-    const candidates = await resolver({
-      spec: failoverSpecForTurn(
-        this.roleModelSpec,
-        this.assignedModelSpec,
-        this.turnModelSpec(this.runningItem ?? undefined),
-      ),
-      userId: this.runningItem?.author?.id ?? this.session.options.userId,
+    const candidates = await resolver(modelFailoverRequestForTurn({
+      roleModelSpec: this.roleModelSpec,
+      assignedModelSpec: this.assignedModelSpec,
+      fallbackSpec: this.turnModelSpec(this.runningItem ?? undefined),
+      authorId: this.runningItem?.author?.id,
+      sessionUserId: this.session.options.userId,
       failedModel,
-    });
+    }));
     for (const candidate of candidates) {
       if (this.aborted || !(await this.canRunCurrentSubmission())) {
         await restore();
