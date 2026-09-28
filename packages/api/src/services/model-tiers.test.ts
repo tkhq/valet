@@ -358,6 +358,22 @@ describe("same-tier failover candidates", () => {
     ]);
   });
 
+  it("matches mixed-case custom ids and bare Anthropic ids", async () => {
+    const { appDb } = await freshTestPgDb();
+    await appDb.insert(orgs).values({ id: "org-canonical", name: "Org", createdAt: Date.now() });
+    await setOrgTierMap(appDb, "org-canonical", {
+      ...DEFAULT_TIER_MAP,
+      s: ["custom_provider/GPT-Mini", "anthropic/Claude-Haiku"],
+      m: ["Claude-Sonnet", "openai/GPT-4.1-Mini"],
+    });
+    expect(await failoverSpecs(appDb, "org-canonical", " CUSTOM_PROVIDER/gpt-mini ")).toEqual([
+      "custom_provider/GPT-Mini", "anthropic/Claude-Haiku",
+    ]);
+    expect(await failoverSpecs(appDb, "org-canonical", "ANTHROPIC/claude-sonnet")).toEqual([
+      "Claude-Sonnet", "openai/GPT-4.1-Mini",
+    ]);
+  });
+
   it("does not cross a size tier for an unassigned explicit model", async () => {
     const { appDb } = await freshTestPgDb();
     await appDb.insert(orgs).values({ id: "org-no-class", name: "Org", createdAt: Date.now() });
