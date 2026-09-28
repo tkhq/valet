@@ -342,6 +342,21 @@ export function isSafeFailoverError(message: string | undefined): boolean {
   return /(?:no credits|insufficient[_ ](?:quota|credits)|quota exceeded|out of budget|available balance|billing|rate limit|overloaded|capacity|service unavailable|\b(?:429|503)\b)/i.test(message ?? "");
 }
 
+export function failoverSpecForTurn(
+  roleModelSpec: string | undefined,
+  assignedModelSpec: string | undefined,
+  fallback: string,
+): string {
+  return roleModelSpec ?? assignedModelSpec ?? fallback;
+}
+
+export function isDistinctFailoverCandidate(
+  candidate: { provider: string; id: string },
+  failed: { provider: string; id: string },
+): boolean {
+  return candidate.provider !== failed.provider || candidate.id !== failed.id;
+}
+
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
@@ -4179,13 +4194,22 @@ export class Thread {
       const itemId = this.runningItem?.id;
       if (itemId) await this.publishActiveModelState(itemId, originalModel);
     };
-    const candidates = await resolver(this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined));
+    const failedModel = { provider: originalModel.provider, id: originalModel.id };
+    const candidates = await resolver({
+      spec: failoverSpecForTurn(
+        this.roleModelSpec,
+        this.assignedModelSpec,
+        this.turnModelSpec(this.runningItem ?? undefined),
+      ),
+      userId: this.runningItem?.author?.id ?? this.session.options.userId,
+      failedModel,
+    });
     for (const candidate of candidates) {
       if (this.aborted || !(await this.canRunCurrentSubmission())) {
         await restore();
         return;
       }
-      if (candidate.model.provider === this.agent.state.model.provider && candidate.model.id === this.agent.state.model.id) continue;
+      if (!isDistinctFailoverCandidate(candidate.model, failedModel)) continue;
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
       this.agent.state.model = candidate.model;
       this.turnApiKey = candidate.apiKey;

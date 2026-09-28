@@ -1051,7 +1051,7 @@ export class EngineHost {
       ownerTeamId: meta.ownerTeamId,
     });
     const resolveModel = this.makeResolveModel(meta.orgId);
-    const resolveModelFailover = this.makeResolveModelFailover(meta.orgId, meta.userId);
+    const resolveModelFailover = this.makeResolveModelFailover(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
@@ -2721,7 +2721,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
-      resolveModelFailover: this.makeResolveModelFailover(meta.orgId, meta.actorUserId),
+      resolveModelFailover: this.makeResolveModelFailover(meta.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -3220,11 +3220,13 @@ export class EngineHost {
 
   /** User overrides the organization default. Both default to enabled so an
    * exhausted provider does not block an equivalent tier target. */
-  private makeResolveModelFailover(orgId: string, userId: string) {
-    return async (spec: string): Promise<ResolvedModel[]> => {
+  private makeResolveModelFailover(orgId: string) {
+    return async ({ spec, userId }: { spec: string; userId?: string }): Promise<ResolvedModel[]> => {
       if (!this.opts.db) return [];
       const [org] = await this.opts.db.select({ enabled: orgs.modelFailoverEnabled }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
-      const [user] = await this.opts.db.select({ enabled: users.modelFailoverEnabled }).from(users).where(eq(users.id, userId)).limit(1);
+      const [user] = userId
+        ? await this.opts.db.select({ enabled: users.modelFailoverEnabled }).from(users).where(eq(users.id, userId)).limit(1)
+        : [];
       if ((user?.enabled ?? org?.enabled ?? true) === false) return [];
       const specs = await failoverSpecs(this.opts.db, orgId, spec);
       const resolved: ResolvedModel[] = [];
@@ -3824,7 +3826,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
-      resolveModelFailover: this.makeResolveModelFailover(opts.orgId, opts.actorUserId),
+      resolveModelFailover: this.makeResolveModelFailover(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
@@ -4000,7 +4002,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
-      resolveModelFailover: this.makeResolveModelFailover(opts.orgId, opts.actorUserId),
+      resolveModelFailover: this.makeResolveModelFailover(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: extras.tools.length ? extras.tools : undefined,

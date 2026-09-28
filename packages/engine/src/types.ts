@@ -2286,6 +2286,15 @@ export interface ResolvedModel {
   canonicalId?: string;
 }
 
+export interface ModelFailoverRequest {
+  /** The size-tier target that failed, or the selected size tier. */
+  spec: string;
+  /** The submitting user. Absent for system-originated submissions. */
+  userId?: string;
+  /** The concrete provider model that already failed this turn. */
+  failedModel: { provider: string; id: string };
+}
+
 export interface CreateSessionOptions {
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
@@ -2333,7 +2342,7 @@ export interface CreateSessionOptions {
   /** Resolve ordered equivalent-class fallback models after a safe provider
    * exhaustion or availability failure. It is never called for arbitrary
    * model errors or after a tool call. */
-  resolveModelFailover?: (spec: string) => Promise<ResolvedModel[]>;
+  resolveModelFailover?: (request: ModelFailoverRequest) => Promise<ResolvedModel[]>;
   /**
    * Optional host-provided model resolver. Absent === the engine's current
    * internal resolution (`resolveModelId`): every existing path is unchanged
