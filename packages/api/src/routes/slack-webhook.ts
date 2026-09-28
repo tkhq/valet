@@ -65,7 +65,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { ingestEvent, logSlackMessageBotNearMiss } from "../events/ingest.js";
+import { ingestEvent, logSlackBotIdentityMissing, logSlackMessageBotNearMiss } from "../events/ingest.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EngineHost } from "../engine/host.js";
 import { handleFollowedMessage } from "../channels/follow-router.js";
@@ -193,12 +193,24 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
       // its diagnostic. Only a classifier miss with no named bot subscription
       // should suggest that a slack.message subscription use slack.bot_message.
       if (normalized.key === "slack.bot_message" && ingestResult.skipped && !ingestResult.namedSubscription) {
-        await logSlackMessageBotNearMiss(deps.db, deps.orgId, normalized.payload);
+        await logSlackMessageBotNearMiss(deps, deps.orgId, normalized.payload);
       }
       matchedTrigger = true;
       break;
     }
-    if (!matchedTrigger) await logUnmatchedInteraction(deps.db, deps.orgId, raw);
+    if (!matchedTrigger) {
+      await logUnmatchedInteraction(deps.db, deps.orgId, raw);
+      if (!deps.botId && isRecord(raw) && raw.type === "event_callback" && isRecord(raw.event)) {
+        const event = raw.event;
+        const botId = typeof event.bot_id === "string" && event.bot_id
+          ? event.bot_id
+          : isRecord(event.bot_profile) && typeof event.bot_profile.id === "string" ? event.bot_profile.id : undefined;
+        if (event.type === "message" && (event.subtype === undefined || event.subtype === "bot_message") && botId
+          && (!deps.botUserId || event.user !== deps.botUserId)) {
+          await logSlackBotIdentityMissing(deps, deps.orgId, { ...event, bot_id: botId });
+        }
+      }
+    }
   } catch (err) {
     console.error("[slack-webhook] event consumer failed", err);
   }
