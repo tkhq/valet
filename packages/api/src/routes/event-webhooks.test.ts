@@ -7,7 +7,7 @@
  * `plugin-linear`'s TriggerDefs — without them the route 404s every
  * `/webhooks/events/linear` POST before org/signature resolution runs.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
@@ -179,6 +179,19 @@ describe("POST /webhooks/events/:service", () => {
       expect(eventRows).toHaveLength(0);
       const drops = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.orgId, "local-org"));
       expect(drops.some((d) => d.reason === "bad_signature")).toBe(true);
+    });
+
+    it("verifies the signature without reading the renewing credential store", async () => {
+      // Production wraps engineCredentials in LinearAppTokenStore, which can
+      // call Linear's token endpoint on read. An unsigned request must not
+      // reach it, so the route reads the signing secret from the row itself.
+      api = await bootTestApi({ plugins: [linearPlugin] });
+      await seedLinearOrg(api);
+      const get = vi.spyOn(api.providers.engineCredentials, "get");
+      const body = linearIssueBody();
+      const res = await postLinear(api.baseUrl, body, linearSig(body, `${WEBHOOK_SECRET}-wrong`));
+      expect(res.status).toBe(403);
+      expect(get).not.toHaveBeenCalled();
     });
 
     it("unknown organizationId -> 204 no-op (no installation row, no event)", async () => {
