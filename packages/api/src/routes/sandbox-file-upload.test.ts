@@ -370,6 +370,29 @@ describe("POST /api/sessions/:id/files", () => {
     expect(replay.status).toBe(400);
   });
 
+  it("treats a byte-identical re-upload as uploaded and still refuses different content", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const send = (text: string) => {
+      const form = new FormData();
+      form.append("file", new Blob([text], { type: "application/yaml" }), "workflow.yaml");
+      return fetch(`${api!.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form });
+    };
+    const first = await send("name: review\n");
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { attachmentRef: string; sha256: string };
+
+    // The composer re-sends a file when a person attaches it again. The same
+    // bytes are already there, so this is a success with a fresh ref.
+    const again = await send("name: review\n");
+    expect(again.status).toBe(200);
+    const againBody = (await again.json()) as { attachmentRef: string; sha256: string };
+    expect(againBody.sha256).toBe(firstBody.sha256);
+    expect(againBody.attachmentRef).not.toBe(firstBody.attachmentRef);
+
+    expect((await send("name: other\n")).status).toBe(409);
+  });
+
   it("refuses to clobber an existing PDF sidecar with extract=true and overwrite unset", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);

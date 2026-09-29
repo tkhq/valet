@@ -104,6 +104,11 @@ function isNotFoundError(err: unknown): boolean {
 }
 
 /** stat() that returns null for a missing path and rethrows everything else. */
+/** Whether this upload unpacks (zip) or converts (PDF sidecar) the file. */
+function shouldExtractUpload(type: ReturnType<typeof detectFileType>, shouldExtract: boolean): boolean {
+  return shouldExtract && (type === "zip" || type === "pdf");
+}
+
 async function statIfExists(
   sandbox: Sandbox,
   path: string,
@@ -297,9 +302,19 @@ fileUploadRouter.post("/:id/files", async (c) => {
   // not exist": that would silently bypass the 409 contract.
   const sidecarPath = `${uploadPath}.md`;
   let skipSidecar = false;
+  // A person who attaches the same file twice sends the same bytes to the
+  // same path. That is already uploaded, so the request succeeds with a new
+  // ref and writes nothing. Only plain files qualify: an extracting upload
+  // would skip the extraction a caller may expect to run again.
+  let alreadyUploaded = false;
   if (!overwrite) {
     try {
-      if ((await statIfExists(sandbox, uploadPath)) !== null) {
+      const existing = await statIfExists(sandbox, uploadPath);
+      if (existing !== null && existing.isFile && existing.size === fileBytes && !shouldExtractUpload(detectedType, shouldExtract)) {
+        const stored = await sandbox.readBinary(uploadPath);
+        alreadyUploaded = createHash("sha256").update(stored).digest("hex") === sha256Hex;
+      }
+      if (existing !== null && !alreadyUploaded) {
         return c.json(
           { error: "File already exists", corrective: "Retry with overwrite=true, or choose a different dest." },
           409,
@@ -329,7 +344,7 @@ fileUploadRouter.post("/:id/files", async (c) => {
   // Create parent directory
   try {
     const parentDir = dirname(uploadPath);
-    if (parentDir && parentDir !== "/workspace") {
+    if (!alreadyUploaded && parentDir && parentDir !== "/workspace") {
       await sandbox.mkdir(parentDir);
     }
   } catch (err) {
@@ -340,7 +355,7 @@ fileUploadRouter.post("/:id/files", async (c) => {
   }
 
   try {
-    await sandbox.writeBinary(uploadPath, totalBytes);
+    if (!alreadyUploaded) await sandbox.writeBinary(uploadPath, totalBytes);
   } catch (err) {
     return c.json(
       { error: "Failed to write file to sandbox", corrective: "Try uploading again." },
