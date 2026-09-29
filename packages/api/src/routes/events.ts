@@ -843,10 +843,16 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     return c.json({ error: "enabled must be a boolean" }, 400);
   }
 
-  if ("assistantId" in body) {
+  // `assistantId: null` clears a retired selection; a value selects one,
+  // which a single-assistant workspace does not support.
+  if ("assistantId" in body && (body as { assistantId?: unknown }).assistantId !== null) {
     return c.json({ error: "Assistant selection is not supported. Choose the subscription workspace instead." }, 400);
   }
-  let patchedTarget = row.target as EventSubscriptionTargetWire;
+  // Drop a retired selection from a row the boot repair has not reached yet,
+  // so the merged row below validates.
+  // Validated jsonb narrows to the wire union, as before; old rows may also carry `assistantId`.
+  const { assistantId: _retired, ...storedTarget } = row.target as EventSubscriptionTargetWire & { assistantId?: unknown };
+  let patchedTarget: EventSubscriptionTargetWire = storedTarget;
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
     if (row.ownerType !== "user" || patchedTarget.kind !== "orchestrator") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
     patchedTarget = { ...patchedTarget,

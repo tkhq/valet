@@ -129,6 +129,19 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
 
   await addColumnsMissingFromAppliedMigrations(db);
   await expandLegacySlackWildcards(db);
+  await stripRetiredAssistantTargets(db);
+}
+
+/** Workspaces now have one assistant, so a subscription target no longer
+ * names one, and the write validator rejects `assistantId`. Rows written by
+ * the earlier model (or by an older binary during a rollback) still carry
+ * it, which made every edit, even disabling the rule, fail validation.
+ * Delivery already ignores the field. Idempotent: a clean row is untouched. */
+export async function stripRetiredAssistantTargets(db: PgDb): Promise<void> {
+  await db.query(
+    `UPDATE event_subscriptions SET target = target - 'assistantId', updated_at = $1 WHERE target ? 'assistantId'`,
+    [Date.now()],
+  );
 }
 
 const LEGACY_SLACK_EVENT_KEYS = [

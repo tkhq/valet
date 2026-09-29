@@ -1537,14 +1537,34 @@ describe("event-subscription assistant target", () => {
     ).json()) as { id: string; target: { assistantId?: string } };
     expect(created.target.assistantId).toBeUndefined();
 
-    for (const assistantId of [mine, null]) {
-      const res = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
-        method: "PATCH", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assistantId }),
-      });
-      expect(res.status).toBe(400);
-      expect(await res.json()).toMatchObject({ error: expect.stringContaining("Assistant selection is not supported") });
-    }
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assistantId: mine }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("Assistant selection is not supported") });
+    // `null` clears a retired selection, so it is accepted.
+    const cleared = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assistantId: null }),
+    });
+    expect(cleared.status).toBe(200);
+  });
+
+  it("lets an owner disable a rule saved with a retired assistant selection", async () => {
+    const a = await bootTestApi({ plugins: [githubPlugin] });
+    const now = Date.now();
+    await a.providers.db.insert(eventSubscriptions).values({
+      id: "legacy-assistant-rule", orgId: "local-org", ownerType: "user", ownerId: "local-user",
+      name: "legacy", eventKeys: ["github.push"], filters: [],
+      target: { kind: "orchestrator", orchestrator: "user", assistantId: "asst_retired" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    const res = await patchSubscription(a.baseUrl, "legacy-assistant-rule", { enabled: false });
+    expect(res.status).toBe(200);
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "legacy-assistant-rule"));
+    expect(row.enabled).toBe(false);
+    expect(row.target).toEqual({ kind: "orchestrator", orchestrator: "user" });
   });
 
   it("refuses assistantId on a workflow target", async () => {

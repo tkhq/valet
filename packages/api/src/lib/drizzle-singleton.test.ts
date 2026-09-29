@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { pgDbFromPglite } from "@valet/store-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyAppMigrations, missingSchemaRepairs } from "./drizzle.js";
+import { applyAppMigrations, missingSchemaRepairs, stripRetiredAssistantTargets } from "./drizzle.js";
 
 describe("workspace singleton repair on an already migrated database", () => {
   const pglite = new PGlite();
@@ -59,6 +59,21 @@ describe("workspace singleton repair on an already migrated database", () => {
     await expect(applyAppMigrations(db)).resolves.toBeUndefined();
     expect(await missingSchemaRepairs(db)).toEqual([]);
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
+  });
+
+  it("strips retired assistant selections from stored subscription targets", async () => {
+    await db.query(`INSERT INTO event_subscriptions(id, org_id, owner_type, owner_id, name, event_keys, filters, target, enabled, created_by, created_at, updated_at)
+      VALUES ('legacy-rule', 'strip-org', 'user', 'u', 'legacy', '["github.push"]', '[]',
+        '{"kind":"orchestrator","orchestrator":"user","assistantId":"asst_retired","follow":true}', true, 'u', 1, 1),
+        ('clean-rule', 'strip-org', 'user', 'u', 'clean', '["github.push"]', '[]', '{"kind":"workflow","workflowId":"w1"}', true, 'u', 1, 1)`);
+    await stripRetiredAssistantTargets(db);
+    await stripRetiredAssistantTargets(db);
+    const rows = await db.query("SELECT id, target, updated_at FROM event_subscriptions WHERE org_id = 'strip-org' ORDER BY id");
+    expect(rows.rows).toEqual([
+      { id: "clean-rule", target: { kind: "workflow", workflowId: "w1" }, updated_at: 1 },
+      { id: "legacy-rule", target: { kind: "orchestrator", orchestrator: "user", follow: true }, updated_at: expect.anything() },
+    ]);
+    await db.query("DELETE FROM event_subscriptions WHERE org_id = 'strip-org'");
   });
 
   it("keeps one row per owner and restores retired rows of owners that still exist", async () => {
