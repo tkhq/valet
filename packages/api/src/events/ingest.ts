@@ -142,7 +142,7 @@ export async function logSlackMessageBotNearMiss(
 /** Keep the fail-closed identity check visible without retaining unsubscribed traffic. */
 export async function logSlackBotIdentityMissing(deps: IngestDeps, orgId: string, payload: unknown): Promise<void> {
   await logSlackBotDiagnostic(deps.db, orgId, payload, "slack.bot_message", "slack_bot_identity_missing",
-    "A Slack bot message arrived, but the installed Valet bot ID is missing. Reconnect Slack in Settings to refresh its identity.", catalogForService(deps.plugins, "slack"));
+    "A Slack bot message arrived, but Valet could not resolve its installed bot identity. Reconnect Slack in Settings to refresh its identity.", catalogForService(deps.plugins, "slack"));
 }
 
 async function logSlackBotDiagnostic(
