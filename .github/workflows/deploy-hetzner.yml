@@ -1,0 +1,45 @@
+# XORS deployment: deploy dev-v2 to the Hetzner server that runs valet.xors.xyz.
+#
+# The runner builds nothing. It streams the commit's source to the server,
+# where the deploy key is locked to /usr/local/bin/valet-deploy. That script
+# builds beside the running version, swaps only after a successful build, and
+# restores the previous version if the new one is not ready in 120 seconds.
+#
+# Secrets: XORS_DEPLOY_SSH_KEY (deploy key), XORS_DEPLOY_KNOWN_HOSTS (pinned
+# server host key), XORS_DEPLOY_HOST (server address).
+name: Deploy to Hetzner
+
+on:
+  push:
+    branches: [dev-v2]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-hetzner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy
+        env:
+          SSH_KEY: ${{ secrets.XORS_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.XORS_DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.XORS_DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          git archive --format=tar HEAD \
+            | ssh -i ~/.ssh/deploy -o BatchMode=yes -o ServerAliveInterval=30 "root@${DEPLOY_HOST}" "$GITHUB_SHA"
+
+      - name: Check the public site
+        run: curl -sf --retry 5 --retry-delay 5 https://valet.xors.xyz/api/health
