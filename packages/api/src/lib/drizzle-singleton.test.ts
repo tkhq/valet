@@ -85,6 +85,27 @@ describe("workspace singleton repair on an already migrated database", () => {
     }
   });
 
+  it("keeps team DM copies on for members present at upgrade", async () => {
+    await db.query("ALTER TABLE user_notification_preferences DROP COLUMN team_dm");
+    await db.query(`INSERT INTO team_members(team_id, user_id, role) VALUES ('dm-team', 'dm-member', 'member'), ('dm-team-2', 'dm-member', 'admin')`);
+    await db.query(`INSERT INTO user_notification_preferences(user_id, kind, web) VALUES ('dm-member', 'question', false)`);
+    await applyAppMigrations(db);
+    const rows = await db.query(`SELECT kind, web, team_dm FROM user_notification_preferences WHERE user_id = 'dm-member' ORDER BY kind`);
+    expect(rows.rows).toEqual([
+      { kind: "approval", web: true, team_dm: true },
+      { kind: "escalation", web: true, team_dm: true },
+      { kind: "notification", web: true, team_dm: true },
+      { kind: "question", web: false, team_dm: true },
+      { kind: "review", web: true, team_dm: true },
+    ]);
+    // A member who joins after the upgrade keeps the new opt-in default.
+    await db.query(`INSERT INTO team_members(team_id, user_id, role) VALUES ('dm-team', 'late-member', 'member')`);
+    await applyAppMigrations(db);
+    expect((await db.query(`SELECT 1 FROM user_notification_preferences WHERE user_id = 'late-member'`)).rows).toHaveLength(0);
+    await db.query(`DELETE FROM user_notification_preferences WHERE user_id IN ('dm-member', 'late-member')`);
+    await db.query(`DELETE FROM team_members WHERE user_id IN ('dm-member', 'late-member')`);
+  });
+
   it("strips retired assistant selections from stored subscription targets", async () => {
     await db.query(`INSERT INTO event_subscriptions(id, org_id, owner_type, owner_id, name, event_keys, filters, target, enabled, created_by, created_at, updated_at)
       VALUES ('legacy-rule', 'strip-org', 'user', 'u', 'legacy', '["github.push"]', '[]',

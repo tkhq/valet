@@ -155,7 +155,7 @@ If origin validation fails, keep the web request visible and record the delivery
 Send one approval card to the originating Slack thread.
 Use the same original gate ID and existing callback authorization.
 Team home-channel fallback keeps its generic web link; it does not expose sensitive request details or decision controls.
-Personal team DM copies remain opt-in. The router deduplicates identical destinations.
+Personal team DM copies are opt-in by notification kind for members who join after this change. Before it, every team member received a DM copy of team attention. The upgrade therefore turns DM copies on for every kind for members present at upgrade, through the `team_dm` column repair backfill. The router deduplicates identical destinations.
 The parent agent must not send a second approval prompt for the same signal.
 
 ## Delivery and restart recovery

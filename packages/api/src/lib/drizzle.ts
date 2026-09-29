@@ -370,7 +370,20 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   },
   { describe: "assistants legacy default index", probe: { kind: "index", index: "assistants_default_owner" }, sql: 'CREATE UNIQUE INDEX assistants_default_owner ON assistants(org_id, owner_type, owner_id) WHERE is_default' },
   { describe: "teams.slack_home_channel_id column", probe: { kind: "column", table: "teams", column: "slack_home_channel_id" }, sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "slack_home_channel_id" text' },
-  { describe: "user_notification_preferences.team_dm column", probe: { kind: "column", table: "user_notification_preferences", column: "team_dm" }, sql: 'ALTER TABLE "user_notification_preferences" ADD COLUMN IF NOT EXISTS "team_dm" boolean DEFAULT false NOT NULL' },
+  {
+    describe: "user_notification_preferences.team_dm column",
+    probe: { kind: "column", table: "user_notification_preferences", column: "team_dm" },
+    sql: 'ALTER TABLE "user_notification_preferences" ADD COLUMN IF NOT EXISTS "team_dm" boolean DEFAULT false NOT NULL',
+    // Before this column, every team member got a DM copy of team attention.
+    // Team DM copies are now opt-in, so members present at upgrade keep them
+    // on for every kind; members added later start with the new default.
+    // Existing `web` choices are kept; a new row takes the table default.
+    backfill:
+      `INSERT INTO "user_notification_preferences" ("user_id", "kind", "team_dm") ` +
+      `SELECT DISTINCT tm."user_id", k."kind", true FROM "team_members" tm ` +
+      `CROSS JOIN (VALUES ('notification'), ('question'), ('escalation'), ('approval'), ('review')) AS k("kind") ` +
+      `ON CONFLICT ("user_id", "kind") DO UPDATE SET "team_dm" = true RETURNING "user_id"`,
+  },
 
   {
     describe: "session_threads.last_user_activity_at column",

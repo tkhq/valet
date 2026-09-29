@@ -88,7 +88,7 @@ channel, with generic links that keep content and approval controls behind web
 access checks. Replies stay in the originating Slack thread. Choosing a home
 channel does not subscribe to every message in it.
 
-Personal team DM copies are opt-in by notification kind. Delivery verifies current
+Personal team DM copies are opt-in by notification kind. Members present at upgrade keep them on for every kind. Delivery verifies current
 team and organization membership. Preferences do not change team access or approval
 authority. Team deletion reviews remain web-only under their existing policy.
 
