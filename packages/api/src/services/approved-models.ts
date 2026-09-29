@@ -13,6 +13,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
 import { TIER_SET, TIER_TOKENS, type TierMap } from "./model-tiers.js";
 import { parseModelId } from "./llm-providers.js";
+import { isDiscoveredModelApproved } from "./model-discoveries.js";
 
 /**
  * Read the org's approved model list from `orgs.approved_models`.
@@ -137,7 +138,14 @@ export async function assertModelSelectable(
   isOrgAdmin: boolean,
   spec: string,
 ): Promise<string | null> {
-  // Admins always pass.
+  if (!TIER_SET.has(spec.trim().toLowerCase())) {
+    const parsed = parseModelId(spec);
+    if (!(await isDiscoveredModelApproved(db, orgId, parsed.namespace, parsed.modelId))) {
+      return `Model "${spec}" is pending registry review. Ask an org admin to approve it in Settings → Organization → Models.`;
+    }
+  }
+
+  // Admins bypass the org allowlist, but not the discovery review gate.
   if (isOrgAdmin) return null;
 
   // Get the approved list.

@@ -14,6 +14,10 @@
       "types": "./src/model-catalog.ts",
       "import": "./src/model-catalog.ts"
     },
+    "./model-registry": {
+      "types": "./src/model-registry.ts",
+      "import": "./src/model-registry.ts"
+    },
     "./test-helpers": {
       "types": "./src/test-helpers/index.ts",
       "import": "./src/test-helpers/index.ts"

@@ -31,6 +31,9 @@ import type {
   ListAssistantsResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
+  ListModelDiscoveriesResponse,
+  ReviewModelDiscoveryRequest,
+  ReviewModelDiscoveryResponse,
   ListSuggestedTeamsResponse,
   ListTeamMembersResponse,
   ListTeamsResponse,
@@ -97,6 +100,7 @@ export const qkSettings = {
   orgDirectory: () => ["settings", "org", "directory"] as const,
   orgPlugins: () => ["settings", "org", "plugins"] as const,
   models: () => ["settings", "models"] as const,
+  modelDiscoveries: () => ["settings", "modelDiscoveries"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
   modelTiers: () => ["settings", "modelTiers"] as const,
@@ -184,6 +188,14 @@ export function useModels(opts?: UseQueryOptions<ListModelsResponse>) {
     // mutations already invalidate this key on write, but a short staleTime
     // covers changes made from elsewhere (another tab, another org admin).
     staleTime: 60_000,
+    ...opts,
+  });
+}
+
+export function useModelDiscoveries(opts?: UseQueryOptions<ListModelDiscoveriesResponse>) {
+  return useQuery<ListModelDiscoveriesResponse>({
+    queryKey: qkSettings.modelDiscoveries(),
+    queryFn: () => api.listModelDiscoveries(),
     ...opts,
   });
 }
@@ -459,6 +471,17 @@ export function usePutApprovedModels() {
     mutationFn: (body) => api.putApprovedModels(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.approvedModels() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function useReviewModelDiscovery() {
+  const qc = useQueryClient();
+  return useMutation<ReviewModelDiscoveryResponse, Error, ReviewModelDiscoveryRequest>({
+    mutationFn: (body) => api.reviewModelDiscovery(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.modelDiscoveries() });
       qc.invalidateQueries({ queryKey: qkSettings.models() });
     },
   });

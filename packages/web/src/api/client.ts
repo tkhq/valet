@@ -124,6 +124,9 @@ import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListModelsResponse,
+  ListModelDiscoveriesResponse,
+  ReviewModelDiscoveryRequest,
+  ReviewModelDiscoveryResponse,
   ListPluginsResponse,
   ListSessionsResponse,
   ListSkillsResponse,
@@ -1158,6 +1161,10 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
+  listModelDiscoveries: () =>
+    request<ListModelDiscoveriesResponse>("GET", "/org/model-discoveries"),
+  reviewModelDiscovery: (body: ReviewModelDiscoveryRequest) =>
+    request<ReviewModelDiscoveryResponse>("PATCH", "/org/model-discoveries", body),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
   usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
     const qs = usagePeriodSearchParams(period);

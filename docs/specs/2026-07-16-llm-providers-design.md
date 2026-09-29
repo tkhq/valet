@@ -219,3 +219,26 @@ through further — there is no fallback beyond the tier itself.
 - Automatic model failover mid-turn.
 - Proxying/rewriting model traffic through the api (turns call providers directly from the api process as today).
 - Migrating legacy D1 service-config keys (pre-1.0).
+
+## Extension: upstream discovery review (2026-09-22)
+
+The engine exports the host-neutral discovery contract from
+`@valet/engine/model-registry`. API registry refreshes use this contract to
+compare upstream records with the bundled catalog and persisted discoveries.
+This makes detection reusable without moving network or database code into the
+portable engine.
+
+An upstream-only model is stored in `model_registry_discoveries`. It starts as
+pending for each organization. An organization admin must approve it before
+`buildOrgCatalog` includes it. A rejection keeps it out of the catalog. The
+existing approved-model allowlist remains a second, narrower policy after this
+review gate.
+
+Discovery never edits model fields. Session and thread pins, user and team
+defaults, tier targets, assistant settings, and workflow definitions stay
+unchanged. Resolution keeps its cached and bundled fallback, so a failed
+refresh does not remove approved models or interrupt an active turn.
+
+Organization Model Settings lists discoveries with provider metadata, first
+observation time, and review state. The same section reports the registry as
+current, stale, failed, or offline. Offline mode uses the bundled catalog.
