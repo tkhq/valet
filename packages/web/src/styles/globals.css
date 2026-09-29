@@ -1,4 +1,6 @@
 @import "../theme.css";
+/* XORS deployment: brand overrides for the default palette and type. */
+@import "./xors.css";
 @import "./code-block.css";
 @import "./react-flow.css";
 
