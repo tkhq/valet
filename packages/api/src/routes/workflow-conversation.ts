@@ -3,6 +3,7 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import type { AppEnv } from "../env.js";
 import type { EnsureWorkflowConversationResponse } from "../wire/types.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
+import { workflowConversationKey } from "../workflows/editor-thread-context.js";
 
 export const workflowConversationRouter = new Hono<AppEnv>();
 
@@ -25,7 +26,7 @@ workflowConversationRouter.post("/:id/conversation", async (c) => {
     { type: workflow.ownerType, id: workflow.ownerId },
     { actorUserId: user.id, orgId: user.orgId },
   );
-  const thread = await session.createThread(`workflow:${workflow.id}:${user.id}`);
+  const thread = await session.createThread(workflowConversationKey(workflow.id, user.id));
   // Opening the editor does not submit a model turn. Reopens cannot duplicate
   // an automatic introduction, including after a lost HTTP response.
   const response: EnsureWorkflowConversationResponse = { sessionId, threadId: thread.id };
