@@ -520,6 +520,88 @@ describe("POST /api/channels/slack/webhook", () => {
   });
 
   it.each([
+    { subtype: "bot_message", tokenField: "accessToken" },
+    { subtype: undefined, tokenField: "accessToken" },
+    { subtype: "bot_message", tokenField: "apiKey" },
+  ])("resolves legacy identity and delivers the existing NDA subscription: %j", async ({ subtype, tokenField }) => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", [tokenField]: "xoxb-test-token",
+      metadata: { webhookSecret: SECRET, teamId: TEAM_ID },
+    });
+    const priorFetch = vi.mocked(globalThis.fetch).getMockImplementation();
+    if (!priorFetch) throw new Error("Missing fetch fixture");
+    const authCalls = vi.fn(() => Response.json({ ok: true, team_id: TEAM_ID, user_id: "U0BOT", bot_id: "BVALET" }));
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (String(input) === "https://slack.com/api/auth.test") return Promise.resolve(authCalls());
+      return priorFetch(input, init);
+    });
+    await seedSubscription(api, ["slack.bot_message"], [
+      { field: "channel", op: "eq", value: "C0BND4A8ZUK" },
+      { field: "bot_id", op: "eq", value: "B0C492869S4" },
+      { field: "text", op: "contains", value: "New NDA Review Request" },
+    ]);
+    const message = { ...botFormMessage(), subtype, channel: "C0BND4A8ZUK", bot_id: "B0C492869S4", text: "New NDA Review Request: example" };
+    const body = envelope(message, "Ev-legacy-nda");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => deliveryCount(api!, "Ev-legacy-nda"), { timeout: 5_000 }).toBe(1);
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    // Match every bot so the self-message assertions exercise the ingress guard.
+    await api.providers.db.update(eventSubscriptions).set({ filters: [] })
+      .where(eq(eventSubscriptions.id, "sub_slack_bot_message"));
+    for (const [suffix, self] of [
+      ["bot", { bot_id: "BVALET" }], ["user", { user: "U0BOT" }],
+    ] as const) {
+      const selfBody = envelope({ ...message, ...self }, `Ev-legacy-self-${suffix}`);
+      expect((await post(api.baseUrl, selfBody, sign(selfBody))).status).toBe(200);
+    }
+    const nextBody = envelope(message, "Ev-legacy-next");
+    expect((await post(api.baseUrl, nextBody, sign(nextBody))).status).toBe(200);
+    await expect.poll(() => deliveryCount(api!, "Ev-legacy-next"), { timeout: 5_000 }).toBe(1);
+    expect(await eventCount(api, "Ev-legacy-self-bot")).toBe(0);
+    expect(await eventCount(api, "Ev-legacy-self-user")).toBe(0);
+    expect(await deliveryCount(api, "Ev-legacy-nda")).toBe(1);
+    expect(await dropReasons(api)).not.toContain("slack_bot_identity_missing");
+    expect(authCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves identity only for verified local bot events, after acknowledging Slack", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-test-token",
+      metadata: { webhookSecret: SECRET, teamId: TEAM_ID, botUserId: "U0BOT" },
+    });
+    await seedSubscription(api, ["slack.bot_message"]);
+    const priorFetch = vi.mocked(globalThis.fetch).getMockImplementation();
+    if (!priorFetch) throw new Error("Missing fetch fixture");
+    let release = (_response: Response): void => {};
+    const pending = new Promise<Response>((resolve) => { release = resolve; });
+    const lookup = vi.fn(() => pending);
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (String(input) === "https://slack.com/api/auth.test") return lookup();
+      return priorFetch(input, init);
+    });
+    const body = envelope(botFormMessage(), "Ev-delayed-identity");
+    try {
+      expect((await post(api.baseUrl, body, sign(body, "wrong-secret"))).status).toBe(401);
+      const foreign = envelope(botFormMessage(), "Ev-foreign-identity", "T_OTHER");
+      expect((await post(api.baseUrl, foreign, sign(foreign))).status).toBe(200);
+      const human = envelope(humanChannelMessage(), "Ev-human-no-lookup");
+      expect((await post(api.baseUrl, human, sign(human))).status).toBe(200);
+      expect(lookup).not.toHaveBeenCalled();
+      // This response must arrive while auth.test is still unresolved.
+      expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+      await expect.poll(() => lookup.mock.calls.length).toBe(1);
+      expect(await eventCount(api, "Ev-delayed-identity")).toBe(0);
+    } finally {
+      release(Response.json({ ok: true, team_id: TEAM_ID, user_id: "U0BOT", bot_id: "BVALET" }));
+    }
+    await expect.poll(() => deliveryCount(api!, "Ev-delayed-identity"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it.each([
     { owner: "org", user: undefined, channel: "C_FORM" },
     { owner: "team", user: undefined, channel: "C_FORM" },
     { owner: "team", user: "U_UNLINKED", channel: "C_FORM" },
