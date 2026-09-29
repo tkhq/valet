@@ -115,6 +115,7 @@ export function parseUsage(
         // cached_tokens is a subset of prompt_tokens, not additive.
         const details = u.prompt_tokens_details as Record<string, unknown> | undefined;
         usage.cacheRead = num(details?.cached_tokens);
+        usage.cacheWrite = num(details?.cache_write_tokens);
         sawUsage = true;
       }
     }
@@ -142,6 +143,7 @@ export function parseUsage(
             | undefined;
           // cached_tokens is a subset of input_tokens, not additive.
           usage.cacheRead = num(details?.cached_tokens);
+          usage.cacheWrite = num(details?.cache_write_tokens);
           sawUsage = true;
         }
       }

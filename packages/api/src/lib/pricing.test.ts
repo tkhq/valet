@@ -9,6 +9,11 @@ describe("priceUsage", () => {
       input: 1_000_000, output: 1000, cacheRead: 900_000, cacheWrite: 0, total: 1_001_000,
     })).toBeCloseTo(0.2475, 8);
   });
+  it("excludes OpenAI cache writes from ordinary input pricing", () => {
+    expect(priceUsage("openai", "gpt-5.6-sol", {
+      input: 100_000, output: 1000, cacheRead: 60_000, cacheWrite: 30_000, total: 101_000,
+    })).toBeCloseTo(0.234, 8);
+  });
   it("keeps Anthropic cache tokens separate from input", () => {
     expect(priceUsage("anthropic", "claude-sonnet-4-5", {
       input: 100, output: 20, cacheRead: 900, cacheWrite: 0, total: 1020,
