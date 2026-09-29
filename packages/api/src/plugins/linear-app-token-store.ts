@@ -8,7 +8,8 @@
  * Renewal is normal operation, not a repair: every token expires. A failed
  * renewal stamps `metadata.refreshFailedAt` and returns the stored row, the
  * same contract as `OAuthRefreshingCredentialStore`, so the caller gets
- * Linear's own 401.
+ * Linear's own 401. Reads skip renewal for `RETRY_AFTER_FAILURE_MS` after a
+ * failure, and saving the app again in settings clears the stamp.
  *
  * Only org-owned rows marked `metadata.grant = "client_credentials"` are
  * touched. Personal and team `linear` rows are MCP OAuth credentials and
@@ -26,6 +27,11 @@ import {
  * slow or failed renewal from reaching callers as an expired token. */
 const RENEW_BUFFER_MS = 24 * 60 * 60 * 1000;
 
+/** After a failed renewal, reads return the stored row without calling Linear
+ * until this window passes. Without it, every credential read during a Linear
+ * outage or after a bad secret made another token request. */
+const RETRY_AFTER_FAILURE_MS = 5 * 60 * 1000;
+
 interface Deps {
   env: NodeJS.ProcessEnv;
   now?: () => number;
@@ -34,6 +40,8 @@ interface Deps {
 function needsRenewal(owner: CredentialOwner, service: string, stored: StoredCredential | null, now: number): boolean {
   if (!stored || owner.type !== "org" || service !== LINEAR_CREDENTIAL_SERVICE) return false;
   if (stored.metadata?.grant !== LINEAR_CLIENT_CREDENTIALS_GRANT) return false;
+  const failedAt = stored.metadata.refreshFailedAt;
+  if (typeof failedAt === "number" && now - failedAt < RETRY_AFTER_FAILURE_MS) return false;
   const expiresAt = stored.metadata.tokenExpiresAt;
   return typeof expiresAt !== "number" || expiresAt - now < RENEW_BUFFER_MS;
 }

@@ -55,6 +55,18 @@ describe("LinearAppTokenStore", () => {
     expect((await inner.get(ORG, "linear"))?.metadata?.refreshFailedAt).toBe(NOW);
   });
 
+  it("does not call Linear again until the retry window after a failed renewal", async () => {
+    let now = NOW;
+    const { inner, f } = await setup(NOW - 1, { oauthToken: () => ({ status: 401, body: { error: "invalid_client" } }) });
+    const store = new LinearAppTokenStore(inner, { env: { LINEAR_API_URL: f.url }, now: () => now });
+    await store.get(ORG, "linear");
+    await store.get(ORG, "linear");
+    expect(f.calls).toHaveLength(1);
+    now += 5 * 60 * 1000;
+    await store.get(ORG, "linear");
+    expect(f.calls).toHaveLength(2);
+  });
+
   it("leaves personal Linear rows and rows from the older OAuth flow alone", async () => {
     const { store, inner, f } = await setup(NOW + 10 * DAY);
     const user: CredentialOwner = { type: "user", id: "u1" };
