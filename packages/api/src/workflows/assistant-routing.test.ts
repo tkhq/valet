@@ -2,7 +2,7 @@ import type { PluginActionContext } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { assistants, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { workflowsActionPlugin } from "./actions.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
 import { copyWorkflowDefinition, createWorkflowDefinition, retryWorkflowRun, startWorkflowRun, updateWorkflowDefinition } from "./service.js";
@@ -300,6 +300,25 @@ describe("workflow workspace routing", () => {
       ownerHint: { ownerType: "team", ownerId: "team-a" },
     });
     expect(receipt.threadId).toBeTruthy();
+  });
+
+  it("records the runtime session when a workflow Thread step wakes a team first", async () => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, { name: "First wake", teamId: "team-a", definition: graph });
+    vi.spyOn(p.workflowRunHost, "start").mockImplementation(async (id, params, definition, runOwner) => {
+      await p.workflowStore.createRun(id, params, definition, params.definitionVersionId, runOwner);
+    });
+    const started = await startWorkflowRun(deps, owner, created.id);
+    if (!started || !("runId" in started)) throw new Error("Run not started");
+    expect(await p.db.select().from(agentSessions).where(eq(agentSessions.id, "assistant:default-a"))).toHaveLength(0);
+
+    const engine = buildWorkflowEngineDeps({ db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials });
+    const receipt = await engine.promptOrchestrator("hello", { dispatchId: `workflow:${started.runId}:one`, queueMode: "followup", ownerHint: { ownerType: "team", ownerId: "team-a" } });
+
+    const [row] = await p.db.select().from(agentSessions).where(eq(agentSessions.id, "assistant:default-a"));
+    expect(row).toMatchObject({ ownerType: "team", ownerId: "team-a", orgId: "local-org", status: "active" });
+    const thread = await fetch(`${api!.baseUrl}/api/threads/${receipt.threadId}`);
+    expect(thread.status).toBe(200);
   });
 
   it("routes every node and repair to the owning workspace and preserves the manual actor", async () => {

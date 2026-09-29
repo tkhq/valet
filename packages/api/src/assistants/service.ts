@@ -152,7 +152,10 @@ export async function ensureDefaultAssistantSession(
   return ensureAssistantSession(deps, assistant, meta);
 }
 
-/** Materialize the workspace runtime and its API session record on first use. */
+/** Materialize the workspace runtime and its API session record on first use.
+ * Exported as `ensureAssistantRuntime` for callers that already hold the row,
+ * such as a workflow Thread step. */
+export { ensureAssistantSession as ensureAssistantRuntime };
 async function ensureAssistantSession(
   deps: { db: AppDb; engineHost: EngineHost },
   assistant: AssistantRow,

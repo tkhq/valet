@@ -66,6 +66,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   ArchivedAssistantError,
+  ensureAssistantRuntime,
   loadAssistant,
   loadAssistantBySessionId,
   resolveDefaultAssistant,
@@ -505,10 +506,13 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           !(await isTeamMember(opts.db, principal.id, ctx.actorUserId))) {
         throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
       }
-      const session = await opts.host.assistantSessionFor(
-        assistant.id,
+      // Through the shared helper, so a runtime first woken by a workflow
+      // gets the same API session record as one opened by a person. Without
+      // it, the run's threads and artifact publishing report "not found".
+      const { session } = await ensureAssistantRuntime(
+        { db: opts.db, engineHost: opts.host },
+        assistant,
         { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
-        { sessionId: assistant.sessionId },
       );
       // One thread per run. A thread is the engine's unit of serial
       // execution and of abort: a shared thread makes one run's approval
