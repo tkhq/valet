@@ -52,9 +52,27 @@ Final Linear security regression tests passed (64 tests), and a forced TypeScrip
 
 ## Deployment
 
-Railway builds the committed snapshot with the shared API Dockerfile and a service-specific cache ID.
 A clean production build found an undeclared `zod` import in the web package.
 The web package now declares this dependency directly; existing local dependencies had concealed the missing declaration.
+
+## Upgrade from dev-v2
+
+A database from the multi-assistant model boots and keeps working. Each item below has a regression test.
+
+| Stored state before upgrade | Handling |
+| --- | --- |
+| Several assistant rows for one owner | The singleton cutover keeps one row (live first, then the old default, then the newest) and moves the others to a `<owner>:retired:<id>` owner key. No row or history is deleted. |
+| Only an archived row for a user, team, or org that still exists | The cutover and `resolveDefaultAssistant` restore it. An archived row whose team is gone stays retired, because team teardown deletes the team row in the same transaction. |
+| Event rule targets with `assistantId` | Boot strips the field. PATCH drops it before validation and accepts `assistantId: null` as a clear, so these rules can be edited and disabled. |
+| Workflows with `orchestrator` steps or a top-level `assistantId` | Boot rewrites stored definitions, versions, run snapshots, and saved templates with `normalizeLegacyDefinition` (`orchestrator` becomes `thread`, same fields). New writes keep the current rules: the retired `orchestrator` type and an explicit `assistantId` are refused. |
+| Team members before `team_dm` existed | The `team_dm` column repair turns team DM copies on for every kind for members present at upgrade. Later members start with the opt-in default. |
+
+Two behavior changes are intentional and need a release note:
+
+- `follow: true` now binds a reply thread only for `slack.app_mention` deliveries. A stored `slack.message` rule with `follow: true` receives only the replies that match its own filters. The earlier behavior delivered each matching reply twice. Existing follow bindings remain. The web UI never created this combination; find API-created rows with `target->>'follow' = 'true'` and `event_keys` containing `slack.message` but not `slack.app_mention`.
+- Subscriptions, follow bindings, and workflows no longer select an assistant. Each workspace has one.
+
+A workflow Thread step that is the first activity in a team now records the runtime's API session, so the run's threads and artifact publishing work before anyone opens the workspace.
 
 ## Evidence boundaries
 
