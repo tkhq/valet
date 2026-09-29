@@ -406,11 +406,3 @@ The live Kubernetes image-build smoke test uses a Git-capable base image and a
 unique resource ID for each run. It requires the image to reach `pushed`; a
 terminal failure no longer counts as success. This catches broken build execution
 instead of only checking that polling terminates.
-
-Railway server deployment uses the same API image, one replica, and an HTTP
-readiness gate through `railway.json`. It does not replace local test backends
-or add a new sandbox provider.
-
-The Railway deployment helper exports a committed Git snapshot and scopes its
-pnpm cache mount to the selected Railway service. Application sources remain
-identical to the selected revision; local builds keep their existing cache ID.
