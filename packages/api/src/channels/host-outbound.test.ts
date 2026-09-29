@@ -1413,6 +1413,18 @@ describe("ChannelHost outbound delivery", () => {
     };
   }
 
+  it("keeps a posted card usable when saving its callback reference fails", async () => {
+    vi.spyOn(engineStore, "getDecisionGate").mockImplementation(async (sessionId, gateId) => ({
+      id: gateId, sessionId, threadId: "t", queueItemId: "qi", resumeKey: "rk", ordinal: 1, type: "approval",
+      title: "Approve the thing?", actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending", createdAt: 1, updatedAt: 1,
+    }));
+    const save = vi.spyOn(engineStore, "saveDecisionGateRef").mockRejectedValue(new Error("database unavailable"));
+    const { gateId, ref } = await openChannelGate();
+    await vi.waitFor(() => expect(save).toHaveBeenCalled());
+    expect(host.gateForRef(ref)).toMatchObject({ gateId });
+  });
+
   it("a withdrawn gate clears its card instead of leaving live buttons", async () => {
     const { sessionId, threadId, gateId, ref } = await openChannelGate();
     expect(host.gateForRef(ref)).toMatchObject({ gateId });

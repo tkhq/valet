@@ -1070,14 +1070,21 @@ export class ChannelHost {
       ...prompt,
       ...(sender !== undefined ? { sender } : {}),
     });
-    const gate = await this.deps.engineStore.getDecisionGate(sessionId, prompt.gateId);
-    if (gate) {
-      await this.deps.engineStore.saveDecisionGateRef(sessionId, gate.threadId, gate.id, {
-        channelType: transport.channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
-      });
-    }
+    // The card is live once sent, so this host records its callback address
+    // first. The saved ref only lets a restarted host restore the address; a
+    // failed save costs that restore, not the buttons on this host.
     this.gateActions.set(prompt.gateId, prompt.actions);
     this.recordGatePrompt(prompt.gateId, ref, sessionId);
+    try {
+      const gate = await this.deps.engineStore.getDecisionGate(sessionId, prompt.gateId);
+      if (gate) {
+        await this.deps.engineStore.saveDecisionGateRef(sessionId, gate.threadId, gate.id, {
+          channelType: transport.channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
+        });
+      }
+    } catch (err) {
+      console.error(`[channels] could not save the callback reference for gate ${prompt.gateId}; the card works until this host restarts`, err);
+    }
     const settled = this.settledGates.get(prompt.gateId);
     if (settled) {
       await this.deliverGateResolution(prompt.gateId, settled);
