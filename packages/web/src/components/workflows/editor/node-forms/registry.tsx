@@ -47,7 +47,7 @@ export function NodeForm({
       return <ForeachForm node={node} onChange={onChange} />;
     case "llm":
       return <LlmForm node={node} onChange={onChange} />;
-    case "thread":
+    case "orchestrator":
       return <ThreadForm node={node} onChange={onChange} />;
     case "tool":
       return <ToolForm node={node} onChange={onChange} />;

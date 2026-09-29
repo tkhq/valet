@@ -37,7 +37,7 @@ async function claimAttempt(store: InMemoryWorkflowStore, runId: string, ownerId
 function threadDefinition(node: Partial<ThreadNode> = {}): WorkflowDefinition {
   const orchestrator: ThreadNode = {
     id: 'o',
-    type: 'thread',
+    type: 'orchestrator',
     prompt: 'do the thing for {{trigger.data.thing}}',
     ...node,
   };

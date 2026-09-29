@@ -11,7 +11,7 @@ const FOREACH_BODY_TYPES: ForeachBodyNode["type"][] = [
   "llm",
   "tool",
   "set",
-  "thread",
+  "orchestrator",
   "session",
   "workflow",
 ];
@@ -75,8 +75,8 @@ function defaultForeachBody(type: ForeachBodyNode["type"], id: string): ForeachB
       return { id, type: "tool", service: "", action: "", params: {} };
     case "set":
       return { id, type: "set", values: {} };
-    case "thread":
-      return { id, type: "thread", prompt: "" };
+    case "orchestrator":
+      return { id, type: "orchestrator", prompt: "" };
     case "session":
       return { id, type: "session", mode: "start", prompt: "" };
     case "workflow":
@@ -136,7 +136,7 @@ function BodyNodeForm({
       return <ToolForm node={node} onChange={onChange} allowOnError={false} />;
     case "set":
       return <SetForm node={node} onChange={onChange} />;
-    case "thread":
+    case "orchestrator":
       return <ThreadForm node={node} onChange={onChange} />;
     case "session":
       return <SessionForm node={node} onChange={onChange} />;

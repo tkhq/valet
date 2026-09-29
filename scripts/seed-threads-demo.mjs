@@ -53,7 +53,7 @@ if (mode === 'bootstrap') {
       version: 'dag/v1',
       nodes: [
         { id: 'start', type: 'trigger' },
-        { id: 'check', type: 'thread', prompt: 'Local workspace routing check. Reply exactly: team-workflow-check-ok. Do not call tools.', wait: { mode: 'until_idle' } },
+        { id: 'check', type: 'orchestrator', prompt: 'Local workspace routing check. Reply exactly: team-workflow-check-ok. Do not call tools.', wait: { mode: 'until_idle' } },
         { id: 'done', type: 'stop', outcome: 'success' },
       ],
       edges: [{ from: 'start', to: 'check' }, { from: 'check', to: 'done' }],

@@ -78,7 +78,7 @@ export function collectNodeTemplateSources(node: WorkflowNode): NodeTemplateSour
       addSource(out, 'prompt', node.prompt);
       addSource(out, 'system', node.system);
       break;
-    case 'thread':
+    case 'orchestrator':
       addSource(out, 'prompt', node.prompt);
       break;
     case 'tool':

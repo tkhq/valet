@@ -6,6 +6,14 @@ older binaries can still read them. New singleton identities default to the lega
 default flag. Both the workspace uniqueness index and legacy default index remain.
 Duplicate profiles cause upgrade to reject without deleting history.
 
+Stored workflows keep the dev-v2 step type `orchestrator`, which the app labels
+"Thread", so dev-v2 can validate and run them after a rollback or during a
+rolling update. Boot removes only the top-level `assistantId`, which dev-v2 reads
+as the owner's default. If an older pod writes `assistantId` during a rolling
+update, runs are not affected, because run paths do not validate the stored
+definition. Editing tools on the new binary refuse that workflow until the next
+boot removes the field.
+
 Run `mise x node@22 -- node scripts/rollback/check-thread-rollback.mjs`.
 The default baseline is `d3e9ede2e7788314dcbd319bfa9aaaa343d21b6a`.
 The harness compiles actual migration, store, and routing code from the baseline

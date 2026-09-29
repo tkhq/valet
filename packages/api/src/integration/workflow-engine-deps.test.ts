@@ -202,7 +202,7 @@ it("Thread nodes share context within a run, isolate separate runs, and expose d
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "repeated-thread-e2e", definition: {
         version: "dag/v1",
-        nodes: [{ id: "trigger", type: "trigger" }, { id: "ask", type: "thread", prompt: "Complete this workflow." }, { id: "review", type: "thread", prompt: "Continue working in {{nodes.ask.result.threadId}}." }, { id: "stop", type: "stop" }],
+        nodes: [{ id: "trigger", type: "trigger" }, { id: "ask", type: "orchestrator", prompt: "Complete this workflow." }, { id: "review", type: "orchestrator", prompt: "Continue working in {{nodes.ask.result.threadId}}." }, { id: "stop", type: "stop" }],
         edges: [{ from: "trigger", to: "ask" }, { from: "ask", to: "review" }, { from: "review", to: "stop" }],
       } }),
     });

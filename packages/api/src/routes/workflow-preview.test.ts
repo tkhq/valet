@@ -121,7 +121,7 @@ const EFFECTFUL_DEFINITION = {
   nodes: [
     { id: "trigger", type: "trigger", dataSchema: { topic: { type: "string" } } },
     { id: "draft", type: "llm", model: MODEL, prompt: "Write about {{trigger.data.topic}}" },
-    { id: "hand-off", type: "thread", prompt: "Review: {{nodes.draft.result.response}}" },
+    { id: "hand-off", type: "orchestrator", prompt: "Review: {{nodes.draft.result.response}}" },
   ],
   edges: [
     { from: "trigger", to: "draft" },
@@ -233,18 +233,19 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
     expect(draft.outputShape.paths).toContain("nodes.draft.result.text");
   });
 
-  it("rejects the retired orchestrator node type on workflow creation", async () => {
+  it("stores the Thread step as orchestrator, the type an older binary can run", async () => {
     api = await bootTestApi();
-    const response = await fetch(`${api.baseUrl}/api/workflows`, {
+    const create = (type: string) => fetch(`${api!.baseUrl}/api/workflows`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Retired node", definition: {
+      body: JSON.stringify({ name: `Step ${type}`, definition: {
         version: "dag/v1",
-        nodes: [{ id: "start", type: "trigger" }, { id: "old", type: "orchestrator", prompt: "hello" }],
-        edges: [{ from: "start", to: "old" }],
+        nodes: [{ id: "start", type: "trigger" }, { id: "ask", type, prompt: "hello" }],
+        edges: [{ from: "start", to: "ask" }],
       } }),
     });
-    expect(response.status).toBe(400);
+    expect((await create("orchestrator")).status).toBe(201);
+    expect((await create("thread")).status).toBe(400);
   });
 
   it("describes a thread node and still reports its unresolved paths", async () => {
@@ -268,7 +269,7 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
       version: "dag/v1",
       nodes: [
         { id: "trigger", type: "trigger" },
-        { id: "kick", type: "thread", prompt: "go", wait: { mode: "none" } },
+        { id: "kick", type: "orchestrator", prompt: "go", wait: { mode: "none" } },
       ],
       edges: [{ from: "trigger", to: "kick" }],
     };

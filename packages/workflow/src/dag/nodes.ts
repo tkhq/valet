@@ -122,7 +122,7 @@ export interface LlmNode {
 // Thread node — trimmed per decision 1 (same trims as SessionNode).
 export interface ThreadNode {
   id: string;
-  type: 'thread';
+  type: 'orchestrator';
   prompt: string;
   outputSchema?: Record<string, unknown>;
   wait?: {

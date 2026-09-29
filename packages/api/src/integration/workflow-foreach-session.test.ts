@@ -268,7 +268,7 @@ describe("api integration: foreach with an orchestrator body", () => {
     const { park, engineStore, workflowStore, db } = await driveForeachRun({
       workflowId: "wf_foreach_orch",
       runId,
-      body: { id: "ask", type: "thread", prompt: "Handle {{item}}.", wait: { mode: "none" } },
+      body: { id: "ask", type: "orchestrator", prompt: "Handle {{item}}.", wait: { mode: "none" } },
     });
 
     expect(park.status).toBe("settled");

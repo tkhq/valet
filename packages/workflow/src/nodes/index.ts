@@ -182,7 +182,7 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     session: { execute: executeSession },
     llm: { execute: executeLlm },
     tool: { execute: executeTool },
-    thread: { execute: executeThread },
+    orchestrator: { execute: executeThread },
     foreach: { execute: executeForeach },
     workflow: { execute: executeWorkflowCall },
   };

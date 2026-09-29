@@ -47,7 +47,7 @@ export interface SubmissionNodeContext {
 }
 
 export interface SubmissionNodeHooks<TDispatched, TSettled> {
-  /** Short label for error messages ("session" | "thread"). */
+  /** Short label for error messages ("session" | "orchestrator"). */
   nodeKind: string;
   /** `workflow:{runId}:{nodeId}[:{iteration}]` — the primary submission's dispatchId (repairs append `:repair`). */
   dispatchId: string;

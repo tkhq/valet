@@ -61,10 +61,10 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
   });
 
-  it("rewrites stored workflows that use orchestrator steps or assistantId", async () => {
+  it("rewrites stored workflows that use thread steps or assistantId", async () => {
     const legacy = JSON.stringify({ version: "dag/v1", assistantId: "asst_old",
-      nodes: [{ id: "o", type: "orchestrator", prompt: "hi" }], edges: [] });
-    const current = JSON.stringify({ version: "dag/v1", nodes: [{ id: "t", type: "thread", prompt: "hi" }], edges: [] });
+      nodes: [{ id: "o", type: "thread", prompt: "hi" }], edges: [] });
+    const current = JSON.stringify({ version: "dag/v1", nodes: [{ id: "t", type: "orchestrator", prompt: "hi" }], edges: [] });
     await db.query(`INSERT INTO workflow_definitions(id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
       VALUES ('wf-legacy', 'wf-org', 'user', 'u', 'legacy', $1, 1, 1), ('wf-current', 'wf-org', 'user', 'u', 'current', $2, 1, 1)`, [legacy, current]);
     await db.query(`INSERT INTO workflow_versions(id, workflow_id, version, name, definition, created_at) VALUES ('wv-legacy', 'wf-legacy', 1, 'legacy', $1, 1)`, [legacy]);
@@ -74,7 +74,7 @@ describe("workspace singleton repair on an already migrated database", () => {
       VALUES ('tpl-legacy', 'wf-org', 'user', 'u', 't', 'p', $1, 1, 1)`, [JSON.stringify({ id: "t", name: "T", definition: JSON.parse(legacy) })]);
     await normalizeLegacyWorkflowDefinitions(db);
     await normalizeLegacyWorkflowDefinitions(db);
-    const expected = { version: "dag/v1", nodes: [{ id: "o", type: "thread", prompt: "hi" }], edges: [] };
+    const expected = { version: "dag/v1", nodes: [{ id: "o", type: "orchestrator", prompt: "hi" }], edges: [] };
     for (const [table, id] of [["workflow_definitions", "wf-legacy"], ["workflow_versions", "wv-legacy"], ["workflow_runs", "run-legacy"]]) {
       expect((await db.query(`SELECT definition FROM ${table} WHERE id = $1`, [id])).rows[0]).toEqual({ definition: expected });
     }

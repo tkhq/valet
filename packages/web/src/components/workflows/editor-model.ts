@@ -181,10 +181,10 @@ export const NODE_META: Record<DagNodeType, NodeMeta> = {
     description: 'Generate or transform text with a model',
     defaultNode: (id): LlmNode => ({ id, type: 'llm', model: '', prompt: '' }),
   },
-  thread: {
+  orchestrator: {
     label: 'Thread',
     description: 'Ask the workspace assistant to work in this workflow’s thread',
-    defaultNode: (id): ThreadNode => ({ id, type: 'thread', prompt: '' }),
+    defaultNode: (id): ThreadNode => ({ id, type: 'orchestrator', prompt: '' }),
   },
   tool: {
     label: 'Tool',
@@ -206,7 +206,7 @@ export const ADDABLE_NODE_TYPES: AddableDagNodeType[] = [
   'approval',
   'wait',
   'set',
-  'thread',
+  'orchestrator',
   'session',
   'workflow',
   'stop',
@@ -949,7 +949,7 @@ function summarizeNode(node: WorkflowNode): string {
       return trimSummary(node.items || 'No item expression configured');
     case 'llm':
       return trimSummary(node.prompt || node.model || 'No prompt configured');
-    case 'thread':
+    case 'orchestrator':
       return trimSummary(node.prompt || 'No prompt configured');
     case 'tool':
       return trimSummary(node.service && node.action ? `${node.service}.${node.action}` : 'No action configured');

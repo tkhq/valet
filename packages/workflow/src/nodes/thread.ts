@@ -1,5 +1,7 @@
 /**
- * `thread` node executor (node-completion plan decision 5). Mirrors
+ * `orchestrator` node executor (node-completion plan decision 5). The app
+ * labels the step "Thread"; the stored type stays `orchestrator` so an older
+ * binary can still run the workflow. Mirrors
  * the `session` executor's shape with `engine.promptOrchestrator` standing
  * in for `createSession` + `prompt`: dispatch a followup to the run
  * owner's orchestrator session, optionally park behind it, and on
@@ -81,7 +83,7 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
   return await executeSubmissionNode<ThreadDispatchedResult, ThreadSettledResult>(
     { run, nodeId: node.id, attempt, iteration, store, clock, engine, existingCheckpoint },
     {
-      nodeKind: 'thread',
+      nodeKind: 'orchestrator',
       dispatchId,
       initialEffects: {},
       waitMode: node.wait?.mode,

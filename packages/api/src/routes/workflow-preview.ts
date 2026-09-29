@@ -469,10 +469,10 @@ export function staticShape(node: WorkflowNode): PreviewOutputShape {
       };
     }
     case "session":
-    case "thread": {
+    case "orchestrator": {
       const dispatchOnly = node.wait?.mode === "none";
-      const threadFields = node.type === "thread" ? { threadId: "thr_..." } : {};
-      const threadPaths = node.type === "thread" ? [`${root}.threadId`] : [];
+      const threadFields = node.type === "orchestrator" ? { threadId: "thr_..." } : {};
+      const threadPaths = node.type === "orchestrator" ? [`${root}.threadId`] : [];
       if (dispatchOnly) {
         return {
           origin: "known",
@@ -566,7 +566,7 @@ function describedReason(node: WorkflowNode): string {
       return `Running this would call ${node.service}.${node.action} for real.`;
     case "session":
       return "Running this would start a session.";
-    case "thread":
+    case "orchestrator":
       return "Running this would send a prompt to the workspace thread.";
     case "workflow":
       return "Running this would start a child run.";
@@ -612,7 +612,7 @@ function collectWarnings(node: WorkflowNode, ctx: TemplateContext, sample: Sampl
       }
     }
   }
-  if ((node.type === "session" || node.type === "thread") && node.wait?.mode === "none") {
+  if ((node.type === "session" || node.type === "orchestrator") && node.wait?.mode === "none") {
     warnings.push(
       "wait.mode is 'none', so this node does not wait for the session. Downstream reads of `response` resolve to nothing.",
     );

@@ -70,7 +70,7 @@ describe('NODE_META default nodes', () => {
   it('produces a defaultNode for every addable type plus trigger', () => {
     const types = Object.keys(NODE_META).sort();
     expect(types).toEqual(
-      ['approval', 'foreach', 'if', 'llm', 'thread', 'session', 'set', 'stop', 'tool', 'trigger', 'wait', 'workflow'].sort(),
+      ['approval', 'foreach', 'if', 'llm', 'orchestrator', 'session', 'set', 'stop', 'tool', 'trigger', 'wait', 'workflow'].sort(),
     );
   });
 
@@ -123,12 +123,12 @@ describe('NODE_META default nodes', () => {
   it('thread default node fails validation on empty prompt only', () => {
     const definition: WorkflowDefinition = {
       version: 'dag/v1',
-      nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.thread.defaultNode('x')],
+      nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.orchestrator.defaultNode('x')],
       edges: [{ from: 'trigger', to: 'x' }],
     };
     expect(validateWorkflowDefinition(definition)).toEqual({
       ok: false,
-      errors: ['node "x": thread.prompt must be a non-empty string'],
+      errors: ['node "x": orchestrator.prompt must be a non-empty string'],
     });
   });
 
@@ -200,7 +200,7 @@ describe('toFlow / fromFlow round trip', () => {
   it('keeps a newly inserted node clear of saved positions on first load', () => {
     const definition: WorkflowDefinition = {
       version: 'dag/v1',
-      nodes: [{ id: 'trigger', type: 'trigger' }, { id: 'review', type: 'thread', prompt: 'Review' }, { id: 'stop', type: 'stop', outcome: 'success' }],
+      nodes: [{ id: 'trigger', type: 'trigger' }, { id: 'review', type: 'orchestrator', prompt: 'Review' }, { id: 'stop', type: 'stop', outcome: 'success' }],
       edges: [{ from: 'trigger', to: 'review' }, { from: 'review', to: 'stop' }],
       ui: { nodes: { trigger: { position: { x: 0, y: 0 } }, stop: { position: { x: LAYOUT_COLUMN_GAP, y: 0 } } } },
     };

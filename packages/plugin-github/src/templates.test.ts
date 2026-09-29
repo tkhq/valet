@@ -145,7 +145,7 @@ function toolNode(definition: WorkflowDefinition, id: string): ToolNode {
 
 function orchestratorNode(definition: WorkflowDefinition, id: string): ThreadNode {
   const node = definition.nodes.find(
-    (n): n is ThreadNode => n.type === "thread" && n.id === id,
+    (n): n is ThreadNode => n.type === "orchestrator" && n.id === id,
   );
   if (!node) throw new Error(`no orchestrator node "${id}"`);
   return node;

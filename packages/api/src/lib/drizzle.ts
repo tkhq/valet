@@ -134,14 +134,15 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await normalizeLegacyWorkflowDefinitions(db);
 }
 
-/** Stored workflow JSON from before workspaces had one assistant: an
- * `orchestrator` step (now `thread`, same fields) or a top-level
- * `assistantId`. The current validator and interpreter reject both, so saved
- * workflows, their versions, run snapshots, and saved templates are rewritten
- * with `normalizeLegacyDefinition`. Idempotent: the filter selects only rows
- * that still carry an old shape. */
+/** Stored workflow JSON that the current validator rejects: a `thread` step
+ * written by an earlier build of this branch (dev-v2 and this build store
+ * `orchestrator`), or a top-level `assistantId` from before workspaces had
+ * one assistant. Saved workflows, their versions, run snapshots, and saved
+ * templates are rewritten with `normalizeLegacyDefinition`, so an older
+ * binary can still read them after a rollback. Idempotent: the filter
+ * selects only rows that still carry an old shape. */
 export async function normalizeLegacyWorkflowDefinitions(db: PgDb): Promise<void> {
-  const LEGACY = (col: string) => `(${col}::text LIKE '%"orchestrator"%' OR ${col} ? 'assistantId')`;
+  const LEGACY = (col: string) => `(${col}::text LIKE '%"thread"%' OR ${col} ? 'assistantId')`;
   for (const table of ["workflow_definitions", "workflow_versions", "workflow_runs"]) {
     const rows = await db.query(`SELECT id, definition FROM ${table} WHERE ${LEGACY("definition")}`);
     for (const row of rows.rows) {
