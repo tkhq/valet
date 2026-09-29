@@ -10,7 +10,7 @@ import { relativeTime } from "~/lib/relative-time";
 import { Badge, Button, ErrorRow, LoadingRow } from "~/components/primitives";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 
-export function WorkspaceCatchUp({ owner: explicitOwner, compact = false }: { owner?: OwnerFilter; compact?: boolean }) {
+export function WorkspaceCatchUp({ owner: explicitOwner }: { owner?: OwnerFilter }) {
   const selectedOwner = useListOwner();
   const me = useMe();
   const owner = explicitOwner ?? selectedOwner;
@@ -18,10 +18,6 @@ export function WorkspaceCatchUp({ owner: explicitOwner, compact = false }: { ow
     return <ErrorRow>Could not load your workspace. Reload to try again.</ErrorRow>;
   }
   if (!owner) return <LoadingRow label="Preparing your briefing…" />;
-  if (compact) return <div className="space-y-4">
-    <div className="flex items-center justify-between"><h2 className="font-display text-lg">Needs attention</h2><Link to="/chat" search={{ view: "work", workspace: owner.ownerType === "team" ? owner.ownerId : undefined }} className="inline-flex items-center gap-1 text-sm text-moss hover:underline">View briefing <ArrowRight className="h-4 w-4" /></Link></div>
-    <WorkspaceActivity owner={owner} compact />
-  </div>;
   return <ScopedBriefings key={`${owner.ownerType}:${owner.ownerId}`} owner={owner} />;
 }
 

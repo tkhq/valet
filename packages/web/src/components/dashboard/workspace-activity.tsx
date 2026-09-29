@@ -6,19 +6,12 @@ import type { OwnerFilter } from "~/api/client";
 import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork } from "~/api/catch-up";
 import { useArtifacts } from "~/api/artifacts";
 import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
-import { useMe } from "~/api/settings";
-import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
 import { Badge, Button, ErrorRow, LoadingRow } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
 
-export function WorkspaceActivity({ owner: explicitOwner, compact = false }: { owner?: OwnerFilter; compact?: boolean }) {
-  const selectedOwner = useListOwner();
-  const me = useMe();
-  const owner = explicitOwner ?? selectedOwner;
-  if (me.error && (!owner || owner.ownerType === "user")) return <ErrorRow>Could not load your workspace. Reload to try again.</ErrorRow>;
-  if (!owner) return <LoadingRow label="Loading work…" />;
-  return <ScopedCatchUp key={`${owner.ownerType}:${owner.ownerId}`} owner={owner} compact={compact} />;
+export function WorkspaceActivity({ owner }: { owner: OwnerFilter }) {
+  return <ScopedCatchUp key={`${owner.ownerType}:${owner.ownerId}`} owner={owner} />;
 }
 
 export function safeResultUrl(value?: string): string | undefined {
@@ -57,7 +50,7 @@ function artifactResult(row: ArtifactListItem): ResultItem {
     sessionId: row.sourceSessionId ?? undefined, threadId: row.sourceThreadId ?? undefined, token: row.token };
 }
 
-function ScopedCatchUp({ owner, compact }: { owner: OwnerFilter; compact: boolean }) {
+function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   const work = useCatchUpWork(owner);
   const activeWork = useWorkspaceActiveWork(owner);
   const outcomes = useWorkspaceOutcomes(owner);
@@ -92,13 +85,6 @@ function ScopedCatchUp({ owner, compact }: { owner: OwnerFilter; compact: boolea
     { label: "workflows", query: workflows }, { label: "approval details", query: gates },
   ].filter(entry => entry.query.error);
   const incomplete = !activeWork.error && activeWork.hasNextPage;
-  if (compact) return <div className="space-y-2">
-    {errors.filter(({ label }) => ["active work", "workflows", "approval details"].includes(label)).map(({ label, query }) => <ErrorRow key={label}>Could not load {label}. <button className="underline" onClick={() => void query.refetch()}>Retry</button></ErrorRow>)}
-    {loading && <LoadingRow label="Loading work…" />}
-    {(needsYou.length > 0 || attentionRuns.length > 0) && <div className="divide-y divide-line rounded-lg border border-line">{needsYou.slice(0, 3).map(row => <ActiveRow key={row.id} row={row} />)}{attentionRuns.slice(0, Math.max(0, 3 - needsYou.length)).map(row => <RunRow key={row.runId} row={row} />)}</div>}
-    {!loading && !activeWork.error && !workflows.error && !gates.error && !needsYou.length && !attentionRuns.length && <p className="text-sm text-muted">Nothing needs your attention right now.</p>}
-    {(needsYou.length + attentionRuns.length > 3 || incomplete) && <p className="text-xs text-muted">More activity is available in your briefing.</p>}
-  </div>;
   return <div className="space-y-7">
     {errors.map(({ label, query }) => <ErrorRow key={label}>Could not load {label}. <button className="underline" onClick={() => void query.refetch()}>Retry</button></ErrorRow>)}
     {loading && <LoadingRow label="Loading work…" />}

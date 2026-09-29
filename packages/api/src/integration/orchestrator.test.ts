@@ -20,7 +20,7 @@ import { driveTurn } from "./_test-utils.js";
 import { EngineHost } from "../engine/host.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { agentSessions, assistants } from "../schema/index.js";
-import type { EnsureWorkspaceRuntimeResponse, WorkspaceRuntimeResponse } from "../wire/types.js";
+import type { EnsureWorkspaceRuntimeResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -30,22 +30,6 @@ afterEach(async () => {
 });
 
 describe("api integration: default assistant lifecycle", () => {
-  // The probe reports no session id at all before the first ensure. The id
-  // used to be derivable from the caller; it no longer is, because an
-  // assistant addresses its session by its OWN id.
-  it("GET /api/workspaces/user/runtime before any ensure reports exists: false and a null sessionId", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/workspaces/user/runtime`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as WorkspaceRuntimeResponse;
-    expect(body.exists).toBe(false);
-    expect(body.sessionId).toBeNull();
-
-    // The probe creates nothing, the assistant row included.
-    const assistantRows = await api.providers.db.select().from(assistants);
-    expect(assistantRows).toHaveLength(0);
-  });
-
   it("POST /api/workspaces/user/runtime is idempotent — two calls, one session row, one assistant row", async () => {
     api = await bootTestApi();
 
@@ -77,11 +61,6 @@ describe("api integration: default assistant lifecycle", () => {
     expect(assistantRows[0]?.ownerType).toBe("user");
     expect(assistantRows[0]?.ownerId).toBe("local-user");
     expect(await db.select().from(assistants)).toHaveLength(1);
-
-    const probe = await fetch(`${api.baseUrl}/api/workspaces/user/runtime`);
-    const probeBody = (await probe.json()) as WorkspaceRuntimeResponse;
-    expect(probeBody.exists).toBe(true);
-    expect(probeBody.sessionId).toBe(firstBody.sessionId);
   });
 
   it("ensured session is queueMode 'steer' with the memory snapshot in systemContext", async () => {

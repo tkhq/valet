@@ -54,7 +54,6 @@ import type {
   DeletePolicyOverrideResponse,
   EnsureWorkspaceRuntimeResponse,
   WorkspaceRuntimeInfoResponse,
-  WorkspaceRuntimeResponse,
   GetArtifactResponse,
   GetChangelogResponse,
   GetGithubAppResponse,
@@ -729,8 +728,6 @@ export const api = {
     request<{ sessionId: string; threadId: string }>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`),
   ensureWorkspaceRuntime: (workspace: string) =>
     request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
-  getWorkspaceRuntime: (workspace: string) =>
-    request<WorkspaceRuntimeResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
   getWorkspaceRuntimeInfo: (workspace: string) =>
     request<WorkspaceRuntimeInfoResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/runtime/info`),
   getChildWork: (sessionId: string, opts?: { cursor?: string; limit?: number }) => {

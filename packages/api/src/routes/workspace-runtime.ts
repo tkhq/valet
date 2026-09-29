@@ -2,11 +2,11 @@ import type { Principal } from "@valet/engine";
 import { and, count, eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
-import { ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant } from "../assistants/service.js";
+import { ensureDefaultAssistantSession, resolveDefaultAssistant } from "../assistants/service.js";
 import { canViewAssistantOwner } from "../assistants/access.js";
 import { childWatches } from "../schema/index.js";
 import { getTeamInOrg } from "../services/teams.js";
-import type { WorkspaceRuntimeInfoResponse, WorkspaceRuntimeResponse, EnsureWorkspaceRuntimeResponse } from "../wire/types.js";
+import type { WorkspaceRuntimeInfoResponse, EnsureWorkspaceRuntimeResponse } from "../wire/types.js";
 
 export const workspaceRuntimeRouter = new Hono<AppEnv>();
 
@@ -18,14 +18,6 @@ export async function authorizedWorkspaceOwner(c: Context<AppEnv>, workspace = c
   const allowed = await canViewAssistantOwner(db, { type: "team", id: workspace }, principal);
   return allowed ? { type: "team", id: workspace } : null;
 }
-
-workspaceRuntimeRouter.get("/:workspace/runtime", async (c) => {
-  const owner = await authorizedWorkspaceOwner(c);
-  if (!owner) return c.json({ error: "Workspace not found." }, 404);
-  const row = await findDefaultAssistant(c.var.providers.db, c.var.user.orgId, owner);
-  const body: WorkspaceRuntimeResponse = { sessionId: row?.sessionId ?? null, exists: row !== undefined };
-  return c.json(body);
-});
 
 workspaceRuntimeRouter.post("/:workspace/runtime", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);

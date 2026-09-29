@@ -842,10 +842,6 @@ export interface WorkspaceRuntimeInfoResponse {
   presence: OrchestratorPresence;
   activeChildren: number;
 }
-export interface WorkspaceRuntimeResponse {
-  sessionId: string | null;
-  exists: boolean;
-}
 export interface EnsureWorkspaceRuntimeResponse { sessionId: string; }
 
 export interface ChildWorkSummary {

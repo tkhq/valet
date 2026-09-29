@@ -209,15 +209,11 @@ describe("team API key reach", () => {
     expect(other.status).toBe(403);
     const personal = await fetch(`${f.baseUrl}/api/workspaces/user/runtime`, { method: "POST", headers });
     expect(personal.status).toBe(403);
-    const probe = await fetch(`${f.baseUrl}/api/workspaces/${f.teamId}/runtime`, { headers });
-    expect(probe.status).toBe(200);
     const info = await fetch(`${f.baseUrl}/api/workspaces/${f.teamId}/runtime/info`, { headers });
     expect(info.status).toBe(200);
     expect(await info.json()).toMatchObject({ sessionId });
     for (const workspace of ["user", otherTeamId]) {
-      for (const suffix of ["runtime", "runtime/info"]) {
-        expect((await fetch(`${f.baseUrl}/api/workspaces/${workspace}/${suffix}`, { headers })).status).toBe(403);
-      }
+      expect((await fetch(`${f.baseUrl}/api/workspaces/${workspace}/runtime/info`, { headers })).status).toBe(403);
     }
   });
 

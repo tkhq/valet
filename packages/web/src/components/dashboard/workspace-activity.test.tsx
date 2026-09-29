@@ -4,10 +4,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api, type OwnerFilter } from "~/api/client";
-import { WorkspaceActivity as WorkspaceCatchUp, safeResultUrl } from "./workspace-activity";
+import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 let owner: OwnerFilter = { ownerType: "user", ownerId: "u" };
-vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
-vi.mock("~/api/settings", () => ({ useMe: () => ({ error: null }) }));
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
 vi.mock("~/api/client", () => ({ api: { listWork: vi.fn(), listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
 beforeEach(() => {
@@ -22,7 +20,7 @@ beforeEach(() => {
 });
 function setup() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const view = render(<QueryClientProvider client={client}><WorkspaceCatchUp /></QueryClientProvider>);
+  const view = render(<QueryClientProvider client={client}><WorkspaceActivity owner={owner} /></QueryClientProvider>);
   return { client, ...view };
 }
 it("groups PRs and published files under their work with real source links", async () => {
@@ -79,7 +77,7 @@ it("resets active paging and hides previous workspace results on scope change", 
   fireEvent.click(await screen.findByRole("button", { name: "Load more active work" }));
   await waitFor(() => expect(api.listWorkspaceActiveWork).toHaveBeenCalledWith(owner, "next"));
   owner = { ownerType: "team", ownerId: "team" };
-  rerender(<QueryClientProvider client={client}><WorkspaceCatchUp /></QueryClientProvider>);
+  rerender(<QueryClientProvider client={client}><WorkspaceActivity owner={owner} /></QueryClientProvider>);
   expect(screen.queryByText("Personal item")).toBeNull();
   expect(await screen.findByText("Team item")).toBeTruthy();
   expect(api.listWorkspaceActiveWork).toHaveBeenCalledWith(owner, undefined);

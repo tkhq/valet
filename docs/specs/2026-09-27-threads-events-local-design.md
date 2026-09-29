@@ -208,15 +208,16 @@ available as the workspace overview. Removed pages have no compatibility redirec
 ### Workspace runtime cutover
 
 Personal and team views use `/api/workspaces/:workspace/runtime`. The personal
-workspace uses `user`; teams use their team ID. GET probes, POST ensures the
-singleton runtime, and GET `/info` returns presence and active child counts.
+workspace uses `user`; teams use their team ID. POST ensures the singleton
+runtime, and GET `/info` returns presence and active child counts.
 Runtime access follows workspace membership. Team API keys can access only their
 own team. Explicit team views never query personal runtime presence.
 
-The assistant list API and client caches are removed. Runtime rows retain only
-identity, ownership, lifecycle timestamps, and their session address. The migration
-drops profile name, avatar, personality, behavior, model, and reasoning columns.
-It preserves runtime IDs and conversation history.
+The assistant list API and client caches are removed. The application model of a
+runtime row holds only identity, ownership, lifecycle timestamps, and its session
+address. The profile name, avatar, personality, behavior, model, and reasoning
+columns stay in SQL for bounded rollback, and current code never reads or writes
+them. Runtime IDs and conversation history are preserved.
 
 Execution uses personal or team model and reasoning defaults. Organization model
 tiers, reasoning caps, credentials, and action policy still apply. Owner memory
