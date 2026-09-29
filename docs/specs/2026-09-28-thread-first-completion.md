@@ -65,12 +65,14 @@ A database from the multi-assistant model boots and keeps working. Each item bel
 | Only an archived row for a user, team, or org that still exists | The cutover and `resolveDefaultAssistant` restore it. An archived row whose team is gone stays retired, because team teardown deletes the team row in the same transaction. |
 | Event rule targets with `assistantId` | Boot strips the field. PATCH drops it before validation and accepts `assistantId: null` as a clear, so these rules can be edited and disabled. |
 | Workflows with `orchestrator` steps or a top-level `assistantId` | Boot rewrites stored definitions, versions, run snapshots, and saved templates with `normalizeLegacyDefinition` (`orchestrator` becomes `thread`, same fields). New writes keep the current rules: the retired `orchestrator` type and an explicit `assistantId` are refused. |
+| In-flight workflow runs started from a chat with a retired assistant | The next Thread step reports on the run's own thread in the workspace runtime. The retired chat does not receive the report. |
 | Team members before `team_dm` existed | The `team_dm` column repair turns team DM copies on for every kind for members present at upgrade. Later members start with the opt-in default. |
 
-Two behavior changes are intentional and need a release note:
+These behavior changes are intentional and need a release note:
 
 - `follow: true` now binds a reply thread only for `slack.app_mention` deliveries. A stored `slack.message` rule with `follow: true` receives only the replies that match its own filters. The earlier behavior delivered each matching reply twice. Existing follow bindings remain. The web UI never created this combination; find API-created rows with `target->>'follow' = 'true'` and `event_keys` containing `slack.message` but not `slack.app_mention`.
 - Subscriptions, follow bindings, and workflows no longer select an assistant. Each workspace has one.
+- Conversations with a retired assistant stay in the database, but the app cannot show them. No thread list includes them, and an archived assistant's session never wakes to serve its messages. A followed Slack thread that was bound to a retired assistant continues in the workspace runtime without the earlier conversation.
 
 A workflow Thread step that is the first activity in a team now records the runtime's API session, so the run's threads and artifact publishing work before anyone opens the workspace.
 

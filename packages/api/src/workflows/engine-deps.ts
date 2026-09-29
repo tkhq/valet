@@ -492,17 +492,25 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // here failed every orchestrator node of every run such a thread
       // started. The lookup is by session id, so the loaded row always
       // carries the origin's own session id.
-      const assistant = ctx.origin
+      //
+      // An origin whose assistant is archived cannot take the report. The
+      // singleton cutover archives every extra assistant a dev-v2 owner had,
+      // and a run started from one of those chats is still in flight. The
+      // run reports on its own thread in the workspace runtime instead, the
+      // same fallback `activeWorkflowOrigin` applies when a run starts.
+      const originAssistant = ctx.origin
         ? await loadAssistantBySessionId(opts.db, ctx.origin.assistantSessionId)
-        : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+        : undefined;
+      const origin = originAssistant?.archivedAt === null ? ctx.origin : undefined;
+      const assistant = origin ? originAssistant : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
       const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
       const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
       if (!assistant || assistant.orgId !== ctx.orgId ||
-          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor))) {
+          (!assistantOwnsRun && !(origin && assistantOwnsActor))) {
         throw new Error("Workflow orchestrator is unavailable. Open the workflow from its owning workspace and retry.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
-      if (ctx.origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
+      if (origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
           !(await isTeamMember(opts.db, principal.id, ctx.actorUserId))) {
         throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
       }
@@ -521,12 +529,12 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // archives the thread when the run settles, so the sidebar does not
       // fill up. An attended run reports into the thread it was started
       // from instead.
-      const thread = ctx.origin
-        ? session.threadById(ctx.origin.threadId)
+      const thread = origin
+        ? session.threadById(origin.threadId)
         : session.thread(workflowRunThreadKey(runId));
       if (!thread) {
         throw new Error(
-          `Workflow origin thread ${ctx.origin?.threadId} is missing from session ${session.id}. ` +
+          `Workflow origin thread ${origin?.threadId} is missing from session ${session.id}. ` +
             "Start a new run from an active assistant thread.",
         );
       }

@@ -261,6 +261,29 @@ describe("workflow workspace routing", () => {
     expect(receipt.threadId).not.toBe(thread.id);
   });
 
+  it("reports an in-flight run from a retired assistant on the workspace runtime", async () => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, { name: "Retired origin", definition: graph });
+    // What the singleton cutover leaves for a dev-v2 user's second assistant.
+    await p.db.insert(assistants).values({ id: "second", orgId: "local-org", ownerType: "user",
+      ownerId: "local-user:retired:second", sessionId: "assistant:second", archivedAt: 2, createdAt: 1 });
+    const runId = "wfrun_retired_origin";
+    await p.workflowStore.createRun(runId, {
+      workflowId: created.id, definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-09-29T00:00:00.000Z", data: {}, metadata: {} },
+      origin: { assistantSessionId: "assistant:second", threadId: "th-second" },
+    }, graph, "v1", { ownerType: "user", ownerId: "local-user" });
+    const engine = buildWorkflowEngineDeps({
+      db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore,
+      actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials,
+    });
+    const receipt = await engine.promptOrchestrator("next step", {
+      dispatchId: `workflow:${runId}:node`, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: "local-user" },
+    });
+    expect(receipt.sessionId).toBe("assistant:personal");
+  });
+
   it("retries a run whose origin thread is gone, without the origin", async () => {
     const { p, deps } = await setup();
     const created = await createWorkflowDefinition(deps, owner, {
