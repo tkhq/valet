@@ -41,6 +41,7 @@ export {
 export type { TemplateContext } from './dag/expression.js';
 
 export { normalizeIfOperation, isIfOperationSupported, allowedIfOperations } from './dag/if-operations.js';
+export { normalizeLegacyDefinition } from './dag/legacy.js';
 export type { IfDataType } from './dag/if-operations.js';
 
 export { parseDurationMs } from './dag/duration.js';

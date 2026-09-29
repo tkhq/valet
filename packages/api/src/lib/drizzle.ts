@@ -21,6 +21,7 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Pool } from "pg";
 import { applyEngineMigrations, isPgLockTimeout, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync } from "node:fs";
+import { normalizeLegacyDefinition } from "@valet/workflow";
 import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-member-activity.js";
 import { prepareAuxUsageRollups, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
@@ -130,6 +131,37 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await addColumnsMissingFromAppliedMigrations(db);
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
+  await normalizeLegacyWorkflowDefinitions(db);
+}
+
+/** Stored workflow JSON from before workspaces had one assistant: an
+ * `orchestrator` step (now `thread`, same fields) or a top-level
+ * `assistantId`. The current validator and interpreter reject both, so saved
+ * workflows, their versions, run snapshots, and saved templates are rewritten
+ * with `normalizeLegacyDefinition`. Idempotent: the filter selects only rows
+ * that still carry an old shape. */
+export async function normalizeLegacyWorkflowDefinitions(db: PgDb): Promise<void> {
+  const LEGACY = (col: string) => `(${col}::text LIKE '%"orchestrator"%' OR ${col} ? 'assistantId')`;
+  for (const table of ["workflow_definitions", "workflow_versions", "workflow_runs"]) {
+    const rows = await db.query(`SELECT id, definition FROM ${table} WHERE ${LEGACY("definition")}`);
+    for (const row of rows.rows) {
+      const next = normalizeLegacyDefinition(row.definition);
+      if (next !== row.definition) {
+        await db.query(`UPDATE ${table} SET definition = $1 WHERE id = $2`, [JSON.stringify(next), row.id]);
+      }
+    }
+  }
+  const templates = await db.query(`SELECT id, template FROM workflow_templates WHERE ${LEGACY("(template->'definition')")}`);
+  for (const row of templates.rows) {
+    const template = row.template;
+    if (typeof template !== "object" || template === null || Array.isArray(template)) continue;
+    const definition = "definition" in template ? template.definition : undefined;
+    const next = normalizeLegacyDefinition(definition);
+    if (next !== definition) {
+      await db.query("UPDATE workflow_templates SET template = $1 WHERE id = $2",
+        [JSON.stringify({ ...template, definition: next }), row.id]);
+    }
+  }
 }
 
 /** Workspaces now have one assistant, so a subscription target no longer
