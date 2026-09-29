@@ -1,9 +1,11 @@
-# XORS deployment: deploy dev-v2 to the Hetzner server that runs valet.xors.xyz.
+# XORS deployment: build dev-v2 in CI and install it on the Hetzner server
+# that runs valet.xors.xyz.
 #
-# The runner builds nothing. It streams the commit's source to the server,
-# where the deploy key is locked to /usr/local/bin/valet-deploy. That script
-# builds beside the running version, swaps only after a successful build, and
-# restores the previous version if the new one is not ready in 120 seconds.
+# The server never builds. This job builds the API bundle (with the web app)
+# and, only when its inputs change, the sandbox image. Both stream to the
+# server over the deploy key, which is locked to /usr/local/bin/valet-deploy.
+# That script loads the artifacts, restarts Valet, and restores the previous
+# version if the new one is not ready in 120 seconds.
 #
 # Secrets: XORS_DEPLOY_SSH_KEY (deploy key), XORS_DEPLOY_KNOWN_HOSTS (pinned
 # server host key), XORS_DEPLOY_HOST (server address).
@@ -24,11 +26,17 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    env:
+      # Files the sandbox image is built from (docker/Dockerfile.sandbox-k8s).
+      SANDBOX_INPUTS: >-
+        docker packages/sandbox-gateway packages/browser-runtime packages/shared
+        packages/sandbox-docker/seccomp package.json pnpm-lock.yaml
+        pnpm-workspace.yaml .dockerignore
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy
+      - name: Set up SSH to the server
         env:
           SSH_KEY: ${{ secrets.XORS_DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.XORS_DEPLOY_KNOWN_HOSTS }}
@@ -38,8 +46,39 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
           chmod 600 ~/.ssh/deploy
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          git archive --format=tar HEAD \
-            | ssh -i ~/.ssh/deploy -o BatchMode=yes -o ServerAliveInterval=30 "root@${DEPLOY_HOST}" "$GITHUB_SHA"
+          printf 'Host valet\n  HostName %s\n  User root\n  IdentityFile ~/.ssh/deploy\n  BatchMode yes\n  ServerAliveInterval 30\n' "$DEPLOY_HOST" > ~/.ssh/config
+
+      - name: Check whether the sandbox image changed
+        id: sandbox
+        run: |
+          hash=$(git ls-tree -r HEAD -- $SANDBOX_INPUTS | sha256sum | cut -c1-16)
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "present=$(ssh valet "has-sandbox $hash")" >> "$GITHUB_OUTPUT"
+
+      - name: Build and upload the sandbox image
+        if: steps.sandbox.outputs.present != 'yes'
+        run: |
+          docker build -f docker/Dockerfile.sandbox-k8s -t "xors-valet-sandbox:h-${{ steps.sandbox.outputs.hash }}" .
+          docker save "xors-valet-sandbox:h-${{ steps.sandbox.outputs.hash }}" | gzip -1 | ssh valet "sandbox ${{ steps.sandbox.outputs.hash }}"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build the API bundle
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm --filter @valet/web run build
+          pnpm --filter @valet/api deploy --legacy --prod "$RUNNER_TEMP/app"
+          mkdir -p "$RUNNER_TEMP/app/web"
+          cp -r packages/web/dist "$RUNNER_TEMP/app/web/dist"
+
+      - name: Install on the server
+        run: tar -C "$RUNNER_TEMP/app" -czf - . | ssh valet "app $GITHUB_SHA ${{ steps.sandbox.outputs.hash }}"
 
       - name: Check the public site
         run: curl -sf --retry 5 --retry-delay 5 https://valet.xors.xyz/api/health
