@@ -1,13 +1,13 @@
+import { prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
  * routes (`routes/workflows.ts`) and the agent-facing action plugin
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
-import { lockTeamDeletionAccess, TeamAdminRequiredError } from "../services/team-deletion-access.js";
-import { checkAssistantForOwner, resolveDefaultAssistant } from "../assistants/service.js";
-import type { OnePasswordService } from "../services/onepassword.js";
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
+import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
+import type { RunHost } from "@valet/workflow";
 import {
   resolveTriggerInput,
   triggerDataSchema,
@@ -25,10 +25,13 @@ import {
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
-import type { RunHost } from "@valet/workflow";
-import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
-import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import type { RequestPrincipal } from "../lib/request-principal.js";
+import {
+  updateInvocationOutcome,
+  writeExecutionGrant,
+} from "../policies/service.js";
 import {
   actionInvocations,
   assistants,
@@ -36,12 +39,15 @@ import {
   eventSubscriptions,
   sessionThreads,
   workflowDefinitions,
+  workflowSignals,
   workflowRuns,
   workflowSchedules,
   workflowVersions,
   workflowWebhooks,
 } from "../schema/index.js";
-import { definitionVersionId } from "./definition-version.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { isOrgAdmin, isOrgMember } from "../services/org.js";
+import { lockTeamDeletionAccess, TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import {
   getTeamInOrg,
   isTeamMember,
@@ -50,14 +56,6 @@ import {
   TeamHasActiveRunsError,
   withAuthorizedTeamOwnership,
 } from "../services/teams.js";
-import type { RequestPrincipal } from "../lib/request-principal.js";
-import { isOrgAdmin, isOrgMember } from "../services/org.js";
-import {
-  writeExecutionGrant,
-  writeAlwaysAllowPolicy,
-  AlwaysAllowNotAdminError,
-  updateInvocationOutcome,
-} from "../policies/service.js";
 import type {
   GetWorkflowRunResponse,
   GlobalWorkflowRunSummary,
@@ -71,6 +69,7 @@ import type {
   WorkflowRunStatus,
   WorkflowRunSummary,
 } from "../wire/types.js";
+import { definitionVersionId } from "./definition-version.js";
 
 export interface WorkflowServiceDeps {
   db: AppDb;
@@ -164,6 +163,9 @@ export function validateDefinitionInput(
 ): { ok: true; definition: WorkflowDefinition } | { ok: false; errors: string[] } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { ok: false, errors: ["definition must be an object"] };
+  }
+  if ("assistantId" in value) {
+    return { ok: false, errors: ["Assistant selection is not supported. Remove assistantId from the workflow definition."] };
   }
   const obj = value as Record<string, unknown>;
   if (!Array.isArray(obj.nodes)) {
@@ -539,10 +541,39 @@ export async function listWorkflowDefinitions(
   const rows = await deps.db
     .select()
     .from(workflowDefinitions)
-    .where(where)
+    .where(and(eq(workflowDefinitions.orgId, owner.orgId), where))
     .orderBy(desc(workflowDefinitions.updatedAt));
   const names = await repoNamesFor(deps.db, rows);
-  return rows.map((row) => rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined));
+  const latestRuns = rows.length === 0 ? [] : await deps.db
+    .selectDistinctOn([workflowRuns.workflowId], {
+      workflowId: workflowRuns.workflowId,
+      runId: workflowRuns.id,
+      failedAt: workflowRuns.updatedAt,
+      status: workflowRuns.status,
+      createdAt: workflowRuns.createdAt,
+      updatedAt: workflowRuns.updatedAt,
+      outcome: workflowRuns.outcome,
+    })
+    .from(workflowRuns)
+    .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+    .where(and(
+      inArray(workflowRuns.workflowId, rows.map((row) => row.id)),
+      eq(workflowDefinitions.orgId, owner.orgId),
+      eq(workflowRuns.ownerType, workflowDefinitions.ownerType),
+      eq(workflowRuns.ownerId, workflowDefinitions.ownerId),
+    ))
+    .orderBy(workflowRuns.workflowId, desc(workflowRuns.createdAt), desc(workflowRuns.id));
+  const latestByWorkflow = new Map(latestRuns.map((run) => [run.workflowId, { runId: run.runId, workflowId: run.workflowId, status: run.status, outcome: run.outcome ?? undefined, createdAt: run.createdAt, updatedAt: run.updatedAt }]));
+  const failureByWorkflow = new Map(
+    latestRuns.filter((run) => run.outcome === "failed").map((run) => [
+      run.workflowId, { runId: run.runId, failedAt: run.failedAt },
+    ]),
+  );
+  return rows.map((row) => ({
+    ...rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined),
+    latestFailedRun: failureByWorkflow.get(row.id),
+    latestRun: latestByWorkflow.get(row.id),
+  }));
 }
 
 export async function getWorkflowDefinition(
@@ -610,33 +641,25 @@ export async function createWorkflowDefinition(
   return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
 }
 
-/** Read routing from the definition so each run uses its immutable snapshot. */
-export function workflowAssistantId(definition: unknown): string | undefined {
-  if (!definition || typeof definition !== "object" || !("assistantId" in definition)) return undefined;
-  if (typeof definition.assistantId !== "string" || !definition.assistantId.trim()) {
-    throw new ValidationError("Select a valid orchestrator for this workflow.");
+/** Definitions use workspace ownership rather than assistant routing. */
+function rejectAssistantRouting(definition: unknown): void {
+  if (definition && typeof definition === "object" && "assistantId" in definition) {
+    throw new ValidationError("Assistant selection is not supported. Remove assistantId from the workflow definition.");
   }
-  return definition.assistantId;
 }
 
 async function validateWorkflowAssistant(
-  db: AppQueryable, orgId: string, owner: { type: WorkflowOwnerType; id: string }, definition: unknown,
+  _db: AppQueryable, _orgId: string, _owner: { type: WorkflowOwnerType; id: string }, definition: unknown,
 ) {
-  const assistantId = workflowAssistantId(definition);
-  if (assistantId && await checkAssistantForOwner(db, orgId, owner, assistantId)) {
-    throw new NotFoundError("assistant", assistantId);
-  }
+  rejectAssistantRouting(definition);
 }
 
-/** Cross-workspace copies must not retain routing into the source workspace. */
+/** A copied definition is portable because it contains no assistant identity. */
 async function copiedDefinitionForOwner(
-  db: AppDb, orgId: string, definition: unknown, owner: { type: "user" | "team"; id: string },
+  _db: AppDb, _orgId: string, definition: unknown, _owner: { type: "user" | "team"; id: string },
 ): Promise<unknown> {
-  const assistantId = workflowAssistantId(definition);
-  if (!assistantId || !definition || typeof definition !== "object") return definition;
-  if (!(await checkAssistantForOwner(db, orgId, owner, assistantId))) return definition;
-  const assistant = await resolveDefaultAssistant(db, orgId, owner);
-  return { ...definition, assistantId: assistant.id };
+  rejectAssistantRouting(definition);
+  return definition;
 }
 
 /** Immutable per-save snapshot backing the UI's version history. */
@@ -730,10 +753,6 @@ export async function updateWorkflowDefinition(
 
   const now = Date.now();
   if (input.definition !== undefined) {
-    const assistantId = workflowAssistantId(row.definition);
-    if (assistantId && workflowAssistantId(input.definition) === undefined && input.definition && typeof input.definition === "object") {
-      input = { ...input, definition: { ...input.definition, assistantId } };
-    }
     await validateWorkflowAssistant(deps.db, owner.orgId, { type: row.ownerType, id: row.ownerId }, input.definition);
   }
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
@@ -838,7 +857,7 @@ export function aggregateSourcePath(node: WorkflowNode): string {
     case "llm":
       return node.outputSchema !== undefined ? `${base}.output` : `${base}.text`;
     case "session":
-    case "orchestrator":
+    case "thread":
       return node.outputSchema !== undefined ? `${base}.output` : `${base}.response`;
     case "workflow":
       return `${base}.output`;
@@ -1497,7 +1516,6 @@ export async function listWorkflowActionRequired(
     const detail = await getWorkflowRunDetail(deps, owner, summary.runId);
     if (detail === null) continue;
     const trigger = workflowActionTrigger(detail.run.params);
-    const assistantId = parkedRunAssistantId(detail.run.definition);
     for (const gate of detail.pendingGates) {
       const iteration = gate.iteration ?? 0;
       items.push({
@@ -1507,7 +1525,6 @@ export async function listWorkflowActionRequired(
         workflowName: summary.workflowName,
         runCreatedAt: summary.createdAt,
         owner: detail.owner,
-        ...(assistantId === undefined ? {} : { assistantId }),
         trigger,
         gate,
       });
@@ -1515,20 +1532,6 @@ export async function listWorkflowActionRequired(
   }
   items.sort((a, b) => (a.gate.waitingSince ?? a.runCreatedAt) - (b.gate.waitingSince ?? b.runCreatedAt));
   return { items, count: items.length };
-}
-
-/**
- * The assistant a parked run executes as. `workflowAssistantId` throws on a
- * malformed id because it guards writes and dispatch; this list only
- * reports, and a run with a broken snapshot still needs its approval to be
- * reachable. Such a run reports no assistant instead of failing the list.
- */
-function parkedRunAssistantId(definition: unknown): string | undefined {
-  try {
-    return workflowAssistantId(definition);
-  } catch {
-    return undefined;
-  }
 }
 
 function workflowActionTrigger(params: unknown): ListWorkflowActionRequiredResponse["items"][number]["trigger"] {
@@ -1614,7 +1617,7 @@ async function ownedRun(
 
 export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
-  | "forbidden_always" | "org_mismatch" | "human_only";
+  | "forbidden_always" | "forbidden_workflow" | "org_mismatch" | "human_only";
 
 /** Scan `definition` (unknown at runtime) for the node with `nodeId`. Searches
  * `definition.nodes` directly and, for each `type === "foreach"` node, also checks
@@ -1743,11 +1746,13 @@ export async function resolveWorkflowApproval(
     nodeId: string;
     approved: boolean;
     note?: string;
-    scope?: "once" | "run" | "always";
+    scope?: "once" | "run" | "always" | "workflow";
     iteration?: number;
     via: "web" | "agent";
   },
 ): Promise<ResolveApprovalOutcome> {
+  // Legacy workflow clients used "always" for org-wide approval. Narrow it to this workflow.
+  if (input.scope === "always") input = { ...input, scope: "workflow" };
   const run = await ownedRun(deps, owner, input.runId, "act");
   if (!run) return "not_found";
   const iter = input.iteration ?? 0;
@@ -1770,11 +1775,12 @@ export async function resolveWorkflowApproval(
   const isPolicyGate = node?.type === "tool";
   if (isPolicyGate && input.via === "agent") return "human_only";
 
-  // Auth check for "always" scope must happen BEFORE the signal insert so a
-  // forbidden_always response never writes anything (no signal, no grant).
-  if (input.approved && input.scope === "always" && isPolicyGate) {
-    const adminOk = await isOrgAdmin(deps.db, orgId, owner.userId);
-    if (!adminOk) return "forbidden_always";
+  let workflowPermission: Awaited<ReturnType<typeof prepareWorkflowPermissions>> = null;
+  if (input.approved && input.scope === "workflow") {
+    if (!isPolicyGate || !node || typeof node.service !== "string" || typeof node.action !== "string") return "forbidden_workflow";
+    const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
+    workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
+    if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
   }
 
   // insertSignal is first-write-wins (ON CONFLICT DO NOTHING). Insert the signal
@@ -1790,7 +1796,7 @@ export async function resolveWorkflowApproval(
     scope: input.scope,
   };
   const signalId = `approval:${input.nodeId}${suffix}:resolution`;
-  const stored = await deps.workflowStore.insertSignal({
+  const signal = {
     runId: input.runId,
     signalId,
     signalType,
@@ -1802,7 +1808,21 @@ export async function resolveWorkflowApproval(
       resolvedVia: input.via,
     },
     createdAt: Date.now(),
-  });
+  };
+  const prepared = workflowPermission;
+  // The app and workflow store share Postgres. Commit the permanent grant,
+  // resolution, audit, and durable wake flag together so crash recovery cannot
+  // consume the approval without the permission it promised.
+  const stored = prepared?.ok ? await deps.db.transaction(async (tx) => {
+    const [inserted] = await tx.insert(workflowSignals).values(signal)
+      .onConflictDoNothing({ target: [workflowSignals.runId, workflowSignals.signalId] }).returning();
+    if (!inserted) return { payload: null };
+    await persistWorkflowPermissions(tx, prepared.grants);
+    await tx.update(actionInvocations).set({ status: "approved", resolvedBy: owner.userId })
+      .where(and(eq(actionInvocations.orgId, orgId), eq(actionInvocations.invocationId, `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`)));
+    await tx.update(workflowRuns).set({ wakeRequested: true }).where(eq(workflowRuns.id, input.runId));
+    return inserted;
+  }) : await deps.workflowStore.insertSignal(signal);
   // Compare the returned row's payload to what we submitted. If another caller
   // won the race the stored payload will differ — do not stamp audit for the loser.
   const storedPayload = stored.payload as { approved?: boolean; resolvedBy?: string; scope?: string } | undefined;
@@ -1820,18 +1840,7 @@ export async function resolveWorkflowApproval(
     const action = typeof n.action === "string" ? n.action : "";
     const actionId = action.includes(".") ? action : `${service}.${action}`;
     const now = Date.now();
-    if (input.scope === "always") {
-      // Admin eligibility was already checked above (before the signal insert).
-      // AlwaysAllowNotAdminError should not fire here, but re-throw defensively
-      // for unexpected cases.
-      try {
-        await writeAlwaysAllowPolicy(deps.db, { orgId, actionId, grantedBy: owner.userId, now });
-      } catch (err) {
-        if (err instanceof AlwaysAllowNotAdminError) return "forbidden_always";
-        throw err;
-      }
-    }
-    if (input.scope === "always" || input.scope === "run") {
+    if (input.scope === "run") {
       await writeExecutionGrant(deps.db, input.runId, {
         orgId,
         service,
@@ -1842,7 +1851,7 @@ export async function resolveWorkflowApproval(
     }
   }
 
-  if (isPolicyGate) {
+  if (isPolicyGate && !prepared?.ok) {
     await updateInvocationOutcome(
       deps.db,
       `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`,
@@ -1946,6 +1955,8 @@ export async function getWorkflowRunDetail(
       };
       if (iteration !== undefined) gate.iteration = iteration;
       if (node && typeof node.prompt === "string") gate.prompt = node.prompt;
+      if (node && typeof node.summary === "string") gate.summary = node.summary;
+      if (node && node.details !== undefined) gate.details = node.details;
       if (node && (node.onDeny === "fail" || node.onDeny === "skip")) gate.onDeny = node.onDeny;
       if (typeof w.timeoutAt === "number") gate.timeoutAt = w.timeoutAt;
       pendingGates.push(gate);

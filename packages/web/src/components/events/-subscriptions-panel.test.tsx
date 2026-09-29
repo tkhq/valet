@@ -10,15 +10,14 @@
  * following the same isolate-from-the-network pattern as the page suite in
  * `routes/-events.test.tsx`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
 import type {
   EventSubscriptionWire,
-  ListAssistantsResponse,
   TeamSummary,
   WorkflowDefinitionSummary,
 } from "@valet/api/wire";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OwnerFilter } from "~/api/client";
 import { TooltipProvider } from "~/components/primitives";
 
@@ -82,6 +81,8 @@ let feedEnabled: boolean | undefined;
 let subscriptionsEnabled: boolean | undefined;
 /** One stable spy, so a case can assert that Refresh did NOT fetch. */
 const feedRefetch = vi.fn();
+const openAssistant = vi.fn();
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }) }));
 
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
@@ -124,17 +125,6 @@ vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
 }));
 
-/** The assistants the caller can see. A row badges one of these, so an empty
- * list is the unresolved case. Mutable per case, reset in `beforeEach`. */
-let assistantsData: ListAssistantsResponse = { assistants: [] };
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({ data: assistantsData, isLoading: false, error: null }),
-  };
-});
-
 // The assistant badge links to the assistant editor, and the real `Link`
 // wants a router this suite has no reason to mount. `params` is serialized
 // so a case can read the assistant a badge navigates to.
@@ -148,7 +138,7 @@ vi.mock("@tanstack/react-router", () => ({
     params?: unknown;
     [key: string]: unknown;
   }) => (
-    <a data-params={JSON.stringify(params)} {...rest}>
+    <a data-params={JSON.stringify(params)} data-search={JSON.stringify(rest.search)} {...rest}>
       {children}
     </a>
   ),
@@ -199,9 +189,9 @@ beforeEach(() => {
   feedCalls = 0;
   subscriptionsData = { subscriptions: [subscription()] };
   workflowsData = { workflows: [] };
-  assistantsData = { assistants: [] };
   teamsData = { teams: [] };
   feedRefetch.mockClear();
+  openAssistant.mockClear();
 });
 
 afterEach(() => {
@@ -211,6 +201,33 @@ afterEach(() => {
 });
 
 describe("SubscriptionsPanel", () => {
+  it("opens assistant setup with a paused proposal request", () => {
+    render(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Create with Valet" }));
+    expect(openAssistant).toHaveBeenCalledTimes(1);
+    expect(openAssistant).toHaveBeenCalledWith(expect.stringContaining("save a paused proposal for me to review before enabling it"));
+  });
+
+  it("resets the organization filter when the workspace changes", () => {
+    subscriptionsData = { subscriptions: [
+      subscription({ id: "org", name: "Org watch", ownerType: "org", ownerId: "org_1" }),
+      subscription({ id: "team", name: "Team watch", ownerType: "team", ownerId: "t_eng" }),
+      subscription(),
+    ] };
+    const view = render(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    expect(screen.getByText("PR alerts")).toBeTruthy();
+    expect(screen.queryByText("Team watch")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
+    expect(screen.getByText("Org watch")).toBeTruthy();
+    expect(screen.queryByText("PR alerts")).toBeNull();
+    scopeTeamId = "t_eng";
+    view.rerender(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    expect((screen.getByLabelText("Subscription scope") as HTMLSelectElement).value).toBe("workspace");
+    expect(screen.getByText("Team watch")).toBeTruthy();
+    expect(screen.queryByText("Org watch")).toBeNull();
+    expect(screen.queryByText("PR alerts")).toBeNull();
+  });
+
   it("asks for the caller's own subscriptions in the personal workspace", () => {
     render(
       <TooltipProvider>
@@ -298,10 +315,9 @@ describe("SubscriptionsPanel", () => {
     ).toBeTruthy();
   });
 
-  // An org-owned subscription belongs to no single workspace. The route
-  // returns it beside every workspace's own rows, and the panel must render
-  // it as manageable in each — it is the only off-switch such a row has.
-  it("lists an org-owned subscription in the personal workspace", () => {
+  // The API includes organization rules. The explicit filter keeps them
+  // manageable without mixing them into workspace-owned rules.
+  it("shows an org-owned subscription only after selecting Organization rules in the personal workspace", () => {
     subscriptionsData = {
       subscriptions: [subscription({ id: "sub_org", name: "Org watch", ownerType: "org", ownerId: "org_1" })],
     };
@@ -310,13 +326,15 @@ describe("SubscriptionsPanel", () => {
         <SubscriptionsPanel />
       </TooltipProvider>,
     );
+    expect(screen.queryByText("Org watch")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
     expect(screen.getByText("Org watch")).toBeTruthy();
     expect(screen.getByText("Org")).toBeTruthy();
     const toggle = screen.getByRole("switch", { name: "Disable Org watch" }) as HTMLButtonElement;
     expect(toggle.disabled).toBe(false);
   });
 
-  it("lists an org-owned subscription in a team workspace too", () => {
+  it("shows an org-owned subscription only after selecting Organization rules in a team workspace", () => {
     scopeTeamId = "t_eng";
     subscriptionsData = {
       subscriptions: [subscription({ id: "sub_org", name: "Org watch", ownerType: "org", ownerId: "org_1" })],
@@ -326,6 +344,8 @@ describe("SubscriptionsPanel", () => {
         <SubscriptionsPanel />
       </TooltipProvider>,
     );
+    expect(screen.queryByText("Org watch")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
     expect(screen.getByText("Org watch")).toBeTruthy();
     expect(screen.getByText("Org")).toBeTruthy();
     const toggle = screen.getByRole("switch", { name: "Disable Org watch" }) as HTMLButtonElement;
@@ -366,20 +386,9 @@ describe("SubscriptionsPanel", () => {
   // The row badges the assistant that answers the event, not the team that
   // owns the rule: a team has many assistants, and the badge is the way in
   // to the one this rule uses.
-  it("badges a team orchestrator target with its assistant, linked to the editor", () => {
+  it("links a team target to its workspace conversation", () => {
+    scopeTeamId = "t_eng";
     teamsData = { teams: [teamFixture()] };
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_eng",
-          owner: { type: "team", id: "t_eng" },
-          sessionId: "assistant:asst_eng",
-          name: "Release Captain",
-          isDefault: true,
-          createdAt: 1,
-        },
-      ],
-    };
     subscriptionsData = {
       subscriptions: [
         subscription({
@@ -395,57 +404,15 @@ describe("SubscriptionsPanel", () => {
       </TooltipProvider>,
     );
 
-    const link = screen.getByText("Release Captain").closest("a");
-    expect(link?.getAttribute("to")).toBe("/assistants/$assistantId");
-    expect(JSON.parse(link?.getAttribute("data-params") ?? "null")).toEqual({
-      assistantId: "asst_eng",
+    const link = screen.getByText("Engineering").closest("a");
+    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(JSON.parse(link?.getAttribute("data-search") ?? "null")).toEqual({
+      workspace: "t_eng",
     });
     // The badge names the assistant, not the owning team it used to name.
     // "Engineering" survives in the target clause, which is a sentence, not
     // a badge.
-    expect(screen.queryByText("Engineering")).toBeNull();
-  });
-
-  // A workflow target runs as the workflow's assistant, so the row resolves
-  // the definition's pinned one rather than the rule owner's default.
-  it("badges a workflow target with the assistant its definition pins", () => {
-    workflowsData = {
-      workflows: [
-        {
-          id: "wf_1",
-          name: "Deploy pipeline",
-          definition: { version: "dag/v1", assistantId: "asst_scribe", nodes: [], edges: [] },
-          createdAt: 1,
-          updatedAt: 1,
-          ownerType: "user",
-          ownerId: "u1",
-        },
-      ],
-    };
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_scribe",
-          owner: { type: "user", id: "u1" },
-          sessionId: "assistant:asst_scribe",
-          name: "Scribe",
-          isDefault: false,
-          createdAt: 1,
-        },
-      ],
-    };
-    subscriptionsData = {
-      subscriptions: [subscription({ target: { kind: "workflow", workflowId: "wf_1" } })],
-    };
-    render(
-      <TooltipProvider>
-        <SubscriptionsPanel />
-      </TooltipProvider>,
-    );
-
-    expect(screen.getByText("Scribe").closest("a")?.getAttribute("to")).toBe(
-      "/assistants/$assistantId",
-    );
+    expect(screen.queryByText("Release Captain")).toBeNull();
   });
 
   // `GET /api/assistants` does not list org-owned assistants today, so the
@@ -453,17 +420,6 @@ describe("SubscriptionsPanel", () => {
   // badge names the org and the plain word must step aside: one "Org", not
   // two.
   it("prints one Org label when the org's assistant resolves (forward guard)", () => {
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_org",
-          owner: { type: "org", id: "org_1" },
-          sessionId: "assistant:asst_org",
-          isDefault: true,
-          createdAt: 1,
-        },
-      ],
-    };
     subscriptionsData = {
       subscriptions: [
         subscription({
@@ -479,25 +435,15 @@ describe("SubscriptionsPanel", () => {
       </TooltipProvider>,
     );
 
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
     const labels = screen.getAllByText("Org");
     expect(labels).toHaveLength(1);
-    expect(labels[0].closest("a")?.getAttribute("to")).toBe("/assistants/$assistantId");
+    expect(labels[0].closest("a")).toBeNull();
   });
 
   // Everything on a personal page belongs to the reader, so a badge naming
   // their own default assistant carries no information.
   it("says nothing about a personal rule its reader's default assistant answers", () => {
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_mine",
-          owner: { type: "user", id: "u1" },
-          sessionId: "assistant:asst_mine",
-          isDefault: true,
-          createdAt: 1,
-        },
-      ],
-    };
     const { container } = render(
       <TooltipProvider>
         <SubscriptionsPanel />

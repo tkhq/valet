@@ -1,3 +1,4 @@
+import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-ingress.js";
 /**
  * Event feed, catalog, and subscriptions CRUD (event-system plan, Task 7).
  *
@@ -12,27 +13,22 @@
  * written — the ingest matcher (`events/ingest.ts`) trusts the
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
+import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
+import { and, desc, eq, exists, gt, gte, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import { Hono } from "hono";
-import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
-import { OnePasswordAuthError } from "../services/onepassword.js";
-import type { StoredCredential } from "@valet/engine";
-import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, gt, gte, ilike, lt, ne, or, sql, type SQL } from "drizzle-orm";
-import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import type { AppDb } from "../lib/drizzle.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
-import { readOwnerFilter } from "./_owner-filter.js";
-import { isOrgAdminUser } from "./_org-admin.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
-import { armableDefinitionRow } from "../workflows/service.js";
-import { checkAssistantForOwner } from "../assistants/service.js";
+import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
+import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError } from "../services/onepassword.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
@@ -53,6 +49,9 @@ import type {
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "../wire/types.js";
+import { armableDefinitionRow } from "../workflows/service.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { readOwnerFilter } from "./_owner-filter.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -196,11 +195,12 @@ function collisionBlockMessage(report: CollisionReport<NarrowedSubscriptionRow>)
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
 
-eventsRouter.get("/events/catalog", (c) => {
-  const { plugins } = c.var.providers;
+eventsRouter.get("/events/catalog", async (c) => {
+  const { plugins, db, engineCredentials } = c.var.providers;
   const services = [...new Set(plugins.flatMap((p) => p.triggers ?? []).map((t) => t.service))];
+  const linear = services.includes("linear") ? await getLinearIngressStatus(db,engineCredentials,c.var.user.orgId) : undefined;
   const resp: GetEventCatalogResponse = {
-    services: services.map((service) => ({ service, entries: catalogForService(plugins, service) })),
+    services: services.map((service) => ({ service, entries: catalogForService(plugins, service), ...(service === "linear" && linear ? { readiness: { ready: linear.ready, ...(linear.reason ? { reason: linear.reason } : {}) } } : {}) })),
   };
   return c.json(resp);
 });
@@ -428,7 +428,7 @@ eventsRouter.get("/events/drops", async (c) => {
   // Slack interaction diagnostics identify form activity. They are the one
   // new sensitive diagnostic class, so members keep the established drop feed
   // without seeing those rows.
-  if (!admin) dropConditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"));
+  if (!admin) dropConditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"), ne(eventDropLog.reason, "slack_classifier_rejected"));
   const visibleDropConditions = [...dropConditions];
   if (query) {
     const escapedQuery = escapeLike(query);
@@ -674,19 +674,15 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     }
   }
 
-  // A named assistant must belong to the owner this target just resolved to.
-  // Checked here, not in `validateSubscription`, because the owner is only
-  // known once the workflow/team resolution above has run.
-  if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
-    const bad = await checkAssistantForOwner(db, user.orgId, { type: ownerType, id: ownerId }, body.target.assistantId);
-    if (bad) return c.json({ error: bad }, 400);
-  }
-
   // Collision gate (TKAI-294). Checked over the FINAL filters (after the
   // mention gate's injected user filter), so two users' mention rules
   // compare as the disjoint rules they are. A disabled create skips the
   // check — the row cannot fire, and enabling it later re-runs it.
   const enabled = body.enabled ?? true;
+  if (enabled) {
+    const ingressBlocked = await linearEventArmBlock(db,c.var.providers.engineCredentials,user.orgId,body.eventKeys);
+    if (ingressBlocked) return c.json({ error: ingressBlocked },400);
+  }
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (enabled) {
     const report = await collisionsForWrite(db, plugins, user.orgId, {
@@ -757,19 +753,6 @@ eventsRouter.post("/event-subscriptions", async (c) => {
               ),
             );
           if (!targetWorkflow) return [];
-        }
-        // Mirrors the pre-lock check above (schedule-service.ts:255-257):
-        // `deleteTeam` archives a team's assistants under this same lock, so
-        // a named assistant needs the same in-lock recheck as the workflow
-        // target does.
-        if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
-          const bad = await checkAssistantForOwner(
-            tx,
-            user.orgId,
-            { type: ownerType, id: ownerId },
-            body.target.assistantId,
-          );
-          if (bad) return [];
         }
         return tx.insert(eventSubscriptions).values(values).returning();
       },
@@ -860,31 +843,22 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     return c.json({ error: "enabled must be a boolean" }, 400);
   }
 
-  // `assistantId` is the one part of `target` a patch may rewrite, and only
-  // within the row's existing owner — see PatchEventSubscriptionRequest.
-  const storedTarget = row.target as EventSubscriptionTargetWire;
-  let patchedTarget = storedTarget;
-  if (body.assistantId !== undefined) {
-    if (storedTarget.kind !== "orchestrator") {
-      return c.json({ error: "assistantId is only valid on an orchestrator target" }, 400);
-    }
-    if (body.assistantId === null) {
-      const { assistantId: _dropped, ...rest } = storedTarget;
-      patchedTarget = rest;
-    } else {
-      if (typeof body.assistantId !== "string" || body.assistantId.length === 0) {
-        return c.json({ error: "assistantId must be a non-empty string" }, 400);
-      }
-      const bad = await checkAssistantForOwner(
-        db,
-        user.orgId,
-        { type: row.ownerType, id: row.ownerId },
-        body.assistantId,
-      );
-      if (bad) return c.json({ error: bad }, 400);
-      patchedTarget = { ...storedTarget, assistantId: body.assistantId };
-    }
+  if ("assistantId" in body) {
+    return c.json({ error: "Assistant selection is not supported. Choose the subscription workspace instead." }, 400);
   }
+  let patchedTarget = row.target as EventSubscriptionTargetWire;
+  if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
+    if (row.ownerType !== "user" || patchedTarget.kind !== "orchestrator") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
+    patchedTarget = { ...patchedTarget,
+      ...(body.deliveryPolicy !== undefined ? { deliveryPolicy: body.deliveryPolicy } : {}),
+      ...(body.pauseOnOverlap !== undefined ? { pauseOnOverlap: body.pauseOnOverlap } : {}),
+    };
+  }
+  if (body.enabled === true && patchedTarget.kind === "orchestrator") {
+    const { overlapPausedAt: _pause, ...rest } = patchedTarget;
+    patchedTarget = rest;
+  }
+
 
   // The prompt templates are the other part of `target` a patch may rewrite,
   // and only on an orchestrator target. `null` clears the field, so the rule
@@ -944,11 +918,10 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const willBeEnabled = body.enabled ?? row.enabled;
   const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
   const arming = body.enabled === true && !row.enabled;
-  // Re-pointing the assistant changes who the rule races: moving OFF a distinct
-  // assistant onto the owner's default can create a clobber that did not exist.
-  const repointed = body.assistantId !== undefined;
   let collisions: EventSubscriptionCollisionsWire | undefined;
-  if (willBeEnabled && (matchChanged || arming || repointed)) {
+  if (willBeEnabled && (matchChanged || arming)) {
+    const ingressBlocked = await linearEventArmBlock(db,c.var.providers.engineCredentials,user.orgId,merged.eventKeys as string[]);
+    if (ingressBlocked) return c.json({ error: ingressBlocked },400);
     const report = await collisionsForWrite(
       db,
       plugins,
@@ -991,10 +964,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       target: patchedTarget,
       audience,
       enabled: willBeEnabled,
-      updatedAt: Date.now(),
+      updatedAt: Math.max(Date.now(), row.updatedAt + 1),
     })
-    .where(eq(eventSubscriptions.id, id))
+    .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.updatedAt, row.updatedAt)))
     .returning();
+
+  if (!updated[0]) return c.json({ error: "This subscription changed while you were editing it. Refresh and try again." }, 409);
 
   const resp: PatchEventSubscriptionResponse = {
     ...rowToSubscription(updated[0]),
@@ -1018,6 +993,6 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
     return c.json({ error: "subscription not found" }, 404);
   }
 
-  await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, id));
+  await db.delete(eventSubscriptions).where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)));
   return c.body(null, 204);
 });

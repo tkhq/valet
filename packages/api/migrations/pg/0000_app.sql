@@ -280,6 +280,7 @@ CREATE TABLE "teams" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"name" text NOT NULL,
+	"slack_home_channel_id" text,
 	"origin" text DEFAULT 'local' NOT NULL,
 	"external_id" text,
 	"created_at" bigint NOT NULL,
@@ -314,24 +315,23 @@ CREATE TABLE "assistants" (
 	"org_id" text NOT NULL,
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
+	-- Retained for the previous binary during bounded rollback.
 	"name" text,
 	"avatar_url" text,
 	"personality" text,
 	"behavior" text,
 	"model" text,
 	"reasoning" text,
+	"is_default" boolean DEFAULT true NOT NULL,
 	"session_id" text NOT NULL,
-	"is_default" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
 	"archived_at" bigint
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "assistants_session" ON "assistants" ("session_id");
 --> statement-breakpoint
--- Exactly one default per principal. PARTIAL, not a plain unique: every
--- non-default assistant shares the same (org, owner_type, owner_id), so a
--- full unique index would allow only one assistant per principal — the very
--- rule this table exists to remove.
+CREATE UNIQUE INDEX "assistants_workspace" ON "assistants" ("org_id","owner_type","owner_id");
+--> statement-breakpoint
 CREATE UNIQUE INDEX "assistants_default_owner" ON "assistants" ("org_id","owner_type","owner_id") WHERE "is_default";
 --> statement-breakpoint
 CREATE INDEX "assistants_owner" ON "assistants" ("org_id","owner_type","owner_id");
@@ -377,6 +377,7 @@ CREATE TABLE "user_notification_preferences" (
 	"user_id" text NOT NULL,
 	"kind" text NOT NULL,
 	"web" boolean DEFAULT true NOT NULL,
+	"team_dm" boolean DEFAULT false NOT NULL,
 	PRIMARY KEY("user_id", "kind")
 );
 --> statement-breakpoint
@@ -528,6 +529,7 @@ CREATE TABLE "artifacts" (
 	"org_id" text NOT NULL,
 	"actor_user_id" text NOT NULL,
 	"source_session_id" text DEFAULT '' NOT NULL,
+	"source_thread_id" text,
 	"source_memory_path" text NOT NULL,
 	"title" text DEFAULT '' NOT NULL,
 	"content" text NOT NULL,
@@ -1065,12 +1067,12 @@ CREATE TABLE "followed_threads" (
 	"created_at" bigint NOT NULL,
 	"last_activity_at" bigint NOT NULL,
 	"last_seen_ts" text,
-	"assistant_id" text,
 	-- The mention rule that bound this thread. The follow router reads that
 	-- rule's CURRENT invocation audience, so a rule narrowed back to the team
 	-- narrows the threads it opened, and a disabled or deleted rule narrows
 	-- them too. NULL, like a rule that is gone, reads as team-only.
-	"subscription_id" text
+	"subscription_id" text,
+	"assistant_id" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");
@@ -1083,7 +1085,6 @@ CREATE TABLE "workflow_schedules" (
 	"target_kind" text DEFAULT 'workflow' NOT NULL,
 	"workflow_id" text,
 	"prompt" text,
-	"assistant_id" text,
 	"name" text NOT NULL,
 	"cron" text NOT NULL,
 	"timezone" text DEFAULT 'UTC' NOT NULL,
@@ -1097,7 +1098,8 @@ CREATE TABLE "workflow_schedules" (
 	"next_fire_at" bigint NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
-	"updated_at" bigint NOT NULL
+	"updated_at" bigint NOT NULL,
+	"assistant_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "workflow_schedules_due" ON "workflow_schedules" ("enabled","next_fire_at");
@@ -2452,3 +2454,32 @@ INSERT INTO usage_member_facts
 CREATE OR REPLACE VIEW usage_member_activity_ready AS SELECT 1 AS version FROM usage_member_facts,usage_member_hourly WHERE false;
 
 END $member$;
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "event_receipts" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "service" text NOT NULL,
+  "external_id" text, "metadata" jsonb NOT NULL DEFAULT '{}',
+  "stages" jsonb NOT NULL DEFAULT '[]', "event_key" text, "event_id" text,
+  "subscriptions" jsonb NOT NULL DEFAULT '[]',
+  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "workspace_briefing_cache" (
+  "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "version" text NOT NULL, "evidence_hash" text, "response" jsonb,
+  "checked_at" bigint, "next_check_at" bigint NOT NULL DEFAULT 0,
+  "lease_token" text, "lease_until" bigint NOT NULL DEFAULT 0,
+  PRIMARY KEY ("org_id", "owner_type", "owner_id")
+);
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "workflow_action_grants" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "workflow_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "action_id" text NOT NULL,
+  "granted_by" text NOT NULL, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workflow_action_grants_workflow" ON "workflow_action_grants" ("org_id", "workflow_id");

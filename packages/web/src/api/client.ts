@@ -1,3 +1,4 @@
+import type { GetLinearConnectionResponse } from "@valet/api/wire";
 import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
@@ -8,15 +9,12 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * auth lands we'll wire token storage here.
  */
 import type {
+  WorkspaceOutcomesResponse,
+  WorkspaceBriefingsResponse,
+  WorkspaceActiveWorkResponse,
   AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
-  CreateAssistantRequest,
-  CreateAssistantResponse,
-  EnsureAssistantSessionResponse,
-  ListAssistantsResponse,
-  PatchAssistantRequest,
-  PatchAssistantResponse,
   AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
@@ -54,7 +52,9 @@ import type {
   DeleteOrgPolicyResponse,
   DeletePolicyOverrideRequest,
   DeletePolicyOverrideResponse,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
+  WorkspaceRuntimeInfoResponse,
+  WorkspaceRuntimeResponse,
   GetArtifactResponse,
   GetChangelogResponse,
   GetGithubAppResponse,
@@ -67,8 +67,7 @@ import type {
   ShareArtifactResponse,
   OrgSettingsResponse,
   PatchOrgSettingsRequest,
-  GetOrchestratorChildrenResponse,
-  GetOrchestratorInfoResponse,
+  ChildWorkResponse,
   GetPrebuildForRepoResponse,
   GetReposResponse,
   GetSlackAppResponse,
@@ -91,6 +90,7 @@ import type {
   SecuritySetConfigResponse,
   SecuritySetPlanResponse,
   GetWorkflowResponse,
+  EnsureWorkflowConversationResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
   DeliverIdentityLinkFallback,
@@ -123,6 +123,7 @@ import type {
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
+  ListNotificationDecisionsResponse,
   ListModelsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
@@ -141,7 +142,6 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
-  GetTeamChildrenResponse,
   ListWorkflowTriggersResponse,
   WorkflowRunOutcome,
   WorkflowRunStatus,
@@ -163,8 +163,6 @@ import type {
   PatchMeRequest,
   PatchMeResponse,
   ProfilePictureUploadResponse,
-  PatchOrchestratorInfoRequest,
-  PatchOrchestratorInfoResponse,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
   PatchIdentityLinkRequest,
@@ -202,6 +200,7 @@ import type {
   GetEventCatalogResponse,
   GetEventResponse,
   ListEventDropsResponse,
+  ListEventReceiptsResponse,
   ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
@@ -563,6 +562,16 @@ export const api = {
       "GET",
       kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
     ),
+  listWork: (owner: OwnerFilter, cursor?: string) =>
+    request<ListSessionsResponse>("GET", `/sessions?discovery=true&limit=25${ownerSuffix(owner)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  listWorkspaceActiveWork: (owner: OwnerFilter, cursor?: string) =>
+    request<WorkspaceActiveWorkResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/active-work?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  getWorkspaceBriefings: (owner: OwnerFilter) =>
+    request<WorkspaceBriefingsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings`),
+  listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
+    request<WorkspaceOutcomesResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/outcomes?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  getThreadAddress: (id: string) =>
+    request<{ id: string; sessionId: string }>("GET", `/threads/${encodeURIComponent(id)}`),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   /** GET /sessions/:id/security — the session's engagement + cells
@@ -716,51 +725,26 @@ export const api = {
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
   // orchestrator (session ids contain colons — always encoded above too, but
   // this entry point never touches a raw id itself, only ensures one exists)
-  ensureOrchestrator: () =>
-    request<EnsureOrchestratorResponse>("POST", "/orchestrator"),
-  getOrchestratorInfo: () =>
-    request<GetOrchestratorInfoResponse>("GET", "/orchestrator/info"),
-  patchOrchestratorInfo: (body: PatchOrchestratorInfoRequest) =>
-    request<PatchOrchestratorInfoResponse>("PATCH", "/orchestrator/info", body),
-  /** `sessionId` scopes the list to one assistant's children — the open
-   * assistant in the chat thread tree, so a team assistant's runs nest under
-   * it. Omitted = your own default assistant. */
-  getOrchestratorChildren: (sessionId?: string) =>
-    request<GetOrchestratorChildrenResponse>(
-      "GET",
-      sessionId
-        ? `/orchestrator/children?sessionId=${encodeURIComponent(sessionId)}`
-        : "/orchestrator/children",
-    ),
-  dismissChild: (childSessionId: string) =>
-    request<{ ok: true }>(
-      "POST",
-      `/orchestrator/children/${encodeURIComponent(childSessionId)}/dismiss`,
-    ),
+  ensureWorkspaceConversation: (workspace: string) =>
+    request<{ sessionId: string; threadId: string }>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`),
+  ensureWorkspaceRuntime: (workspace: string) =>
+    request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
+  getWorkspaceRuntime: (workspace: string) =>
+    request<WorkspaceRuntimeResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
+  getWorkspaceRuntimeInfo: (workspace: string) =>
+    request<WorkspaceRuntimeInfoResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/runtime/info`),
+  getChildWork: (sessionId: string, opts?: { cursor?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.limit !== undefined) qs.set("limit", String(opts.limit));
+    return request<ChildWorkResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/children?${qs}`);
+  },
+  dismissChild: (sessionId: string, childSessionId: string) =>
+    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(sessionId)}/children/${encodeURIComponent(childSessionId)}/dismiss`),
 
   // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
   // also how the client learns each assistant's session id, so it replaces
   // the client-side id derivation the rail used to do.
-  listAssistants: () => request<ListAssistantsResponse>("GET", "/assistants"),
-  createAssistant: (body: CreateAssistantRequest) =>
-    request<CreateAssistantResponse>("POST", "/assistants", body),
-  patchAssistant: (id: string, body: PatchAssistantRequest) =>
-    request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
-  uploadAssistantAvatar: (id: string, file: File) =>
-    uploadProfilePicture(`/assistants/${encodeURIComponent(id)}/avatar`, file),
-  // Archive, not destroy: the row keeps `archived_at` and the conversation
-  // it held survives. `DELETE` carries it because the wire's
-  // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
-  // house convention for a soft remove is the same verb as `deleteTeam`.
-  archiveAssistant: (id: string) =>
-    request<{ ok: true }>("DELETE", `/assistants/${encodeURIComponent(id)}`),
-  /** Get-or-create one assistant's session. Creating an assistant writes no
-   * session, so the chat page calls this before opening the conversation. */
-  ensureAssistantSession: (id: string) =>
-    request<EnsureAssistantSessionResponse>(
-      "POST",
-      `/assistants/${encodeURIComponent(id)}/session`,
-    ),
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
@@ -776,14 +760,14 @@ export const api = {
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
-  getTeamChildren: (teamId: string) =>
-    request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
   // `mine=1` is the caller-scoped gallery view (server-filtered — see the
   // route's comment on why this replaced a client-side `actorUserId` match)
   // and composes with nothing, so it is a separate option, not `OwnerFilter`.
-  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean; limit?: number; cursor?: string }) => {
+  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean; limit?: number; cursor?: string; sourceSessionId?: string; sourceThreadId?: string }) => {
     const qs = new URLSearchParams(ownerParams(owner));
     if (opts?.mine) qs.set("mine", "1");
+    if (opts?.sourceSessionId) qs.set("sourceSessionId", opts.sourceSessionId);
+    if (opts?.sourceThreadId) qs.set("sourceThreadId", opts.sourceThreadId);
     if (opts?.limit !== undefined) qs.set("limit", String(opts.limit));
     if (opts?.cursor !== undefined) qs.set("cursor", opts.cursor);
     return request<ListArtifactsResponse>("GET", `/artifacts${qs.size ? `?${qs}` : ""}`);
@@ -902,6 +886,7 @@ export const api = {
     ),
 
   // decision gates
+  listNotificationDecisions: () => request<ListNotificationDecisionsResponse>("GET", "/notifications/decisions"),
   listDecisions: (sessionId: string) =>
     request<ListDecisionsResponse>(
       "GET",
@@ -950,6 +935,7 @@ export const api = {
    * half-specified pair rather than guessing. */
   listWorkflows: (owner?: OwnerFilter) =>
     request<ListWorkflowsResponse>("GET", `/workflows${ownerQuery(owner)}`),
+  ensureWorkflowConversation: (workflowId: string) => request<EnsureWorkflowConversationResponse>("POST", `/workflows/${encodeURIComponent(workflowId)}/conversation`),
   getWorkflow: (id: string) =>
     request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: CreateWorkflowRequest) =>
@@ -1011,6 +997,7 @@ export const api = {
       "GET",
       `/workflows/${encodeURIComponent(id)}/permissions`,
     ),
+  revokeWorkflowPermissions: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/allow`),
   allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest = {}) =>
     request<AllowWorkflowPermissionsResponse>(
       "POST",
@@ -1068,6 +1055,13 @@ export const api = {
     const q = qs.toString();
     const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
     return request<ListEventsResponse>("GET", path);
+  },
+  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return request<ListEventReceiptsResponse>("GET", `/events/receipts${qs.size ? `?${qs}` : ""}`);
   },
   listEventDrops: (params: { q?: string; cursor?: string; direction?: "previous" } = {}) => {
     const qs = new URLSearchParams();
@@ -1302,8 +1296,6 @@ export const api = {
       "DELETE",
       `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
-  ensureTeamOrchestrator: (id: string) =>
-    request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
   listTeamApiKeys: (id: string) =>
     request<ListTeamApiKeysResponse>("GET", `/teams/${encodeURIComponent(id)}/api-keys`),
   createTeamApiKey: (id: string, body: CreateTeamApiKeyRequest) =>
@@ -1433,6 +1425,10 @@ export const api = {
   listSourceBakes: (id: string) => request<ListBakesResponse>("GET", `/org/sources/${encodeURIComponent(id)}/bakes`),
 
   // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated
+  getLinearConnection: () => request<GetLinearConnectionResponse>("GET", "/org/linear"),
+  putLinearConnection: (body: { clientId: string; clientSecret: string; webhookSecret: string }) =>
+    request<GetLinearConnectionResponse>("PUT", "/org/linear", body),
+  deleteLinearConnection: () => request<undefined>("DELETE", "/org/linear"),
   getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),
   postGithubAppManifest: (body: PostGithubAppManifestRequest = {}) =>
     request<PostGithubAppManifestResponse>("POST", "/org/github-app/manifest", body),

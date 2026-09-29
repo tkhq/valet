@@ -14,23 +14,62 @@
  * package (teams.ts) for cross-tenant access.
  *
  * Preferences mirror `isWebEnabled`'s default in `orchestrator/attention.ts`:
- * a kind with no row reports `web: true`. The table only ever needs a row
- * for someone who opted OUT.
+ * a kind with no row reports `web: true` and `teamDm: false`.
  */
 import { Hono } from "hono";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import { notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
+import { agentSessions, workflowRuns, workflowDefinitions, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
+import { canResolveSessionGate } from "../services/session-access.js";
+import { engineGateToWire } from "../engine/bridge.js";
 import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
+  ListNotificationDecisionsResponse,
   NotificationKind,
   NotificationSummary,
   SetNotificationPreferenceRequest,
 } from "../wire/types.js";
 
 export const notificationsRouter = new Hono<AppEnv>();
+
+/** Read durable gates without waking their sessions or relying on notification read state. */
+notificationsRouter.get("/decisions", async (c) => {
+  const { db, engineStore } = c.var.providers;
+  const sessions = await db.select().from(agentSessions).where(and(
+    eq(agentSessions.orgId, c.var.user.orgId),
+    ne(agentSessions.status, "deleted"),
+    sql`EXISTS (SELECT 1 FROM engine_decision_gates g WHERE g.session_id = ${agentSessions.id} AND g.status = 'pending')`,
+  ));
+  const items: ListNotificationDecisionsResponse["items"] = [];
+  for (const session of sessions) {
+    if (!await canResolveSessionGate(db, session, c.var.principal)) continue;
+    const gates = await engineStore.listDecisionGates(session.id, undefined, "pending");
+    for (const gate of gates) items.push({ sessionId: session.id, title: session.title || "Thread approval", gate: engineGateToWire(gate) });
+  }
+  // Workflow agent sessions have no app session row. Their run owns the gates.
+  const workflowSessions = await db.selectDistinct({
+    session_id: sql<string>`g.session_id`,
+    owner_type: workflowRuns.ownerType, owner_id: workflowRuns.ownerId, title: workflowDefinitions.name,
+  }).from(sql`engine_decision_gates g`)
+    .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(g.session_id, ':', 2)`)
+    .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+    .where(and(eq(workflowDefinitions.orgId, c.var.user.orgId), sql`g.status = 'pending' and g.session_id LIKE 'wf:%'`));
+  for (const session of workflowSessions) {
+    if (!await canResolveSessionGate(db, {
+      ownerType: session.owner_type, ownerId: session.owner_id,
+      userId: session.owner_type === "user" ? session.owner_id : "",
+    }, c.var.principal)) continue;
+    const gates = await engineStore.listDecisionGates(session.session_id, undefined, "pending");
+    for (const gate of gates) {
+      if (!items.some(item => item.gate.id === gate.id)) {
+        items.push({ sessionId: session.session_id, title: session.title, gate: engineGateToWire(gate) });
+      }
+    }
+  }
+  return c.json({ items } satisfies ListNotificationDecisionsResponse);
+});
 
 const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review"];
 
@@ -113,6 +152,7 @@ notificationsRouter.get("/preferences", async (c) => {
   const preferences = NOTIFICATION_KINDS.map((kind) => ({
     kind,
     web: byKind.get(kind)?.web ?? true,
+    teamDm: byKind.get(kind)?.teamDm ?? false,
   }));
 
   const body: ListNotificationPreferencesResponse = { preferences };
@@ -129,6 +169,7 @@ notificationsRouter.put("/preferences", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  if (body === null || typeof body !== "object") return c.json({ error: "body must be an object" }, 400);
   if (!NOTIFICATION_KINDS.includes(body.kind)) {
     return c.json({ error: `kind must be one of ${NOTIFICATION_KINDS.join(", ")}` }, 400);
   }
@@ -136,12 +177,16 @@ notificationsRouter.put("/preferences", async (c) => {
     return c.json({ error: "web must be a boolean" }, 400);
   }
 
+  if (body.teamDm !== undefined && typeof body.teamDm !== "boolean") {
+    return c.json({ error: "teamDm must be a boolean. Choose whether to receive team direct messages." }, 400);
+  }
+
   await db
     .insert(userNotificationPreferences)
-    .values({ userId, kind: body.kind, web: body.web })
+    .values({ userId, kind: body.kind, web: body.web, teamDm: body.teamDm ?? false })
     .onConflictDoUpdate({
       target: [userNotificationPreferences.userId, userNotificationPreferences.kind],
-      set: { web: body.web },
+      set: { web: body.web, ...(body.teamDm === undefined ? {} : { teamDm: body.teamDm }) },
     });
 
   return c.json({ ok: true });

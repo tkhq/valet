@@ -1,3 +1,4 @@
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
  * `invokeAction` (now a real headless `ActionInvoker` with durable dedup —
@@ -303,7 +304,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     // owner's default assistant — the row `resolveDefaultAssistant` created.
     const defaultAssistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: LOCAL_USER.id });
     expect(receipt.sessionId).toBe(defaultAssistant.sessionId);
-    expect(defaultAssistant.isDefault).toBe(true);
+    expect(defaultAssistant).toBeDefined();
     expect(receipt.threadId).toBeTruthy();
     expect(receipt.queueItemId).toBeTruthy();
 
@@ -417,7 +418,6 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       ownerType: "user",
       ownerId: LOCAL_USER.id,
       sessionId: legacySessionId,
-      isDefault: false,
       createdAt: Date.now(),
     });
     const session = await engineHost.assistantSessionFor(
@@ -747,6 +747,26 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
     } finally {
       piAi.registerApiProvider(original);
     }
+  });
+
+  it.each(["error", "aborted"] as const)("rejects a provider %s response instead of returning empty success", async (stopReason) => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("OpenAI transport is required");
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      events.end({ ...fauxAssistantMessage(""), stopReason, errorMessage: "Provider rejected this model" });
+      return events;
+    });
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+      const runId = `wfrun_provider_${stopReason}`;
+      await seedRun(api, runId, `wf_provider_${stopReason}`);
+      await expect(deps.llmComplete({ runId, model: "openai/gpt-6-astra", prompt: "hi" })).rejects.toThrow('Provider rejected this model');
+    } finally { piAi.registerApiProvider(original); }
   });
 
   it("throws descriptively for an unknown model id, without any network call", async () => {

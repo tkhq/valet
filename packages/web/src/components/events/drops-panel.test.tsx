@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 
 const useEventDropsMock = vi.fn();
 vi.mock("~/api/events", () => ({ useEventDrops: (...args: unknown[]) => useEventDropsMock(...args) }));
@@ -32,29 +32,24 @@ describe("DropsPanel", () => {
     expect(screen.getByText("No subscription")).toBeTruthy();
     expect(screen.getByText("Bad signature")).toBeTruthy();
     expect(screen.getByText("Slack form did not start a workflow")).toBeTruthy();
-    expect(screen.queryByText(/no enabled subscription names it/)).toBeNull();
-    const details = screen.getAllByRole("button", { name: "Details" })[0];
-    expect(details.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(details);
-    expect(details.getAttribute("aria-expanded")).toBe("true");
-    expect(details.getAttribute("aria-controls")).toBeTruthy();
     expect(screen.getByText(/no enabled subscription names it/)).toBeTruthy();
-    fireEvent.click(details);
-    expect(screen.queryByText(/no enabled subscription names it/)).toBeNull();
-    expect(screen.getByText(/Last event received/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Details" })).toBeNull();
+    expect(screen.getByText(/Last recorded event or diagnostic/)).toBeTruthy();
   });
 
-  it("tells the user when no event has ever arrived", () => {
+  it("distinguishes a missing receipt record from proof of non-delivery", () => {
     useEventDropsMock.mockReturnValue({ isPending: false, error: null, data: { lastEventAt: null, drops: [] } });
     render(<DropsPanel />);
-    expect(screen.getByText(/No event has reached Valet yet/)).toBeTruthy();
-    expect(screen.getByText(/No problems in the recent window/)).toBeTruthy();
+    expect(screen.getByText(/No event receipt is recorded yet/)).toBeTruthy();
+    expect(screen.getByText(/No recorded problems in this window/)).toBeTruthy();
+    expect(screen.queryByText(/Every event that arrived was handled/)).toBeNull();
+    expect(screen.getByText(/Check the integration's delivery logs if a message is missing/)).toBeTruthy();
   });
 
   it("shows a loading state", () => {
     useEventDropsMock.mockReturnValue({ isPending: true, error: null, data: undefined });
     render(<DropsPanel />);
-    expect(screen.getByText(/Loading problems/)).toBeTruthy();
+    expect(screen.getByText(/Loading rejections/)).toBeTruthy();
   });
 
   it("limits searches to 200 characters before it submits them", async () => {
@@ -63,7 +58,7 @@ describe("DropsPanel", () => {
     const user = userEvent.setup();
     render(<DropsPanel onQueryChange={onQueryChange} />);
 
-    const search = screen.getByRole("searchbox", { name: "Search problems" }) as HTMLInputElement;
+    const search = screen.getByRole("searchbox", { name: "Search rejections and failures" }) as HTMLInputElement;
     await user.type(search, "x".repeat(201));
 
     expect(search.value).toBe("x".repeat(200));
@@ -79,7 +74,7 @@ describe("DropsPanel", () => {
     expect(screen.getByRole("alert").textContent).toBe(
       "Search is too long. Shorten the search to 200 characters or fewer.",
     );
-    expect(screen.queryByText("Loading problems…")).toBeNull();
+    expect(screen.queryByText("Loading rejections…")).toBeNull();
     expect(useEventDropsMock).toHaveBeenLastCalledWith(
       { q: query, cursor: undefined, direction: undefined },
       { enabled: false },

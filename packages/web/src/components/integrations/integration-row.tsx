@@ -13,6 +13,7 @@
  * carries identity only — a badge, the fix, and a Reconnect control. See
  * `service-health.ts` for the states and `ServiceIcon` for the marks.
  *
+ * Linear presents the organization's native connection before its optional MCP tool connection.
  * GitHub carries a second line for the half its organisation owns — the
  * GitHub App, which the personal credential depends on to sign in and which
  * reaches repositories on its own. See `github-org-app.ts`.
@@ -40,6 +41,7 @@ import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
+import { LinearOrgConnection } from "./linear-org-connection";
 import { GithubOrgAppLine } from "./github-org-app-line";
 import { IdentityLinkBlock, useServiceIdentityLink } from "./identity-link-block";
 import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
@@ -118,9 +120,7 @@ function EnvNames({ names }: { names: string[] }) {
   );
 }
 
-/** GitHub is the only service whose organisation owns a second, separate
- * way in. Keyed on the credential service, the same key `connectPath` reads
- * to route GitHub through the org App's OAuth client. */
+/** GitHub personal access depends on its organization App. */
 function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
   return service.service === "github" ? <GithubOrgAppLine /> : undefined;
 }
@@ -221,7 +221,8 @@ function ServiceBlock({
   // A broken connection keeps its row in the credential store, so the card
   // offers the repair beside the disconnect instead of only "Disconnect".
   const repair = needsReauth(health);
-  const connectLabel = repair ? "Reconnect" : "Connect";
+  const linear = service.service === "linear";
+  const connectLabel = linear ? (repair ? "Reconnect via MCP" : "Connect via MCP") : repair ? "Reconnect" : "Connect";
   // No connect affordance for an unconfigured service — its tile exists only
   // so a leftover credential can be disconnected, or so an org admin can read
   // what to set (integration-availability design). The note below names where
@@ -245,7 +246,7 @@ function ServiceBlock({
   // The visible label stays one word, but the grid holds a dozen identical
   // "Connect" buttons — so each one names its service to a screen reader.
   const connectControl = (
-    <Button size="sm" aria-label={`${connectLabel} ${title}`} onClick={() => setConnecting(true)}>
+    <Button variant={linear ? "secondary" : "primary"} size="sm" aria-label={linear ? connectLabel : `${connectLabel} ${title}`} onClick={() => setConnecting(true)}>
       {connectLabel}
     </Button>
   );
@@ -254,7 +255,7 @@ function ServiceBlock({
     <Button
       variant="ghost"
       size="sm"
-      aria-label={`Disconnect ${title}`}
+      aria-label={linear ? "Disconnect Linear MCP" : `Disconnect ${title}`}
       onClick={() => {
         // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
         disconnect.reset();
@@ -262,7 +263,7 @@ function ServiceBlock({
       }}
       disabled={disconnect.isPending}
     >
-      {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+      {disconnect.isPending ? "Disconnecting…" : linear ? "Disconnect MCP" : "Disconnect"}
     </Button>
   );
 
@@ -322,14 +323,7 @@ function ServiceBlock({
       </p>
     ) : undefined;
 
-  return (
-    <>
-      <CardHeading
-        title={title}
-        slug={slug}
-        description={description}
-        state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
-      />
+  const connectionDetails = <>
       {/* The org note reads on a disconnected card too — "your organisation
           has no GitHub App" is the reason Connect is about to fail — so the
           stack no longer hangs off `service.connected` alone. */}
@@ -354,10 +348,31 @@ function ServiceBlock({
           {orgNote}
         </div>
       )}
-      <CardFooter meta={meta} right={controls} />
+  </>;
+
+  return (
+    <>
+      <CardHeading
+        title={title}
+        slug={slug}
+        description={linear ? undefined : description}
+        state={!linear && badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
+      />
+      {linear ? <>
+        <div className="mt-4"><LinearOrgConnection /></div>
+        <details className="mt-4 border-t border-line pt-3">
+          <summary className="cursor-pointer text-xs text-muted">Optional MCP tools</summary>
+          <div className="mt-3 space-y-2">
+            <p className="text-xs text-muted">Tool access only. Workflow events come from your organization’s Linear connection.</p>
+            {badge && <Badge variant={badge.variant}>{badge.label}</Badge>}
+            {connectionDetails}
+            <CardFooter meta={meta} right={controls} />
+          </div>
+        </details>
+      </> : <>{connectionDetails}<CardFooter meta={meta} right={controls} /></>}
       <ConnectDialog
         service={service}
-        title={title}
+        title={linear ? `${title} via MCP` : title}
         slug={slug}
         open={connecting}
         onOpenChange={setConnecting}
@@ -368,8 +383,8 @@ function ServiceBlock({
       <ConfirmDialog
         open={disconnecting}
         onOpenChange={setDisconnecting}
-        title={`Disconnect ${title}?`}
-        description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
+        title={`Disconnect ${title}${linear ? " MCP" : ""}?`}
+        description={linear ? "This removes MCP tool access and its team shares. Your organization’s Linear connection stays connected." : `This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"
         pending={disconnect.isPending}

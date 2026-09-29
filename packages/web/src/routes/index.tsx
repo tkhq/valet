@@ -1,29 +1,14 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import type { GetOrchestratorInfoResponse } from "@valet/api/wire";
-import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
-import { useNotifications } from "~/api/queries";
-import { ActivityStrip, mergeActivity } from "~/components/assistant/activity-strip";
-import { ThreadsCard } from "~/components/assistant/threads-card";
-import { IdentityHeader } from "~/components/assistant/identity-header";
-import { IdentityFields } from "~/components/assistant/identity-fields";
+import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
+import { createFileRoute } from "@tanstack/react-router";
 import { MemoryCard } from "~/components/assistant/memory-card";
-import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamsCard } from "~/components/assistant/teams-card";
+import { WorkspaceCatchUp } from "~/components/dashboard/workspace-catch-up";
+import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamDashboard } from "~/components/dashboard/team-dashboard";
 import { Spinner } from "~/components/primitives";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 
-/**
- * `/` — the dashboard. Follows the workspace switcher, exactly like every
- * list page (team dashboard design, 2026-08-27): the personal workspace
- * renders the assistant dashboard (assistant-centered web UI, decision 1);
- * a team workspace renders the team's activity dashboard.
- *
- * The personal branch works as before: `GET /api/orchestrator/info` with
- * `name === null` means first visit — an inline, full-page-centered
- * identity step (decision 11); once named, the identity header + card grid
- * + activity strip.
- */
+/** Home follows the workspace switcher and shows the personal or team activity dashboard. */
 export const Route = createFileRoute("/")({
   component: Home,
 });
@@ -37,7 +22,7 @@ export function Home() {
 }
 
 export function Dashboard() {
-  const info = useOrchestratorInfo();
+  const info = useWorkspaceRuntimeInfo("user");
 
   if (info.isLoading) {
     return (
@@ -51,7 +36,7 @@ export function Dashboard() {
     return (
       <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
         <div>
-          Couldn’t load your assistant.
+          Couldn’t load your workspace.
           <div className="mt-2">
             <button type="button" className="min-h-11 px-3 underline sm:min-h-0" onClick={() => info.refetch()}>
               Retry
@@ -62,53 +47,20 @@ export function Dashboard() {
     );
   }
 
-  if (info.data.name === null) {
-    return (
-      <div className="flex-1 grid place-items-center p-8">
-        <IdentityFields className="w-full max-w-md" variant="onboarding" />
-      </div>
-    );
-  }
-
-  return <DashboardBody info={info.data} />;
+  return <DashboardBody />;
 }
 
-function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
-  const childrenQ = useOrchestratorChildren();
-  const notificationsQ = useNotifications();
-
-  const events = mergeActivity(notificationsQ.data?.notifications ?? [], childrenQ.data?.children ?? []);
-
+function DashboardBody() {
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-8">
-        <div className="space-y-2">
-          <IdentityHeader info={info} />
-          {/* The one path to an assistant's editor used to be the chat
-              rail's menu; the dashboard links the list page directly. */}
-          <Link to="/assistants" className="inline-flex min-h-11 items-center text-xs text-moss underline-offset-2 hover:underline sm:min-h-0">
-            Manage assistants →
-          </Link>
-        </div>
-
+        <header><h1 className="font-display text-2xl">Personal</h1><p className="mt-1 text-sm text-muted">Your briefing: what needs attention, what finished, and what comes next.</p></header>
+        <WorkspaceCatchUp />
         <div className="grid gap-4 md:grid-cols-2">
-          <div className="md:col-span-2">
-            <ThreadsCard />
-          </div>
           <MemoryCard />
           <UsageCard />
           <TeamsCard />
         </div>
-
-        <ActivityStrip
-          events={events}
-          loading={notificationsQ.isLoading || childrenQ.isLoading}
-          error={!!notificationsQ.error || !!childrenQ.error}
-          onRetry={() => {
-            notificationsQ.refetch();
-            childrenQ.refetch();
-          }}
-        />
       </div>
     </div>
   );

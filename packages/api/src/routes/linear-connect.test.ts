@@ -1,8 +1,7 @@
 /**
- * `/api/org/linear` connect flow (event-system plan, Task 9). Route-level:
- * real Hono app via `bootTestApi`, real HTTP requests, a fake Linear API
- * server (`startLinearFixture`) subbed in via `LINEAR_API_URL` /
- * `LINEAR_OAUTH_URL` — same shape as `github-app.test.ts`.
+ * `/api/org/linear` — the Slack-model Linear connection. Route-level: real
+ * Hono app via `bootTestApi`, real HTTP requests, a fake Linear API server
+ * (`startLinearFixture`) subbed in via `LINEAR_API_URL`.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
@@ -12,11 +11,13 @@ import { linearInstallations } from "../schema/index.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
+const APP = { clientId: "lin-client-id", clientSecret: "lin-client-secret", webhookSecret: "lin-webhook-secret" };
+const ORG = { type: "org" as const, id: "local-org" };
 
 let api: TestApi | undefined;
 let fixture: LinearFixture | undefined;
 
-const SAVED_ENV_KEYS = ["LINEAR_API_URL", "LINEAR_OAUTH_URL", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET", "VALET_PUBLIC_URL"] as const;
+const SAVED_ENV_KEYS = ["LINEAR_API_URL", "VALET_PUBLIC_URL"] as const;
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(
   SAVED_ENV_KEYS.map((k) => [k, process.env[k]]),
 );
@@ -35,281 +36,168 @@ afterEach(async () => {
 function useFixture(overrides: Parameters<typeof startLinearFixture>[0] = {}): LinearFixture {
   fixture = startLinearFixture(overrides);
   process.env.LINEAR_API_URL = fixture.url;
-  process.env.LINEAR_OAUTH_URL = fixture.url;
-  process.env.LINEAR_CLIENT_ID = "lin-client-id";
-  process.env.LINEAR_CLIENT_SECRET = "lin-client-secret";
   return fixture;
 }
 
-async function fetchAuthorizeUrl(baseUrl: string): Promise<URL> {
-  const res = await fetch(`${baseUrl}/api/org/linear/connect`, { method: "POST", headers: HEADERS });
-  expect(res.status).toBe(200);
-  const body = (await res.json()) as { url: string };
-  return new URL(body.url);
+function saveApp(baseUrl: string, body: Record<string, unknown> = APP, headers = HEADERS): Promise<Response> {
+  return fetch(`${baseUrl}/api/org/linear`, { method: "PUT", headers, body: JSON.stringify(body) });
 }
 
-/** Drives the full connect → callback exchange against the fixture and
- * returns the callback response (redirect: manual). */
-async function completeConnect(baseUrl: string): Promise<Response> {
-  const authorizeUrl = await fetchAuthorizeUrl(baseUrl);
-  const state = authorizeUrl.searchParams.get("state");
-  expect(state).toBeTruthy();
-  return fetch(`${baseUrl}/api/org/linear/callback?code=lin-code&state=${encodeURIComponent(state!)}`, {
-    redirect: "manual",
-  });
+function tokenCalls(f: LinearFixture, grant: string): LinearFixtureCall[] {
+  return f.calls.filter((call) => call.path === "/oauth/token" && (call.body as Record<string, string>).grant_type === grant);
 }
 
-function graphqlCalls(f: LinearFixture, needle: string): LinearFixtureCall[] {
-  return f.calls.filter((call) => {
-    if (call.path !== "/graphql") return false;
-    const body = call.body as { query?: string } | undefined;
-    return typeof body?.query === "string" && body.query.includes(needle);
-  });
+async function status(baseUrl: string): Promise<Record<string, unknown>> {
+  return (await fetch(`${baseUrl}/api/org/linear`, { headers: HEADERS })).json() as Promise<Record<string, unknown>>;
 }
 
-describe("POST /api/org/linear/connect", () => {
+describe("PUT /api/org/linear", () => {
   it("403s for a non-admin org member", async () => {
     api = await bootTestApi();
     useFixture();
-    const res = await fetch(`${api.baseUrl}/api/org/linear/connect`, { method: "POST", headers: MEMBER_HEADERS });
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: "org admin required" });
+    expect((await saveApp(api.baseUrl, APP, MEMBER_HEADERS)).status).toBe(403);
   });
 
-  it("503s with a clear message when LINEAR_CLIENT_ID/SECRET are unset", async () => {
-    api = await bootTestApi();
-    delete process.env.LINEAR_CLIENT_ID;
-    delete process.env.LINEAR_CLIENT_SECRET;
-    const res = await fetch(`${api.baseUrl}/api/org/linear/connect`, { method: "POST", headers: HEADERS });
-    expect(res.status).toBe(503);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("LINEAR_CLIENT_ID");
-  });
-
-  it("returns an authorize URL with client_id, redirect_uri, scope, state, and actor=app", async () => {
+  it("400s unless all three values are present", async () => {
     api = await bootTestApi();
     const f = useFixture();
-    const url = await fetchAuthorizeUrl(api.baseUrl);
-    expect(url.origin).toBe(f.url);
-    expect(url.pathname).toBe("/oauth/authorize");
-    expect(url.searchParams.get("client_id")).toBe("lin-client-id");
-    expect(url.searchParams.get("redirect_uri")).toBe(`${api.baseUrl}/api/org/linear/callback`);
-    expect(url.searchParams.get("response_type")).toBe("code");
-    expect(url.searchParams.get("scope")).toBe("read,write,admin");
-    expect(url.searchParams.get("actor")).toBe("app");
-    expect(url.searchParams.get("state")).toBeTruthy();
-  });
-});
-
-describe("GET /api/org/linear/callback", () => {
-  it("403s for a non-admin org member", async () => {
-    api = await bootTestApi();
-    useFixture();
-    const res = await fetch(`${api.baseUrl}/api/org/linear/callback?code=x&state=y`, {
-      headers: MEMBER_HEADERS,
-      redirect: "manual",
-    });
-    expect(res.status).toBe(403);
+    for (const missing of ["clientId", "clientSecret", "webhookSecret"]) {
+      const res = await saveApp(api.baseUrl, { ...APP, [missing]: " " });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("webhook signing secret");
+    }
+    expect(f.calls).toHaveLength(0);
   });
 
-  it("400s when code or state is missing", async () => {
-    api = await bootTestApi();
-    useFixture();
-    const res = await fetch(`${api.baseUrl}/api/org/linear/callback?code=abc`, { redirect: "manual" });
-    expect(res.status).toBe(400);
-  });
-
-  it("400s on a tampered state", async () => {
-    api = await bootTestApi();
-    useFixture();
-    const authorizeUrl = await fetchAuthorizeUrl(api.baseUrl);
-    const state = authorizeUrl.searchParams.get("state")!;
-    const tampered = `${state.slice(0, -1)}${state.endsWith("A") ? "B" : "A"}`;
-    const res = await fetch(
-      `${api.baseUrl}/api/org/linear/callback?code=abc&state=${encodeURIComponent(tampered)}`,
-      { redirect: "manual" },
-    );
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "invalid or expired state" });
-  });
-
-  it("exchanges the code, creates the webhook, saves the credential + installation, and 302s", async () => {
+  it("verifies with a client_credentials token, then stores the app, token, secret, and installation", async () => {
     api = await bootTestApi();
     const f = useFixture();
-    const res = await completeConnect(api.baseUrl);
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toContain("/settings");
+    const res = await saveApp(api.baseUrl);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ configured: true, clientId: "lin-client-id", connected: true, webhookConfigured: true, ready: true, workspaceName: "Turnkey" });
 
-    // Token exchange hit the fixture with the code + app credentials.
-    const tokenCall = f.calls.find((call) => call.path === "/oauth/token");
-    expect(tokenCall).toBeDefined();
-    expect(tokenCall!.body).toMatchObject({
-      code: "lin-code",
-      client_id: "lin-client-id",
-      client_secret: "lin-client-secret",
-      grant_type: "authorization_code",
-      redirect_uri: `${api.baseUrl}/api/org/linear/callback`,
-    });
+    const [grant] = tokenCalls(f, "client_credentials");
+    expect(grant.body).toMatchObject({ client_id: "lin-client-id", client_secret: "lin-client-secret", scope: "read,write" });
+    const [lookup] = f.calls.filter((call) => call.path === "/graphql");
+    expect(lookup.authHeader).toBe("Bearer lin_app_token");
 
-    // webhookCreate pointed at our ingress with a generated secret.
-    const [createCall] = graphqlCalls(f, "webhookCreate");
-    expect(createCall).toBeDefined();
-    expect(createCall.authHeader).toBe("Bearer lin_test");
-    const variables = (createCall.body as { variables: { input: Record<string, unknown> } }).variables;
-    expect(variables.input.url).toBe(`${api.baseUrl}/webhooks/events/linear`);
-    expect(variables.input.allPublicTeams).toBe(true);
-    expect(variables.input.resourceTypes).toEqual(["Issue", "Comment", "Project", "Cycle", "IssueLabel", "Reaction"]);
-    const secret = variables.input.secret;
-    expect(typeof secret).toBe("string");
-    expect(secret).toMatch(/^[0-9a-f]{64}$/);
-
-    // Credential saved with the same secret + workspace id in metadata.
-    const cred = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear");
+    const cred = await api.providers.engineCredentials.get(ORG, "linear");
     expect(cred).toMatchObject({
       type: "oauth2",
-      accessToken: "lin_test",
-      metadata: { webhookSecret: secret, workspaceId: "lin-org-1" },
+      accessToken: "lin_app_token",
+      metadata: { webhookSecret: "lin-webhook-secret", workspaceId: "lin-org-1", grant: "client_credentials" },
     });
-
-    // Installation row upserted.
+    expect(cred?.metadata?.tokenExpiresAt).toBeGreaterThan(Date.now() + 29 * 24 * 60 * 60 * 1000);
+    expect(await api.providers.engineCredentials.get(ORG, "linear_app")).toMatchObject({ apiKey: "lin-client-secret", metadata: { clientId: "lin-client-id" } });
     const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      workspaceId: "lin-org-1",
-      workspaceName: "Turnkey",
-      webhookId: "wh-1",
-      connectedBy: "local-user",
-    });
+    expect(rows[0]).toMatchObject({ workspaceId: "lin-org-1", workspaceName: "Turnkey", webhookId: null, connectedBy: "local-user" });
   });
 
-  it("reconnecting the same workspace updates the existing row instead of duplicating it", async () => {
+  it("stores nothing and names the fix when Linear refuses the client_credentials grant", async () => {
     api = await bootTestApi();
-    const f = useFixture();
-    expect((await completeConnect(api.baseUrl)).status).toBe(302);
-    expect((await completeConnect(api.baseUrl)).status).toBe(302);
-
-    const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
-    expect(rows).toHaveLength(1);
-
-    // The old webhook (wh-1, created during the first connect) must have been
-    // deleted before the new one was registered — prevents an orphaned webhook
-    // delivering with a dead signing secret.
-    const [deleteCall] = graphqlCalls(f, "webhookDelete");
-    expect(deleteCall).toBeDefined();
-    expect((deleteCall.body as { variables: { id: string } }).variables.id).toBe("wh-1");
+    useFixture({ oauthToken: () => ({ status: 400, body: { error: "unsupported_grant_type", error_description: "Client does not support the client_credentials grant type" } }) });
+    const res = await saveApp(api.baseUrl);
+    expect(res.status).toBe(400);
+    const error = ((await res.json()) as { error: string }).error;
+    expect(error).toContain("turn on Client credentials");
+    expect(error).toContain("Linear said: Client does not support the client_credentials grant type");
+    expect(await api.providers.engineCredentials.get(ORG, "linear")).toBeNull();
+    expect(await api.providers.engineCredentials.get(ORG, "linear_app")).toBeNull();
+    expect(await api.providers.db.select().from(linearInstallations)).toHaveLength(0);
   });
 
-  it("502s when webhook creation fails — credential + install saved FIRST (repairable, no delivery gap)", async () => {
-    // The credential (with the signing secret) and the installation row are
-    // persisted BEFORE webhookCreate: Linear can deliver the moment the
-    // webhook exists, and a delivery the ingress can't resolve is 204'd and
-    // never retried. A failed webhookCreate therefore leaves a repairable
-    // half-connected state (webhookConfigured: false), not nothing.
+  it("names the credentials when Linear rejects the client ID or secret", async () => {
     api = await bootTestApi();
-    useFixture({ webhookCreate: () => ({ body: { data: { webhookCreate: { success: false } } } }) });
-    const res = await completeConnect(api.baseUrl);
-    expect(res.status).toBe(502);
-
-    const cred = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear");
-    expect(cred).toMatchObject({ type: "oauth2", accessToken: "lin_test" });
-    const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ workspaceId: "lin-org-1", webhookId: null });
-
-    const status = await fetch(`${api.baseUrl}/api/org/linear`, { headers: HEADERS });
-    expect(await status.json()).toMatchObject({ webhookConfigured: false });
+    useFixture({ oauthToken: () => ({ status: 401, body: { error: "invalid_client" } }) });
+    const res = await saveApp(api.baseUrl);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("Copy the client ID and client secret again");
   });
 
-  it("409s when a different workspace is already connected for the org", async () => {
-    // One workspace per org: the org credential holds exactly one token, so
-    // a second workspace would orphan the first's webhook forever.
+  it("409s when a different Linear workspace is already connected", async () => {
     api = await bootTestApi();
     useFixture();
     await api.providers.db.insert(linearInstallations).values({
-      id: "lin_pre-existing",
-      orgId: "local-org",
-      workspaceId: "lin-org-OTHER",
-      workspaceName: "Other Workspace",
-      webhookId: "wh-other",
-      connectedBy: "local-user",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      id: "lin_pre-existing", orgId: "local-org", workspaceId: "lin-org-OTHER", workspaceName: "Other Workspace",
+      webhookId: null, connectedBy: "local-user", createdAt: Date.now(), updatedAt: Date.now(),
     });
-
-    const res = await completeConnect(api.baseUrl);
+    const res = await saveApp(api.baseUrl);
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toContain("Other Workspace");
-
-    // Nothing about the pre-existing install was touched, and no credential
-    // was written for the rejected workspace.
-    const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ workspaceId: "lin-org-OTHER", webhookId: "wh-other" });
-    expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear")).toBeNull();
+    expect(await api.providers.engineCredentials.get(ORG, "linear")).toBeNull();
   });
+
 });
 
 describe("GET /api/org/linear", () => {
   it("403s for a non-admin org member", async () => {
     api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/linear`, { headers: MEMBER_HEADERS });
-    expect(res.status).toBe(403);
+    expect((await fetch(`${api.baseUrl}/api/org/linear`, { headers: MEMBER_HEADERS })).status).toBe(403);
   });
 
-  it("reports disconnected before any connect", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/linear`, { headers: HEADERS });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ connected: false, webhookConfigured: false });
-  });
-
-  it("reflects connected state after the callback", async () => {
+  it("reports setup inputs and never returns secrets", async () => {
     api = await bootTestApi();
     useFixture();
-    expect((await completeConnect(api.baseUrl)).status).toBe(302);
+    const before = await status(api.baseUrl);
+    expect(before).toMatchObject({ configured: false, connected: false, ready: false, redirectUri: `${api.baseUrl}/api/org/linear/callback` });
+    expect(before.webhookUrl).toBeUndefined();
+    expect(before.webhookResourceTypes).toEqual(["Issue", "Comment", "Project", "Cycle", "IssueLabel", "Reaction"]);
+    await saveApp(api.baseUrl);
+    const after = JSON.stringify(await status(api.baseUrl));
+    for (const secret of ["lin-client-secret", "lin-webhook-secret", "lin_app_token"]) expect(after).not.toContain(secret);
+  });
 
-    const res = await fetch(`${api.baseUrl}/api/org/linear`, { headers: HEADERS });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ connected: true, workspaceName: "Turnkey", webhookConfigured: true });
+  it("offers the public HTTPS event URL for the app webhook", async () => {
+    process.env.VALET_PUBLIC_URL = "https://valet.example";
+    api = await bootTestApi();
+    expect(await status(api.baseUrl)).toMatchObject({
+      webhookUrl: "https://valet.example/webhooks/events/linear",
+      redirectUri: "https://valet.example/api/org/linear/callback",
+    });
   });
 });
 
 describe("DELETE /api/org/linear", () => {
   it("403s for a non-admin org member", async () => {
     api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/linear`, { method: "DELETE", headers: MEMBER_HEADERS });
-    expect(res.status).toBe(403);
+    expect((await fetch(`${api.baseUrl}/api/org/linear`, { method: "DELETE", headers: MEMBER_HEADERS })).status).toBe(403);
   });
 
-  it("deletes the webhook, installation rows, and credential", async () => {
+  it("removes the installation, token, and app", async () => {
     api = await bootTestApi();
-    const f = useFixture();
-    expect((await completeConnect(api.baseUrl)).status).toBe(302);
-
-    const res = await fetch(`${api.baseUrl}/api/org/linear`, { method: "DELETE", headers: HEADERS });
-    expect(res.status).toBe(204);
-
-    const [deleteCall] = graphqlCalls(f, "webhookDelete");
-    expect(deleteCall).toBeDefined();
-    expect((deleteCall.body as { variables: { id: string } }).variables.id).toBe("wh-1");
-
-    const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
-    expect(rows).toHaveLength(0);
-    const cred = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear");
-    expect(cred).toBeNull();
-
-    const getRes = await fetch(`${api.baseUrl}/api/org/linear`, { headers: HEADERS });
-    expect(await getRes.json()).toEqual({ connected: false, webhookConfigured: false });
+    useFixture();
+    await saveApp(api.baseUrl);
+    expect((await fetch(`${api.baseUrl}/api/org/linear`, { method: "DELETE", headers: HEADERS })).status).toBe(204);
+    expect(await api.providers.db.select().from(linearInstallations)).toHaveLength(0);
+    expect(await api.providers.engineCredentials.get(ORG, "linear")).toBeNull();
+    expect(await api.providers.engineCredentials.get(ORG, "linear_app")).toBeNull();
+    expect(await status(api.baseUrl)).toMatchObject({ configured: false, connected: false, ready: false });
   });
 
-  it("still disconnects (204) when the webhookDelete call fails", async () => {
-    api = await bootTestApi();
-    useFixture({ webhookDelete: () => ({ status: 500, body: { errors: [{ message: "boom" }] } }) });
-    expect((await completeConnect(api.baseUrl)).status).toBe(302);
-
-    const res = await fetch(`${api.baseUrl}/api/org/linear`, { method: "DELETE", headers: HEADERS });
-    expect(res.status).toBe(204);
-    const rows = await api.providers.db.select().from(linearInstallations).where(eq(linearInstallations.orgId, "local-org"));
-    expect(rows).toHaveLength(0);
+  it("removes a webhook an older connection created, and still disconnects when that fails", async () => {
+    for (const ok of [true, false]) {
+      api = await bootTestApi();
+      const f = useFixture(ok ? {} : { webhookDelete: () => ({ status: 500, body: { errors: [{ message: "boom" }] } }) });
+      await saveApp(api.baseUrl);
+      await api.providers.db.update(linearInstallations).set({ webhookId: "wh-legacy" }).where(eq(linearInstallations.orgId, "local-org"));
+      expect((await fetch(`${api.baseUrl}/api/org/linear`, { method: "DELETE", headers: HEADERS })).status).toBe(204);
+      const [deleteCall] = f.calls.filter((call) => JSON.stringify(call.body ?? "").includes("webhookDelete"));
+      expect((deleteCall.body as { variables: { id: string } }).variables.id).toBe("wh-legacy");
+      expect(await api.providers.db.select().from(linearInstallations)).toHaveLength(0);
+      await api.cleanup(); api = undefined;
+      await f.close(); fixture = undefined;
+    }
   });
+});
+
+it("reserves Linear application credentials from generic mutation routes", async () => {
+  api = await bootTestApi();
+  for (const method of ["PUT", "DELETE"]) {
+    const response = await fetch(`${api.baseUrl}/api/credentials/linear_app?scope=org`, {
+      method, headers: HEADERS,
+      ...(method === "PUT" ? { body: JSON.stringify({ scope: "org", type: "api_key", apiKey: "secret" }) } : {}),
+    });
+    expect(response.status).toBe(400);
+  }
 });

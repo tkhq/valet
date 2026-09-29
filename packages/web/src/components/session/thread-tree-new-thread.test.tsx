@@ -57,6 +57,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
     ...actual,
+    useMe: () => ({ data: { id: "user-1" }, error: null }),
     useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
     useModelTiers: () => ({
       data: { xs: [], s: [], m: [], l: [], xl: [] },
@@ -66,19 +67,26 @@ vi.mock("~/api/settings", async (importOriginal) => {
   };
 });
 
-vi.mock("~/api/orchestrator", () => ({
-  useOrchestratorInfo: () => ({ data: { sessionId: "orchestrator:user-1" } }),
-  useOrchestratorChildren: () => ({ data: { children: [] }, refetch: vi.fn() }),
-  useDismissChild: () => ({ mutateAsync: vi.fn(), isPending: false }),
+const runtimeInfo = vi.fn((_workspace?: string) => ({ data: { sessionId: "orchestrator:user-1" } }));
+vi.mock("~/api/workspace-runtime", () => ({
+  useWorkspaceRuntimeInfo: (workspace: string | undefined) => runtimeInfo(workspace),
+
 }));
 
-vi.mock("~/stores/stream", () => ({
+vi.mock("~/stores/stream", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/stores/stream")>(),
+  useThreadLiveStatus: () => ({ status: "idle" }),
+  useQueueStateForThread: () => undefined,
   useStreamStore: () => undefined,
 }));
 
 import { ThreadTree } from "./thread-tree";
 
 describe("ThreadTree — new thread affordance", () => {
+  it("disables the personal runtime query when an explicit session is supplied", () => {
+    render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    expect(runtimeInfo).toHaveBeenLastCalledWith(undefined);
+  });
   it("creates a thread and navigates to it", async () => {
     render(
       <TooltipProvider>
@@ -97,9 +105,18 @@ describe("ThreadTree — new thread affordance", () => {
       expect.objectContaining({ search: expect.any(Function) }),
     );
     const call = navigate.mock.calls[0][0] as { search: (prev: Record<string, unknown>) => Record<string, unknown> };
-    expect(call.search({ thread: "thread-1" })).toEqual({
+    expect(call.search({ thread: "thread-1", child: "child-1", view: "events" })).toEqual({
       thread: "thread-new",
       child: undefined,
+      view: undefined,
     });
   });
+});
+
+vi.mock("~/api/child-work", async (importOriginal) => {
+ const actual = await importOriginal<typeof import("~/api/child-work")>();
+ return { ...actual,
+  useChildWork: () => ({ data: { pages: [{ children: [], runningCount: 0, nextCursor: null }] }, refetch: vi.fn() }),
+  useDismissChild: () => ({ mutateAsync: vi.fn(), isPending: false }),
+ };
 });

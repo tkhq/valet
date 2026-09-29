@@ -69,9 +69,9 @@ describe("api client: colon-safe URL encoding", () => {
 
   it("ensureOrchestrator posts to /orchestrator with no id to encode", async () => {
     const fetchMock = stubFetchOk({ sessionId: COLON_ID });
-    const res = await api.ensureOrchestrator();
+    const res = await api.ensureWorkspaceRuntime("user");
     const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).toBe("/api/orchestrator");
+    expect(url).toBe("/api/workspaces/user/runtime");
     expect(res.sessionId).toBe(COLON_ID);
   });
 
@@ -135,4 +135,29 @@ describe("api client: usage period URLs", () => {
       "/api/usage/export.csv?window=7d&scope=me&granularity=day&validate=1",
     );
   });
+});
+
+it("scopes child work and pagination to an encoded parent session", async () => {
+  const fetchMock = stubFetchOk({ children: [], nextCursor: null, runningCount: 0 });
+  await api.getChildWork("parent:team", { cursor: "cursor+/=", limit: 25 });
+  const url = new URL(fetchMock.mock.calls[0]?.[0] as string, "https://example.test");
+  expect(url.pathname).toBe("/api/sessions/parent%3Ateam/children");
+  expect(url.searchParams.get("cursor")).toBe("cursor+/=");
+  expect(url.searchParams.get("limit")).toBe("25");
+});
+
+it("dismisses a child under an explicit encoded parent", async () => {
+  const fetchMock = stubFetchOk({ ok: true });
+  await api.dismissChild("parent:team", "child:one");
+  expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/sessions/parent%3Ateam/children/child%3Aone/dismiss");
+});
+
+it("encodes receipt search and page cursor", async () => {
+  const fetchMock = stubFetchOk();
+  await api.listEventReceipts({ q: "C123 + Ev456", cursor: "cursor+/=", limit: 25 });
+  const url = new URL(fetchMock.mock.calls[0]?.[0] as string, "https://example.test");
+  expect(url.pathname).toBe("/api/events/receipts");
+  expect(url.searchParams.get("q")).toBe("C123 + Ev456");
+  expect(url.searchParams.get("cursor")).toBe("cursor+/=");
+  expect(url.searchParams.get("limit")).toBe("25");
 });

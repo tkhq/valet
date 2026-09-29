@@ -6,15 +6,13 @@
  * server-derived hash, so Slack can fetch assistant avatars without a Valet
  * session and clients cannot select another principal's storage key.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { createHash, randomBytes } from "node:crypto";
 import type sharpType from "sharp";
-import { eq } from "drizzle-orm";
-import type { AppEnv } from "../env.js";
-import { assistantOwner, canAdministerAssistantOwner } from "../assistants/access.js";
-import { loadAssistant, patchAssistant } from "../assistants/service.js";
 import { publicUrlFromEnv } from "../channels/host.js";
+import type { AppEnv } from "../env.js";
 import { requireUser } from "../middleware/auth.js";
 import { users } from "../schema/index.js";
 import {
@@ -232,18 +230,5 @@ profilePicturesRouter.post("/me/avatar", limitUploadBody, async (c) => {
     .limit(1);
   return storePicture(c, "users", user.id, current?.image, async (avatarUrl) => {
     await c.var.providers.db.update(users).set({ image: avatarUrl }).where(eq(users.id, user.id));
-  });
-});
-
-profilePicturesRouter.post("/assistants/:id/avatar", limitUploadBody, async (c) => {
-  const user = requireUser(c);
-  if (!user) return c.json({ error: "unauthorized" }, 401);
-  const row = await loadAssistant(c.var.providers.db, c.req.param("id"));
-  if (!row || row.orgId !== user.orgId) return c.json({ error: "assistant not found" }, 404);
-  if (!(await canAdministerAssistantOwner(c.var.providers.db, assistantOwner(row), c.var.principal))) {
-    return c.json({ error: "assistant not found" }, 404);
-  }
-  return storePicture(c, "assistants", row.id, row.avatarUrl, async (avatarUrl) => {
-    await patchAssistant(c.var.providers.db, row, { avatarUrl });
   });
 });

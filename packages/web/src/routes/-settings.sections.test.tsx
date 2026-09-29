@@ -4,7 +4,7 @@
  * default-model typeahead's filter/select/clear, the enable-organizations
  * card's gate visibility + PATCH-then-navigate, appearance's theme
  * radio-cards, and the notifications toggle. Mocks `~/api/settings` /
- * `~/api/orchestrator` / `~/api/queries` / `@tanstack/react-router` the same
+ * `~/api/workspace-runtime` / `~/api/queries` / `@tanstack/react-router` the same
  * way `-integrations.test.tsx` mocks `~/api/integrations` — these tests
  * only care what each section renders and which mutation it fires, not that
  * TanStack Query or the router themselves resolve anything.
@@ -12,16 +12,15 @@
  * Task 11 adds the API keys section, mocking `~/api/api-keys` the same way
  * — the create flow's one-time secret reveal and the revoke confirm-gate.
  */
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const patchMeMutate = vi.fn();
 const uploadMyAvatarMutateAsync = vi.fn().mockResolvedValue({ avatarUrl: "/avatars/me.webp" });
 const patchOrgMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const setPrefMutate = vi.fn();
 const navigateMock = vi.fn();
-const saveIdentityMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const createApiKeyMutate = vi.fn();
 const revokeApiKeyMutate = vi.fn();
 
@@ -95,13 +94,12 @@ vi.mock("~/api/settings", async (importOriginal) => {
   };
 });
 
-vi.mock("~/api/orchestrator", () => ({
+vi.mock("~/api/workspace-runtime", () => ({
   useOrchestratorInfo: () => ({
     data: { sessionId: "s1", name: "Valet", personality: null, presence: "idle", activeChildren: 0 },
     isLoading: false,
     error: null,
   }),
-  useSaveIdentity: () => ({ mutateAsync: saveIdentityMutateAsync, isPending: false, error: null }),
 }));
 
 // importOriginal: see -new-session-dialog.test.tsx for why a bare
@@ -138,12 +136,12 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   };
 });
 
-import { ProfilePage } from "./settings.profile";
-import { AssistantPage } from "./settings.assistant";
-import { AppearancePage } from "./settings.appearance";
 import { PALETTE_CHOICES } from "~/lib/theme";
-import { NotificationsPage } from "./settings.notifications";
 import { ApiKeysPage } from "./settings.api-keys";
+import { AppearancePage } from "./settings.appearance";
+import { ThreadDefaultsPage } from "./settings.threads";
+import { NotificationsPage } from "./settings.notifications";
+import { ProfilePage } from "./settings.profile";
 
 describe("ProfilePage", () => {
   beforeEach(() => {
@@ -219,7 +217,7 @@ describe("ProfilePage", () => {
   });
 });
 
-describe("AssistantPage", () => {
+describe("ThreadDefaultsPage", () => {
   beforeEach(() => {
     patchMeMutate.mockClear();
     meData = {
@@ -237,18 +235,18 @@ describe("AssistantPage", () => {
   });
 
   it("renders the shared identity fields and the default-model helper text verbatim", () => {
-    render(<AssistantPage />);
-    expect(screen.getByLabelText("Name")).toBeTruthy();
-    expect(screen.getByLabelText(/Personality/)).toBeTruthy();
+    render(<ThreadDefaultsPage />);
+    expect(screen.queryByLabelText("Name")).toBeNull();
+    expect(screen.queryByLabelText(/Personality/)).toBeNull();
     expect(
       screen.getByText(
-        "New sessions you start use this model or size. Existing sessions keep theirs. Switch the model per thread in the chat header. Shared team assistants do not use it.",
+        "Choose a model for new personal threads, or use the valet default. Existing threads keep their settings.",
       ),
     ).toBeTruthy();
   });
 
   it("the model combobox filters to curated sonnet entries on 'sonnet'", () => {
-    render(<AssistantPage />);
+    render(<ThreadDefaultsPage />);
     const input = screen.getByLabelText("Default model");
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "sonnet" } });
@@ -260,7 +258,7 @@ describe("AssistantPage", () => {
   });
 
   it("selecting a model fires PATCH /api/me with its id", () => {
-    render(<AssistantPage />);
+    render(<ThreadDefaultsPage />);
     const input = screen.getByLabelText("Default model");
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "sonnet" } });
@@ -271,33 +269,18 @@ describe("AssistantPage", () => {
 
   it("shows a clear row naming the fallback tiers and clears with defaultModel: null", () => {
     meData = { ...meData!, defaultModel: "claude-sonnet-4-5" };
-    render(<AssistantPage />);
+    render(<ThreadDefaultsPage />);
     const input = screen.getByLabelText("Default model");
     fireEvent.focus(input);
 
-    // "Team or organization default", not "System default": clearing the
-    // personal tier falls to the team default (team workspace) or the org
-    // preference list, not to a fixed product-wide model. Scoped to the
-    // combobox's own listbox — the reasoning select below shares the same
-    // fallback wording in its empty option.
-    fireEvent.click(within(screen.getByRole("listbox")).getByText("Team or organization default"));
+    // Personal threads do not inherit team defaults.
+    fireEvent.click(within(screen.getByRole("listbox")).getByText("Valet default"));
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: null });
-  });
-
-  it("saving the identity fields calls the shared save-identity mutation", async () => {
-    saveIdentityMutateAsync.mockClear();
-    render(<AssistantPage />);
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Nova" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() =>
-      expect(saveIdentityMutateAsync).toHaveBeenCalledWith({ name: "Nova" }),
-    );
   });
 
   it("defaults the reasoning select to Inherit and selecting a level fires PATCH /api/me", async () => {
     const user = userEvent.setup();
-    render(<AssistantPage />);
+    render(<ThreadDefaultsPage />);
     const select = screen.getByLabelText("Reasoning") as HTMLSelectElement;
     expect(select.value).toBe("");
 
@@ -308,12 +291,16 @@ describe("AssistantPage", () => {
   it("resetting the reasoning select to Inherit clears with defaultReasoning: null", async () => {
     meData = { ...meData!, defaultReasoning: "high" };
     const user = userEvent.setup();
-    render(<AssistantPage />);
+    render(<ThreadDefaultsPage />);
 
     await user.selectOptions(screen.getByLabelText("Reasoning"), "");
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultReasoning: null });
   });
 
+  it("does not offer current-thread inheritance for new conversations", () => {
+    render(<ThreadDefaultsPage />);
+    expect(screen.queryByLabelText("New thread behavior")).toBeNull();
+  });
 });
 
 describe("AppearancePage", () => {

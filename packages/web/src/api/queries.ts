@@ -16,9 +16,13 @@ import type {
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  DeliverIdentityLinkFallback,
+  DeliverIdentityLinkRequest,
+  DeliverIdentityLinkResponse,
   GetSessionResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
+  ListLinkMembersResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
@@ -35,10 +39,6 @@ import type {
   SandboxProfile,
   SessionRunState,
   SetNotificationPreferenceRequest,
-  DeliverIdentityLinkFallback,
-  DeliverIdentityLinkRequest,
-  DeliverIdentityLinkResponse,
-  ListLinkMembersResponse,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
 import { useLiveQuery } from "~/lib/use-live-query";
@@ -63,7 +63,6 @@ export const qk = {
   /** Spelled here (not in assistants.ts's `qkAssistants`) so useDeleteSession
    * below can invalidate it without an import cycle — assistants.ts already
    * imports this factory and derives `qkAssistants.list` from it. */
-  assistants: () => ["assistants"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
@@ -205,7 +204,7 @@ export function useDeleteSession() {
       // instead of on the next focus refetch. Unconditional on purpose:
       // migrated assistants keep legacy non-`assistant:`-prefixed session
       // ids, so the id alone cannot say whether a retire happened.
-      qc.invalidateQueries({ queryKey: qk.assistants() });
+      qc.invalidateQueries({ queryKey: ["workspace-conversation"] });
     },
   });
 }
@@ -414,6 +413,10 @@ export function useDecisions(
   });
 }
 
+export function useNotificationDecisions() {
+  return useQuery({ queryKey: ["notification-decisions"], queryFn: api.listNotificationDecisions, refetchInterval: 5000 });
+}
+
 export function useResolveDecision(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
@@ -423,7 +426,10 @@ export function useResolveDecision(sessionId: string) {
   >({
     mutationFn: ({ gateId, body }) => api.resolveDecision(sessionId, gateId, body),
     // Approval-only views poll this query without a session stream.
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+    },
   });
 }
 
@@ -432,7 +438,10 @@ export function useWithdrawDecision(sessionId: string) {
   return useMutation<{ ok: true }, Error, { gateId: string }>({
     mutationFn: ({ gateId }) =>
       api.withdrawDecision(sessionId, gateId, { reason: "cancel" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+    },
   });
 }
 

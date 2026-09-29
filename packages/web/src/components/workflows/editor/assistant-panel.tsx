@@ -1,30 +1,6 @@
-/**
- * The workflow editor's right-hand column: the assistant conversation.
- *
- * The column used to hold a card that summarised the definition and
- * offered a button to open the assistant as a second panel beside it. The
- * summary restated the canvas, and the button put the primary way to
- * change a workflow one click behind something that could change nothing.
- * The column IS the conversation now. The per-node forms take the same
- * column while a step is selected (`editor.tsx`), because they edit one
- * step by hand rather than describe a change to the whole workflow.
- *
- * It is a host for the shared `SessionView`, not a second chat: the
- * transcript, the tool cards, slash commands, steering, abort, and the
- * decision-gate card all come from the one implementation `/chat`, the
- * standalone session page, and the child slide-over already use. Assistant
- * sessions run headless, so `SandboxTabs` renders nothing here and the
- * panel is header, transcript, gate, composer.
- *
- * The panel does not apply the edits it causes. `workflows.patch_workflow`
- * writes straight to the stored definition; `useWorkflowPatchWatch` (owned
- * by the editor page) refetches, and the editor adopts.
- */
-import { Sparkles } from "lucide-react";
 import type { WorkflowDefinition } from "@valet/workflow";
-import { SessionView } from "~/components/session/session-view";
-import { Button, Spinner } from "~/components/primitives";
-import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { AssistantPanel } from "~/components/session/assistant-panel";
+import { prefillComposerDraft } from "~/stores/composer-drafts";
 import type { WorkflowAssistant } from "~/hooks/use-workflow-assistant";
 import { workflowSuggestions } from "./assistant-suggestions";
 
@@ -51,11 +27,11 @@ export function WorkflowAssistantPanel({
       className="flex h-full min-h-0 flex-1 flex-col"
       data-testid="workflow-assistant"
     >
-      <div className="border-b border-line px-3 py-2">
+      <AssistantPanel title="Valet · Workflow" sessionId={assistant.sessionId} threadId={assistant.threadId} error={assistant.error} onRetry={assistant.retry}>
+      <div className="shrink-0 border-b border-line px-4 py-3">
         <p className="flex items-start gap-2 text-xs leading-relaxed text-muted">
-          <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-moss" aria-hidden />
           <span className="min-w-0">
-            Edits here are saved as they are made. To undo one, use Version history.
+            Changes save automatically. Undo them in Version history.
           </span>
         </p>
         {/* Openings drawn from this workflow, not a generic "ask me
@@ -71,7 +47,8 @@ export function WorkflowAssistantPanel({
               <li key={suggestion.label}>
                 <button
                   type="button"
-                  onClick={() => useComposerPrefillStore.getState().set(suggestion.prompt)}
+                  disabled={!assistant.sessionId || !assistant.threadId}
+                  onClick={() => { if (assistant.sessionId && assistant.threadId) prefillComposerDraft(assistant.sessionId, assistant.threadId, suggestion.prompt); }}
                   className="min-h-11 rounded-full border border-line sm:min-h-0 px-2.5 py-1 text-[11px] text-ink transition-colors hover:border-moss hover:bg-moss-wash focus:outline-none focus-visible:ring-2 focus-visible:ring-moss"
                 >
                   {suggestion.label}
@@ -82,26 +59,7 @@ export function WorkflowAssistantPanel({
         )}
       </div>
 
-      {assistant.error !== undefined ? (
-        // Recovery without a page reload. The hook releases both guards and
-        // the remembered attempt, so this genuinely repeats the failed call
-        // rather than re-rendering the same stuck state.
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-          <p className="text-sm text-danger-500">{assistant.error}</p>
-          <Button size="sm" variant="secondary" onClick={assistant.retry}>
-            Retry
-          </Button>
-        </div>
-      ) : assistant.sessionId === undefined || assistant.threadId === undefined ? (
-        <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted">
-          {/* Names the outstanding step. One spinner for both calls gave no
-              clue which one was slow when the panel hung. */}
-          <Spinner size={14} />
-          {assistant.stage === "session" ? "Opening your assistant…" : "Starting the conversation…"}
-        </div>
-      ) : (
-        <SessionView panel sessionId={assistant.sessionId} activeThreadId={assistant.threadId} />
-      )}
+      </AssistantPanel>
     </aside>
   );
 }

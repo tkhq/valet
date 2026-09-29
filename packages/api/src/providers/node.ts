@@ -40,7 +40,6 @@ import { assemblePlugins } from "../plugins/assemble.js";
 import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
-import { assistantsActionPlugin } from "../assistants/actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
@@ -54,6 +53,7 @@ import { skillRepoReaderFactory } from "../services/content-source-credential.js
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { LinearAppTokenStore } from "../plugins/linear-app-token-store.js";
 import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
@@ -389,21 +389,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     name: "events-actions",
     version: "0.1.0",
     description: "Agent-facing received event diagnostics.",
-    actions: [eventsActionPlugin(db)],
+    actions: [eventsActionPlugin(db, () => plugins)],
   };
-  const assistantsActions: ValetPlugin = {
-    name: "assistants-actions",
-    version: "0.1.0",
-    description: "Agent-facing assistant profile management actions.",
-    actions: [
-      assistantsActionPlugin(db, (sessionId) => {
-        if (!evictRef.current) {
-          throw new Error("assistants actions invoked before provider wiring completed");
-        }
-        evictRef.current(sessionId);
-      }),
-    ],
-  };
+
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
   // the operator must remove one to avoid ambiguity.
@@ -432,7 +420,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, eventsActions, assistantsActions],
+        [workflowsActions, skillsActions, eventsActions],
       ]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),
@@ -455,9 +443,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     env: process.env,
   });
+  // The org Linear connection's client_credentials token has no refresh
+  // token; this layer mints a replacement before it expires.
+  const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
   // Team references wrap outside refresh: a followed user row refreshes
   // under that user, a direct team row refreshes under the team.
-  const engineCredentials = new TeamCredentialStore(refreshingCredentials, {
+  const engineCredentials = new TeamCredentialStore(linearAppCredentials, {
     isMember: (teamId, userId) => isTeamMember(db, teamId, userId),
   });
 
@@ -672,7 +663,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!owner) return; // no recorded owner: nothing to notify
       const isPolicyGate = info.kind === "policy_gate";
       await routeAttention(
-        { db },
+        { db, channels: [channelHost.attentionDeliverer()] },
         {
           kind: "approval",
           owner,
@@ -754,7 +745,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     store: workflowStore,
   });
-  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: [channelHost.attentionDeliverer()] });
   const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore });
 
   const workflowRunHost = new LocalRunHost({

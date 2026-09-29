@@ -4,29 +4,18 @@ import { TabBar, tabPanelId } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { EventFeed, type FeedScope } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
+import { useMe } from "~/api/settings";
+import { ReceiptsPanel } from "~/components/events/receipts-panel";
 import { DropsPanel } from "~/components/events/drops-panel";
 import { textParam } from "~/lib/search-params";
 
-/**
- * `/events` — the UI over the event system (feed, catalog, subscriptions;
- * see the events router in packages/api). Three tabs:
- *
- * - Activity: ingested events, filterable by service/key, each expandable
- *   into its payload and delivery attempts. The scope control starts at the
- *   active workspace's events and opens to the whole org on request.
- * - Subscriptions: the rules that turn a matching event into a workflow
- *   run or an orchestrator prompt, listed for the active workspace.
- * - Problems: reasons why an event did not become an activity row.
- *
- * The selected tab and the feed scope live in search params. A shared
- * Problems search or cursor must also select Problems after reload. This
- * follows the workflows hub's `?tab=` pattern. One event has its own URL,
- * `/events/$eventId`, because a broken run needs a paste-able reference.
- */
-type TabId = "activity" | "subscriptions" | "problems";
+/** Activity, subscriptions, and recorded event diagnostics. Legacy tab URLs
+ * remain readable so existing links keep their searches and cursors. */
+type TabId = "activity" | "subscriptions" | "logs";
 
 interface EventsSearch {
   tab?: TabId;
+  review?: string;
   scope?: FeedScope;
   problemsQ?: string;
   problemsCursor?: string;
@@ -37,12 +26,13 @@ interface EventsSearch {
  * value reads as the default tab and workspace scope. */
 export function readEventsSearch(raw: unknown): EventsSearch {
   const tabValue = textParam(raw, "tab");
-  const tab = tabValue === "subscriptions" || tabValue === "problems" ? tabValue : undefined;
+  const tab = tabValue === "subscriptions" ? tabValue : ["logs", "problems", "receipts"].includes(tabValue ?? "") ? "logs" : undefined;
   const scope = textParam(raw, "scope") === "all" ? "all" : undefined;
   const problemsQ = textParam(raw, "problemsQ");
   const problemsCursor = textParam(raw, "problemsCursor");
   const problemsDirection = textParam(raw, "problemsDirection") === "previous" ? "previous" as const : undefined;
-  return { ...(tab ? { tab } : {}), ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}), ...(problemsDirection ? { problemsDirection } : {}) };
+  const review = textParam(raw, "review");
+  return { ...(review ? { review } : {}), ...(tab ? { tab } : {}), ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}), ...(problemsDirection ? { problemsDirection } : {}) };
 }
 
 export const Route = createFileRoute("/events/")({
@@ -54,7 +44,7 @@ const TABS_LABEL = "Events sections";
 const TABS = [
   { id: "activity", label: "Activity" },
   { id: "subscriptions", label: "Subscriptions" },
-  { id: "problems", label: "Problems" },
+  { id: "logs", label: "Event Logs" },
 ] as const;
 
 export function EventsPage() {
@@ -62,7 +52,11 @@ export function EventsPage() {
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
-  const [tab, setTab] = useState<TabId>(search.tab ?? "activity");
+  const me = useMe();
+  const isAdmin = !me.error && me.data?.orgRole === "admin";
+  const [selectedTab, setTab] = useState<TabId>(search.tab ?? "activity");
+  const tab = selectedTab;
+  const tabs = TABS;
   useEffect(() => setTab(search.tab ?? "activity"), [search.tab]);
   const scope: FeedScope = search.scope ?? "workspace";
 
@@ -90,7 +84,7 @@ export function EventsPage() {
         </p>
 
         <div className="mt-6">
-          <TabBar tabs={TABS} active={tab} onSelect={selectTab} label={TABS_LABEL} />
+          <TabBar tabs={tabs} active={tab} onSelect={selectTab} label={TABS_LABEL} />
         </div>
 
         <div
@@ -107,19 +101,26 @@ export function EventsPage() {
               }
             />
           )}
-          {tab === "subscriptions" && <SubscriptionsPanel />}
-          {tab === "problems" && (
+
+          {tab === "subscriptions" && <SubscriptionsPanel reviewId={search.review} onReviewClose={() => void navigate({ to: "/events", search: { tab: "subscriptions" } })} />}
+          {tab === "logs" && (
+            <div className="space-y-8">
+            <section aria-label="Rejections and failures">
+            <h2 className="mb-2 text-base font-medium">Rejections and failures</h2>
             <DropsPanel
               query={search.problemsQ}
               cursor={search.problemsCursor}
               direction={search.problemsDirection}
               onQueryChange={(problemsQ) => {
                 problemsQ = problemsQ.trim() ? problemsQ : "";
-                void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
+                void navigate({ to: "/events", search: { tab: "logs", ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
               }}
-              onPrevious={(problemsCursor) => void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor, problemsDirection: "previous" as const } : {}) } })}
-              onNext={(problemsCursor) => void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } })}
+              onPrevious={(problemsCursor) => void navigate({ to: "/events", search: { tab: "logs", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor, problemsDirection: "previous" as const } : {}) } })}
+              onNext={(problemsCursor) => void navigate({ to: "/events", search: { tab: "logs", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } })}
             />
+            </section>
+            {isAdmin && <section aria-label="Incoming events"><h2 className="mb-2 text-base font-medium">Incoming events</h2><ReceiptsPanel key={me.data?.orgId} /></section>}
+            </div>
           )}
         </div>
       </div>

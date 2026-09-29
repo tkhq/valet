@@ -588,6 +588,14 @@ messagesRouter.post("/:id/threads", async (c) => {
     return c.json({ error: "sourceThreadId must be a string. Select a thread from this session." }, 400);
   }
 
+  if (body.title !== undefined && typeof body.title !== "string") {
+    return c.json({ error: "Set title to a string." }, 400);
+  }
+  const title = body.title?.trim() || undefined;
+  if (title && title.length > MAX_THREAD_TITLE_CHARS) {
+    return c.json({ error: `title is too long. Use ${MAX_THREAD_TITLE_CHARS} characters or fewer.` }, 400);
+  }
+
   const sourceThreadId = body.sourceThreadId;
   const source = sourceThreadId === undefined ? null : engineSession.threadById(sourceThreadId);
   if (sourceThreadId !== undefined && !source) {
@@ -614,12 +622,18 @@ messagesRouter.post("/:id/threads", async (c) => {
   // returns the cached one).
   const key = `web:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const thread = await engineSession.createThread(key, settings);
+  if (title) {
+    await db.insert(sessionThreads).values({
+      id: thread.id, sessionId: session.id,
+      createdAt: thread.toThreadData().createdAt, title,
+    }).onConflictDoUpdate({ target: sessionThreads.id, set: { title } });
+  }
   const summary: CreateThreadResponse = threadToSummary(
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
     thread.toThreadData().createdAt,
-    body.title,
+    title,
     thread.modelId(),
     thread.key,
     undefined,
@@ -884,8 +898,8 @@ messagesRouter.post("/:id/messages", async (c) => {
     typeof body.promoteItemId === "string" && body.promoteItemId.length > 0
       ? body.promoteItemId
       : undefined;
-  if (!promoteItemId && (!body.text || typeof body.text !== "string")) {
-    return c.json({ error: "text is required" }, 400);
+  if (!promoteItemId && typeof body.text !== "string") {
+    return c.json({ error: "text must be a string (it may be empty with attachments)" }, 400);
   }
   if (body.queueMode !== undefined && body.queueMode !== "followup" && body.queueMode !== "steer") {
     return c.json(
@@ -906,6 +920,9 @@ messagesRouter.post("/:id/messages", async (c) => {
       );
     }
   }
+  if (Array.isArray(body.attachments) && body.attachments.length > 20) {
+    return c.json({ error: "At most 20 images are allowed per message." }, 400);
+  }
   if (body.fileRefs !== undefined) {
     const valid =
       Array.isArray(body.fileRefs) &&
@@ -916,6 +933,10 @@ messagesRouter.post("/:id/messages", async (c) => {
         400,
       );
     }
+  }
+
+  if (!promoteItemId && !body.text.trim() && !body.attachments?.length && !body.fileRefs?.length) {
+    return c.json({ error: "Add a message or an attachment." }, 400);
   }
 
   try {

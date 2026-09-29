@@ -1,3 +1,4 @@
+import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
  * Phase 7 / spec decisions 4-6, 10). `handleUpdate` is the single entry
@@ -12,8 +13,6 @@
  * lands in Task 8; `start` here only resolves credentials and constructs
  * transports.
  */
-import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
 import {
   ConflictError,
   parseAssistantSessionId,
@@ -33,39 +32,41 @@ import {
   type PromptAttachment,
   type Session,
   type SessionEntry,
-  type SignalContent,
   type SessionStore,
+  type SignalContent,
   type StoredCredential,
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
-import type { AppDb } from "../lib/drizzle.js";
-import type { EngineHost } from "../engine/host.js";
-import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, users, workflowDefinitions } from "../schema/index.js";
+import { and, eq } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
 import {
   ArchivedAssistantError,
-  assistantSenderIdentity as senderIdentityForAssistant,
   ensureDefaultAssistantSession,
   loadAssistant,
   loadAssistantBySessionId,
 } from "../assistants/service.js";
+import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { canResolveSessionGate, type SessionOwnerLike } from "../services/session-access.js";
-import { isOrgAdmin } from "../services/org.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
-import { writeDropLog } from "../orchestrator/signals.js";
-import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
-import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
-import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
-import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
+import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import { writeDropLog } from "../orchestrator/signals.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
+import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
+import { isOrgAdmin } from "../services/org.js";
+import { canResolveSessionGate, type SessionOwnerLike } from "../services/session-access.js";
 import { recordThreadUserActivity } from "../services/thread-activity.js";
-import { digestGate } from "./gate-digest.js";
-import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
+import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
+import { digestGate } from "./gate-digest.js";
+import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
+import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
 
 export interface ChannelHostDeps {
@@ -449,7 +450,7 @@ export class ChannelHost {
   recordGatePrompt(gateId: string, ref: GatePromptRef, sessionId: string): void {
     this.gateRefs.set(`${ref.conversationKey}#${ref.messageId}`, { gateId, sessionId });
     const refs = this.gatePrompts.get(gateId) ?? [];
-    refs.push(ref);
+    if (!refs.some(existing => existing.conversationKey === ref.conversationKey && existing.messageId === ref.messageId)) refs.push(ref);
     this.gatePrompts.set(gateId, refs);
   }
 
@@ -465,6 +466,15 @@ export class ChannelHost {
     }
     this.orgId = await this.deps.resolveOrgId();
     const orgId = this.orgId;
+    // Restore callback addresses before starting ingress. Authorization still
+    // runs for each click; a stored address grants no decision authority.
+    const restored = await savedGatePrompts(this.deps.db, orgId);
+    for (const prompt of restored) {
+      const gate = await this.deps.engineStore.getDecisionGate(prompt.sessionId, prompt.gateId);
+      if (!gate) continue;
+      this.recordGatePrompt(prompt.gateId, prompt.ref, prompt.sessionId);
+      this.gateActions.set(prompt.gateId, gate.actions);
+    }
     for (const plugin of this.deps.plugins) {
       for (const factory of plugin.transports ?? []) {
         // start() now runs on the api's background boot chain, so stop()
@@ -527,6 +537,13 @@ export class ChannelHost {
     }
     if (!this.started) return;
     this.startOutbound();
+    // A gate can settle while channel delivery is offline. Clear its old buttons.
+    const restoredGates = new Map(restored.map(prompt => [prompt.gateId, prompt]));
+    for (const prompt of restoredGates.values()) {
+      const gate = await this.deps.engineStore.getDecisionGate(prompt.sessionId, prompt.gateId);
+      if (gate?.status === "resolved" && gate.resolution) await this.deliverGateResolution(gate.id, gate.resolution);
+      else if (gate && gate.status !== "pending") await this.settleGatePrompts(gate.id, gate.status === "expired" ? GATE_EXPIRED_LABEL : GATE_WITHDRAWN_LABEL);
+    }
     // Close streams a previous boot left open. Runs after the transports are
     // up because closing one needs its transport, and after `startOutbound`
     // so a slow sweep cannot delay live traffic.
@@ -800,7 +817,7 @@ export class ChannelHost {
     if (this.delivered.has(dedupeKey)) return;
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
-    const sender = await this.assistantSenderIdentity(sessionId);
+    const sender = await this.workspaceSenderForSession(sessionId);
     try {
       await transport.send(target.conversationKey, {
         markdown: first.content,
@@ -934,12 +951,12 @@ export class ChannelHost {
    * override set — the transport then posts under the bot's own identity.
    * Best-effort: a lookup failure must not stop the delivery.
    */
-  private async assistantSenderIdentity(
+  private async workspaceSenderForSession(
     sessionId: string,
   ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
     try {
       const row = await loadAssistantBySessionId(this.deps.db, sessionId);
-      return row ? senderIdentityForAssistant(row) : undefined;
+      return row ? workspaceSenderIdentity(this.deps.db, row.orgId, { type: row.ownerType, id: row.ownerId }) : undefined;
     } catch (err) {
       // Identity is decoration on the post; the text must still land.
       console.error("[channels] assistant identity lookup failed", err);
@@ -980,7 +997,7 @@ export class ChannelHost {
     if (!transport) return;
 
     const markdown = `\`${entry.command}\`\n${entry.output}`;
-    const sender = await this.assistantSenderIdentity(sessionId);
+    const sender = await this.workspaceSenderForSession(sessionId);
     await transport.send(mapped.conversationKey, {
       markdown,
       ...(sender !== undefined ? { sender } : {}),
@@ -1013,7 +1030,8 @@ export class ChannelHost {
     // tool_id/args JSON dump; the card shows the summary plus labeled
     // fields instead, with a link for the full request.
     const digest = digestGate(gate);
-    const link = this.openInValetLink(attentionHref(sessionId));
+    const source = await this.deps.engineStore.getSession(sessionId);
+    const link = this.openInValetLink(attentionHref(sessionId, gate.threadId, source?.owner));
     const body =
       link === undefined ? digest.body : digest.body === undefined ? link : `${digest.body}\n\n${link}`;
     await this.sendAndRecordGatePrompt(
@@ -1045,13 +1063,19 @@ export class ChannelHost {
     sessionId: string,
   ): Promise<void> {
     // The card carries the asking assistant's identity. In a channel with
-    // several assistants, the reader must see who asks for approval.
+    // shared workspaces, the reader must see who asks for approval.
     // Resolution edits keep the posted identity.
-    const sender = await this.assistantSenderIdentity(sessionId);
+    const sender = await this.workspaceSenderForSession(sessionId);
     const ref = await transport.sendGatePrompt(conversationKey, {
       ...prompt,
       ...(sender !== undefined ? { sender } : {}),
     });
+    const gate = await this.deps.engineStore.getDecisionGate(sessionId, prompt.gateId);
+    if (gate) {
+      await this.deps.engineStore.saveDecisionGateRef(sessionId, gate.threadId, gate.id, {
+        channelType: transport.channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
+      });
+    }
     this.gateActions.set(prompt.gateId, prompt.actions);
     this.recordGatePrompt(prompt.gateId, ref, sessionId);
     const settled = this.settledGates.get(prompt.gateId);
@@ -1099,6 +1123,7 @@ export class ChannelHost {
     label: string,
     outcome: { actionId?: string; resolvedAtMs?: number } = {},
   ): Promise<void> {
+    let allUpdated = true;
     for (const ref of this.gatePrompts.get(gateId) ?? []) {
       const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
       const transport = this.transports.get(channelType);
@@ -1108,14 +1133,18 @@ export class ChannelHost {
         } catch (err) {
           // One stale message (deleted DM, revoked scope) must not keep the
           // other copies of the same prompt un-updated.
+          allUpdated = false;
           console.error(`[channels] ${channelType}: gate prompt update failed`, err);
         }
+      } else {
+        allUpdated = false;
       }
       this.gateRefs.delete(`${ref.conversationKey}#${ref.messageId}`);
     }
 
     this.gatePrompts.delete(gateId);
     this.gateActions.delete(gateId);
+    if (allUpdated) await deleteSavedGatePrompts(this.deps.db, gateId);
   }
 
   /**
@@ -1621,6 +1650,26 @@ export class ChannelHost {
    */
   attentionDeliverer(): AttentionChannelDeliverer {
     return {
+      deliverTeam: async (event): Promise<void> => {
+        if (event.owner.type !== "team") return;
+        const transport = this.transports.get("slack");
+        if (!transport?.sendToChannel) return;
+        const orgId = this.orgId ?? await this.deps.resolveOrgId();
+        const [team] = await this.deps.db.select().from(teams)
+          .where(and(eq(teams.id, event.owner.id), eq(teams.orgId, orgId))).limit(1);
+        if (!team?.slackHomeChannelId) return;
+        if (event.sessionId && event.threadId) {
+          const thread = await this.deps.engineStore.getThread(event.sessionId, event.threadId);
+          // Existing Slack conversations keep their origin. This is only a new-message default.
+          if (thread?.key.startsWith("slack:")) return;
+        }
+        // Channel membership can differ from team membership. Keep sensitive details and
+        // approval controls behind the authorized web route.
+        const href = event.href ?? `/chat?workspace=${encodeURIComponent(team.id)}`;
+        await transport.sendToChannel(team.slackHomeChannelId, {
+          markdown: ["A team notification is ready in Valet.", this.openInValetLink(href)].filter(Boolean).join("\n\n"),
+        });
+      },
       deliver: async (userId: string, event: AttentionEvent): Promise<void> => {
         for (const channelType of this.transports.keys()) {
           try {
@@ -1660,7 +1709,7 @@ export class ChannelHost {
             // No gate, a recipient who cannot resolve it, or a lookup that
             // failed: fall through to the plain summary with the web link.
             const sender = event.sessionId
-              ? await this.assistantSenderIdentity(event.sessionId)
+              ? await this.workspaceSenderForSession(event.sessionId)
               : undefined;
             await transport.send(conversationKey, {
               markdown: this.attentionMarkdown(event),

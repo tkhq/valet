@@ -416,3 +416,7 @@ Before the catalog exposes this key, startup expands existing `slack.*` subscrip
 
 
 Accepting subtype-less posts intentionally expands the events delivered to existing `slack.bot_message` subscriptions. An unfiltered subscription receives every eligible third-party bot post. Before rollout, inspect enabled bot subscriptions and add channel or bot ID filters where that broader behavior is unwanted. No subtype compatibility guard is applied: both Slack payload forms represent bot posts. Production subscription rows have not been inspected as part of this change.
+
+### Receipt diagnostics and legacy bot identity
+
+Resolve the saved bot identity before classifying a bot message. Keep classification stages in the event receipt. If identity resolution fails, emit only the subscription-scoped identity diagnostic. Do not add a duplicate generic rejection to the drop log.

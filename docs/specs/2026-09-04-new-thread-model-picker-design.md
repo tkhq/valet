@@ -18,7 +18,7 @@ The API keeps a personal `newThreadBehavior` preference for explicit source-base
 - `keep_current`: Copy the source thread's effective model and reasoning level.
 - `use_defaults`: Resolve the current assistant, personal or team, host, and built-in model defaults. Resolve organization settings in the reasoning cascade.
 
-The default value is `keep_current`. The preference applies to model and reasoning together. The Assistant settings page does not expose this API-only continuation preference.
+The default value is `keep_current`. The preference applies to model and reasoning together. The Thread defaults settings page does not expose this API-only continuation preference.
 
 The sidebar **New thread** action never sends `sourceThreadId`. It always creates a top-level conversation with current defaults. An explicit API caller that sends `sourceThreadId` gets the following behavior:
 

@@ -1,8 +1,22 @@
-import { TeamDeletionRequests } from "./team-deletion-requests";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { AutomationWizard } from "~/components/events/automation-wizard";
 import { Link } from "@tanstack/react-router";
-import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
+import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { ApiError } from "~/api/client";
+import {
+  useAddTeamMember,
+  useCreateTeam,
+  useDeleteTeam,
+  useMe,
+  useModels,
+  usePatchTeam,
+  useRemoveTeamMember,
+  useSetTeamMemberRole,
+  useTeamMembers,
+  useTeams,
+} from "~/api/settings";
+import { TeamCredentials } from "~/components/integrations/team-credentials";
 import {
   Avatar,
   AvatarFallback,
@@ -21,29 +35,16 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "~/components/primitives";
-import { TeamOnePasswordToken } from "./team-onepassword-token";
-import { ApiError } from "~/api/client";
+import { ModelCombobox } from "~/components/settings/model-combobox";
+import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
-import { matchesNeedle } from "~/lib/text-match";
-import {
-  useAddTeamMember,
-  useCreateTeam,
-  useDeleteTeam,
-  useMe,
-  useModels,
-  usePatchTeam,
-  useRemoveTeamMember,
-  useSetTeamMemberRole,
-  useTeamMembers,
-  useTeams,
-} from "~/api/settings";
-import { ModelCombobox } from "~/components/settings/model-combobox";
-import { TeamCredentials } from "~/components/integrations/team-credentials";
-import { ReasoningSelect } from "~/components/settings/reasoning-select";
-import { curatedForCatalogId } from "~/lib/models";
 import { isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
+import { curatedForCatalogId } from "~/lib/models";
 import { reasoningLabelFor } from "~/lib/reasoning";
+import { matchesNeedle } from "~/lib/text-match";
+import { TeamDeletionRequests } from "./team-deletion-requests";
+import { TeamOnePasswordToken } from "./team-onepassword-token";
 
 /**
  * Says what a declared team's controls do and do not survive.
@@ -241,9 +242,9 @@ function TeamRow({
         </span>
         {showAssistantLink && (
           <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
-            <Link to="/assistants">
+            <Link to="/chat" search={{ workspace: team.id }}>
               <Bot className="h-3.5 w-3.5" aria-hidden />
-              Assistant
+              Threads
             </Link>
           </Button>
         )}
@@ -287,6 +288,7 @@ function TeamRow({
         <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
           <TeamDeletionRequests key={`deletion-requests:${team.id}`} teamId={team.id} canManage={canMutate} />
           <TeamDefaults team={team} canMutate={canMutate} />
+          <TeamHomeChannel key={team.id} team={team} canMutate={canMutate} />
           <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
           <TeamOnePasswordToken key={team.id} teamId={team.id} teamName={team.name} canMutate={canMutate} />
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />
@@ -385,8 +387,8 @@ function TeamDefaults({
         )}
       </div>
       <p className="text-xs text-muted">
-        New sessions started in this team's workspace use this model and reasoning level. A
-        member's personal default wins for sessions that member starts. Existing sessions keep
+        New runtimes started in this team's workspace use this model and reasoning level. A
+        member's personal default wins for runtimes that member starts. Existing runtimes keep
         their settings, including the team assistant if anyone has already opened it.
       </p>
       {patchTeam.error != null && (
@@ -676,4 +678,24 @@ function AddMemberPicker({
       </PopoverContent>
     </Popover>
   );
+}
+
+function TeamHomeChannel({ team, canMutate }: { team: TeamSummary; canMutate: boolean }) {
+  const [channel, setChannel] = useState(team.slackHomeChannelId ?? "");
+  const [replySetup, setReplySetup] = useState(false);
+  const patch = usePatchTeam();
+  useEffect(() => { setChannel(team.slackHomeChannelId ?? ""); }, [team.slackHomeChannelId]);
+  return <div className="space-y-2 py-3">
+    <div className="text-sm font-medium">Slack routing</div>
+    <label htmlFor={`home-channel-${team.id}`} className="block text-xs text-muted">Home channel for team notifications</label>
+    <p className="text-sm text-muted">New team notifications go here. Replies stay in their original Slack thread. This does not subscribe to channel messages. Add the Valet bot to the channel first.</p>
+    {canMutate ? <div className="flex gap-2"><Input id={`home-channel-${team.id}`} aria-label="Slack home channel ID" placeholder="C0123456789" value={channel} onChange={(event) => setChannel(event.target.value)} /><Button disabled={patch.isPending || channel.trim() === (team.slackHomeChannelId ?? "")} onClick={() => patch.mutate({ id: team.id, body: { slackHomeChannelId: channel.trim() || null } })}>Save</Button></div> : <p className="text-sm">{team.slackHomeChannelId ?? "No home channel configured"}</p>}
+    {patch.error && <ErrorRow>{errorText(patch.error)}</ErrorRow>}
+    <div className="flex flex-wrap items-center gap-3 pt-2">
+      <Button variant="secondary" size="sm" onClick={() => setReplySetup(true)}>Set up Slack replies</Button>
+      <Link to="/events" search={{ tab: "subscriptions" }} className="text-sm text-moss hover:underline">Manage subscriptions</Link>
+      <Link to="/settings/notifications" className="text-sm text-moss hover:underline">My DM preferences</Link>
+    </div>
+    {replySetup && <AutomationWizard key={team.id} open onOpenChange={setReplySetup} replyTeam={{ id: team.id, name: team.name }} />}
+  </div>;
 }

@@ -34,6 +34,8 @@ import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AttentionEvent } from "../orchestrator/attention.js";
+import { savedGatePrompts } from "./gate-prompts.js";
+import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -273,6 +275,35 @@ describe("ChannelHost outbound delivery", () => {
     vi.restoreAllMocks();
   });
 
+  it("home channel receives a safe new notification, never a Slack-thread reply or foreign team", async () => {
+    await host.stop();
+    class HomeTransport extends FakeTransport {
+      override readonly channelType = "slack";
+      async sendToChannel(channelId: string, message: OutboundChannelMessage) {
+        return this.send(channelId, message);
+      }
+    }
+    const home = new HomeTransport();
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "fake" });
+    host = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials, workflowStore, actionPluginByService,
+      plugins: [{ name: "home-test", version: "0", transports: [{ channelType: "slack", create: () => home }] }], resolveOrgId: async () => ORG_ID });
+    await host.start();
+    await testDb.appDb.insert(teams).values({ id: "home-team", orgId: ORG_ID, name: "Home", createdAt: Date.now(), slackHomeChannelId: "C0123456789" });
+    const event: AttentionEvent = { kind: "approval", owner: { type: "team", id: "home-team" }, title: "private approval content", body: "sensitive" };
+    await host.attentionDeliverer().deliverTeam?.(event);
+    expect(home.sent).toHaveLength(1);
+    expect(home.sent[0]?.conversationKey).toBe("C0123456789");
+    expect(home.sent[0]?.message.markdown).not.toContain("private");
+    expect(home.sent[0]?.message.markdown).not.toContain("sensitive");
+    expect(home.gatePrompts).toHaveLength(0);
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const thread = session.thread("slack:COTHER:123.456");
+    await host.attentionDeliverer().deliverTeam?.({ ...event, sessionId: session.id, threadId: thread.id });
+    expect(home.sent).toHaveLength(1);
+    await host.attentionDeliverer().deliverTeam?.({ ...event, owner: { type: "team", id: "inaccessible-team" } });
+    expect(home.sent).toHaveLength(1);
+  });
+
   async function emitTerminalTurn(args: {
     queueItemId: string;
     messageId?: string;
@@ -385,12 +416,9 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["internal response"]);
   });
 
-  it("delivers a branded command_result to the channel the command came from", async () => {
+  it("delivers a command_result with the bot identity to the channel the command came from", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
-    await testDb.appDb
-      .update(assistants)
-      .set({ name: "Ledger", avatarUrl: "https://cdn.example.com/ledger.png" })
-      .where(eq(assistants.sessionId, session.id));
+
     const sessionId = session.id;
     const threadId = session.thread("fake:99").id;
 
@@ -423,10 +451,7 @@ describe("ChannelHost outbound delivery", () => {
     });
     const hit = fakeTransport.sent.find((s) => s.message.markdown.includes("Queue"));
     expect(hit?.message.markdown).toContain("/status");
-    expect(hit?.message.sender).toEqual({
-      displayName: "Ledger",
-      avatarUrl: "https://cdn.example.com/ledger.png",
-    });
+    expect(hit?.message.sender).toBeUndefined();
     // Dedup: the second append must not double-deliver.
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("Queue"))).toHaveLength(1);
@@ -1551,6 +1576,103 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.answered.some((a) => a.callbackId === "cb2" && a.text === undefined)).toBe(true);
   });
 
+  it("routes a child gate through its parent audience to Slack and resolves only the child after host restart", async () => {
+    await host.stop();
+    class SlackContractTransport extends FakeTransport {
+      override readonly channelType = "slack";
+    }
+    const slack = new SlackContractTransport();
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "contract-token" });
+    await linkIdentity(testDb.appDb, { provider: "slack", externalId: "U_PARENT", userId: USER_ID });
+    host = new ChannelHost({
+      db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials, workflowStore, actionPluginByService,
+      plugins: [{ name: "slack-contract", version: "0", transports: [{ channelType: "slack", create: () => slack }] }],
+      resolveOrgId: async () => ORG_ID,
+    });
+    await host.start();
+    const unwire = wireAttentionRouter({ db: testDb.appDb, engineStore, eventStream, channels: [host.attentionDeliverer()] });
+    try {
+      const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const childId = `child-slack-${randomUUID()}`;
+      await testDb.appDb.insert(agentSessions).values({
+        id: childId, userId: USER_ID, orgId: ORG_ID, workspace: "/tmp/child-slack-contract",
+        ownerType: "user", ownerId: USER_ID, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const child = await engineHost.childSessionFor(childId, {
+        parentSessionId: parent.id, parentThreadId: parent.thread().id,
+        actorUserId: USER_ID, orgId: ORG_ID, owner: parent.owner, workspace: "/tmp/child-slack-contract",
+      });
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "child action" }, { id: "child-action" })], { stopReason: "toolUse" }),
+        fauxAssistantMessage("child finished"),
+      ]);
+      await child.thread().submitPrompt({ text: "perform the child action" }, { dispatchId: `child:${randomUUID()}` });
+      await vi.waitFor(() => expect(slack.gatePrompts).toHaveLength(1), { timeout: 5000 });
+      const prompt = slack.gatePrompts[0];
+      expect(prompt.conversationKey).toContain("U_PARENT");
+      expect(host.gateForRef(prompt)).toMatchObject({ sessionId: child.id, gateId: prompt.prompt.gateId });
+      expect(await parent.pendingDecisionGates()).toHaveLength(0);
+      // Rebuild the channel host; its callback maps must come from durable refs.
+      await host.stop();
+      host = new ChannelHost({
+        db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials, workflowStore, actionPluginByService,
+        plugins: [{ name: "slack-contract", version: "0", transports: [{ channelType: "slack", create: () => slack }] }],
+        resolveOrgId: async () => ORG_ID,
+      });
+      await host.start();
+      expect(host.gateForRef(prompt)).toMatchObject({ sessionId: child.id, gateId: prompt.prompt.gateId });
+      expect(slack.gatePrompts).toHaveLength(1);
+      await linkIdentity(testDb.appDb, { provider: "slack", externalId: "U_OUTSIDER", userId: "outsider" });
+      await host.handleUpdate("slack", inbound({
+        dispatchId: `slack:${randomUUID()}`, conversationKey: prompt.conversationKey,
+        sender: { externalId: "U_OUTSIDER" }, kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId: "outsider", ref: prompt },
+      }));
+      expect((await engineStore.getDecisionGate(child.id, prompt.prompt.gateId))?.status).toBe("pending");
+      expect(slack.answered.find(answer => answer.callbackId === "outsider")?.text).toContain("expired");
+      await host.handleUpdate("slack", inbound({
+        dispatchId: `slack:${randomUUID()}`, conversationKey: prompt.conversationKey,
+        sender: { externalId: "U_PARENT" }, kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId: "child-slack-approve", ref: prompt },
+      }));
+      await vi.waitFor(async () => {
+        expect((await engineStore.getDecisionGate(child.id, prompt.prompt.gateId))?.status).toBe("resolved");
+        expect(slack.gateEdits).toHaveLength(1);
+      });
+      expect(await parent.pendingDecisionGates()).toHaveLength(0);
+      expect(slack.answered).toContainEqual({ callbackId: "child-slack-approve", text: undefined });
+    } finally {
+      unwire();
+    }
+  });
+
+  it.each(["resolved", "expired", "withdrawn"] as const)("clears a gate card that became %s while the channel host was offline", async (status) => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const gate: DecisionGate = {
+      id: "offline-gate", sessionId: session.id, threadId: session.thread().id, queueItemId: "offline-q",
+      resumeKey: "offline", ordinal: 0, type: "approval", title: "Offline approval",
+      actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+    };
+    await engineStore.saveDecisionGate(session.id, gate.threadId, gate);
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval", owner: session.owner, sessionId: session.id, title: gate.title,
+      gate: { id: gate.id, actions: gate.actions },
+    });
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    await host.stop();
+    await engineStore.saveDecisionGate(session.id, gate.threadId, {
+      ...gate, status, ...(status === "resolved" ? { resolution: { actionId: "approve", resolvedBy: USER_ID, resolvedAt: Date.now() } } : {}),
+    });
+    host = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: () => fakeTransport }] }],
+      resolveOrgId: async () => ORG_ID,
+    });
+    await host.start();
+    expect(fakeTransport.gateEdits).toHaveLength(1);
+    expect(host.gateForRef(fakeTransport.gatePrompts[0])).toBeNull();
+    expect(await savedGatePrompts(testDb.appDb, ORG_ID)).toEqual([]);
+  });
+
   it("a Slack approval resolves its originating workflow gate", async () => {
     const now = Date.now();
     await testDb.appDb.insert(workflowDefinitions).values({
@@ -2083,7 +2205,7 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(host.gateForRef(ref)).toMatchObject({ gateId: "gate-1", sessionId: "sess-1" });
   });
 
-  it("an approval event without a gate keeps a branded plain summary message", async () => {
+  it("an approval event without a gate keeps a plain summary with the bot identity", async () => {
     host = await buildHost({ publicUrl: "https://valet.example.com" });
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     await testDb.appDb.insert(assistants).values({
@@ -2091,10 +2213,7 @@ describe("ChannelHost.attentionDeliverer", () => {
       orgId: ORG_ID,
       ownerType: "user",
       ownerId: USER_ID,
-      name: "Ledger",
-      avatarUrl: "https://cdn.example.com/ledger.png",
       sessionId: "sess-1",
-      isDefault: false,
       createdAt: Date.now(),
     });
 
@@ -2105,10 +2224,7 @@ describe("ChannelHost.attentionDeliverer", () => {
 
     expect(fakeTransport.gatePrompts).toHaveLength(0);
     expect(fakeTransport.sent).toHaveLength(1);
-    expect(fakeTransport.sent[0]?.message.sender).toEqual({
-      displayName: "Ledger",
-      avatarUrl: "https://cdn.example.com/ledger.png",
-    });
+    expect(fakeTransport.sent[0]?.message.sender).toBeUndefined();
   });
 
   it("resolution edits EVERY recorded prompt for the gate — one message per recipient DM", async () => {

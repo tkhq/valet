@@ -1,15 +1,8 @@
 // @vitest-environment jsdom
-/**
- * Dashboard branch (assistant-centered web UI, decision 11/20): `/` shows
- * the identity step when `info.name === null` (first visit), otherwise the
- * identity header + card grid. Card internals (each a self-contained
- * query, decision 15) are stubbed here so this test stays focused on the
- * naming-vs-dashboard branch — they're covered by their own component
- * tests.
- */
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+/** Home selects the personal or team dashboard without profile setup. */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 const infoMock = vi.fn();
 
@@ -20,15 +13,9 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
 
-vi.mock("~/api/orchestrator", () => ({
-  useOrchestratorInfo: () => infoMock(),
-  useOrchestratorChildren: () => ({
-    data: { children: [] },
-    isLoading: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
-  useSaveIdentity: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+vi.mock("~/api/workspace-runtime", () => ({
+  useWorkspaceRuntimeInfo: () => infoMock(),
+
 }));
 
 // importOriginal: see -new-session-dialog.test.tsx for why a bare
@@ -46,8 +33,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
-vi.mock("~/components/assistant/threads-card", () => ({
-  ThreadsCard: () => <div data-testid="threads-card" />,
+vi.mock("~/components/dashboard/workspace-catch-up", () => ({
+  WorkspaceCatchUp: () => <div data-testid="catch-up" />,
 }));
 vi.mock("~/components/assistant/memory-card", () => ({
   MemoryCard: () => <div data-testid="memory-card" />,
@@ -87,12 +74,10 @@ function renderDashboard() {
 }
 
 describe("Dashboard", () => {
-  it("shows the identity step on first visit (name === null)", () => {
+  it("shows catch-up without a profile setup step", () => {
     infoMock.mockReturnValue({
       data: {
         sessionId: "orchestrator:user-1",
-        name: null,
-        personality: null,
         presence: "idle",
         activeChildren: 0,
       },
@@ -103,16 +88,14 @@ describe("Dashboard", () => {
 
     renderDashboard();
 
-    expect(screen.getByText("Meet your assistant")).toBeTruthy();
-    expect(screen.queryByTestId("threads-card")).toBeNull();
+    expect(screen.queryByText("Meet your assistant")).toBeNull();
+    expect(screen.getByTestId("catch-up")).toBeTruthy();
   });
 
-  it("shows the identity header + card grid once named", () => {
+  it("shows the personal workspace header and cards", () => {
     infoMock.mockReturnValue({
       data: {
         sessionId: "orchestrator:user-1",
-        name: "Echo",
-        personality: null,
         presence: "idle",
         activeChildren: 0,
       },
@@ -123,9 +106,8 @@ describe("Dashboard", () => {
 
     renderDashboard();
 
-    expect(screen.getByText("Echo")).toBeTruthy();
-    expect(screen.getByText("idle")).toBeTruthy();
-    expect(screen.getByTestId("threads-card")).toBeTruthy();
+    expect(screen.getByText("Personal")).toBeTruthy();
+    expect(screen.getByTestId("catch-up")).toBeTruthy();
     expect(screen.getByTestId("memory-card")).toBeTruthy();
     expect(screen.getByTestId("usage-card")).toBeTruthy();
     expect(screen.queryByText("Meet your assistant")).toBeNull();
@@ -134,7 +116,7 @@ describe("Dashboard", () => {
   it("shows a loading state while the info query is in flight", () => {
     infoMock.mockReturnValue({ data: undefined, isLoading: true, error: null, refetch: vi.fn() });
     renderDashboard();
-    expect(screen.queryByTestId("threads-card")).toBeNull();
+    expect(screen.queryByTestId("catch-up")).toBeNull();
     expect(screen.queryByText("Meet your assistant")).toBeNull();
   });
 });
@@ -143,7 +125,7 @@ describe("Home (workspace branch)", () => {
   it("renders the personal dashboard when the scope is personal", () => {
     scopeMock.mockReturnValue({ key: "user", teamId: undefined, available: ["user"], setKey: vi.fn() });
     infoMock.mockReturnValue({
-      data: { sessionId: "orchestrator:user-1", name: null, personality: null, presence: "idle", activeChildren: 0 },
+      data: { sessionId: "orchestrator:user-1", presence: "idle", activeChildren: 0 },
       isLoading: false,
       error: null,
       refetch: vi.fn(),
@@ -168,4 +150,16 @@ describe("Home (workspace branch)", () => {
     const dash = screen.getByTestId("team-dashboard");
     expect(dash.getAttribute("data-team")).toBe("team_1");
   });
+});
+
+vi.mock("~/api/child-work", async (importOriginal) => {
+ const actual = await importOriginal<typeof import("~/api/child-work")>();
+ return { ...actual,
+  useChildWork: () => ({
+    data: { pages: [{ children: [], runningCount: 0, nextCursor: null }] },
+    isLoading: false,
+    error: null,
+    refetch: vi.fn(),
+  }),
+ };
 });

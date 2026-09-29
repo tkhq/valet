@@ -160,6 +160,7 @@ interface SchemaRepair {
   describe: string;
   probe:
     | { kind: "column"; table: string; column: string }
+    | { kind: "removed-column"; table: string; column: string }
     | { kind: "table"; table: string }
     | { kind: "index"; index: string };
   sql: string;
@@ -241,13 +242,61 @@ END $cost_view$`;
  * `0000_app.sql`. Delete this list at 1.0, when numbered migrations take
  * over.
  *
- * Every entry must also be safe to ROLL BACK: the previous release may boot
+ * Each entry must also be safe to ROLL BACK: the previous release may boot
  * this database again. Adding a column or a table is safe; renaming or
  * dropping is not, because the older release repairs the OLD name and its
  * statement then stops its boot. Do not rename or drop here.
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "workflow action grants", probe: { kind: "table", table: "workflow_action_grants" }, sql: `CREATE TABLE IF NOT EXISTS "workflow_action_grants" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "workflow_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "action_id" text NOT NULL,
+  "granted_by" text NOT NULL, "created_at" bigint NOT NULL
+);` },
+  { describe: "workflow grant lookup", probe: { kind: "index", index: "workflow_action_grants_workflow" }, sql: 'CREATE INDEX IF NOT EXISTS "workflow_action_grants_workflow" ON "workflow_action_grants" ("org_id", "workflow_id")' },
+  { describe: "workspace briefing cache", probe: { kind: "table", table: "workspace_briefing_cache" }, sql: `CREATE TABLE IF NOT EXISTS "workspace_briefing_cache" (
+    "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+    "version" text NOT NULL, "evidence_hash" text, "response" jsonb,
+    "checked_at" bigint, "next_check_at" bigint NOT NULL DEFAULT 0,
+    "lease_token" text, "lease_until" bigint NOT NULL DEFAULT 0,
+    PRIMARY KEY ("org_id", "owner_type", "owner_id")
+  )` },
+  { describe: "event receipts table", probe: { kind: "table", table: "event_receipts" }, sql: `CREATE TABLE IF NOT EXISTS "event_receipts" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "service" text NOT NULL,
+  "external_id" text, "metadata" jsonb NOT NULL DEFAULT '{}',
+  "stages" jsonb NOT NULL DEFAULT '[]', "event_key" text, "event_id" text,
+  "subscriptions" jsonb NOT NULL DEFAULT '[]',
+  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
+)` },
+  { describe: "event receipts page index", probe: { kind: "index", index: "event_receipts_page" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id")' },
+  // Retain retired fields for an older binary. Current application schemas
+  // deliberately omit them, so new code cannot change their saved values.
+  ...["name", "avatar_url", "personality", "behavior", "model", "reasoning"].map((column): SchemaRepair => ({
+    describe: `assistants.${column} rollback column`,
+    probe: { kind: "column", table: "assistants", column },
+    sql: `ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "${column}" text`,
+  })),
+  { describe: "assistants.is_default rollback column", probe: { kind: "column", table: "assistants", column: "is_default" }, sql: 'ALTER TABLE assistants ADD COLUMN IF NOT EXISTS is_default boolean NOT NULL DEFAULT true' },
+  ...["followed_threads", "workflow_schedules"].map((table): SchemaRepair => ({
+    describe: `${table}.assistant_id rollback column`,
+    probe: { kind: "column", table, column: "assistant_id" },
+    sql: `ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS assistant_id text`,
+  })),
+  {
+    describe: "workspace assistant singleton cutover",
+    probe: { kind: "index", index: "assistants_workspace" },
+    // Duplicate profiles reject this transaction without deleting history.
+    // Preserve legacy default flags and routing fields for a bounded rollback.
+    sql: `DO $$ BEGIN
+      CREATE UNIQUE INDEX assistants_workspace ON assistants(org_id, owner_type, owner_id);
+      ALTER TABLE assistants ALTER COLUMN is_default SET DEFAULT true;
+    END $$`,
+  },
+  { describe: "assistants legacy default index", probe: { kind: "index", index: "assistants_default_owner" }, sql: 'CREATE UNIQUE INDEX assistants_default_owner ON assistants(org_id, owner_type, owner_id) WHERE is_default' },
+  { describe: "teams.slack_home_channel_id column", probe: { kind: "column", table: "teams", column: "slack_home_channel_id" }, sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "slack_home_channel_id" text' },
+  { describe: "user_notification_preferences.team_dm column", probe: { kind: "column", table: "user_notification_preferences", column: "team_dm" }, sql: 'ALTER TABLE "user_notification_preferences" ADD COLUMN IF NOT EXISTS "team_dm" boolean DEFAULT false NOT NULL' },
+
   {
     describe: "session_threads.last_user_activity_at column",
     probe: { kind: "column", table: "session_threads", column: "last_user_activity_at" },
@@ -467,22 +516,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "event_subscriptions", column: "origin" },
     sql: `ALTER TABLE "event_subscriptions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
   },
-  {
-    // Which of the owner's assistants a followed thread routes to. Null on
-    // rows from before the column, and on any follow whose rule named no
-    // assistant — both read as "the owner's default", the old behavior.
-    describe: "followed_threads.assistant_id column",
-    probe: { kind: "column", table: "followed_threads", column: "assistant_id" },
-    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "assistant_id" text',
-  },
-  {
-    // Which of the owner's assistants an orchestrator-target schedule prompts.
-    // Null on rows from before the column and on schedules that named none;
-    // both resolve to the owner's default at fire time.
-    describe: "workflow_schedules.assistant_id column",
-    probe: { kind: "column", table: "workflow_schedules", column: "assistant_id" },
-    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "assistant_id" text',
-  },
+
+
   {
     // Records which person's GitHub credential a team source may use.
     // Null on every row written before the column existed, which the sync
@@ -597,6 +632,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "updated_at" bigint NOT NULL,
       "revoked_at" bigint
     )`,
+  },
+  {
+    describe: "artifacts.source_thread_id column",
+    probe: { kind: "column", table: "artifacts", column: "source_thread_id" },
+    sql: 'ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "source_thread_id" text',
   },
   {
     describe: "artifacts_token_unique index",
@@ -788,22 +828,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "mcp_oauth_clients.scopes_supported column",
     probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
-  },
-  {
-    // Per-assistant personality prose (assistant editor, #325). Null on rows
-    // from before the column existed, which the persona builder reads as
-    // "no personality section" — the same answer a fresh assistant gets.
-    describe: "assistants.personality column",
-    probe: { kind: "column", table: "assistants", column: "personality" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "personality" text',
-  },
-  {
-    // Per-assistant behavior config JSON (assistant editor, #325). Null reads
-    // as "no restrictions" at wake (host.ts parseAssistantBehavior), matching
-    // pre-editor behavior.
-    describe: "assistants.behavior column",
-    probe: { kind: "column", table: "assistants", column: "behavior" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "behavior" text',
   },
   {
     // The LLM recording gateway's request log (#432). The gateway writes a row
@@ -1344,20 +1368,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "default_reasoning" text',
   },
   {
-    // Per-assistant model override (model selector overhaul).
-    // Tier token or catalog model id. Null = inherit the cascade.
-    describe: "assistants.model column",
-    probe: { kind: "column", table: "assistants", column: "model" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "model" text',
-  },
-  {
-    // Per-assistant reasoning override (model selector overhaul).
-    // Null = inherit the cascade.
-    describe: "assistants.reasoning column",
-    probe: { kind: "column", table: "assistants", column: "reasoning" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "reasoning" text',
-  },
-  {
     // Persisted session-default reasoning level (model selector overhaul).
     // An ENGINE table: the same rule as engine_entries.seq above applies —
     // additive columns arrive through this repair, and ENGINE_SCHEMA_VERSION
@@ -1373,13 +1383,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "engine_threads.reasoning column",
     probe: { kind: "column", table: "engine_threads", column: "reasoning" },
     sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
-  },
-  {
-    // Per-assistant avatar for outbound channel posts (TKAI-387).
-    // Null = the bot's own icon.
-    describe: "assistants.avatar_url column",
-    probe: { kind: "column", table: "assistants", column: "avatar_url" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "avatar_url" text',
   },
   {
     // Team `vlt_` key pin (TKAI-396). Nullable: a personal key has none.
@@ -1492,7 +1495,7 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   const tableNames: string[] = [];
   const indexNames: string[] = [];
   for (const { probe } of SCHEMA_REPAIRS) {
-    if (probe.kind === "column") columnTables.add(probe.table);
+    if (probe.kind === "column" || probe.kind === "removed-column") columnTables.add(probe.table);
     else if (probe.kind === "table") tableNames.push(probe.table);
     else indexNames.push(probe.index);
   }
@@ -1526,6 +1529,7 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   );
 
   const pending = SCHEMA_REPAIRS.filter(({ probe: p }) => {
+    if (p.kind === "removed-column") return present.has(`column:${p.table}.${p.column}`);
     const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
     return !present.has(key);
   });

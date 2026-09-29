@@ -24,21 +24,22 @@
  * would claim the row.) A crash mid-delivery leaves the row pending; it
  * becomes due again when the lease lapses.
  */
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
-import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import type { ChannelOrigin, SignalContent, ValetPlugin } from "@valet/engine";
+import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
+import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { allCatalogEntries } from "./ingest.js";
-import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
+import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
+import { hasTeamCoverage } from "./delivery-policy.js";
+import { allCatalogEntries } from "./ingest.js";
+import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
   mentionAudience,
   teamMentionActor,
 } from "./team-slack-gate.js";
-import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -64,8 +65,6 @@ export interface OrchestratorDeliverFn {
     actorUserId: string;
     signal: SignalContent;
     dispatchId: string;
-    /** Which of the owner's assistants answers. Absent → the owner's default. */
-    assistantId?: string;
   }): Promise<void>;
 }
 
@@ -114,11 +113,11 @@ function channelText(payload: unknown): string | undefined {
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
   workflowId?: string;
-  /** Which of the owner's assistants answers. Absent → the owner's default. */
-  assistantId?: string;
   /** When true, an orchestrator channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
+  pauseOnOverlap?: boolean;
+  overlapPausedAt?: number;
   /** Standing instruction rendered above the event. Absent → no instruction. */
   systemPrompt?: string;
   /** The event message, in place of the default body. Absent → the default. */
@@ -190,7 +189,7 @@ export class EventDispatcher {
   private async deliverOne(deliveryId: string): Promise<void> {
     const { db } = this.deps;
     const [delivery] = await db.select().from(eventDeliveries).where(eq(eventDeliveries.id, deliveryId)).limit(1);
-    if (!delivery || delivery.status === "delivered" || delivery.status === "dead") return;
+    if (!delivery || delivery.status === "delivered" || delivery.status === "dead" || delivery.status === "skipped") return;
     const [event] = await db.select().from(events).where(eq(events.id, delivery.eventId)).limit(1);
     const [sub] = await db
       .select()
@@ -211,6 +210,24 @@ export class EventDispatcher {
       // is Record<string, string>). Same narrowing convention as ingest.ts.
       const target = sub.target as SubscriptionTarget;
       const refs = event.refs as Record<string, string>;
+      if (event.orgId !== sub.orgId) throw new Error("Event and subscription organizations differ.");
+      const covered = sub.enabled && await hasTeamCoverage(db, sub, event, allCatalogEntries(this.deps.plugins ?? []));
+      if (!sub.enabled || covered) {
+        let paused = false;
+        if (covered && target.pauseOnOverlap) {
+          const changed = await db.update(eventSubscriptions)
+            .set({ enabled: false, target: { ...target, overlapPausedAt: Date.now() }, updatedAt: Math.max(Date.now(), sub.updatedAt + 1) })
+            .where(and(eq(eventSubscriptions.id, sub.id), eq(eventSubscriptions.orgId, event.orgId),
+              eq(eventSubscriptions.updatedAt, sub.updatedAt), eq(eventSubscriptions.enabled, true)))
+            .returning({ id: eventSubscriptions.id });
+          paused = changed.length > 0;
+        }
+        await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
+          ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
+          : "Skipped — subscription is disabled." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
+        return;
+      }
+
       if (target.kind === "workflow" && target.workflowId) {
         await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
       } else if (target.kind === "orchestrator") {
@@ -289,12 +306,13 @@ export class EventDispatcher {
             origin: origin ?? undefined,
           },
           dispatchId: `event:${delivery.id}`,
-          assistantId: target.assistantId,
         });
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The
         // threadKey is `{channelType}:{channelId}:{threadTs}`.
-        if (target.follow && origin) {
+        // Message subscriptions already deliver later replies. A second follow
+        // binding would submit each reply twice and outlive the subscription.
+        if (target.follow && origin && event.eventKey === "slack.app_mention") {
           const parts = origin.threadKey.split(":");
           if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
             const key = {
@@ -325,9 +343,6 @@ export class EventDispatcher {
               // rule id is what it needs.
               ...(teamMention ? { subscriptionId: sub.id } : {}),
               preserveBinding,
-              // Whichever assistant just answered keeps the thread, so a later
-              // overheard message does not fall back to the owner's default.
-              assistantId: target.assistantId,
               // The mention itself is the last message the assistant has seen,
               // so the follow-router's gap re-hydration starts right after it.
               lastSeenTs: origin.messageTs,

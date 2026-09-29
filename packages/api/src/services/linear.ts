@@ -1,45 +1,44 @@
 /**
- * Linear API service (event-system plan, Task 9) — OAuth code exchange and
- * the GraphQL calls the connect flow needs (workspace lookup, webhook
- * create/delete). Kept out of `routes/linear-connect.ts` so the routes stay
- * thin (validate admin, call service, write rows).
+ * Linear API service (event-system plan, Task 9) — the token calls and the
+ * GraphQL calls the connect flow needs. Kept out of `routes/linear-connect.ts`
+ * so the routes stay thin (validate admin, call service, write rows).
  *
- * ── URL scheme ────────────────────────────────────────────────────────────
- * Linear splits its hosts: the BROWSER authorize page lives on the web app
- * (`https://linear.app/oauth/authorize`) while the token endpoint and
- * GraphQL API live on the API host (`https://api.linear.app/oauth/token`,
- * `https://api.linear.app/graphql`). So:
+ * The organization connection follows the Slack model: the admin pastes the
+ * app's client ID, client secret, and webhook signing secret, and Valet mints
+ * an app-actor token with the `client_credentials` grant. Linear owns the
+ * webhook (configured on the app itself), so this module no longer creates
+ * one. `deleteWebhook` remains only to clean up webhooks that older
+ * connections created through the API.
  *
- *   - `LINEAR_OAUTH_URL ?? "https://linear.app"` — ONLY for building the
- *     browser authorize URL (`resolveLinearOauthUrl`, used by the route).
- *   - `LINEAR_API_URL ?? "https://api.linear.app"` — every server-side HTTP
- *     call this module makes: token exchange AND GraphQL.
- *
- * Tests point `LINEAR_API_URL` at `startLinearFixture()` (same pattern as
- * `GITHUB_API_URL` / `startGithubFixture`); `LINEAR_OAUTH_URL` never
- * receives traffic — it only shapes the URL string handed to the browser.
+ * Every call goes to Linear's API host (`LINEAR_API_URL`, default
+ * `https://api.linear.app`): the token endpoint and GraphQL. Tests point
+ * `LINEAR_API_URL` at `startLinearFixture()`.
  */
 import { isRecord } from "../lib/oauth-state.js";
 
-/** Browser-facing web-app host — authorize URL construction only. */
-export function resolveLinearOauthUrl(env: NodeJS.ProcessEnv): string {
-  return env.LINEAR_OAUTH_URL || "https://linear.app";
-}
-
-/** API host — token exchange + GraphQL. */
+/** API host: the token endpoint and GraphQL. */
 export function resolveLinearApiUrl(env: NodeJS.ProcessEnv): string {
   return env.LINEAR_API_URL || "https://api.linear.app";
 }
 
 export interface LinearService {
-  exchangeCode(code: string, redirectUri: string): Promise<{ accessToken: string }>;
+  /** `client_credentials` grant: an app-actor token for the app's own
+   * workspace, with no browser redirect. Linear issues it for 30 days and
+   * without a refresh token; Valet mints a new one before it expires. */
+  clientCredentialsToken(): Promise<{ accessToken: string; expiresAt: number }>;
   fetchWorkspace(accessToken: string): Promise<{ workspaceId: string; workspaceName: string }>;
-  createWebhook(accessToken: string, args: { url: string; secret: string }): Promise<{ webhookId: string }>;
   deleteWebhook(accessToken: string, webhookId: string): Promise<void>;
 }
 
-/** Resource types the auto-created workspace webhook subscribes to — keep in
- * sync with the trigger catalog in `@valet/plugin-linear`. */
+/** Scopes for every app-actor token. Keep this string constant: Linear
+ * revokes all of an app's `client_credentials` tokens when one is requested
+ * with a different scope set. `admin` is not requested, because `actor=app`
+ * installations cannot hold it. */
+export const LINEAR_APP_SCOPES = "read,write";
+
+/** Resource types the app's webhook subscribes to. The settings page prefills
+ * them into Linear's app form. Keep in sync with the trigger catalog in
+ * `@valet/plugin-linear`. */
 export const LINEAR_WEBHOOK_RESOURCE_TYPES = [
   "Issue",
   "Comment",
@@ -52,6 +51,15 @@ export const LINEAR_WEBHOOK_RESOURCE_TYPES = [
 interface GraphqlResult {
   data?: Record<string, unknown>;
   errors?: unknown[];
+}
+
+/** A token-endpoint refusal. `detail` carries Linear's `error_description`
+ * or `error` so callers can name the fix. */
+export class LinearTokenError extends Error {
+  constructor(message: string, readonly status: number, readonly detail?: string) {
+    super(message);
+    this.name = "LinearTokenError";
+  }
 }
 
 export interface LinearClientConfig {
@@ -92,36 +100,41 @@ export function createLinearService(config: LinearClientConfig, env: NodeJS.Proc
     return result.data;
   }
 
-  return {
-    async exchangeCode(code, redirectUri) {
-      const form = new URLSearchParams({
-        code,
-        redirect_uri: redirectUri,
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        grant_type: "authorization_code",
+  async function token(label: string, fields: Record<string, string>): Promise<Record<string, unknown>> {
+    const form = new URLSearchParams({ ...fields, client_id: config.clientId, client_secret: config.clientSecret });
+    let res: Response;
+    try {
+      res = await fetch(`${apiUrl}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form.toString(),
       });
-      let res: Response;
-      try {
-        res = await fetch(`${apiUrl}/oauth/token`, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: form.toString(),
-        });
-      } catch (err) {
-        throw new Error(`Linear token exchange: request failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      if (!res.ok) throw new Error(`Linear token exchange: returned ${res.status}`);
+    } catch (err) {
+      throw new Error(`Linear ${label}: request failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    let payload: unknown;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = undefined;
+    }
+    if (!res.ok) {
+      const detail = isRecord(payload) && typeof payload.error_description === "string" ? payload.error_description
+        : isRecord(payload) && typeof payload.error === "string" ? payload.error : undefined;
+      throw new LinearTokenError(`Linear ${label}: returned ${res.status}${detail ? `: ${detail}` : ""}`, res.status, detail);
+    }
+    if (!isRecord(payload) || typeof payload.access_token !== "string" || !payload.access_token) {
+      throw new Error(`Linear ${label}: no access_token in response`);
+    }
+    return payload;
+  }
 
-      let payload: unknown;
-      try {
-        payload = await res.json();
-      } catch {
-        throw new Error("Linear token exchange: malformed (non-JSON) response");
-      }
-      const accessToken = isRecord(payload) && typeof payload.access_token === "string" ? payload.access_token : null;
-      if (!accessToken) throw new Error("Linear token exchange: no access_token in response");
-      return { accessToken };
+  return {
+    async clientCredentialsToken() {
+      const payload = await token("client credentials", { grant_type: "client_credentials", scope: LINEAR_APP_SCOPES });
+      // Linear documents 30 days. Fall back to that when expires_in is absent.
+      const seconds = typeof payload.expires_in === "number" && payload.expires_in > 0 ? payload.expires_in : 30 * 24 * 60 * 60;
+      return { accessToken: String(payload.access_token), expiresAt: Date.now() + seconds * 1000 };
     },
 
     async fetchWorkspace(accessToken) {
@@ -131,24 +144,6 @@ export function createLinearService(config: LinearClientConfig, env: NodeJS.Proc
         throw new Error("Linear fetchWorkspace: malformed organization in response");
       }
       return { workspaceId: organization.id, workspaceName: organization.name };
-    },
-
-    async createWebhook(accessToken, { url, secret }) {
-      const data = await graphql(
-        accessToken,
-        "webhookCreate",
-        "mutation($input: WebhookCreateInput!) { webhookCreate(input: $input) { success webhook { id } } }",
-        { input: { url, secret, allPublicTeams: true, resourceTypes: [...LINEAR_WEBHOOK_RESOURCE_TYPES] } },
-      );
-      const result = data.webhookCreate;
-      if (!isRecord(result) || result.success !== true) {
-        throw new Error(`Linear webhookCreate: mutation did not succeed: ${JSON.stringify(data)}`);
-      }
-      const webhook = result.webhook;
-      if (!isRecord(webhook) || typeof webhook.id !== "string") {
-        throw new Error("Linear webhookCreate: no webhook id in response");
-      }
-      return { webhookId: webhook.id };
     },
 
     async deleteWebhook(accessToken, webhookId) {

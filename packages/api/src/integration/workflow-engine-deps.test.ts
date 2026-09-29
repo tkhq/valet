@@ -1,3 +1,4 @@
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Integration test: `buildWorkflowEngineDeps` (Phase 5 plan Task 10, Task 7
  * of the node-completion plan) over a real `EngineHost` + real Anthropic
@@ -183,7 +184,7 @@ describeIfKey("api integration: workflow engine-deps", () => {
 });
 
 
-it("HTTP workflow runs keep separate orchestrator threads and archive each on settle, without an LLM key", async () => {
+it("Thread nodes share context within a run, isolate separate runs, and expose durable thread IDs", async () => {
   const original = piAi.getApiProvider("anthropic-messages");
   const stream: piAi.ApiStreamSimpleFunction = () => {
     const events = piAi.createAssistantMessageEventStream();
@@ -199,10 +200,10 @@ it("HTTP workflow runs keep separate orchestrator threads and archive each on se
     const create = await fetch(`${api.baseUrl}/api/workflows`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "repeated-orchestrator-e2e", definition: {
+      body: JSON.stringify({ name: "repeated-thread-e2e", definition: {
         version: "dag/v1",
-        nodes: [{ id: "trigger", type: "trigger" }, { id: "ask", type: "orchestrator", prompt: "Complete this workflow." }, { id: "stop", type: "stop" }],
-        edges: [{ from: "trigger", to: "ask" }, { from: "ask", to: "stop" }],
+        nodes: [{ id: "trigger", type: "trigger" }, { id: "ask", type: "thread", prompt: "Complete this workflow." }, { id: "review", type: "thread", prompt: "Continue working in {{nodes.ask.result.threadId}}." }, { id: "stop", type: "stop" }],
+        edges: [{ from: "trigger", to: "ask" }, { from: "ask", to: "review" }, { from: "review", to: "stop" }],
       } }),
     });
     expect(create.status).toBe(201);
@@ -228,6 +229,10 @@ it("HTTP workflow runs keep separate orchestrator threads and archive each on se
       if (typeof effects?.sessionId !== "string" || typeof receipt !== "object" || receipt === null || !("threadId" in receipt) || typeof receipt.threadId !== "string" || !("queueItemId" in receipt) || typeof receipt.queueItemId !== "string") {
         throw new Error("Workflow checkpoint must contain its durable submission receipt.");
       }
+      expect(checkpoints.find((cp) => cp.nodeId === "ask")?.result).toMatchObject({ threadId: receipt.threadId });
+      expect(checkpoints.find((cp) => cp.nodeId === "review")?.result).toMatchObject({
+        threadId: receipt.threadId, sessionId: effects.sessionId, response: "workflow completed",
+      });
       receipts.push({ runId, sessionId: effects.sessionId, threadId: receipt.threadId, queueItemId: receipt.queueItemId });
     }
     // One assistant, one thread per run: neither run can block or abort
