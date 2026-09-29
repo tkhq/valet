@@ -216,9 +216,14 @@ export function TopNav() {
         className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash md:min-h-0 md:min-w-0"
         aria-label="Valet — dashboard"
       >
-        <span className="text-moss text-base leading-none" aria-hidden>
-          ◈
-        </span>
+        {/* XORS iconmark: four 11x8 rounded rectangles (corner radius 3) on
+            a 2x2 grid, per the XORS brand guidelines. */}
+        <svg viewBox="0 0 22 16" className="h-3.5 w-[19px] text-ink" fill="currentColor" aria-hidden>
+          <rect x="0" y="0" width="11" height="8" rx="3" />
+          <rect x="11" y="0" width="11" height="8" rx="3" />
+          <rect x="0" y="8" width="11" height="8" rx="3" />
+          <rect x="11" y="8" width="11" height="8" rx="3" />
+        </svg>
         <span className="hidden font-display text-sm font-medium text-ink md:inline">Valet</span>
       </Link>
 
