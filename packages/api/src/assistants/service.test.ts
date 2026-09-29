@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { assistants, orgs } from "../schema/index.js";
+import { assistants, orgs, teams, users } from "../schema/index.js";
 import { ArchivedAssistantError, findDefaultAssistant, resolveDefaultAssistant } from "./service.js";
 
 const ORG = "org1";
@@ -54,6 +54,23 @@ describe("resolveDefaultAssistant", () => {
     expect(existing?.id).toBe(first.id);
     expect(existing?.archivedAt).not.toBeNull();
     await expect(db.insert(assistants).values({ id: "duplicate", orgId: ORG, ownerType: TEAM.type, ownerId: TEAM.id, sessionId: "assistant:duplicate", createdAt: Date.now() })).rejects.toThrow();
+  });
+
+  it("restores a retired identity whose team still exists, keeping its session", async () => {
+    await db.insert(teams).values({ id: TEAM.id, orgId: ORG, name: "Team", createdAt: Date.now() });
+    const first = await resolveDefaultAssistant(db, ORG, TEAM);
+    await db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, first.id));
+    const restored = await resolveDefaultAssistant(db, ORG, TEAM);
+    expect(restored).toMatchObject({ id: first.id, sessionId: first.sessionId, archivedAt: null });
+    expect((await findDefaultAssistant(db, ORG, TEAM))?.archivedAt).toBeNull();
+  });
+
+  it("restores a retired personal identity, since users are never torn down", async () => {
+    const user = { type: "user", id: "user_1" } as const;
+    await db.insert(users).values({ id: user.id, name: "User", email: "user_1@example.test" });
+    const first = await resolveDefaultAssistant(db, ORG, user);
+    await db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, first.id));
+    expect((await resolveDefaultAssistant(db, ORG, user)).archivedAt).toBeNull();
   });
 
 });

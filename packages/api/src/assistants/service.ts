@@ -7,7 +7,7 @@ import { and, eq, sql, type SQL } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, assistants, type AssistantRow } from "../schema/index.js";
+import { agentSessions, assistants, orgs, teams, users, type AssistantRow } from "../schema/index.js";
 
 /** Raised when a request targets an assistant that is already archived. */
 export class ArchivedAssistantError extends Error {
@@ -84,6 +84,30 @@ function newAssistantRow(args: {
   };
 }
 
+/** True while the user, team, or org that owns a workspace still exists.
+ * Team teardown deletes the team row in the transaction that retires its
+ * assistant, so a retired assistant of a live owner is a deleted profile
+ * left by the earlier multi-assistant model, not a teardown. */
+async function ownerExists(db: AppQueryable, orgId: string, principal: Principal): Promise<boolean> {
+  const rows = principal.type === "team"
+    ? await db.select({ id: teams.id }).from(teams).where(and(eq(teams.id, principal.id), eq(teams.orgId, orgId))).limit(1)
+    : principal.type === "user"
+      ? await db.select({ id: users.id }).from(users).where(eq(users.id, principal.id)).limit(1)
+      : await db.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, principal.id)).limit(1);
+  return rows.length > 0;
+}
+
+/** Returns a live row. An archived row stays retired (and throws) only when
+ * its owner is gone; otherwise it is restored, so a workspace cannot be left
+ * with a retired identity and no way to replace it. */
+async function liveOrRestored(db: AppQueryable, orgId: string, principal: Principal, row: AssistantRow): Promise<AssistantRow> {
+  if (row.archivedAt === null) return row;
+  if (!(await ownerExists(db, orgId, principal))) throw new ArchivedAssistantError();
+  const [restored] = await db.update(assistants).set({ archivedAt: null })
+    .where(eq(assistants.id, row.id)).returning();
+  return restored ?? { ...row, archivedAt: null };
+}
+
 /** Resolve the sole workspace identity. Concurrent first use converges via
  * the unconditional owner unique index. Accepts transactions so team creation
  * and its runtime identity commit or roll back together. */
@@ -93,10 +117,7 @@ export async function resolveDefaultAssistant(
   principal: Principal,
 ): Promise<AssistantRow> {
   const existing = await findDefaultAssistant(db, orgId, principal);
-  if (existing) {
-    if (existing.archivedAt !== null) throw new ArchivedAssistantError();
-    return existing;
-  }
+  if (existing) return liveOrRestored(db, orgId, principal, existing);
 
   const row = newAssistantRow({ orgId, principal });
   const inserted = await db.insert(assistants).values(row).onConflictDoNothing().returning();
@@ -109,8 +130,7 @@ export async function resolveDefaultAssistant(
         `the workspace unique index rejected the insert but no owner row exists`,
     );
   }
-  if (winner.archivedAt !== null) throw new ArchivedAssistantError();
-  return winner;
+  return liveOrRestored(db, orgId, principal, winner);
 }
 
 /**

@@ -61,16 +61,30 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
   });
 
-  it("rolls back the cutover if existing profiles share an owner", async () => {
+  it("keeps one row per owner and restores retired rows of owners that still exist", async () => {
     await restorePreviousSchema();
+    await db.query(`INSERT INTO "user"(id, name, email, email_verified, created_at, updated_at)
+      VALUES ('dup-owner', 'Owner', 'dup-owner@example.test', false, now(), now()),
+             ('lone-owner', 'Lone', 'lone-owner@example.test', false, now(), now())
+      ON CONFLICT DO NOTHING`);
     await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, is_default, created_at, archived_at)
-      VALUES ('first', 'duplicate-org', 'user', 'owner', 'first-session', true, 1, NULL),
-             ('second', 'duplicate-org', 'user', 'owner', 'second-session', false, 1, 2)`);
-    await expect(applyAppMigrations(db)).rejects.toThrow(/unique/i);
-    const rows = await db.query("SELECT id, is_default FROM assistants WHERE org_id = 'duplicate-org' ORDER BY id");
-    expect(rows.rows).toEqual([{ id: "first", is_default: true }, { id: "second", is_default: false }]);
-    const oldIndex = await db.query("SELECT 1 FROM pg_indexes WHERE indexname = 'assistants_default_owner'");
-    expect(oldIndex.rows).toHaveLength(1);
-    expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toContain("workspace assistant singleton cutover");
+      VALUES ('archived-old', 'dup-org', 'user', 'dup-owner', 'old-session', false, 1, 2),
+             ('live-default', 'dup-org', 'user', 'dup-owner', 'default-session', true, 2, NULL),
+             ('live-extra', 'dup-org', 'user', 'dup-owner', 'extra-session', false, 3, NULL),
+             ('lone-archived', 'dup-org', 'user', 'lone-owner', 'lone-session', false, 1, 5),
+             ('gone-team', 'dup-org', 'team', 'deleted-team', 'gone-session', true, 1, 7)`);
+    await expect(applyAppMigrations(db)).resolves.toBeUndefined();
+    const rows = await db.query(`SELECT id, owner_id, archived_at IS NULL AS live, is_default, session_id
+      FROM assistants WHERE org_id = 'dup-org' ORDER BY id`);
+    expect(rows.rows).toEqual([
+      { id: "archived-old", owner_id: "dup-owner:retired:archived-old", live: false, is_default: false, session_id: "old-session" },
+      { id: "gone-team", owner_id: "deleted-team", live: false, is_default: true, session_id: "gone-session" },
+      { id: "live-default", owner_id: "dup-owner", live: true, is_default: true, session_id: "default-session" },
+      { id: "live-extra", owner_id: "dup-owner:retired:live-extra", live: false, is_default: false, session_id: "extra-session" },
+      { id: "lone-archived", owner_id: "lone-owner", live: true, is_default: true, session_id: "lone-session" },
+    ]);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    await db.query("DELETE FROM assistants WHERE org_id = 'dup-org'");
+    await db.query(`DELETE FROM "user" WHERE id IN ('dup-owner', 'lone-owner')`);
   });
 });

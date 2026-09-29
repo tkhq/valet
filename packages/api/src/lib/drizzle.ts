@@ -286,9 +286,39 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
     describe: "workspace assistant singleton cutover",
     probe: { kind: "index", index: "assistants_workspace" },
-    // Duplicate profiles reject this transaction without deleting history.
-    // Preserve legacy default flags and routing fields for a bounded rollback.
-    sql: `DO $$ BEGIN
+    // The earlier model allowed several assistant rows per owner, and
+    // deleting a profile archived it. One statement, so it commits or rolls
+    // back as a unit:
+    //   1. Keep one row per owner: live first, then the old default, then the
+    //      newest. Move every other row to a retired owner key
+    //      (`<owner>:retired:<id>`) and archive it. No row or history is
+    //      deleted, and the unique index below can be built.
+    //   2. Un-retire an archived survivor whose user, team, or org still
+    //      exists: that is a deleted profile, not a teardown. Team teardown
+    //      removes the team row in the same transaction that archives its
+    //      assistant, so a real teardown stays retired and keeps its slot.
+    // Legacy default flags and routing fields stay for a bounded rollback.
+    sql: `DO $$ DECLARE now_ms bigint := (extract(epoch from clock_timestamp()) * 1000)::bigint; BEGIN
+      WITH ranked AS (
+        SELECT id, row_number() OVER (
+          PARTITION BY org_id, owner_type, owner_id
+          ORDER BY (archived_at IS NULL) DESC, is_default DESC, created_at DESC, id
+        ) AS rank
+        FROM assistants
+      )
+      UPDATE assistants a
+        SET owner_id = a.owner_id || ':retired:' || a.id,
+            archived_at = COALESCE(a.archived_at, now_ms),
+            is_default = false
+        FROM ranked r
+        WHERE a.id = r.id AND r.rank > 1;
+      UPDATE assistants a SET archived_at = NULL, is_default = true
+        WHERE a.archived_at IS NOT NULL AND position(':retired:' in a.owner_id) = 0 AND (
+          (a.owner_type = 'user' AND EXISTS (SELECT 1 FROM "user" u WHERE u.id = a.owner_id)) OR
+          (a.owner_type = 'team' AND EXISTS (SELECT 1 FROM teams t WHERE t.id = a.owner_id)) OR
+          (a.owner_type = 'org' AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = a.owner_id)));
+      UPDATE assistants SET is_default = true
+        WHERE archived_at IS NULL AND position(':retired:' in owner_id) = 0;
       CREATE UNIQUE INDEX assistants_workspace ON assistants(org_id, owner_type, owner_id);
       ALTER TABLE assistants ALTER COLUMN is_default SET DEFAULT true;
     END $$`,
