@@ -41,7 +41,7 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  * rename orphans the row and the next boot creates a second team beside it.
  */
 import { Hono, type Context } from "hono";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
@@ -377,6 +377,12 @@ teamsRouter.patch("/:id", async (c) => {
     const channel = raw.slackHomeChannelId;
     if (channel !== null && (typeof channel !== "string" || !/^[CG][A-Z0-9]{2,}$/.test(channel))) {
       return c.json({ error: "Use a Slack channel ID starting with C or G, or null to disable home-channel notifications." }, 400);
+    }
+    if (channel !== null) {
+      // One home channel per team: another team's attention links must not land here.
+      const [taken] = await db.select({ name: teams.name }).from(teams)
+        .where(and(eq(teams.orgId, user.orgId), eq(teams.slackHomeChannelId, channel), ne(teams.id, id))).limit(1);
+      if (taken) return c.json({ error: `${taken.name} already uses this channel as its home channel. Choose another channel.` }, 409);
     }
     update.slackHomeChannelId = channel;
   }

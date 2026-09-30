@@ -758,6 +758,14 @@ export async function updateWorkflowDefinition(
   if (input.definition !== undefined) {
     await validateWorkflowAssistant(deps.db, owner.orgId, { type: row.ownerType, id: row.ownerId }, input.definition);
   }
+  const stepsChange = input.definition !== undefined
+    && definitionVersionId(input.definition) !== definitionVersionId(row.definition);
+  // A grant approves the steps as they were. When someone who could not have
+  // granted it changes them, an approver must look again. Revoke before the
+  // write, so no run can start on the new steps under the old grant.
+  if (stepsChange && !(await canGrantWorkflowPermissions(deps, owner, row))) {
+    await revokeWorkflowGrants(deps.db, row.orgId, id);
+  }
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
   // definition at run-start time (plan decision 17), so updating the
   // definitions row here never reaches back into a running/parked run.
@@ -772,10 +780,7 @@ export async function updateWorkflowDefinition(
 
   // Version history: snapshot only when the definition actually changed —
   // a rename alone shouldn't mint a version.
-  if (
-    input.definition !== undefined &&
-    definitionVersionId(input.definition) !== definitionVersionId(row.definition)
-  ) {
+  if (stepsChange) {
     await snapshotVersion(
       deps,
       id,
@@ -784,9 +789,6 @@ export async function updateWorkflowDefinition(
       input.definition,
       now,
     );
-    // A grant approves the steps as they were. When someone who could not
-    // have granted it changes them, an approver must look again.
-    if (!(await canGrantWorkflowPermissions(deps, owner, row))) await revokeWorkflowGrants(deps.db, row.orgId, id);
   }
 
   return {

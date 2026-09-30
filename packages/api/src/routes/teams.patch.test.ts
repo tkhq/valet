@@ -55,6 +55,11 @@ describe("PATCH /api/teams/:id", () => {
     const saved = await patchTeam(api, { slackHomeChannelId: "C0123456789" }, "test-lead");
     expect(saved.status).toBe(200);
     expect(((await saved.json()) as PatchTeamResponse).team.slackHomeChannelId).toBe("C0123456789");
+    // Another team already uses this channel as its home.
+    await api.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1, slackHomeChannelId: "C0999999999" });
+    const taken = await patchTeam(api, { slackHomeChannelId: "C0999999999" }, "test-lead");
+    expect(taken.status).toBe(409);
+    expect(((await taken.json()) as { error: string }).error).toContain("Other already uses this channel");
     const cleared = await patchTeam(api, { slackHomeChannelId: null }, "test-lead");
     expect(((await cleared.json()) as PatchTeamResponse).team.slackHomeChannelId).toBeNull();
   });

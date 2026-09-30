@@ -55,7 +55,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
       JOIN LATERAL (SELECT e.created_at FROM engine_entries e
         WHERE e.session_id=s.id AND e.thread_id=t.id AND e.entry_type='message' AND e.role IN ('user','assistant') AND ${hasNarrative}
         ORDER BY e.created_at DESC,e.id DESC LIMIT 1) latest ON true
-      WHERE ${scopedSession}
+      WHERE ${scopedSession} AND t.archived_at IS NULL
         AND ${sharedThreadKey(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=s.id AND et.id=t.id)`)}
       ORDER BY latest.created_at DESC,t.id DESC LIMIT 30
     ) SELECT t.*,m.role,m.text,m.created_at AS message_at,

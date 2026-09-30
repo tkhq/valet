@@ -30,6 +30,7 @@ export async function listWorkspaceActiveWork(
     WHERE s.status<>'deleted' AND s.org_id=${orgId} AND s.owner_type=${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id}
       AND ${sharedThreadKey(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=q.session_id AND et.id=q.thread_id)`, viewerId)}
+      AND t.archived_at IS NULL
       AND q.status<>'settled'
       AND (q.status IN ('blocked_on_decision_gate','collecting','queued','running') OR q.outcome='failed')
       ${after}

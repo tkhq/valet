@@ -86,7 +86,8 @@ or credentials. A missing record does not prove that Slack delivered an event.
 Team administrators can choose a Slack home channel. New team attention uses that
 channel, with generic links that keep content and approval controls behind web
 access checks. Replies stay in the originating Slack thread. Choosing a home
-channel does not subscribe to every message in it.
+channel does not subscribe to every message in it. A channel can be the home of only one team;
+the API refuses a channel that another team already uses.
 
 Personal team DM copies are opt-in by notification kind. Members present at upgrade keep them on for every kind. Delivery verifies current
 team and organization membership. Preferences do not change team access or approval

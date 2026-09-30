@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { sessionThreads, workspaceBriefingCache } from "../schema/index.js";
+import { sessionThreads, teamMembers, teams, workspaceBriefingCache } from "../schema/index.js";
 import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing } from "../wire/types.js";
 import { hideDismissedBriefings } from "./workspace-briefings.js";
 
@@ -60,4 +60,18 @@ it("hides a dismissed brief for the caller and archives its threads, except one 
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/briefings/brief:${"f".repeat(24)}/dismiss`, { method: "POST" })).status).toBe(404);
 
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/briefings/not-a-brief/dismiss`, { method: "POST" })).status).toBe(400);
+});
+
+it("hides a team brief for the dismisser only, archiving none of the shared threads", async () => {
+  api = await bootTestApi();
+  await api.providers.db.insert(teams).values({ id: "t1", orgId: "local-org", name: "T1", createdAt: 1 });
+  await api.providers.db.insert(teamMembers).values({ teamId: "t1", userId: "local-user", role: "member" });
+  const withThread: WorkspaceBriefing = { ...briefs[0]!, latestThread: { sessionId: "team-session", threadId: "shared" } };
+  await api.providers.db.insert(workspaceBriefingCache).values({ orgId: "local-org", ownerType: "team", ownerId: "t1",
+    version: "v", response: { briefings: [withThread], generatedAt: 1, coverage: "recent" } });
+  const res = await fetch(`${api.baseUrl}/api/workspaces/t1/briefings/${briefs[0]!.id}/dismiss`, { method: "POST" });
+  expect(res.status).toBe(200);
+  expect(await res.json() as DismissWorkspaceBriefingResponse).toEqual({ dismissed: true, archived: 0, keptWaiting: 0 });
+  const hidden = await hideDismissedBriefings(api.providers.db, "local-user", { type: "team", id: "t1" }, { briefings: [withThread], generatedAt: 1, coverage: "recent" });
+  expect(hidden.briefings).toEqual([]);
 });

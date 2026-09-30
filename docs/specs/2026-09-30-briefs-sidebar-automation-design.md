@@ -4,7 +4,7 @@ Status: implemented on 2026-09-30. This note records six changes from the briefs
 
 ## Briefs
 
-Brief evidence, active work, and **Waiting on you** leave out threads that are private to one person: each person's app-assistant helper thread, and workflow editor conversations. Active work and **Waiting on you** show the viewer's own editor conversations. Briefs are shared by every member, so they show none. One SQL helper (`sharedThreadKey` in `services/thread-read-state.ts`) holds this rule.
+Brief evidence, active work, and **Waiting on you** leave out personal helper threads: each person's app-assistant helper thread, and workflow editor conversations. They also leave out archived threads. Hiding a helper thread from these lists keeps shared views about shared work; it is not access control. Team members share one runtime, so the thread API still lets a member open any thread in it, as the "Shared with the team" notice on the thread page says. Active work and **Waiting on you** show the viewer's own editor conversations. Briefs are shared by every member, so they show none. One SQL helper (`sharedThreadKey` in `services/thread-read-state.ts`) holds this rule.
 
 A brief covers a line of work: it combines at least two kinds of source, such as a conversation with its pull request, a workflow run, an artifact, or a sent message. A goal whose only evidence is conversations gets no brief, because the thread list and **Waiting on you** show those threads with exact state. The parser drops a single-kind group even when the model returns one.
 
@@ -27,7 +27,7 @@ A source carries `originUrl` for a Slack origin. A thread keyed `slack:{channel}
 
 **Dismiss** hides a brief for the person who dismissed it. The `briefing_dismissals` table stores one row per person, workspace, and brief. A brief's id is a hash of its sources, so new activity produces a new brief that shows again. Rows older than 30 days are removed when the same person dismisses again.
 
-Dismiss also archives the brief's threads that belong to the workspace. The server reads the brief's threads from its own cached copy of the brief, not from the request, and refuses a brief it does not know. A thread waiting on an approval stays open, because archiving it would withdraw an approval that someone may still answer. The response reports how many threads were archived and how many stayed open.
+In a personal workspace, dismiss also archives the brief's threads. In a team workspace the threads are shared, so dismiss only hides the brief for the person who dismissed it. The server reads the brief's threads from its own cached copy of the brief, not from the request, and refuses a brief it does not know. A thread waiting on an approval stays open, because archiving it would withdraw an approval that someone may still answer. The response reports how many threads were archived and how many stayed open.
 
 ## Needs attention
 

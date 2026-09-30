@@ -34,8 +34,8 @@ workspaceBriefingsRouter.get("/:workspace/briefings", async c => {
 });
 
 /**
- * Hides one brief for the caller, and archives the brief's threads so the
- * sidebar clears with it. A thread waiting on an approval stays open:
+ * Hides one brief for the caller. In a personal workspace it also archives the
+ * brief's threads so the sidebar clears with it. A thread waiting on an approval stays open:
  * archiving would withdraw an approval someone may still answer.
  */
 /** The threads a brief names: its conversation and its thread sources. */
@@ -59,7 +59,10 @@ workspaceBriefingsRouter.post("/:workspace/briefings/:briefingId/dismiss", async
     .where(and(eq(workspaceBriefingCache.orgId, c.var.user.orgId), eq(workspaceBriefingCache.ownerType, owner.type), eq(workspaceBriefingCache.ownerId, owner.id))).limit(1);
   const brief = cached?.response?.briefings.find(candidate => candidate.id === briefingId);
   if (!brief) return c.json({ error: "Unknown brief. Reload the page and try again." }, 404);
-  const threads = briefThreads(brief);
+  // A dismissal is one person's choice. In a team workspace the threads are
+  // shared, so it hides the brief for the dismisser and archives nothing;
+  // archiving there would clear other members' threads without notice.
+  const threads = owner.type === "team" ? [] : briefThreads(brief);
   const now = Date.now();
   await db.insert(briefingDismissals).values({ userId: c.var.user.id, orgId: c.var.user.orgId, ownerType: owner.type, ownerId: owner.id, briefingId, dismissedAt: now })
     .onConflictDoNothing();
