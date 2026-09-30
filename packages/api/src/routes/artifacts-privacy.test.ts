@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { internalToken } from "../lib/internal-auth.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, artifacts, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
 import { addArtifactComment, getArtifactById, listArtifactComments, publishArtifact, revokeArtifactByPath, shareArtifact, setArtifactVisibility } from "../services/artifacts.js";
-import type { GetArtifactResponse, ListArtifactsResponse } from "../wire/types.js";
+import type {
+  GetArtifactResponse,
+  ListArtifactsResponse,
+  ListTeamArtifactAudienceManagementResponse,
+} from "../wire/types.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -16,7 +20,11 @@ async function setup() {
   const target = await bootTestApi();
   api = target;
   const db = target.providers.db;
-  await db.insert(users).values({ id: "nonmember", email: "nonmember@dev", name: "Nonmember", role: "member" });
+  await db.insert(users).values([
+    { id: "nonmember", email: "nonmember@dev", name: "Nonmember", role: "member" },
+    { id: "org-viewer", email: "org-viewer@dev", name: "Org Viewer", role: "member" },
+  ]);
+  await db.insert(orgMembers).values({ orgId: "local-org", userId: "org-viewer", role: "member", createdAt: 1 });
   await db.insert(orgs).values({ id: "foreign-org", name: "Foreign", createdAt: 1 });
   await db.insert(teams).values([
     { id: "private-team", orgId: "local-org", name: "Private", createdAt: 1 },
@@ -77,6 +85,32 @@ describe("team artifact privacy", () => {
     expect((await request(`/${token}`, "test-admin")).status).toBe(404);
   });
 
+  it("narrows organization-audience artifacts when non-admin publishers replace content", async () => {
+    const { db, row, request } = await setup();
+    const owner = { type: "team", id: "private-team" } as const;
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+
+    const memberUpdate = await publishArtifact(db, { owner, actorUserId: "test-member" }, {
+      orgId: "local-org", key: "private.html", content: "Member replacement", format: "html",
+    });
+    expect(memberUpdate).toMatchObject({ teamAudience: "team", content: "Member replacement" });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    const agentUpdate = await publishArtifact(db, { owner, actorUserId: "local-user", principal: owner }, {
+      orgId: "local-org", key: "private.html", content: "Agent replacement", format: "html",
+    });
+    expect(agentUpdate).toMatchObject({ teamAudience: "team", content: "Agent replacement" });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    const adminUpdate = await publishArtifact(db, { owner, actorUserId: "local-user" }, {
+      orgId: "local-org", key: "private.html", content: "Admin replacement", format: "html",
+    });
+    expect(adminUpdate).toMatchObject({ teamAudience: "organization", content: "Admin replacement" });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(200);
+  });
+
   it("gates service-level publish, share and revoke without an org-admin fallback", async () => {
     const { db, row } = await setup();
     const owner = { type: "team", id: "private-team" } as const;
@@ -116,13 +150,113 @@ describe("team artifact privacy", () => {
     expect((await request("/share?ownerType=team&ownerId=private-team", "test-member", "POST", { key: "member.md", content: "Member publish" })).status).toBe(200);
   });
 
-  it("denies nonmembers, org admins and removed publishers on every artifact surface", async () => {
+  it("widens and narrows artifact access without granting team management", async () => {
+    const { db, row, request } = await setup();
+    expect(row.teamAudience).toBe("team");
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+    expect((await request(`/${row.id}`, "test-member", "PATCH", { audience: "organization" })).status).toBe(404);
+
+    await db.update(teamMembers).set({ role: "admin" }).where(eq(teamMembers.userId, "test-member"));
+    const widened = await request(`/${row.id}`, "test-member", "PATCH", { audience: "organization" });
+    expect(widened.status).toBe(200);
+    expect(await widened.json()).toMatchObject({ audience: "organization", canChangeAudience: true });
+    const adminList = await request("", "test-admin");
+    const adminRow = (await adminList.json() as ListArtifactsResponse).artifacts.find((item) => item.id === row.id);
+    expect(adminRow).toMatchObject({ audience: "organization", canChangeAudience: false });
+
+    const read = await request(`/${row.token}`, "org-viewer");
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({ audience: "organization", content: "<h1>Team secret</h1>" });
+    expect((await request(`/${row.token}/comments`, "org-viewer")).status).toBe(200);
+    expect((await request(`/${row.token}/comments`, "org-viewer", "POST", { body: "Org feedback" })).status).toBe(200);
+    const list = await request("?ownerType=team&ownerId=private-team", "org-viewer");
+    expect(list.status).toBe(404);
+    await db.delete(teamMembers).where(and(
+      eq(teamMembers.teamId, "private-team"), eq(teamMembers.userId, "local-user"),
+    ));
+    const removedPublisherMine = await request("?mine=1", "local-user");
+    expect(await removedPublisherMine.json()).toMatchObject({ artifacts: [{ id: row.id, audience: "organization" }] });
+    expect((await request(`/${row.id}/versions`, "org-viewer")).status).toBe(404);
+    expect((await request(`/${row.id}`, "org-viewer", "PATCH", { sharedVersion: 1 })).status).toBe(404);
+    expect((await request(`/${row.id}`, "org-viewer", "DELETE")).status).toBe(404);
+
+    expect((await request(`/${row.id}`, "test-admin", "PATCH", { audience: "team" })).status).toBe(404);
+    const narrowed = await request(`/management/audiences/${row.id}`, "test-admin", "PATCH", { audience: "team" });
+    expect(narrowed.status).toBe(200);
+    expect(await narrowed.json()).toEqual({ id: row.id, audience: "team" });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+
+    expect((await request(`/management/audiences/${row.id}`, "test-admin", "PATCH", { audience: "organization" })).status).toBe(200);
+    await db.delete(orgMembers).where(eq(orgMembers.userId, "org-viewer"));
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+    const removedOrgMemberList = await request("", "org-viewer");
+    expect(JSON.stringify(await removedOrgMemberList.json())).not.toContain(row.id);
+
+    await db.delete(orgMembers).where(eq(orgMembers.userId, "test-member"));
+    expect((await request(`/${row.id}`, "test-member", "PATCH", { audience: "team" })).status).toBe(404);
+  });
+
+  it("validates a shared version before widening the audience", async () => {
+    const { db, row, request } = await setup();
+    await db.update(teamMembers).set({ role: "admin" }).where(and(
+      eq(teamMembers.teamId, "private-team"), eq(teamMembers.userId, "test-member"),
+    ));
+
+    const response = await request(`/${row.id}`, "local-user", "PATCH", {
+      audience: "organization",
+      sharedVersion: 99,
+    });
+    expect(response.status).toBe(400);
+    expect(await getArtifactById(db, row.id)).toMatchObject({ teamAudience: "team", sharedVersion: null });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+  });
+
+  it("hides organization-audience artifacts after their owning team is deleted", async () => {
+    const { db, row, request } = await setup();
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    expect((await request("", "org-viewer").then((response) => response.json()) as ListArtifactsResponse)
+      .artifacts.map((item) => item.id)).toContain(row.id);
+
+    await db.delete(teams).where(eq(teams.id, "private-team"));
+    const listed = await request("", "org-viewer");
+    const body = await listed.json() as ListArtifactsResponse;
+    expect(body.artifacts.map((item) => item.id)).not.toContain(row.id);
+    expect(JSON.stringify(body)).not.toContain("Team secret");
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+  });
+
+  it("hides revoked organization-audience metadata from default and owner lists", async () => {
+    const { db, row, request } = await setup();
+    await db.update(artifacts).set({ teamAudience: "organization", revokedAt: Date.now() })
+      .where(eq(artifacts.id, row.id));
+
+    const memberList = await request("", "local-user");
+    const memberRow = (await memberList.json() as ListArtifactsResponse).artifacts.find((item) => item.id === row.id);
+    expect(memberRow).toMatchObject({ revoked: true, canChangeAudience: false });
+    expect((await request(`/${row.id}`, "local-user", "PATCH", { audience: "team" })).status).toBe(404);
+    expect(await getArtifactById(db, row.id)).toMatchObject({ teamAudience: "organization" });
+
+    for (const path of ["", "?ownerType=team&ownerId=private-team"]) {
+      const response = await request(path, "org-viewer");
+      const text = await response.text();
+      expect(text).not.toContain(row.title);
+      expect(text).not.toContain(row.sourceMemoryPath);
+      expect(text).not.toContain(row.token);
+    }
+    const ownerList = await request("?ownerType=team&ownerId=private-team", "test-member");
+    expect(ownerList.status).toBe(200);
+    expect(await ownerList.json()).toMatchObject({ artifacts: [] });
+  });
+
+  it("denies team-only reads and management after team membership is removed", async () => {
     const { db, row, comment, request } = await setup();
     await db.delete(teamMembers).where(eq(teamMembers.userId, "local-user"));
     for (const user of ["nonmember", "test-admin", "local-user"]) {
-      for (const path of [`/${row.token}`, `/${row.token}/comments`, `/${row.id}/versions`, "?ownerType=team&ownerId=private-team"]) {
+      for (const path of [`/${row.token}`, `/${row.token}/comments`, `/${row.id}/versions`]) {
         expect((await request(path, user)).status, `${user} GET ${path}`).toBe(404);
       }
+      const ownerList = await request("?ownerType=team&ownerId=private-team", user);
+      expect(ownerList.status).toBe(404);
       expect((await request(`/${row.token}/comments`, user, "POST", { body: "Leak", sendToSession: true })).status).toBe(404);
       expect((await request(`/${row.token}/comments/${comment.id}/resolve`, user, "POST")).status).toBe(404);
       expect((await request(`/${row.id}`, user, "PATCH", { sharedVersion: 1 })).status).toBe(404);
@@ -131,7 +265,6 @@ describe("team artifact privacy", () => {
         expect((await request("/share?ownerType=team&ownerId=private-team", user, "POST", body)).status).toBe(404);
       }
       for (const path of ["", "?mine=1"]) {
-        // The route response is checked against the wire contract below.
         const list = await (await request(path, user)).json() as ListArtifactsResponse;
         expect(list.artifacts.map((item) => item.id)).not.toContain(row.id);
       }
@@ -140,10 +273,44 @@ describe("team artifact privacy", () => {
     expect(await getArtifactById(db, row.id)).toMatchObject({ version: 1, revokedAt: null, sharedVersion: null });
   });
 
+  it("uses a bounded token-free admin index and hides revoked organization rows", async () => {
+    const { db, row, request } = await setup();
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    const visible = await request("", "org-viewer");
+    expect((await visible.json() as ListArtifactsResponse).artifacts.map((item) => item.id)).toContain(row.id);
+    await db.update(artifacts).set({ revokedAt: Date.now() }).where(eq(artifacts.id, row.id));
+    const revokedList = await request("", "org-viewer");
+    expect((await revokedList.json() as ListArtifactsResponse).artifacts.map((item) => item.id)).not.toContain(row.id);
+
+    const now = Date.now();
+    await db.insert(artifacts).values(Array.from({ length: 101 }, (_, index) => ({
+      id: `managed-${index}`,
+      token: `managed-token-${index}`,
+      ownerType: "team",
+      ownerId: "private-team",
+      orgId: "local-org",
+      actorUserId: "local-user",
+      sourceMemoryPath: `private-${index}.md`,
+      title: `Managed ${index}`,
+      content: "private",
+      createdAt: now + index,
+      updatedAt: now + index,
+    })));
+    expect((await request("/management/audiences", "org-viewer")).status).toBe(403);
+    const response = await request("/management/audiences", "test-admin");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ListTeamArtifactAudienceManagementResponse;
+    expect(body.artifacts).toHaveLength(100);
+    expect(body.truncated).toBe(true);
+    expect(Object.keys(body.artifacts[0]!).sort()).toEqual(["audience", "id", "teamId", "teamName", "title"]);
+    expect(body.artifacts.map((item) => item.id)).not.toContain(row.id);
+  });
+
   it("requires live org membership even when team membership and deployment identity remain", async () => {
     const { db, row, comment, request } = await setup();
     await db.update(orgs).set({ allowPublicArtifacts: true }).where(eq(orgs.id, "local-org"));
-    await db.update(artifacts).set({ visibility: "public" }).where(eq(artifacts.id, row.id));
+    await db.update(artifacts).set({ visibility: "public", teamAudience: "organization" })
+      .where(eq(artifacts.id, row.id));
     await db.delete(orgMembers).where(eq(orgMembers.userId, "local-user"));
     await db.delete(orgMembers).where(eq(orgMembers.userId, "test-member"));
     for (const user of ["local-user", "test-member"]) {

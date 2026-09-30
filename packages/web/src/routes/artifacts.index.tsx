@@ -1,12 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import type { ArtifactListItem } from "@valet/api/wire";
+import type { ArtifactListItem, TeamArtifactAudienceManagementItem } from "@valet/api/wire";
 import { useState } from "react";
 import { useListOwner } from "~/lib/use-list-owner";
 import { useMe } from "~/api/settings";
 import { Pager } from "~/components/pager";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import type { OwnerFilter } from "~/api/client";
-import { useArtifacts, useRevokeArtifact } from "~/api/artifacts";
+import {
+  useArtifacts,
+  usePatchArtifact,
+  usePatchTeamArtifactAudienceManagement,
+  useRevokeArtifact,
+  useTeamArtifactAudienceManagement,
+} from "~/api/artifacts";
 import { ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
@@ -43,8 +49,12 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
   const me = useMe();
   const [cursors, setCursors] = useState<string[]>([]);
   const listQ = useArtifacts(owner, { limit: 50, cursor: currentCursor(cursors) });
+  const adminQ = useTeamArtifactAudienceManagement({
+    enabled: owner.ownerType === "user" && me.data?.orgRole === "admin",
+  });
   const loading = listQ.isLoading;
   const artifacts = (listQ.data?.artifacts ?? []).filter((a) => !a.revoked);
+  const managedTeamArtifacts = adminQ.data?.artifacts ?? [];
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -52,7 +62,7 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
         <h1 className="font-display text-2xl text-ink">Artifacts</h1>
         <p className="mt-1 text-sm text-muted">
           {owner.ownerType === "team"
-            ? "Team-only pages. Only current members of this team can open these links."
+            ? "Team-owned pages are team-only unless an admin shares one with the organization."
             : "Pages published in this workspace. A link serves logged-in members of your org unless it is public."}
         </p>
 
@@ -67,7 +77,7 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
           {!loading && !listQ.error && artifacts.length > 0 && (
             <div className="divide-y divide-line border-t border-line">
               {artifacts.map((artifact) => (
-                <ArtifactRow key={artifact.id} artifact={artifact} canManage={!me.error && (me.data?.orgRole === "admin" || me.data?.id === artifact.actorUserId)} />
+                <ArtifactRow key={artifact.id} artifact={artifact} />
               ))}
             </div>
           )}
@@ -85,12 +95,60 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
             />
           )}
         </div>
+
+        {owner.ownerType === "user" && me.data?.orgRole === "admin" && managedTeamArtifacts.length > 0 && (
+          <section className="mt-10">
+            <h2 className="font-display text-lg text-ink">Team artifact audiences</h2>
+            <p className="mt-1 text-sm text-muted">
+              Organization admins can change a team artifact audience without joining the team.
+            </p>
+            <div className="mt-4 divide-y divide-line border-t border-line">
+              {managedTeamArtifacts.map((artifact) => (
+                <AudienceManagementRow key={artifact.id} artifact={artifact} />
+              ))}
+            </div>
+            {adminQ.data?.truncated && (
+              <p className="mt-3 text-xs text-muted">Only the 100 most recently updated artifacts are shown.</p>
+            )}
+          </section>
+        )}
       </div>
     </div>
   );
 }
 
-function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canManage: boolean }) {
+function AudienceManagementRow({ artifact }: { artifact: TeamArtifactAudienceManagementItem }) {
+  const patch = usePatchTeamArtifactAudienceManagement();
+  return (
+    <div className="flex flex-col items-stretch justify-between gap-2 py-2.5 sm:flex-row sm:items-center sm:gap-3">
+      <div className="min-w-0 flex-1 px-1 py-0.5">
+        <p className="break-words text-sm text-ink sm:truncate">{artifact.title}</p>
+        <p className="mt-0.5 text-xs text-muted">{artifact.teamName}</p>
+      </div>
+      <label className="flex shrink-0 items-center gap-2 text-xs text-muted">
+        Audience
+        <select
+          aria-label={`Audience for ${artifact.title}`}
+          value={artifact.audience}
+          disabled={patch.isPending}
+          onChange={(event) => patch.mutate({
+            id: artifact.id,
+            audience: event.target.value === "organization" ? "organization" : "team",
+          })}
+          className="rounded border border-line bg-transparent px-1.5 py-1 text-xs text-ink"
+        >
+          <option value="team">Only this team</option>
+          <option value="organization">Anyone in the organization</option>
+        </select>
+      </label>
+      {patch.error != null && (
+        <p className="text-xs text-danger-500">{errorText(patch.error)}</p>
+      )}
+    </div>
+  );
+}
+
+function ArtifactRow({ artifact }: { artifact: ArtifactListItem }) {
   // Per-row instance: `useCopyToClipboard`'s "Copied" flash is component
   // state, and each row needs its own so copying one doesn't flash every
   // row in the list.
@@ -99,6 +157,7 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
   // shared mutation would disable and error every row in the list for one
   // revoke, instead of just the row the caller acted on.
   const revoke = useRevokeArtifact();
+  const patch = usePatchArtifact();
   const [confirmRevoke, setConfirmRevoke] = useState(false);
 
   return (
@@ -119,7 +178,7 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
             <span>version {artifact.sharedVersion ?? artifact.version}</span>
             <span>·</span>
             {artifact.ownerType === "team" ? (
-              <span>Team-only</span>
+              <span>{artifact.audience === "organization" ? "Organization-wide" : "Team-only"}</span>
             ) : artifact.visibility === "public" ? (
               <span className="rounded bg-ink-wash px-1.5 py-0.5">public</span>
             ) : (
@@ -130,6 +189,24 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
           </p>
         </Link>
         <div className="flex shrink-0 flex-wrap items-center gap-3">
+          {artifact.canChangeAudience && (
+            <label className="flex items-center gap-2 text-xs text-muted">
+              Audience
+              <select
+                aria-label={`Audience for ${artifact.title}`}
+                value={artifact.audience}
+                disabled={patch.isPending}
+                onChange={(event) => patch.mutate({
+                  id: artifact.id,
+                  audience: event.target.value === "organization" ? "organization" : "team",
+                })}
+                className="rounded border border-line bg-transparent px-1.5 py-1 text-xs text-ink"
+              >
+                <option value="team">Only this team</option>
+                <option value="organization">Anyone in the organization</option>
+              </select>
+            </label>
+          )}
           <button
             type="button"
             onClick={() => void copy(artifact.url)}
@@ -137,7 +214,7 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
           >
             {copied ? "Copied" : "Copy link"}
           </button>
-          {canManage && <button
+          {artifact.canManage && <button
             type="button"
             disabled={revoke.isPending}
             onClick={() => {
@@ -158,10 +235,13 @@ function ArtifactRow({ artifact, canManage }: { artifact: ArtifactListItem; canM
           produced it; the row keeps the message after the dialog is
           dismissed, because a link the caller believes is revoked and is
           not is a disclosure they must still be able to see. */}
+      {patch.error != null && (
+        <p className="mt-1 text-xs text-danger-500">{errorText(patch.error)}</p>
+      )}
       {revoke.error != null && !confirmRevoke && (
         <p className="mt-1 text-xs text-danger-500">{errorText(revoke.error)}</p>
       )}
-      {canManage && <ConfirmDialog
+      {artifact.canManage && <ConfirmDialog
         open={confirmRevoke}
         onOpenChange={setConfirmRevoke}
         title={`Revoke the link to ${artifact.title}?`}

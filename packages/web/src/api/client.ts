@@ -254,6 +254,8 @@ import type {
   ArtifactCommentWire,
   ListArtifactCommentsResponse,
   ListArtifactVersionsResponse,
+  ListTeamArtifactAudienceManagementResponse,
+  PatchTeamArtifactAudienceManagementResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -788,6 +790,14 @@ export const api = {
     if (opts?.cursor !== undefined) qs.set("cursor", opts.cursor);
     return request<ListArtifactsResponse>("GET", `/artifacts${qs.size ? `?${qs}` : ""}`);
   },
+  listTeamArtifactAudienceManagement: () =>
+    request<ListTeamArtifactAudienceManagementResponse>("GET", "/artifacts/management/audiences"),
+  patchTeamArtifactAudienceManagement: (id: string, audience: "team" | "organization") =>
+    request<PatchTeamArtifactAudienceManagementResponse>(
+      "PATCH",
+      `/artifacts/management/audiences/${encodeURIComponent(id)}`,
+      { audience },
+    ),
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>

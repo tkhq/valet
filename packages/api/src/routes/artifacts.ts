@@ -42,17 +42,21 @@ import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import {
   addArtifactComment,
+  canChangeTeamArtifactAudience,
   copyArtifactToTeam,
   decideArtifactAccess,
   getAllowPublicArtifacts,
   getArtifactById,
   getArtifactByToken,
   getArtifactComment,
+  getArtifactTeamPermissions,
+  hasArtifactReadAccess,
   hasArtifactTeamAccess,
   listArtifactComments,
   listArtifacts,
   listArtifactsForOwner,
   listArtifactVersions,
+  listTeamArtifactAudienceManagement,
   markArtifactCommentSent,
   publishArtifact,
   resolveArtifactComment,
@@ -61,6 +65,8 @@ import {
   revokeArtifactByPath,
   setArtifactSharedVersion,
   setArtifactVisibility,
+  validateArtifactSharedVersion,
+  setTeamArtifactAudience,
   shareArtifact,
   type ArtifactScope,
   type ArtifactCommentRow,
@@ -76,7 +82,9 @@ import type {
   ListArtifactCommentsResponse,
   ListArtifactsResponse,
   ListArtifactVersionsResponse,
+  ListTeamArtifactAudienceManagementResponse,
   PatchArtifactRequest,
+  PatchTeamArtifactAudienceManagementResponse,
   ShareArtifactRequest,
   ShareArtifactResponse,
 } from "../wire/types.js";
@@ -109,7 +117,11 @@ function shareUrl(c: Context<AppEnv>, token: string): string {
   return `${shareUrlBase(c)}/a/${token}`;
 }
 
-function toListItem(c: Context<AppEnv>, row: ArtifactSummaryRow): ArtifactListItem {
+function toListItem(
+  c: Context<AppEnv>,
+  row: ArtifactSummaryRow,
+  permissions = { canManage: false, canChangeAudience: false },
+): ArtifactListItem {
   return {
     id: row.id,
     path: row.sourceMemoryPath,
@@ -121,12 +133,36 @@ function toListItem(c: Context<AppEnv>, row: ArtifactSummaryRow): ArtifactListIt
     token: row.token,
     url: shareUrl(c, row.token),
     visibility: row.visibility,
+    audience: row.teamAudience,
+    canManage: permissions.canManage,
+    canChangeAudience: permissions.canChangeAudience,
     ownerType: row.ownerType,
     actorUserId: row.actorUserId,
     revoked: row.revokedAt !== null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+async function toListItems(
+  c: Context<AppEnv>,
+  rows: ArtifactSummaryRow[],
+  user: AuthUser,
+  orgAdmin: boolean,
+): Promise<ArtifactListItem[]> {
+  const { db } = c.var.providers;
+  const teamPermissions = await getArtifactTeamPermissions(db, rows, user, orgAdmin);
+  return rows.map((row) => {
+    const teamPermission = teamPermissions.get(row.ownerId);
+    const teamMember = row.ownerType !== "team" || teamPermission?.teamMember === true;
+    return toListItem(c, row, {
+      canManage: row.ownerType !== "team"
+        ? row.actorUserId === user.id || orgAdmin
+        : teamMember && (row.actorUserId === user.id || orgAdmin),
+      canChangeAudience: row.ownerType === "team" && row.revokedAt === null &&
+        teamPermission?.canChangeAudience === true,
+    });
+  });
 }
 
 // ─── Public read ───────────────────────────────────────────────────────
@@ -213,7 +249,7 @@ async function loadCommentContext(
     artifact.visibility === "public" ? await getAllowPublicArtifacts(db, artifact.orgId) : false;
   const access = decideArtifactAccess({
     artifact, allowPublicArtifacts: allowPublic, user,
-    teamMember: await hasArtifactTeamAccess(db, artifact, user),
+    teamAccess: await hasArtifactReadAccess(db, artifact, user),
   });
   if (access.kind === "not_found") return { error: c.json({ error: "not found" }, 404) };
   if (access.kind !== "serve" || !mayComment(artifact, user)) {
@@ -311,7 +347,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
 
     const access = decideArtifactAccess({
       artifact, allowPublicArtifacts: allowPublic, user,
-      teamMember: await hasArtifactTeamAccess(db, artifact, user),
+      teamAccess: await hasArtifactReadAccess(db, artifact, user),
     });
     if (access.kind === "not_found") {
       return c.json({ error: "not found" }, 404);
@@ -343,6 +379,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       icon: artifact.icon,
       version: served.version,
       visibility: artifact.visibility,
+      audience: artifact.teamAudience,
       ownerType: artifact.ownerType,
       updatedAt: artifact.updatedAt,
       ...(sharedBy !== undefined ? { sharedBy } : {}),
@@ -481,7 +518,15 @@ artifactsRouter.post("/copy-to-team", async (c) => {
     }
     const db = c.var.providers.db;
     const row = await copyArtifactToTeam(db, scope, await orgIdForShare(c, db), { artifactId: body.artifactId, teamId: body.teamId, key: body.key });
-    return c.json({ id: row.id, path: row.sourceMemoryPath, url: shareUrl(c, row.token), visibility: row.visibility }, 201);
+    return c.json({
+      id: row.id,
+      path: row.sourceMemoryPath,
+      url: shareUrl(c, row.token),
+      visibility: row.visibility,
+      audience: row.teamAudience,
+      version: row.version,
+      updatedAt: row.updatedAt,
+    }, 201);
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -550,6 +595,7 @@ artifactsRouter.post("/share", async (c) => {
       path: row.sourceMemoryPath,
       url: shareUrl(c, row.token),
       visibility: row.visibility,
+      audience: row.teamAudience,
       version: row.version,
       updatedAt: row.updatedAt,
     };
@@ -609,8 +655,8 @@ artifactsRouter.get("/", async (c) => {
     // filtering on `actorUserId` had the same intent but failed open: if
     // `/api/me` errored, the filter compared against `undefined` and every
     // row was dropped, showing a false empty state.
-    const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin: false });
-    const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };
+    const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin: false, mine: true });
+    const body: ListArtifactsResponse = { artifacts: await toListItems(c, rows, user, false) };
     return c.json(body);
   }
 
@@ -621,8 +667,10 @@ artifactsRouter.get("/", async (c) => {
     if (ownerType === "user") {
       if (ownerId !== user.id) return c.json({ error: "owner not found" }, 404);
     } else {
-      const allowed = await hasArtifactTeamAccess(db, { ownerType, ownerId, orgId: user.orgId }, user);
-      if (!allowed) return c.json({ error: "owner not found" }, 404);
+      const owner = { ownerType, ownerId, orgId: user.orgId };
+      if (!(await hasArtifactTeamAccess(db, owner, user))) {
+        return c.json({ error: "owner not found" }, 404);
+      }
     }
     const limitParam = c.req.query("limit");
     const cursorParam = c.req.query("cursor");
@@ -644,7 +692,8 @@ artifactsRouter.get("/", async (c) => {
     );
     const visible = paged ? rows.slice(0, limit) : rows;
     const last = visible.at(-1);
-    const body: ListArtifactsResponse = { artifacts: visible.map((row) => toListItem(c, row)) };
+    const orgAdmin = await isOrgAdmin(db, user.orgId, user.id);
+    const body: ListArtifactsResponse = { artifacts: await toListItems(c, visible, user, orgAdmin) };
     if (paged) {
       body.nextCursor = rows.length > limit && last
         ? encodePageCursor({ updatedAt: last.updatedAt, id: last.id, ownerType, ownerId })
@@ -655,8 +704,54 @@ artifactsRouter.get("/", async (c) => {
 
   const orgAdmin = await isOrgAdmin(db, user.orgId, user.id);
   const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin });
-  const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };
+  const body: ListArtifactsResponse = { artifacts: await toListItems(c, rows, user, orgAdmin) };
   return c.json(body);
+});
+
+/** Bounded, token-free index for org admins who manage team audiences. */
+artifactsRouter.get("/management/audiences", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
+  const { db } = c.var.providers;
+  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    return c.json({ error: "Only an organization admin can manage team artifact audiences." }, 403);
+  }
+  const result = await listTeamArtifactAudienceManagement(db, user.orgId);
+  const body: ListTeamArtifactAudienceManagementResponse = {
+    artifacts: result.rows,
+    truncated: result.truncated,
+  };
+  return c.json(body);
+});
+
+artifactsRouter.patch("/management/audiences/:id", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
+  const { db } = c.var.providers;
+  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    return c.json({ error: "Only an organization admin can manage team artifact audiences." }, 403);
+  }
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("audience" in body) ||
+      (body.audience !== "team" && body.audience !== "organization")) {
+    return c.json({ error: "audience must be 'team' or 'organization'" }, 400);
+  }
+  const existing = await getArtifactById(db, c.req.param("id"));
+  if (!existing || existing.orgId !== user.orgId || existing.ownerType !== "team" || existing.revokedAt !== null) {
+    return c.json({ error: "not found" }, 404);
+  }
+  try {
+    const row = await setTeamArtifactAudience(db, existing.id, body.audience, user.id);
+    const response: PatchTeamArtifactAudienceManagementResponse = {
+      id: row.id,
+      audience: row.teamAudience,
+    };
+    return c.json(response);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
 });
 
 /** Sharer-or-admin gate for managing one artifact. Wrong org or no row →
@@ -700,12 +795,16 @@ artifactsRouter.patch("/:id", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
   const hasVisibility = body.visibility !== undefined;
+  const hasAudience = body.audience !== undefined;
   const hasSharedVersion = "sharedVersion" in body;
-  if (!hasVisibility && !hasSharedVersion) {
-    return c.json({ error: "pass visibility and/or sharedVersion" }, 400);
+  if (!hasVisibility && !hasAudience && !hasSharedVersion) {
+    return c.json({ error: "pass visibility, audience, and/or sharedVersion" }, 400);
   }
   if (hasVisibility && body.visibility !== "org" && body.visibility !== "public") {
     return c.json({ error: "visibility must be 'org' or 'public'" }, 400);
+  }
+  if (hasAudience && body.audience !== "team" && body.audience !== "organization") {
+    return c.json({ error: "audience must be 'team' or 'organization'" }, 400);
   }
   if (
     hasSharedVersion &&
@@ -715,12 +814,24 @@ artifactsRouter.patch("/:id", async (c) => {
     return c.json({ error: "sharedVersion must be a positive version number or null for latest" }, 400);
   }
 
-  const loaded = await loadManagedArtifact(c, user);
-  if ("error" in loaded) return loaded.error;
-
   const { db } = c.var.providers;
-  if (body.visibility === "public" && loaded.row.ownerType === "team") {
-    return c.json({ error: "Team artifacts require team membership. Share the link with members of the owning team." }, 400);
+  const existing = await getArtifactById(db, c.req.param("id"));
+  if (!existing || existing.orgId !== user.orgId) return c.json({ error: "not found" }, 404);
+  if (hasAudience && (
+    !(await hasArtifactTeamAccess(db, existing, user)) ||
+    !(await canChangeTeamArtifactAudience(db, existing, user.id))
+  )) {
+    return c.json({ error: "not found" }, 404);
+  }
+
+  let row = existing;
+  if (hasVisibility || hasSharedVersion) {
+    const loaded = await loadManagedArtifact(c, user);
+    if ("error" in loaded) return loaded.error;
+    row = loaded.row;
+  }
+  if (hasVisibility && row.ownerType === "team") {
+    return c.json({ error: "Use audience to change access for a team artifact." }, 400);
   }
   if (body.visibility === "public" && !(await getAllowPublicArtifacts(db, user.orgId))) {
     return c.json(
@@ -733,14 +844,23 @@ artifactsRouter.patch("/:id", async (c) => {
   }
 
   try {
-    let row = loaded.row;
+    // Validate the complete request before the first write. Artifact versions
+    // are immutable, so this check stays valid for the mutations below.
+    if (hasSharedVersion) {
+      await validateArtifactSharedVersion(db, row.id, body.sharedVersion ?? null);
+    }
+    if (hasAudience) {
+      row = await setTeamArtifactAudience(db, row.id, body.audience!, user.id);
+    }
     if (hasVisibility) {
       row = await setArtifactVisibility(db, row.id, body.visibility!, user.id);
     }
     if (hasSharedVersion) {
       row = await setArtifactSharedVersion(db, row.id, body.sharedVersion ?? null);
     }
-    return c.json(toListItem(c, row));
+    const orgAdmin = await isOrgAdmin(db, user.orgId, user.id);
+    const [item] = await toListItems(c, [row], user, orgAdmin);
+    return c.json(item);
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);

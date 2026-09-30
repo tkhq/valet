@@ -39,9 +39,9 @@ async function setup() {
   const teamRows = await Promise.all(["one", "two", "three"].map((key) => publish({ type: "team", id: "team-a" }, key)));
   const revoked = await publish({ type: "team", id: "team-a" }, "revoked");
   await db.update(artifacts).set({ revokedAt: 100, updatedAt: 9999 }).where(eq(artifacts.id, revoked.id));
-  await publish({ type: "team", id: "team-b" }, "other-team");
+  const otherTeam = await publish({ type: "team", id: "team-b" }, "other-team");
   await db.delete(teamMembers).where(eq(teamMembers.userId, "local-user"));
-  return { target, personal, otherPersonal, teamRows, revoked };
+  return { target, personal, otherPersonal, teamRows, revoked, otherTeam };
 }
 
 async function list(target: TestApi, query: string, userId = "local-user") {
@@ -67,10 +67,19 @@ describe("workspace artifact lists", () => {
     expect(team.nextCursor).toBeNull();
   });
 
-  it("refuses nonmembers, other personal owners, missing teams, and foreign-org teams", async () => {
-    const { target } = await setup();
+  it("404s nonmember team filters regardless of team existence or audience", async () => {
+    const { target, otherTeam } = await setup();
+    const request = (teamId: string, userId = "test-member") => fetch(
+      `${target.baseUrl}/api/artifacts?ownerType=team&ownerId=${teamId}`,
+      { headers: { "x-valet-test-user-id": userId } },
+    );
+    expect((await request("team-b")).status).toBe(404);
+    expect((await request("missing")).status).toBe(404);
+    await target.providers.db.update(artifacts).set({ teamAudience: "organization" })
+      .where(eq(artifacts.id, otherTeam.id));
+    expect((await request("team-b")).status).toBe(404);
+
     for (const [query, userId] of [
-      ["ownerType=team&ownerId=team-b", "test-member"],
       ["ownerType=user&ownerId=test-member", "local-user"],
       ["ownerType=team&ownerId=missing", "local-user"],
       ["ownerType=team&ownerId=foreign-team", "local-user"],
@@ -80,13 +89,8 @@ describe("workspace artifact lists", () => {
       });
       expect(response.status).toBe(404);
     }
-    // Org admin authority does not grant team artifact access.
-    expect((await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-b`)).status).toBe(404);
     await target.providers.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
-    const removed = await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-a&limit=50`, {
-      headers: { "x-valet-test-user-id": "test-member" },
-    });
-    expect(removed.status).toBe(404);
+    expect((await request("team-a")).status).toBe(404);
   });
 
   it("pages active rows without skipping timestamp ties or crossing workspace boundaries", async () => {
@@ -105,8 +109,8 @@ describe("workspace artifact lists", () => {
     await target.providers.db.insert(teamMembers).values({ teamId: "team-b", userId: "local-user", role: "member" });
     const wrongWorkspace = await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-b&limit=2&cursor=${cursor}`);
     expect(wrongWorkspace.status).toBe(400);
-    // Non-paged callers keep the legacy list, including revoked rows.
-    expect((await list(target, "ownerType=team&ownerId=team-a", "test-member")).artifacts).toHaveLength(4);
+    // Non-paged owner lists also hide revoked links.
+    expect((await list(target, "ownerType=team&ownerId=team-a", "test-member")).artifacts).toHaveLength(3);
   });
 
   it("rejects malformed owners, limits, and cursors", async () => {

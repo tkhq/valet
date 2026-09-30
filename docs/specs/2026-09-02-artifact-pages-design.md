@@ -63,8 +63,8 @@ Three things do not change:
 - Sharing is explicit. Writing a file never publishes it.
 - The tool surface can only create `org` visibility. Personal artifacts can
   widen to `public` through the web UI with the org's `allowPublicArtifacts`
-  opt-in. Team artifacts always require current team membership. The gallery
-  and page show Team-only, regardless of their stored visibility.
+  opt-in. Team artifacts use a separate `team | organization` audience and
+  never serve anonymously. The gallery and page show that audience.
 - An artifact is a snapshot, never a live reference.
 
 ## What we take from Claude Code artifacts, and what we reject
@@ -725,3 +725,12 @@ implements against.
   never compiles; it renders what the api stored.
 - `ArtifactFrame` remounts on a `srcDoc` change — a republished page must not
   keep the previous document's script state.
+
+
+## Team artifact organization audience (TKAI-569)
+
+Team artifacts store `team_audience` separately from personal `visibility`. The default is `team` for new and existing rows. A personal visibility value never changes the team audience. When a non-admin member or internal team agent replaces organization-audience content, the API resets the audience to `team`. A team or organization admin can replace content without narrowing the audience.
+
+The `organization` audience lets any current member of the owning organization read the token page, source download, comments, and active rows in the unfiltered readable list. The owning team must still exist. Team-only and revoked rows remain hidden from nonmembers. All owner lists omit revoked rows. Explicit team owner filters require live team membership and return 404 for nonmembers. Version history, pinning, revoke, sessions, credentials, and other team resources keep their existing authorization. A compound management request validates its shared version before it changes the audience.
+
+A team admin with live team and organization membership can change the audience. An organization admin with live organization membership can also change it without joining the team. The authenticated gallery shows `Only this team` and `Anyone in the organization` only to those callers. List routes resolve permissions with one joined query for the distinct owning teams. Organization admins discover rows through a 100-row bounded index. The index returns only artifact id, team id, team name, title, and audience. It excludes paths, tokens, content, descriptions, and revoked rows. One joined query builds the index without per-row membership checks. Narrowing takes effect on the next request.

@@ -3325,6 +3325,7 @@ export interface PatchOrgSettingsRequest {
 // ─── Artifacts (2026-08-22 artifacts design; 2026-09-02 artifact-pages) ──
 
 export type ArtifactVisibility = "org" | "public";
+export type TeamArtifactAudience = "team" | "organization";
 
 /** How a viewer must render the artifact's source: `markdown` compiled
  * through GFM at publish, `html` verbatim. Both render in the sandboxed
@@ -3359,6 +3360,7 @@ export interface ShareArtifactResponse {
   path: string;
   url: string;
   visibility: ArtifactVisibility;
+  audience: TeamArtifactAudience;
   version: number;
   updatedAt: number;
 }
@@ -3379,6 +3381,7 @@ export interface GetArtifactResponse {
   icon: string;
   version: number;
   visibility: ArtifactVisibility;
+  audience: TeamArtifactAudience;
   updatedAt: number;
   /** Sharer's display name — only present for `org` visibility, where the
    * viewer is a logged-in teammate. Anonymous readers never see it. */
@@ -3406,6 +3409,11 @@ export interface ArtifactListItem {
   token: string;
   url: string;
   visibility: ArtifactVisibility;
+  audience: TeamArtifactAudience;
+  /** Whether this caller may change a team artifact audience. */
+  canChangeAudience: boolean;
+  /** Whether this caller may revoke or pin this artifact. */
+  canManage: boolean;
   /** Who shared it. An org admin's list contains every member's artifacts,
    * and paths are conventional (`journal/2026-08-27.md`), so a path-only
    * client match can hit another member's row. Filter on this too. */
@@ -3421,11 +3429,32 @@ export interface ListArtifactsResponse {
   nextCursor?: string | null;
 }
 
+/** Minimal metadata for the org-admin team-audience management index. */
+export interface TeamArtifactAudienceManagementItem {
+  id: string;
+  teamId: string;
+  teamName: string;
+  title: string;
+  audience: TeamArtifactAudience;
+}
+
+export interface ListTeamArtifactAudienceManagementResponse {
+  artifacts: TeamArtifactAudienceManagementItem[];
+  /** True when more than the bounded response limit exists. */
+  truncated: boolean;
+}
+
+export interface PatchTeamArtifactAudienceManagementResponse {
+  id: string;
+  audience: TeamArtifactAudience;
+}
+
 /** `PATCH /api/artifacts/:id` — widen/narrow, or pin the served version.
  * Widening to `public` requires the org's `allowPublicArtifacts` opt-in.
  * `sharedVersion: null` serves the latest publish. */
 export interface PatchArtifactRequest {
   visibility?: ArtifactVisibility;
+  audience?: TeamArtifactAudience;
   sharedVersion?: number | null;
 }
 

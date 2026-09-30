@@ -12,7 +12,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { OwnerFilter } from "~/api/client";
-import type { ArtifactListItem, ListArtifactsResponse } from "@valet/api/wire";
+import type {
+  ArtifactListItem,
+  ListArtifactsResponse,
+  ListTeamArtifactAudienceManagementResponse,
+} from "@valet/api/wire";
 
 const mine: ArtifactListItem = {
   ownerType: "user",
@@ -26,6 +30,9 @@ const mine: ArtifactListItem = {
   token: "tok-mine",
   url: "https://valet.example/a/tok-mine",
   visibility: "org",
+  audience: "team",
+  canManage: true,
+  canChangeAudience: false,
   actorUserId: "u-1",
   revoked: false,
   createdAt: 1,
@@ -50,8 +57,13 @@ const revoked: ArtifactListItem = {
 };
 
 let artifactsData: ListArtifactsResponse = { artifacts: [mine, revoked] };
+let audienceManagementData: ListTeamArtifactAudienceManagementResponse = {
+  artifacts: [],
+  truncated: false,
+};
 
 const revokeMutate = vi.fn();
+const patchMutate = vi.fn();
 let revokePending = false;
 let revokeError: Error | null = null;
 const useArtifactsMock = vi.fn();
@@ -88,6 +100,9 @@ vi.mock("~/api/artifacts", () => ({
     useArtifactsMock(...args);
     return { data: artifactsData, isLoading: listLoading, error: listError };
   },
+  useTeamArtifactAudienceManagement: () => ({ data: audienceManagementData, isLoading: false, error: null }),
+  usePatchTeamArtifactAudienceManagement: () => ({ mutate: patchMutate, isPending: false, error: null }),
+  usePatchArtifact: () => ({ mutate: patchMutate, isPending: false, error: null }),
   useRevokeArtifact: () => ({
     mutate: revokeMutate,
     isPending: revokePending,
@@ -119,6 +134,7 @@ function openDialog(index = 0) {
 
 beforeEach(() => {
   artifactsData = { artifacts: [mine, revoked] };
+  audienceManagementData = { artifacts: [], truncated: false };
   owner = { ownerType: "user", ownerId: "u-1" };
   listError = null;
   listLoading = false;
@@ -127,6 +143,7 @@ beforeEach(() => {
   revokePending = false;
   revokeError = null;
   revokeMutate.mockReset();
+  patchMutate.mockReset();
   useArtifactsMock.mockClear();
 });
 
@@ -140,9 +157,9 @@ describe("ArtifactsPage", () => {
     artifactsData = { artifacts: [mine], nextCursor: "page-two" };
     const view = renderPage();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(useArtifactsMock).toHaveBeenLastCalledWith(owner, { limit: 50, cursor: "page-two" });
+    expect(useArtifactsMock).toHaveBeenCalledWith(owner, { limit: 50, cursor: "page-two" });
     fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-    expect(useArtifactsMock).toHaveBeenLastCalledWith(owner, { limit: 50, cursor: undefined });
+    expect(useArtifactsMock).toHaveBeenCalledWith(owner, { limit: 50, cursor: undefined });
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
 
     for (const nextOwner of [
@@ -154,7 +171,9 @@ describe("ArtifactsPage", () => {
       owner = nextOwner;
       view.rerender(<ArtifactsPage />);
       expect(useArtifactsMock).toHaveBeenCalledWith(owner, { limit: 50, cursor: undefined });
-      expect(useArtifactsMock.mock.calls.every((call) => call[1].cursor === undefined)).toBe(true);
+      expect(useArtifactsMock.mock.calls
+        .filter((call) => call[0] === owner)
+        .every((call) => (call[1] as { cursor?: string }).cursor === undefined)).toBe(true);
       fireEvent.click(screen.getByRole("button", { name: "Next" }));
     }
   });
@@ -297,23 +316,82 @@ describe("ArtifactsPage", () => {
 
 it("shows colleague artifacts without offering unauthorized revoke", () => {
   owner = { ownerType: "team", ownerId: "team-a" };
-  artifactsData = { artifacts: [{ ...mine, actorUserId: "colleague" }] };
+  artifactsData = { artifacts: [{ ...mine, actorUserId: "colleague", canManage: false }] };
   const view = renderPage();
   expect(screen.getByText("Deploy report")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
   orgRole = "admin";
+  artifactsData = { artifacts: [{ ...mine, actorUserId: "colleague", canManage: true }] };
   view.rerender(<ArtifactsPage />);
   expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
 });
 
 it("labels team rows and gallery as team-only even with a legacy public flag", () => {
   owner = { ownerType: "team", ownerId: "team-1" };
-  artifactsData = { artifacts: [{ ...mine, ownerType: "team", visibility: "public", actorUserId: "other-member" }] };
+  artifactsData = { artifacts: [{
+    ...mine,
+    ownerType: "team",
+    visibility: "public",
+    actorUserId: "other-member",
+    canManage: false,
+  }] };
   orgRole = "member";
   render(<ArtifactsPage />);
   expect(screen.getByText("Team-only")).toBeTruthy();
-  expect(screen.getByText("Team-only pages. Only current members of this team can open these links.")).toBeTruthy();
+  expect(screen.getByText("Team-owned pages are team-only unless an admin shares one with the organization.")).toBeTruthy();
   expect(screen.queryByText("public")).toBeNull();
   expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
   expect(screen.queryByRole("switch", { name: "Allow anyone with the link" })).toBeNull();
+});
+
+it("does not show the Audience control to an unauthorized viewer", () => {
+  owner = { ownerType: "team", ownerId: "team-1" };
+  artifactsData = { artifacts: [{
+    ...mine,
+    ownerType: "team",
+    canManage: false,
+    canChangeAudience: false,
+  }] };
+  orgRole = "member";
+  render(<ArtifactsPage />);
+  expect(screen.queryByRole("combobox", { name: "Audience for Deploy report" })).toBeNull();
+  expect(screen.queryByText("Audience")).toBeNull();
+});
+
+it("lets an authorized admin change a team artifact audience", () => {
+  owner = { ownerType: "team", ownerId: "team-1" };
+  artifactsData = { artifacts: [{
+    ...mine,
+    ownerType: "team",
+    canManage: false,
+    canChangeAudience: true,
+  }] };
+  render(<ArtifactsPage />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Audience for Deploy report" }), {
+    target: { value: "organization" },
+  });
+  expect(patchMutate).toHaveBeenCalledWith({ id: "art_mine", audience: "organization" });
+  expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+});
+
+it("uses the minimal audience index for an organization admin", () => {
+  orgRole = "admin";
+  audienceManagementData = {
+    artifacts: [{
+      id: "managed-artifact",
+      teamId: "team-private",
+      teamName: "Private team",
+      title: "Private report",
+      audience: "team",
+    }],
+    truncated: false,
+  };
+  render(<ArtifactsPage />);
+  expect(screen.getByText("Team artifact audiences")).toBeTruthy();
+  expect(screen.getByText("Private team")).toBeTruthy();
+  fireEvent.change(screen.getByRole("combobox", { name: "Audience for Private report" }), {
+    target: { value: "organization" },
+  });
+  expect(patchMutate).toHaveBeenCalledWith({ id: "managed-artifact", audience: "organization" });
+  expect(screen.queryByRole("link", { name: /Private report/ })).toBeNull();
 });

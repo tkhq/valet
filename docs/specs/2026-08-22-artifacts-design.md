@@ -191,7 +191,8 @@ share route can grow a decision gate later.
 ### Management (authed, session or API key)
 
 - `GET /api/artifacts` — list the caller's artifacts (org admins also see
-  the org's personal artifacts). All team rows require current membership.
+  the org's personal artifacts). Team-only rows require current team membership.
+  Active organization-audience rows appear to current organization members.
 - `POST /api/artifacts/share` (authed variant) `{ path }` — human-initiated
   share from the memory viewer.
 - `PATCH /api/artifacts/:id` `{ visibility }` — widen or narrow. Widening
@@ -375,9 +376,9 @@ themselves. Anything else degrades to `/`.
 
 The Artifacts list follows the selected workspace through the existing `useListOwner` hook. Stored `ownerType` and `ownerId` select rows. `actorUserId` records who published an artifact and does not define its workspace. The personal gallery therefore excludes team artifacts that the caller published.
 
-`GET /api/artifacts?ownerType=user&ownerId=<id>` requires the caller's own user id. A team filter requires a team in the caller's org and current membership. Org admins also require team membership. Unknown, foreign-org, and unauthorized owners return 404. The unfiltered and `mine=1` lists exclude team artifacts when the caller is no longer a member.
+`GET /api/artifacts?ownerType=user&ownerId=<id>` requires the caller's own user id. A team filter requires a team in the caller's org and current membership. Org admins also require team membership. Unknown, foreign-org, and unauthorized owners return 404. The unfiltered and `mine=1` lists exclude team-only artifacts when the caller is no longer a member.
 
-Owner lists accept optional `limit` and `cursor` parameters. The default page size is 50, capped at 100. Paged lists omit revoked rows before pagination and sort by `updatedAt` and `id`, both descending. The opaque cursor carries both sort fields and the selected owner. A cursor from another workspace or an invalid limit returns 400. `nextCursor` is null on the last page. Requests without pagination retain the legacy response and revoked rows.
+Owner lists accept optional `limit` and `cursor` parameters. The default page size is 50, capped at 100. All owner lists omit revoked rows. Paged lists apply this filter before pagination and sort by `updatedAt` and `id`, both descending. The opaque cursor carries both sort fields and the selected owner. A cursor from another workspace or an invalid limit returns 400. `nextCursor` is null on the last page.
 
 The gallery caches each owner and page separately. A workspace change resets the cursor stack and row dialogs before the next request. While personal identity loads, the gallery makes no unscoped request. Loading, empty, and error states remain visible. An authorization error hides cached rows.
 
@@ -390,17 +391,19 @@ The gallery offers Revoke only to the publishing user or an organization admin, 
 
 ## Team artifact privacy (2026-09-10)
 
-Team ownership takes precedence over stored visibility. Every human token read requires login and live rows in both `org_members` and `team_members` for the artifact's organization and team. The deployment organization on the user object does not prove membership. An org admin or the publishing actor has no membership exception. Existing team rows marked `public` follow this rule, even when public artifacts are enabled.
+Team ownership takes precedence over stored visibility. Team-only token reads require login and live rows in both `org_members` and `team_members`. Organization-audience token reads require live organization membership and a live owning team. The deployment organization on the user object does not prove membership. An org admin or the publishing actor has no exception for team-only reads. Existing team rows marked `public` follow these rules, even when public artifacts are enabled.
 
-The same gate protects source bytes, rendered pages, comments, replies, thread resolution, version history, pinning, revocation, and artifact lists. Downloads use the authorized token response; there is no separate download endpoint. Comment delivery also requires access to a source session in the same organization. Nonmembers and foreign-org callers receive 404. Signed-out token readers receive 401.
+The audience gate protects source bytes, rendered pages, comments, replies, and thread resolution. Team membership still protects version history, pinning, revocation, and explicit owner lists. Downloads use the authorized token response; there is no separate download endpoint. Comment delivery also requires access to a source session in the same organization. Unauthorized and foreign-org callers receive 404. Signed-out token readers receive 401.
 
 Publish, memory share, and revoke-by-path validate the team scope in the service. Human callers require both live memberships. Verified internal tools can act as their owning team. A team principal never inherits its actor's or key creator's user authority. Team API keys remain excluded from artifact management and private token reads.
 
 Publish, memory share, revoke-by-path, and personal-to-team copy hold `FOR SHARE` locks on both authorizing membership rows until transaction commit. Membership deletion waits for an authorized mutation to commit. If deletion holds the row first, the mutation waits and then refuses access after deletion commits. The team ownership lock separately serializes team deletion.
 
-There is no audience-grant mechanism for team artifacts. Public widening is rejected without changing the artifact or its version pin. Personal org/public sharing retains its existing rules. Copying a personal artifact to a team creates a team-only snapshot.
+Team artifacts use `team_audience`, separate from personal `visibility`. The values are `team` and `organization`. A missing or legacy value repairs to `team`; stored `visibility = org` or `public` never widens a team artifact. Public widening stays rejected. Copying a personal artifact to a team creates a team-only snapshot. A non-admin member or internal team agent can replace an organization-audience artifact, but the replacement resets the audience to `team`. A team or organization admin can replace content without narrowing the audience.
 
-The gallery and page show **Team-only** for team artifacts, including legacy public rows. The team gallery explains that only current members can open its links. Team memory has no public-share control. Personal share controls exclude team snapshots even when their path and publishing actor match. A refused page asks the reader to check access with the sender.
+Team admins and organization admins can change the audience. A team admin must have live organization and owning-team membership. An organization admin needs live organization membership and does not need team membership. Organization audience grants access only to the artifact token, comments, downloads, and the caller's unfiltered readable list. It grants no team sessions, credentials, other artifacts, or management rights. The readable list requires the owning team to exist. An explicit team owner filter always requires live team membership and returns 404 for a nonmember. Every request checks current membership. Narrowing to `team` revokes organization-only readers immediately. Revoked rows never use the organization-audience list fallback or owner lists. A compound management request validates its shared version before it changes the audience.
+
+The gallery and page show **Team-only** or **Organization-wide** from `team_audience`, including legacy rows with personal visibility flags. The gallery shows the audience control only when the API reports audience-management permission. List routes resolve permissions with one joined query for the distinct owning teams, not one query for each artifact. Organization admins use a bounded management index that returns at most 100 active rows. Each row contains only artifact id, team id, team name, title, and audience. The index contains no token, path, content, description, or revoked row. One joined query builds the index; the gallery does not run a membership query for each row. Team memory has no public-share control. Personal share controls exclude team snapshots even when their path and publishing actor match. A refused page asks the reader to check access with the sender.
 
 Regression checks cover members, nonmembers, nonmember admins, removed publishers, stale team rows without org membership, foreign organizations, anonymous callers, team keys, and direct service calls. UI checks cover team-only labels and personal-share collisions.
 

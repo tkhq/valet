@@ -26,12 +26,12 @@ describe("decideArtifactAccess", () => {
     for (const visibility of ["org", "public"] as const) {
       const artifact = { ...orgArtifact, ownerType: "team", visibility };
       for (const allowPublicArtifacts of [false, true]) {
-        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: undefined, teamMember: true })).toEqual({ kind: "login" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: undefined, teamAccess: true })).toEqual({ kind: "login" });
         expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member })).toEqual({ kind: "not_found" });
-        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member, teamMember: false })).toEqual({ kind: "not_found" });
-        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: outsider, teamMember: true })).toEqual({ kind: "not_found" });
-        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member, teamMember: true })).toEqual({ kind: "serve" });
-        expect(decideArtifactAccess({ artifact: { ...artifact, revokedAt: 1 }, allowPublicArtifacts, user: member, teamMember: true })).toEqual({ kind: "not_found" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member, teamAccess: false })).toEqual({ kind: "not_found" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: outsider, teamAccess: true })).toEqual({ kind: "not_found" });
+        expect(decideArtifactAccess({ artifact, allowPublicArtifacts, user: member, teamAccess: true })).toEqual({ kind: "serve" });
+        expect(decideArtifactAccess({ artifact: { ...artifact, revokedAt: 1 }, allowPublicArtifacts, user: member, teamAccess: true })).toEqual({ kind: "not_found" });
       }
     }
   });
