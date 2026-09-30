@@ -85,6 +85,32 @@ describe("team artifact privacy", () => {
     expect((await request(`/${token}`, "test-admin")).status).toBe(404);
   });
 
+  it("narrows organization-audience artifacts when non-admin publishers replace content", async () => {
+    const { db, row, request } = await setup();
+    const owner = { type: "team", id: "private-team" } as const;
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+
+    const memberUpdate = await publishArtifact(db, { owner, actorUserId: "test-member" }, {
+      orgId: "local-org", key: "private.html", content: "Member replacement", format: "html",
+    });
+    expect(memberUpdate).toMatchObject({ teamAudience: "team", content: "Member replacement" });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    const agentUpdate = await publishArtifact(db, { owner, actorUserId: "local-user", principal: owner }, {
+      orgId: "local-org", key: "private.html", content: "Agent replacement", format: "html",
+    });
+    expect(agentUpdate).toMatchObject({ teamAudience: "team", content: "Agent replacement" });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    const adminUpdate = await publishArtifact(db, { owner, actorUserId: "local-user" }, {
+      orgId: "local-org", key: "private.html", content: "Admin replacement", format: "html",
+    });
+    expect(adminUpdate).toMatchObject({ teamAudience: "organization", content: "Admin replacement" });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(200);
+  });
+
   it("gates service-level publish, share and revoke without an org-admin fallback", async () => {
     const { db, row } = await setup();
     const owner = { type: "team", id: "private-team" } as const;
@@ -163,6 +189,8 @@ describe("team artifact privacy", () => {
     expect((await request(`/management/audiences/${row.id}`, "test-admin", "PATCH", { audience: "organization" })).status).toBe(200);
     await db.delete(orgMembers).where(eq(orgMembers.userId, "org-viewer"));
     expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+    const removedOrgMemberList = await request("", "org-viewer");
+    expect(JSON.stringify(await removedOrgMemberList.json())).not.toContain(row.id);
 
     await db.delete(orgMembers).where(eq(orgMembers.userId, "test-member"));
     expect((await request(`/${row.id}`, "test-member", "PATCH", { audience: "team" })).status).toBe(404);

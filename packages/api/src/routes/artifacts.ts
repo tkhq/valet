@@ -49,6 +49,7 @@ import {
   getArtifactById,
   getArtifactByToken,
   getArtifactComment,
+  getArtifactTeamPermissions,
   hasArtifactReadAccess,
   hasArtifactTeamAccess,
   listArtifactComments,
@@ -150,16 +151,18 @@ async function toListItems(
   orgAdmin: boolean,
 ): Promise<ArtifactListItem[]> {
   const { db } = c.var.providers;
-  return Promise.all(rows.map(async (row) => {
-    const teamMember = await hasArtifactTeamAccess(db, row, user);
+  const teamPermissions = await getArtifactTeamPermissions(db, rows, user, orgAdmin);
+  return rows.map((row) => {
+    const teamPermission = teamPermissions.get(row.ownerId);
+    const teamMember = row.ownerType !== "team" || teamPermission?.teamMember === true;
     return toListItem(c, row, {
       canManage: row.ownerType !== "team"
         ? row.actorUserId === user.id || orgAdmin
         : teamMember && (row.actorUserId === user.id || orgAdmin),
-      canChangeAudience: row.revokedAt === null && teamMember &&
-        await canChangeTeamArtifactAudience(db, row, user.id),
+      canChangeAudience: row.ownerType === "team" && row.revokedAt === null &&
+        teamPermission?.canChangeAudience === true,
     });
-  }));
+  });
 }
 
 // ─── Public read ───────────────────────────────────────────────────────

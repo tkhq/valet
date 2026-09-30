@@ -19,7 +19,7 @@
  * explicit `organization` audience.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, exists, isNull, lt, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, exists, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import { marked } from "marked";
 import {
   NotFoundError,
@@ -263,6 +263,10 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
 
   if (existing) {
     const reactivating = existing.revokedAt !== null;
+    const mayKeepOrganizationAudience = existing.ownerType !== "team" ||
+      existing.teamAudience !== "organization" ||
+      (scope.principal?.type !== "team" &&
+        await canChangeTeamArtifactAudience(db, existing, scope.actorUserId));
     const nextVersion = existing.version + 1;
     const [row] = await db
       .update(artifacts)
@@ -283,7 +287,7 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
         revokedAt: null,
         ...(reactivating
           ? { visibility: "org" as const, teamAudience: "team" as const, publicBy: null, sharedVersion: null }
-          : {}),
+          : mayKeepOrganizationAudience ? {} : { teamAudience: "team" as const }),
       })
       .where(and(eq(artifacts.id, existing.id), eq(artifacts.orgId, input.orgId)))
       .returning();
@@ -609,6 +613,32 @@ export async function canChangeTeamArtifactAudience(
   return artifact.ownerType === "team" &&
     await hasCurrentOrgMembership(db, artifact.orgId, actorUserId) &&
     await canAdministerTeam(db, artifact.ownerId, actorUserId);
+}
+
+export interface ArtifactTeamPermission {
+  teamMember: boolean;
+  canChangeAudience: boolean;
+}
+
+/** Resolve list permissions once per owning team instead of once per artifact row. */
+export async function getArtifactTeamPermissions(
+  db: AppDb,
+  rows: Pick<ArtifactRow, "ownerType" | "ownerId">[],
+  user: { id: string; orgId: string },
+  orgAdmin: boolean,
+): Promise<Map<string, ArtifactTeamPermission>> {
+  const teamIds = [...new Set(rows.filter((row) => row.ownerType === "team").map((row) => row.ownerId))];
+  if (!teamIds.length) return new Map();
+
+  const memberships = await db.select({ teamId: teams.id, role: teamMembers.role })
+    .from(teams)
+    .innerJoin(teamMembers, and(eq(teamMembers.teamId, teams.id), eq(teamMembers.userId, user.id)))
+    .innerJoin(orgMembers, and(eq(orgMembers.orgId, teams.orgId), eq(orgMembers.userId, user.id)))
+    .where(and(eq(teams.orgId, user.orgId), inArray(teams.id, teamIds)));
+  return new Map(memberships.map((membership) => [membership.teamId, {
+    teamMember: true,
+    canChangeAudience: orgAdmin || membership.role === "admin",
+  }]));
 }
 
 export async function setTeamArtifactAudience(
