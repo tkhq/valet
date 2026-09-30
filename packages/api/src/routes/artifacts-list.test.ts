@@ -67,14 +67,17 @@ describe("workspace artifact lists", () => {
     expect(team.nextCursor).toBeNull();
   });
 
-  it("lists only organization-audience rows for nonmembers", async () => {
+  it("404s nonmember team filters regardless of team existence or audience", async () => {
     const { target, otherTeam } = await setup();
-    const empty = await list(target, "ownerType=team&ownerId=team-b", "test-member");
-    expect(empty.artifacts).toEqual([]);
+    const request = (teamId: string, userId = "test-member") => fetch(
+      `${target.baseUrl}/api/artifacts?ownerType=team&ownerId=${teamId}`,
+      { headers: { "x-valet-test-user-id": userId } },
+    );
+    expect((await request("team-b")).status).toBe(404);
+    expect((await request("missing")).status).toBe(404);
     await target.providers.db.update(artifacts).set({ teamAudience: "organization" })
       .where(eq(artifacts.id, otherTeam.id));
-    const widened = await list(target, "ownerType=team&ownerId=team-b", "test-member");
-    expect(widened.artifacts).toMatchObject([{ id: otherTeam.id, audience: "organization" }]);
+    expect((await request("team-b")).status).toBe(404);
 
     for (const [query, userId] of [
       ["ownerType=user&ownerId=test-member", "local-user"],
@@ -87,8 +90,7 @@ describe("workspace artifact lists", () => {
       expect(response.status).toBe(404);
     }
     await target.providers.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
-    const removed = await list(target, "ownerType=team&ownerId=team-a&limit=50", "test-member");
-    expect(removed.artifacts).toEqual([]);
+    expect((await request("team-a")).status).toBe(404);
   });
 
   it("pages active rows without skipping timestamp ties or crossing workspace boundaries", async () => {

@@ -3429,6 +3429,26 @@ export interface ListArtifactsResponse {
   nextCursor?: string | null;
 }
 
+/** Minimal metadata for the org-admin team-audience management index. */
+export interface TeamArtifactAudienceManagementItem {
+  id: string;
+  teamId: string;
+  teamName: string;
+  title: string;
+  audience: TeamArtifactAudience;
+}
+
+export interface ListTeamArtifactAudienceManagementResponse {
+  artifacts: TeamArtifactAudienceManagementItem[];
+  /** True when more than the bounded response limit exists. */
+  truncated: boolean;
+}
+
+export interface PatchTeamArtifactAudienceManagementResponse {
+  id: string;
+  audience: TeamArtifactAudience;
+}
+
 /** `PATCH /api/artifacts/:id` — widen/narrow, or pin the served version.
  * Widening to `public` requires the org's `allowPublicArtifacts` opt-in.
  * `sharedVersion: null` serves the latest publish. */

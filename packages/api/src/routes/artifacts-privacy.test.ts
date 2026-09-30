@@ -4,7 +4,11 @@ import { internalToken } from "../lib/internal-auth.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, artifacts, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
 import { addArtifactComment, getArtifactById, listArtifactComments, publishArtifact, revokeArtifactByPath, shareArtifact, setArtifactVisibility } from "../services/artifacts.js";
-import type { GetArtifactResponse, ListArtifactsResponse } from "../wire/types.js";
+import type {
+  GetArtifactResponse,
+  ListArtifactsResponse,
+  ListTeamArtifactAudienceManagementResponse,
+} from "../wire/types.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -137,8 +141,7 @@ describe("team artifact privacy", () => {
     expect((await request(`/${row.token}/comments`, "org-viewer")).status).toBe(200);
     expect((await request(`/${row.token}/comments`, "org-viewer", "POST", { body: "Org feedback" })).status).toBe(200);
     const list = await request("?ownerType=team&ownerId=private-team", "org-viewer");
-    expect(list.status).toBe(200);
-    expect(await list.json()).toMatchObject({ artifacts: [{ id: row.id, audience: "organization", canManage: false }] });
+    expect(list.status).toBe(404);
     await db.delete(teamMembers).where(and(
       eq(teamMembers.teamId, "private-team"), eq(teamMembers.userId, "local-user"),
     ));
@@ -148,11 +151,13 @@ describe("team artifact privacy", () => {
     expect((await request(`/${row.id}`, "org-viewer", "PATCH", { sharedVersion: 1 })).status).toBe(404);
     expect((await request(`/${row.id}`, "org-viewer", "DELETE")).status).toBe(404);
 
-    const narrowed = await request(`/${row.id}`, "test-admin", "PATCH", { audience: "team" });
+    expect((await request(`/${row.id}`, "test-admin", "PATCH", { audience: "team" })).status).toBe(404);
+    const narrowed = await request(`/management/audiences/${row.id}`, "test-admin", "PATCH", { audience: "team" });
     expect(narrowed.status).toBe(200);
+    expect(await narrowed.json()).toEqual({ id: row.id, audience: "team" });
     expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
 
-    expect((await request(`/${row.id}`, "test-admin", "PATCH", { audience: "organization" })).status).toBe(200);
+    expect((await request(`/management/audiences/${row.id}`, "test-admin", "PATCH", { audience: "organization" })).status).toBe(200);
     await db.delete(orgMembers).where(eq(orgMembers.userId, "org-viewer"));
     expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
 
@@ -168,7 +173,7 @@ describe("team artifact privacy", () => {
         expect((await request(path, user)).status, `${user} GET ${path}`).toBe(404);
       }
       const ownerList = await request("?ownerType=team&ownerId=private-team", user);
-      expect(ownerList.status).toBe(user === "nonmember" ? 404 : 200);
+      expect(ownerList.status).toBe(404);
       expect((await request(`/${row.token}/comments`, user, "POST", { body: "Leak", sendToSession: true })).status).toBe(404);
       expect((await request(`/${row.token}/comments/${comment.id}/resolve`, user, "POST")).status).toBe(404);
       expect((await request(`/${row.id}`, user, "PATCH", { sharedVersion: 1 })).status).toBe(404);
@@ -177,18 +182,45 @@ describe("team artifact privacy", () => {
         expect((await request("/share?ownerType=team&ownerId=private-team", user, "POST", body)).status).toBe(404);
       }
       for (const path of ["", "?mine=1"]) {
-        // Org admins get metadata for the explicit audience control. The
-        // caller-scoped mine view and nonmembers do not.
         const list = await (await request(path, user)).json() as ListArtifactsResponse;
-        if (path === "" && user !== "nonmember") {
-          expect(list.artifacts).toMatchObject([{ id: row.id, canChangeAudience: true, canManage: false }]);
-        } else {
-          expect(list.artifacts.map((item) => item.id)).not.toContain(row.id);
-        }
+        expect(list.artifacts.map((item) => item.id)).not.toContain(row.id);
       }
     }
     expect(await listArtifactComments(db, row.id)).toHaveLength(1);
     expect(await getArtifactById(db, row.id)).toMatchObject({ version: 1, revokedAt: null, sharedVersion: null });
+  });
+
+  it("uses a bounded token-free admin index and hides revoked organization rows", async () => {
+    const { db, row, request } = await setup();
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    const visible = await request("", "org-viewer");
+    expect((await visible.json() as ListArtifactsResponse).artifacts.map((item) => item.id)).toContain(row.id);
+    await db.update(artifacts).set({ revokedAt: Date.now() }).where(eq(artifacts.id, row.id));
+    const revokedList = await request("", "org-viewer");
+    expect((await revokedList.json() as ListArtifactsResponse).artifacts.map((item) => item.id)).not.toContain(row.id);
+
+    const now = Date.now();
+    await db.insert(artifacts).values(Array.from({ length: 101 }, (_, index) => ({
+      id: `managed-${index}`,
+      token: `managed-token-${index}`,
+      ownerType: "team",
+      ownerId: "private-team",
+      orgId: "local-org",
+      actorUserId: "local-user",
+      sourceMemoryPath: `private-${index}.md`,
+      title: `Managed ${index}`,
+      content: "private",
+      createdAt: now + index,
+      updatedAt: now + index,
+    })));
+    expect((await request("/management/audiences", "org-viewer")).status).toBe(403);
+    const response = await request("/management/audiences", "test-admin");
+    expect(response.status).toBe(200);
+    const body = await response.json() as ListTeamArtifactAudienceManagementResponse;
+    expect(body.artifacts).toHaveLength(100);
+    expect(body.truncated).toBe(true);
+    expect(Object.keys(body.artifacts[0]!).sort()).toEqual(["audience", "id", "teamId", "teamName", "title"]);
+    expect(body.artifacts.map((item) => item.id)).not.toContain(row.id);
   });
 
   it("requires live org membership even when team membership and deployment identity remain", async () => {

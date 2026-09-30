@@ -13,6 +13,7 @@ import type {
   ListArtifactCommentsResponse,
   ListArtifactsResponse,
   ListArtifactVersionsResponse,
+  ListTeamArtifactAudienceManagementResponse,
   PatchArtifactRequest,
   ShareArtifactResponse,
 } from "@valet/api/wire";
@@ -33,6 +34,7 @@ export const qkArtifacts = {
   byToken: (token: string) => ["artifacts", "token", token] as const,
   comments: (token: string) => ["artifacts", "comments", token] as const,
   versions: (id: string) => ["artifacts", "versions", id] as const,
+  audienceManagement: () => ["artifacts", "audience-management"] as const,
 };
 
 export function useArtifact(token: string, opts?: Partial<UseQueryOptions<GetArtifactResponse>>) {
@@ -61,6 +63,25 @@ export function useArtifacts(
   });
 }
 
+export function useTeamArtifactAudienceManagement(opts?: { enabled?: boolean }) {
+  return useQuery<ListTeamArtifactAudienceManagementResponse>({
+    queryKey: qkArtifacts.audienceManagement(),
+    queryFn: () => api.listTeamArtifactAudienceManagement(),
+    enabled: opts?.enabled ?? true,
+  });
+}
+
+export function usePatchTeamArtifactAudienceManagement() {
+  const qc = useQueryClient();
+  return useMutation<unknown, Error, { id: string; audience: "team" | "organization" }>({
+    mutationFn: ({ id, audience }) => api.patchTeamArtifactAudienceManagement(id, audience),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkArtifacts.audienceManagement() });
+      void qc.invalidateQueries({ queryKey: qkArtifacts.list() });
+    },
+  });
+}
+
 export function useShareArtifact() {
   const qc = useQueryClient();
   return useMutation<ShareArtifactResponse, Error, { path: string }>({
@@ -77,6 +98,7 @@ export function usePatchArtifact() {
     mutationFn: ({ id, ...body }) => api.patchArtifact(id, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkArtifacts.list() });
+      void qc.invalidateQueries({ queryKey: qkArtifacts.audienceManagement() });
     },
   });
 }

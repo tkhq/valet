@@ -519,14 +519,19 @@ export async function listArtifacts(
     )));
   const where = and(
     eq(artifacts.orgId, caller.orgId),
-    caller.orgAdmin && !caller.mine ? undefined : or(
-      and(ne(artifacts.ownerType, "team"), eq(artifacts.actorUserId, caller.id)),
-      and(eq(artifacts.ownerType, "team"), caller.mine ? eq(artifacts.actorUserId, caller.id) : undefined),
-    ),
-    caller.orgAdmin && !caller.mine ? undefined : or(
-      ne(artifacts.ownerType, "team"),
-      teamMember,
-      eq(artifacts.teamAudience, "organization"),
+    or(
+      and(
+        ne(artifacts.ownerType, "team"),
+        caller.orgAdmin && !caller.mine ? undefined : eq(artifacts.actorUserId, caller.id),
+      ),
+      and(
+        eq(artifacts.ownerType, "team"),
+        caller.mine ? eq(artifacts.actorUserId, caller.id) : undefined,
+        or(
+          teamMember,
+          and(eq(artifacts.teamAudience, "organization"), isNull(artifacts.revokedAt)),
+        ),
+      ),
     ),
   );
   return db.select(summaryColumns).from(artifacts).where(where).orderBy(desc(artifacts.updatedAt));
@@ -539,7 +544,6 @@ export async function listArtifactsForOwner(
   orgId: string,
   owner: { type: string; id: string },
   page?: { limit: number; cursor?: { updatedAt: number; id: string } },
-  organizationAudienceOnly = false,
 ): Promise<ArtifactSummaryRow[]> {
   const query = db
     .select(summaryColumns)
@@ -549,7 +553,6 @@ export async function listArtifactsForOwner(
         eq(artifacts.orgId, orgId),
         eq(artifacts.ownerType, owner.type),
         eq(artifacts.ownerId, owner.id),
-        organizationAudienceOnly ? eq(artifacts.teamAudience, "organization") : undefined,
         // The paged gallery omits revoked links before selecting a page.
         page ? isNull(artifacts.revokedAt) : undefined,
         page?.cursor ? or(
@@ -560,6 +563,32 @@ export async function listArtifactsForOwner(
     )
     .orderBy(desc(artifacts.updatedAt), desc(artifacts.id));
   return page ? query.limit(page.limit + 1) : query;
+}
+
+export interface TeamArtifactAudienceManagementRow {
+  id: string;
+  teamId: string;
+  teamName: string;
+  title: string;
+  audience: TeamArtifactAudience;
+}
+
+/** A bounded org-admin index for audience changes. It excludes tokens, paths, content, and revoked rows. */
+export async function listTeamArtifactAudienceManagement(
+  db: AppDb, orgId: string, limit = 100,
+): Promise<{ rows: TeamArtifactAudienceManagementRow[]; truncated: boolean }> {
+  const rows = await db.select({
+    id: artifacts.id,
+    teamId: artifacts.ownerId,
+    teamName: teams.name,
+    title: artifacts.title,
+    audience: artifacts.teamAudience,
+  }).from(artifacts).innerJoin(teams, and(
+    eq(teams.id, artifacts.ownerId), eq(teams.orgId, artifacts.orgId),
+  )).where(and(
+    eq(artifacts.orgId, orgId), eq(artifacts.ownerType, "team"), isNull(artifacts.revokedAt),
+  )).orderBy(desc(artifacts.updatedAt), desc(artifacts.id)).limit(limit + 1);
+  return { rows: rows.slice(0, limit), truncated: rows.length > limit };
 }
 
 export async function canChangeTeamArtifactAudience(

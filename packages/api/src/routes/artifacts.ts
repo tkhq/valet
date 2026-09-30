@@ -55,6 +55,7 @@ import {
   listArtifacts,
   listArtifactsForOwner,
   listArtifactVersions,
+  listTeamArtifactAudienceManagement,
   markArtifactCommentSent,
   publishArtifact,
   resolveArtifactComment,
@@ -79,7 +80,9 @@ import type {
   ListArtifactCommentsResponse,
   ListArtifactsResponse,
   ListArtifactVersionsResponse,
+  ListTeamArtifactAudienceManagementResponse,
   PatchArtifactRequest,
+  PatchTeamArtifactAudienceManagementResponse,
   ShareArtifactRequest,
   ShareArtifactResponse,
 } from "../wire/types.js";
@@ -656,16 +659,13 @@ artifactsRouter.get("/", async (c) => {
     if ((ownerType !== "team" && ownerType !== "user") || !ownerId) {
       return c.json({ error: "Send ownerType=user or team with an ownerId." }, 400);
     }
-    let organizationAudienceOnly = false;
     if (ownerType === "user") {
       if (ownerId !== user.id) return c.json({ error: "owner not found" }, 404);
     } else {
-      const owner = { ownerType, ownerId, orgId: user.orgId, teamAudience: "organization" as const };
-      const teamMember = await hasArtifactTeamAccess(db, owner, user);
-      if (!teamMember && !(await hasArtifactReadAccess(db, owner, user))) {
+      const owner = { ownerType, ownerId, orgId: user.orgId };
+      if (!(await hasArtifactTeamAccess(db, owner, user))) {
         return c.json({ error: "owner not found" }, 404);
       }
-      organizationAudienceOnly = !teamMember;
     }
     const limitParam = c.req.query("limit");
     const cursorParam = c.req.query("cursor");
@@ -684,7 +684,6 @@ artifactsRouter.get("/", async (c) => {
     }
     const rows = await listArtifactsForOwner(
       db, user.orgId, { type: ownerType, id: ownerId }, paged ? { limit, cursor } : undefined,
-      organizationAudienceOnly,
     );
     const visible = paged ? rows.slice(0, limit) : rows;
     const last = visible.at(-1);
@@ -702,6 +701,52 @@ artifactsRouter.get("/", async (c) => {
   const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin });
   const body: ListArtifactsResponse = { artifacts: await toListItems(c, rows, user, orgAdmin) };
   return c.json(body);
+});
+
+/** Bounded, token-free index for org admins who manage team audiences. */
+artifactsRouter.get("/management/audiences", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
+  const { db } = c.var.providers;
+  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    return c.json({ error: "Only an organization admin can manage team artifact audiences." }, 403);
+  }
+  const result = await listTeamArtifactAudienceManagement(db, user.orgId);
+  const body: ListTeamArtifactAudienceManagementResponse = {
+    artifacts: result.rows,
+    truncated: result.truncated,
+  };
+  return c.json(body);
+});
+
+artifactsRouter.patch("/management/audiences/:id", async (c) => {
+  const user = requireActingUser(c);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
+  const { db } = c.var.providers;
+  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    return c.json({ error: "Only an organization admin can manage team artifact audiences." }, 403);
+  }
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("audience" in body) ||
+      (body.audience !== "team" && body.audience !== "organization")) {
+    return c.json({ error: "audience must be 'team' or 'organization'" }, 400);
+  }
+  const existing = await getArtifactById(db, c.req.param("id"));
+  if (!existing || existing.orgId !== user.orgId || existing.ownerType !== "team" || existing.revokedAt !== null) {
+    return c.json({ error: "not found" }, 404);
+  }
+  try {
+    const row = await setTeamArtifactAudience(db, existing.id, body.audience, user.id);
+    const response: PatchTeamArtifactAudienceManagementResponse = {
+      id: row.id,
+      audience: row.teamAudience,
+    };
+    return c.json(response);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
 });
 
 /** Sharer-or-admin gate for managing one artifact. Wrong org or no row →
@@ -767,7 +812,10 @@ artifactsRouter.patch("/:id", async (c) => {
   const { db } = c.var.providers;
   const existing = await getArtifactById(db, c.req.param("id"));
   if (!existing || existing.orgId !== user.orgId) return c.json({ error: "not found" }, 404);
-  if (hasAudience && !(await canChangeTeamArtifactAudience(db, existing, user.id))) {
+  if (hasAudience && (
+    !(await hasArtifactTeamAccess(db, existing, user)) ||
+    !(await canChangeTeamArtifactAudience(db, existing, user.id))
+  )) {
     return c.json({ error: "not found" }, 404);
   }
 

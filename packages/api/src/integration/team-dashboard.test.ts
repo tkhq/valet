@@ -248,7 +248,7 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
     });
   }
 
-  it("lists team artifacts for a member and hides team-only rows from an organization member", async () => {
+  it("lists team artifacts for a member and 404s an organization nonmember", async () => {
     api = await bootTestApi();
     await seedTeam(api);
     await seedArtifact(api, { id: "art-team", ownerType: "team", ownerId: "team_1", title: "Postmortem" });
@@ -262,8 +262,7 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
     const organizationMember = await fetch(`${api.baseUrl}/api/artifacts?ownerType=team&ownerId=team_1`, {
       headers: NON_MEMBER_HEADERS,
     });
-    expect(organizationMember.status).toBe(200);
-    expect(await organizationMember.json()).toMatchObject({ artifacts: [] });
+    expect(organizationMember.status).toBe(404);
 
     const malformed = await fetch(`${api.baseUrl}/api/artifacts?ownerType=user`);
     expect(malformed.status).toBe(400);

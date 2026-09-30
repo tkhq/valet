@@ -1,12 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import type { ArtifactListItem } from "@valet/api/wire";
+import type { ArtifactListItem, TeamArtifactAudienceManagementItem } from "@valet/api/wire";
 import { useState } from "react";
 import { useListOwner } from "~/lib/use-list-owner";
 import { useMe } from "~/api/settings";
 import { Pager } from "~/components/pager";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import type { OwnerFilter } from "~/api/client";
-import { useArtifacts, usePatchArtifact, useRevokeArtifact } from "~/api/artifacts";
+import {
+  useArtifacts,
+  usePatchArtifact,
+  usePatchTeamArtifactAudienceManagement,
+  useRevokeArtifact,
+  useTeamArtifactAudienceManagement,
+} from "~/api/artifacts";
 import { ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
@@ -43,13 +49,12 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
   const me = useMe();
   const [cursors, setCursors] = useState<string[]>([]);
   const listQ = useArtifacts(owner, { limit: 50, cursor: currentCursor(cursors) });
-  const adminQ = useArtifacts(undefined, {
+  const adminQ = useTeamArtifactAudienceManagement({
     enabled: owner.ownerType === "user" && me.data?.orgRole === "admin",
   });
   const loading = listQ.isLoading;
   const artifacts = (listQ.data?.artifacts ?? []).filter((a) => !a.revoked);
-  const managedTeamArtifacts = (adminQ.data?.artifacts ?? [])
-    .filter((a) => a.ownerType === "team" && a.canChangeAudience && !a.revoked);
+  const managedTeamArtifacts = adminQ.data?.artifacts ?? [];
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -98,11 +103,47 @@ function ScopedArtifactsPage({ owner }: { owner: OwnerFilter }) {
               Organization admins can change a team artifact audience without joining the team.
             </p>
             <div className="mt-4 divide-y divide-line border-t border-line">
-              {managedTeamArtifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} />)}
+              {managedTeamArtifacts.map((artifact) => (
+                <AudienceManagementRow key={artifact.id} artifact={artifact} />
+              ))}
             </div>
+            {adminQ.data?.truncated && (
+              <p className="mt-3 text-xs text-muted">Only the 100 most recently updated artifacts are shown.</p>
+            )}
           </section>
         )}
       </div>
+    </div>
+  );
+}
+
+function AudienceManagementRow({ artifact }: { artifact: TeamArtifactAudienceManagementItem }) {
+  const patch = usePatchTeamArtifactAudienceManagement();
+  return (
+    <div className="flex flex-col items-stretch justify-between gap-2 py-2.5 sm:flex-row sm:items-center sm:gap-3">
+      <div className="min-w-0 flex-1 px-1 py-0.5">
+        <p className="break-words text-sm text-ink sm:truncate">{artifact.title}</p>
+        <p className="mt-0.5 text-xs text-muted">{artifact.teamName}</p>
+      </div>
+      <label className="flex shrink-0 items-center gap-2 text-xs text-muted">
+        Audience
+        <select
+          aria-label={`Audience for ${artifact.title}`}
+          value={artifact.audience}
+          disabled={patch.isPending}
+          onChange={(event) => patch.mutate({
+            id: artifact.id,
+            audience: event.target.value === "organization" ? "organization" : "team",
+          })}
+          className="rounded border border-line bg-transparent px-1.5 py-1 text-xs text-ink"
+        >
+          <option value="team">Only this team</option>
+          <option value="organization">Anyone in the organization</option>
+        </select>
+      </label>
+      {patch.error != null && (
+        <p className="text-xs text-danger-500">{errorText(patch.error)}</p>
+      )}
     </div>
   );
 }
