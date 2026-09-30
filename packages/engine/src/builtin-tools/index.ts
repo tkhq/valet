@@ -345,13 +345,30 @@ export const bashTool = defineTool({
   },
 });
 
+/**
+ * The thread a `thread_read` argument names. A person points at a thread by
+ * pasting its link: the web app links `/threads/<id>`, and older chat links
+ * carry `?thread=<id>`. Anything that is not an http(s) URL is a key or an id
+ * as given; `web:default` parses as a URL, so the scheme check matters.
+ */
+export function threadReference(value: string): string {
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  let url: URL;
+  try { url = new URL(trimmed); } catch { return trimmed; }
+  const fromPath = /\/threads\/([^/]+)/.exec(url.pathname)?.[1];
+  const found = fromPath ?? url.searchParams.get("thread");
+  return found ? decodeURIComponent(found) : trimmed;
+}
+
 export const threadReadTool = defineTool({
   name: "thread_read",
   concurrencySafe: true,
   description:
-    "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done).",
+    "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done). " +
+    "Accepts a thread key, a thread id, or a Valet thread link a person pasted (`/threads/<id>`, or a chat link with `?thread=<id>`).",
   parameters: Type.Object({
-    key: Type.String({ description: "Thread key to read from (e.g. 'web:default', 'task:research')." }),
+    key: Type.String({ description: "Thread key (e.g. 'web:default', 'task:research'), thread id, or a pasted Valet thread link." }),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     includeCompacted: Type.Optional(Type.Boolean()),
   }),
@@ -360,9 +377,10 @@ export const threadReadTool = defineTool({
       limit: args.limit ?? 30,
       includeCompacted: args.includeCompacted ?? true,
     };
-    const entries = await ctx.threadRead(args.key, opts);
-    if (entries.length === 0) return { text: `(thread "${args.key}" has no messages)` };
-    return { text: renderEntries(`thread:${args.key}`, entries) };
+    const ref = threadReference(args.key);
+    const entries = await ctx.threadRead(ref, opts);
+    if (entries.length === 0) return { text: `(thread "${ref}" has no messages, or is not a thread in this session)` };
+    return { text: renderEntries(`thread:${ref}`, entries) };
   },
 });
 

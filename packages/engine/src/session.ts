@@ -1501,8 +1501,9 @@ export class Session {
     return this.providers.store.listDecisionGates(this.id);
   }
 
+  /** Reads a thread by key, or by id when no thread has that key. */
   async readEntries(threadKey: string, opts?: MessageQuery): Promise<SessionEntry[]> {
-    const t = await this.threadByKey(threadKey);
+    const t = (await this.threadByKey(threadKey)) ?? this.threadById(threadKey);
     if (!t) return [];
     return t.readEntries(opts);
   }

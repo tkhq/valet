@@ -29,7 +29,8 @@ The legacy `sessions` command remains available for runtime operations.
 
 Dashboard thread rows, outcome links, briefing links, and thread sources use `/threads/:threadId` when a thread ID exists.
 The thread route resolves the existing runtime and retains the runtime's security or workflow view.
-Links with only a runtime ID retain `/sessions/:sessionId`. This includes work rows and security review entrypoints.
+Links with only a runtime ID retain `/sessions/:sessionId`.
+An agent reads a linked thread with `thread_read`, which accepts a thread key, a thread ID, or a pasted Valet link (`/threads/:threadId`, or a chat link with `?thread=`). It reads only threads in its own runtime. This includes work rows and security review entrypoints.
 Runtime operations, permissions, usage attribution, and sandbox controls retain their runtime meaning.
 
 ## Validation
