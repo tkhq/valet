@@ -214,6 +214,37 @@ function botMessageOf(raw: RawChannelUpdate): Record<string, unknown> | undefine
  * update: one malformed payload must not stop the rest of a batch, and
  * neither consumer may block the other.
  */
+async function recordVerifiedReceipt(
+  db: AppDb,
+  orgId: string,
+  raw: RawChannelUpdate,
+  credentialTeamId: string | undefined,
+  deps: FanOutDeps,
+  delivery: { retryNum: string | undefined; retryReason: string | undefined; payloadBytes: number },
+): Promise<string | undefined> {
+  const envelope = isRecord(raw) ? raw : {};
+  const event = isRecord(envelope.event) ? envelope.event : {};
+  const sameWorkspace = teamIdOf(raw) === credentialTeamId;
+  const scalar = (value: unknown) => typeof value === "string" ? value : undefined;
+  const receiptId = await createEventReceipt(db, { orgId, service: "slack",
+    externalId: sameWorkspace ? scalar(envelope.event_id) : undefined,
+    metadata: {
+      workspaceId: teamIdOf(raw),
+      rawType: scalar(event.type) ?? scalar(envelope.type),
+      ...(sameWorkspace ? {
+        rawSubtype: scalar(event.subtype), channelId: scalar(event.channel) ?? (isRecord(envelope.channel) ? scalar(envelope.channel.id) : undefined),
+        actorId: scalar(event.user), botId: scalar(event.bot_id) ?? (isRecord(event.bot_profile) ? scalar(event.bot_profile.id) : undefined),
+        appId: scalar(envelope.api_app_id), messageTs: scalar(event.ts), threadTs: scalar(event.thread_ts),
+      } : {}),
+      retryNum: delivery.retryNum, ...(delivery.retryNum !== undefined ? { retryReason: delivery.retryReason } : {}),
+      botIdentityAvailable: !!deps.botId, botUserIdentityAvailable: !!deps.botUserId,
+      payloadBytes: delivery.payloadBytes, configuredTriggerCount: deps.triggerDefs.length,
+    },
+  });
+  await appendReceiptStage(db, receiptId, { stage: "verification", outcome: "verified", detail: "The Slack signature was verified. Message body and credential headers are not retained in this receipt." });
+  return receiptId;
+}
+
 async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: string | undefined): Promise<void> {
   try {
     await appendReceiptStage(deps.db, receiptId, { stage: "channel", outcome: "started", detail: "Direct-channel processing started." });
@@ -429,33 +460,11 @@ slackWebhookRouter.post("/webhook", async (c) => {
     rawBody,
   };
 
-  // Persist the verified receipt before acknowledging. Processing stays asynchronous;
-  // a receipt without later stages identifies interruption after acknowledgement.
-  const received = await Promise.all(raws.map(async raw => {
-    const envelope = isRecord(raw) ? raw : {};
-    const event = isRecord(envelope.event) ? envelope.event : {};
-    const sameWorkspace = teamIdOf(raw) === credentialTeamId;
-    const scalar = (value: unknown) => typeof value === "string" ? value : undefined;
-    const receiptId = await createEventReceipt(db, { orgId, service: "slack",
-      externalId: sameWorkspace ? scalar(envelope.event_id) : undefined,
-      metadata: {
-        workspaceId: teamIdOf(raw),
-        rawType: scalar(event.type) ?? scalar(envelope.type),
-        ...(sameWorkspace ? {
-          rawSubtype: scalar(event.subtype), channelId: scalar(event.channel) ?? (isRecord(envelope.channel) ? scalar(envelope.channel.id) : undefined),
-          actorId: scalar(event.user), botId: scalar(event.bot_id) ?? (isRecord(event.bot_profile) ? scalar(event.bot_profile.id) : undefined),
-          appId: scalar(envelope.api_app_id), messageTs: scalar(event.ts), threadTs: scalar(event.thread_ts),
-        } : {}),
-        retryNum, ...(retryNum !== undefined ? { retryReason } : {}),
-        botIdentityAvailable: !!deps.botId, botUserIdentityAvailable: !!deps.botUserId,
-        payloadBytes: rawBody.byteLength, configuredTriggerCount: deps.triggerDefs.length,
-      },
-    });
-    await appendReceiptStage(db, receiptId, { stage: "verification", outcome: "verified", detail: "The Slack signature was verified. Message body and credential headers are not retained in this receipt." });
-    return { raw, receiptId };
-  }));
+  // Acknowledge first. A receipt is diagnostic state, so its writes run after the
+  // response and a slow database cannot push the ack past Slack's 3-second deadline.
   void (async () => {
-    for (const { raw, receiptId } of received) {
+    for (const raw of raws) {
+      const receiptId = await recordVerifiedReceipt(db, orgId, raw, credentialTeamId, deps, { retryNum, retryReason, payloadBytes: rawBody.byteLength });
       try {
         const teamId = teamIdOf(raw);
         if (teamId !== credentialTeamId) {

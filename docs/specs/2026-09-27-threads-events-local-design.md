@@ -255,11 +255,12 @@ provider IDs, channel IDs, event keys, and processing outcomes. Pagination binds
 organization and search. Members and team API keys cannot read these organization
 wide records, including through a copied cursor.
 
-A Slack receipt is written after signature verification and before acknowledgement.
-Each retry gets its own receipt and retains its provider event ID and retry metadata.
+A Slack receipt is written after signature verification and after acknowledgement, so a
+slow database cannot delay the acknowledgement past Slack's three-second deadline. An
+interruption between acknowledgement and the receipt write leaves no receipt. Each retry gets its own receipt and retains its provider event ID and retry metadata.
 Workspace checks, direct-channel processing, classification, subscription decisions,
 persistence, dispatch, and followed-thread checks append timestamped stages. A receipt
-with no later stage can identify an interruption after acknowledgement. Diagnostic
+with no later stage identifies an interruption during processing. Diagnostic
 write failure is logged without exception payloads and does not stop normal processing.
 
 Normalized ingestion also records unmatched keys, disabled named subscriptions,

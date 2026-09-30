@@ -16,6 +16,7 @@ import { __resetSlackWebhookThrottle } from "./slack-webhook.js";
 import { __resetIngestDropThrottle } from "../events/ingest.js";
 import * as ingestModule from "../events/ingest.js";
 import * as followRouter from "../channels/follow-router.js";
+import * as receiptsModule from "../events/receipts.js";
 import * as signalDiagnostics from "../orchestrator/signals.js";
 
 let api: TestApi | undefined;
@@ -981,6 +982,22 @@ describe("Slack receipt diagnostics", () => {
     const receipt = await completedReceipt("Ev-missing-bot-id", "follow");
     expect(receipt.stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "classification", outcome: "rejected" })]));
     expect(JSON.stringify(receipt.stages)).toMatch(/bot identity/i);
+  });
+
+  it("acknowledges before the receipt write settles", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = receiptsModule.createEventReceipt;
+    const receipt = vi.spyOn(receiptsModule, "createEventReceipt").mockImplementation(async (...args) => { await gate; return original(...args); });
+    const body = envelope(humanChannelMessage(), "Ev-slow-receipt");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => receipt.mock.calls.length, { timeout: 5_000 }).toBe(1);
+    release();
+    // Let the post-ack fan-out finish before the next test boots.
+    await expect.poll(() => eventCount(api!, "Ev-slow-receipt"), { timeout: 5_000 }).toBe(1);
   });
 
   it("records foreign-workspace receipt without running any consumer", async () => {
