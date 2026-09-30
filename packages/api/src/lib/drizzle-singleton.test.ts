@@ -111,8 +111,12 @@ describe("workspace singleton repair on an already migrated database", () => {
       VALUES ('run-legacy', 'wf-legacy', 'wv-legacy', $1, '{}', 1, 1)`, [legacy]);
     await db.query(`INSERT INTO workflow_templates(id, org_id, owner_type, owner_id, template_id, upstream_path, template, created_at, updated_at)
       VALUES ('tpl-legacy', 'wf-org', 'user', 'u', 't', 'p', $1, 1, 1)`, [JSON.stringify({ id: "t", name: "T", definition: JSON.parse(legacy) })]);
+    // A settled run never executes again, so its snapshot is left as it was.
+    await db.query(`INSERT INTO workflow_runs(id, workflow_id, definition_version_id, definition, params, status, created_at, updated_at)
+      VALUES ('run-settled-legacy', 'wf-legacy', 'wv-legacy', $1, '{}', 'settled', 1, 1)`, [legacy]);
     await normalizeLegacyWorkflowDefinitions(db);
     await normalizeLegacyWorkflowDefinitions(db);
+    expect((await db.query("SELECT definition FROM workflow_runs WHERE id = 'run-settled-legacy'")).rows[0]).toEqual({ definition: JSON.parse(legacy) });
     const expected = { version: "dag/v1", nodes: [{ id: "o", type: "orchestrator", prompt: "hi" }], edges: [] };
     for (const [table, id] of [["workflow_definitions", "wf-legacy"], ["workflow_versions", "wv-legacy"], ["workflow_runs", "run-legacy"]]) {
       expect((await db.query(`SELECT definition FROM ${table} WHERE id = $1`, [id])).rows[0]).toEqual({ definition: expected });

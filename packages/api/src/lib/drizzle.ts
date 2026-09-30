@@ -189,9 +189,13 @@ export async function syncAssistantSessionStatus(db: PgDb): Promise<void> {
  * binary can still read them after a rollback. Idempotent: the filter
  * selects only rows that still carry an old shape. */
 export async function normalizeLegacyWorkflowDefinitions(db: PgDb): Promise<void> {
-  const LEGACY = (col: string) => `(${col}::text LIKE '%"thread"%' OR ${col} ? 'assistantId')`;
-  for (const table of ["workflow_definitions", "workflow_versions", "workflow_runs"]) {
-    const rows = await db.query(`SELECT id, definition FROM ${table} WHERE ${LEGACY("definition")}`);
+  // Match a node whose type is "thread", not any text that says "thread", so
+  // prompt text does not select the same rows again on every boot.
+  const LEGACY = (col: string) => `(jsonb_path_exists(${col}, '$.** ? (@.type == "thread")') OR ${col} ? 'assistantId')`;
+  // A settled run never executes again, so only unsettled run snapshots need
+  // the rewrite; the run history stays out of every boot's scan.
+  for (const [table, scope] of [["workflow_definitions", ""], ["workflow_versions", ""], ["workflow_runs", " AND status <> 'settled'"]] as const) {
+    const rows = await db.query(`SELECT id, definition FROM ${table} WHERE ${LEGACY("definition")}${scope}`);
     for (const row of rows.rows) {
       const next = normalizeLegacyDefinition(row.definition);
       if (next !== row.definition) {
