@@ -29,7 +29,7 @@ It does not send model prompts, receive Slack callbacks, or connect an integrati
 4. Run `make dev-local`.
 5. Open a conversation URL printed by the seed command.
 
-The manifest lives in `.valet-dev/threads-demo.json`.
+The manifest lives in `.valet-dev/threads-demo.json`, or in `VALET_DATA_DIR` when `.env` sets it. Export the same value before you run the seed.
 Repeated offline seeding preserves later conversation branches.
 Use a new empty worktree database to repeat the initial setup from scratch.
 
@@ -46,6 +46,18 @@ Use a new empty worktree database to repeat the initial setup from scratch.
 
 The fixtures prove persistence and UI behavior. They do not prove live Slack admission or successful workflow execution.
 Work discovery, artifact placement, home-channel delivery, and event presets remain subsequent phases.
+
+## Pull request and unread state
+
+With the API running, run `node scripts/seed-threads-demo.mjs pull-requests`.
+Stop the API, run `node scripts/seed-threads-demo.mjs offline`, and start it again.
+The seed adds two personal threads that name xors-software/xors-valet pull requests.
+The XORS deployment shows the same two threads.
+
+- "[Demo] Dependency bump PR (open)" shows the open icon and an unread dot. It also appears under **Waiting on you**.
+- "[Demo] Typebox lockfile fix (merged)" shows the merged icon and reads as read.
+
+The seed writes pull request state directly. It does not call GitHub.
 
 ## Team workflow check
 

@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const dataDir = `${root}.valet-dev`;
+// `make dev-local` uses VALET_DATA_DIR when `.env` sets it, and `.valet-dev` otherwise.
+const dataDir = process.env.VALET_DATA_DIR || `${root}.valet-dev`;
 const manifestPath = `${dataDir}/threads-demo.json`;
 const base = 'http://localhost:8788';
 const mode = process.argv[2];
@@ -149,6 +150,30 @@ if (mode === 'bootstrap') {
   }
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   console.log('Created local approval, timer, completed workflow, and checklist fixtures. Stop the API, then run offline for labeled outcome records.');
+} else if (mode === 'pull-requests') {
+  const me = await request('/me');
+  if (me.id !== 'local-user' || me.orgId !== 'local-org') throw new Error('Seed requires the local stub identity.');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const personal = await request('/workspaces/user/runtime', 'POST', {});
+  manifest.pullRequestThreads ??= [];
+  // The same pull requests the XORS deployment shows, so both render the same icons.
+  const examples = [
+    { key: 'open', title: '[Demo] Dependency bump PR (open)', read: false,
+      question: 'Review the grouped dependency bump and open it for review.',
+      answer: 'The dependency bump is open as xors-software/xors-valet#8. Should I merge it once CI passes?',
+      pullRequest: { url: 'https://github.com/xors-software/xors-valet/pull/8', repo: 'xors-software/xors-valet', number: 8, state: 'open' } },
+    { key: 'merged', title: '[Demo] Typebox lockfile fix (merged)', read: true,
+      question: 'Restore the typebox override in the lockfile.',
+      answer: 'Merged as xors-software/xors-valet#12. The lockfile pins typebox again.',
+      pullRequest: { url: 'https://github.com/xors-software/xors-valet/pull/12', repo: 'xors-software/xors-valet', number: 12, state: 'merged' } },
+  ];
+  for (const example of examples) {
+    if (manifest.pullRequestThreads.some(row => row.key === example.key)) continue;
+    const thread = await request(`/sessions/${encodeURIComponent(personal.sessionId)}/threads`, 'POST', { title: example.title });
+    manifest.pullRequestThreads.push({ ...example, sessionId: personal.sessionId, threadId: thread.id });
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+  console.log('Created the open and merged pull request threads. Stop the API, then run offline for their transcripts and pull request state.');
 } else if (mode === 'child-work') {
   const me = await request('/me');
   if (me.id !== 'local-user' || me.orgId !== 'local-org') throw new Error('Seed requires the local stub identity.');
@@ -177,8 +202,9 @@ if (mode === 'bootstrap') {
   try {
     const now = Date.now();
     await db.transaction(async tx => {
-      for (const [index, record] of [...manifest.records, ...(manifest.briefingThreads ?? [])].entries()) {
-        const created = now - (manifest.records.length + (manifest.briefingThreads?.length ?? 0) - index) * 60_000;
+      const transcripts = [...manifest.records, ...(manifest.briefingThreads ?? []), ...(manifest.pullRequestThreads ?? [])];
+      for (const [index, record] of transcripts.entries()) {
+        const created = now - (transcripts.length - index) * 60_000;
         await tx.query('INSERT INTO session_threads (id,session_id,title,created_at,last_user_activity_at) VALUES ($1,$2,$3,$4,$4) ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title,last_user_activity_at=EXCLUDED.last_user_activity_at', [record.threadId,record.sessionId,record.title,created]);
         const userId = `threads-demo-${record.threadId}-user`;
         const replyId = `threads-demo-${record.threadId}-reply`;
@@ -186,6 +212,18 @@ if (mode === 'bootstrap') {
           await tx.query('INSERT INTO engine_entries (id,session_id,thread_id,parent_id,entry_type,role,content,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING', [id,record.sessionId,record.threadId,parent,'message',role,content,time]);
         }
         await tx.query('UPDATE engine_threads SET active_leaf_entry_id=$1 WHERE id=$2 AND session_id=$3 AND (active_leaf_entry_id IS NULL OR active_leaf_entry_id=$4)', [replyId,record.threadId,record.sessionId,userId]);
+      }
+      // Pull request state and read state for the sidebar icons and unread dots.
+      for (const record of manifest.pullRequestThreads ?? []) {
+        const pr = record.pullRequest;
+        await tx.query(`INSERT INTO thread_pull_requests (session_id,thread_id,url,repo,number,state,created_at,updated_at,checked_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$7) ON CONFLICT (session_id,thread_id,url) DO UPDATE SET state=EXCLUDED.state,updated_at=EXCLUDED.updated_at`,
+          [record.sessionId,record.threadId,pr.url,pr.repo,pr.number,pr.state,now]);
+        if (record.read) {
+          await tx.query('INSERT INTO thread_reads (user_id,session_id,thread_id,read_at) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id,thread_id) DO UPDATE SET read_at=EXCLUDED.read_at', ['local-user',record.sessionId,record.threadId,now]);
+        } else {
+          await tx.query('DELETE FROM thread_reads WHERE user_id=$1 AND thread_id=$2', ['local-user',record.threadId]);
+        }
       }
       const origin = manifest.records.find(record => record.scope === 'team');
       for (const [index, childId] of (manifest.childWorkSessionIds ?? []).entries()) {
@@ -232,5 +270,5 @@ if (mode === 'bootstrap') {
     for (const row of manifest.records) console.log(`${row.title}: http://localhost:5173/chat?workspace=${encodeURIComponent(row.scope === 'team' ? manifest.teamId : 'user')}&thread=${encodeURIComponent(row.threadId)}`);
   } finally { await db.close(); }
 } else {
-  throw new Error('Use bootstrap, workflow, review, catch-up, or child-work with the API running, or offline after stopping it.');
+  throw new Error('Use bootstrap, workflow, review, catch-up, child-work, or pull-requests with the API running, or offline after stopping it.');
 }
