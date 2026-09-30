@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { budgetBriefingEvidence, collectWorkspaceBriefingSources, slackUrlForThreadKey, type BriefingEvidence } from "./workspace-briefing-sources.js";
-import { briefingModelRef, createBriefingGenerator, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
+import { briefingModelRef, createBriefingGenerator, withoutInternalIds, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
 
 const user = { type: "user" as const, id: "local-user" };
 const evidence: BriefingEvidence[] = [
@@ -36,6 +36,15 @@ describe("workspace briefing synthesis", () => {
     const withPr = [...evidence, pr];
     const runAndPr = JSON.stringify({ briefings: [{ title: "Intake verification", summary: "Concurrent deliveries remain untested.", sourceIds: ["run","pr"] }] });
     expect(parseWorkspaceBriefings(runAndPr,withPr)[0].latestThread).toBeNull();
+  });
+  it("never shows an internal id in brief text", () => {
+    expect(withoutInternalIds("Choose the first workflow for wf_mun9pbd4w3ev5i")).toBe("Choose the first workflow for the workflow");
+    expect(withoutInternalIds("Open `th-mun9pbh1-2` and retry wfrun_abc123def")).toBe("Open the thread and retry the run");
+    expect(withoutInternalIds("Keep gpt-5.6 and TKAI-42")).toBe("Keep gpt-5.6 and TKAI-42");
+    const reply = JSON.stringify({ briefings: [{ title: "Intake", summary: "Waiting on wf_mun9pbd4w3ev5i.", nextAction: "Name wf_mun9pbd4w3ev5i", sourceIds: ["latest","run"] }] });
+    const [brief] = parseWorkspaceBriefings(reply,evidence);
+    expect(brief.summary).toBe("Waiting on the workflow.");
+    expect(brief.nextAction).toBe("Name the workflow");
   });
   it("keeps a short next action and drops one with a link", () => {
     const reply = (nextAction: string) => JSON.stringify({ briefings: [{ title: "Intake", summary: "The fix is in review.", nextAction, sourceIds: ["latest","run"] }] });

@@ -25,7 +25,7 @@ Confirmed-effect sources confirm only that effect. Conversation claims are repor
 Preserve demo or fixture labeling: describe simulated evidence as a demo.
 If no line of work has evidence, return an empty briefings array. Prefer 2 to 6 briefs; maximum 8.
 Return JSON only: {"briefings":[{"title":"...","nextAction":"...","summary":"...","sourceIds":["exact provided id"]}]}.
-Use ONLY supplied sourceIds. Do not put links, markdown, IDs, or timestamps in the text.`;
+Use ONLY supplied sourceIds. Do not put links, markdown, IDs such as wf_..., or timestamps in the text. Call a workflow by its name.`;
 
 /**
  * The model that writes brief text. `VALET_BRIEFING_MODEL` names one as
@@ -48,7 +48,7 @@ export const defaultBriefingSummarizer: BriefingSummarizer = async (evidence, si
   if (!model) throw new Error(`Briefing model ${ref.provider}/${ref.model} is unavailable. Set VALET_BRIEFING_MODEL to a known provider/model.`);
   const result = await completeSimple(model, {
     systemPrompt: SYSTEM_PROMPT,
-    messages: [{ role: "user", timestamp: Date.now(), content: [{ type: "text", text: JSON.stringify(evidence) }] }],
+    messages: [{ role: "user", timestamp: Date.now(), content: [{ type: "text", text: JSON.stringify(evidence.map(item => ({ ...item, content: withoutInternalIds(item.content) }))) }] }],
     // Reasoning models spend output tokens before the answer, and reject a temperature.
   }, { ...(ref.provider === "anthropic" ? { temperature: 0.2, maxTokens: 3000 } : { maxTokens: 12_000 }), signal });
   if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error("Briefing generation failed.");
@@ -61,6 +61,14 @@ function record(value: unknown): value is Record<string, unknown> {
 function prose(value: unknown, max: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= max
     && !/(?:[a-z][a-z0-9+.-]*:\/\/|www\.|\]\s*\()/i.test(value);
+}
+/** Internal ids (workflows, threads, runs, assistants) mean nothing to a reader.
+ * Brief text never shows one: it becomes "the workflow" or "the thread". */
+const INTERNAL_ID = /`?\b(wf|wfrun|th|asst|brief)[_-][A-Za-z0-9_-]{6,}\b`?/g;
+export function withoutInternalIds(text: string): string {
+  return text.replace(INTERNAL_ID, (_match, kind: string) => kind === "wf" ? "the workflow"
+    : kind === "wfrun" ? "the run" : kind === "th" ? "the thread" : "it")
+    .replace(/\bthe (workflow|run|thread) the \1\b/g, "the $1");
 }
 function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 
@@ -102,12 +110,12 @@ export function parseWorkspaceBriefings(text: string, evidence: readonly Briefin
       ?? group.find(item => item.source.sessionId && item.source.threadId))?.source;
     const originUrl = group.find(item => item.source.originUrl)?.source.originUrl;
     const demo = group.some(item => /\[(?:local )?demo\]/i.test(`${item.source.title}\n${item.content}`));
-    const title = brief.title.trim();
-    const nextAction = prose(brief.nextAction,160) ? brief.nextAction.trim() : undefined;
+    const title = withoutInternalIds(brief.title.trim());
+    const nextAction = prose(brief.nextAction,160) ? withoutInternalIds(brief.nextAction.trim()) : undefined;
     return {
       id: `brief:${digest(group.map(item => item.source.id).sort().join("\n")).slice(0,24)}`,
       title: demo && !/demo/i.test(title) ? `[Demo] ${title}` : title,
-      summary: brief.summary.trim(),
+      summary: withoutInternalIds(brief.summary.trim()),
       ...(nextAction ? { nextAction } : {}),
       status: group.some(item => item.state === "needs_attention") ? "needs_attention"
         : group.some(item => item.state === "in_progress") ? "in_progress" : "updated",
@@ -167,7 +175,7 @@ export function createBriefingGenerator(options: {
 
 const generateBriefings = createBriefingGenerator();
 // Bump the algorithm prefix for changes to source collection, grouping or rendering.
-const CACHE_VERSION = `briefings-v6-next-action:${briefingModelRef(process.env).provider}:${digest(SYSTEM_PROMPT)}`;
+const CACHE_VERSION = `briefings-v7-no-ids:${briefingModelRef(process.env).provider}:${digest(SYSTEM_PROMPT)}`;
 export const getWorkspaceBriefings = createDurableBriefingCache({
   version: CACHE_VERSION,
   collect: collectWorkspaceBriefingSources,
