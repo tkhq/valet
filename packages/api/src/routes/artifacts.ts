@@ -64,6 +64,7 @@ import {
   revokeArtifactByPath,
   setArtifactSharedVersion,
   setArtifactVisibility,
+  validateArtifactSharedVersion,
   setTeamArtifactAudience,
   shareArtifact,
   type ArtifactScope,
@@ -839,6 +840,11 @@ artifactsRouter.patch("/:id", async (c) => {
   }
 
   try {
+    // Validate the complete request before the first write. Artifact versions
+    // are immutable, so this check stays valid for the mutations below.
+    if (hasSharedVersion) {
+      await validateArtifactSharedVersion(db, row.id, body.sharedVersion ?? null);
+    }
     if (hasAudience) {
       row = await setTeamArtifactAudience(db, row.id, body.audience!, user.id);
     }

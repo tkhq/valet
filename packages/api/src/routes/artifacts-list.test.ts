@@ -109,8 +109,8 @@ describe("workspace artifact lists", () => {
     await target.providers.db.insert(teamMembers).values({ teamId: "team-b", userId: "local-user", role: "member" });
     const wrongWorkspace = await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-b&limit=2&cursor=${cursor}`);
     expect(wrongWorkspace.status).toBe(400);
-    // Non-paged callers keep the legacy list, including revoked rows.
-    expect((await list(target, "ownerType=team&ownerId=team-a", "test-member")).artifacts).toHaveLength(4);
+    // Non-paged owner lists also hide revoked links.
+    expect((await list(target, "ownerType=team&ownerId=team-a", "test-member")).artifacts).toHaveLength(3);
   });
 
   it("rejects malformed owners, limits, and cursors", async () => {

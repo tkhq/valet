@@ -165,6 +165,52 @@ describe("team artifact privacy", () => {
     expect((await request(`/${row.id}`, "test-member", "PATCH", { audience: "team" })).status).toBe(404);
   });
 
+  it("validates a shared version before widening the audience", async () => {
+    const { db, row, request } = await setup();
+    await db.update(teamMembers).set({ role: "admin" }).where(and(
+      eq(teamMembers.teamId, "private-team"), eq(teamMembers.userId, "test-member"),
+    ));
+
+    const response = await request(`/${row.id}`, "local-user", "PATCH", {
+      audience: "organization",
+      sharedVersion: 99,
+    });
+    expect(response.status).toBe(400);
+    expect(await getArtifactById(db, row.id)).toMatchObject({ teamAudience: "team", sharedVersion: null });
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+  });
+
+  it("hides organization-audience artifacts after their owning team is deleted", async () => {
+    const { db, row, request } = await setup();
+    await db.update(artifacts).set({ teamAudience: "organization" }).where(eq(artifacts.id, row.id));
+    expect((await request("", "org-viewer").then((response) => response.json()) as ListArtifactsResponse)
+      .artifacts.map((item) => item.id)).toContain(row.id);
+
+    await db.delete(teams).where(eq(teams.id, "private-team"));
+    const listed = await request("", "org-viewer");
+    const body = await listed.json() as ListArtifactsResponse;
+    expect(body.artifacts.map((item) => item.id)).not.toContain(row.id);
+    expect(JSON.stringify(body)).not.toContain("Team secret");
+    expect((await request(`/${row.token}`, "org-viewer")).status).toBe(404);
+  });
+
+  it("hides revoked organization-audience metadata from default and owner lists", async () => {
+    const { db, row, request } = await setup();
+    await db.update(artifacts).set({ teamAudience: "organization", revokedAt: Date.now() })
+      .where(eq(artifacts.id, row.id));
+
+    for (const path of ["", "?ownerType=team&ownerId=private-team"]) {
+      const response = await request(path, "org-viewer");
+      const text = await response.text();
+      expect(text).not.toContain(row.title);
+      expect(text).not.toContain(row.sourceMemoryPath);
+      expect(text).not.toContain(row.token);
+    }
+    const ownerList = await request("?ownerType=team&ownerId=private-team", "test-member");
+    expect(ownerList.status).toBe(200);
+    expect(await ownerList.json()).toMatchObject({ artifacts: [] });
+  });
+
   it("denies team-only reads and management after team membership is removed", async () => {
     const { db, row, comment, request } = await setup();
     await db.delete(teamMembers).where(eq(teamMembers.userId, "local-user"));

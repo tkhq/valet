@@ -434,21 +434,28 @@ export async function listArtifactVersions(db: AppDb, artifactId: string): Promi
  * version row — pre-pages publishes wrote none, and pinning to a phantom
  * would serve the fallback while claiming the pin took.
  */
+export async function validateArtifactSharedVersion(
+  db: AppDb,
+  id: string,
+  sharedVersion: number | null,
+): Promise<void> {
+  if (sharedVersion === null) return;
+  const rows = await db
+    .select({ version: artifactVersions.version })
+    .from(artifactVersions)
+    .where(and(eq(artifactVersions.artifactId, id), eq(artifactVersions.version, sharedVersion)))
+    .limit(1);
+  if (!rows[0]) {
+    throw new ValidationError(`Version ${sharedVersion} does not exist for this artifact.`);
+  }
+}
+
 export async function setArtifactSharedVersion(
   db: AppDb,
   id: string,
   sharedVersion: number | null,
 ): Promise<ArtifactRow> {
-  if (sharedVersion !== null) {
-    const rows = await db
-      .select({ version: artifactVersions.version })
-      .from(artifactVersions)
-      .where(and(eq(artifactVersions.artifactId, id), eq(artifactVersions.version, sharedVersion)))
-      .limit(1);
-    if (!rows[0]) {
-      throw new ValidationError(`Version ${sharedVersion} does not exist for this artifact.`);
-    }
-  }
+  await validateArtifactSharedVersion(db, id, sharedVersion);
   const [row] = await db
     .update(artifacts)
     .set({ sharedVersion, updatedAt: Date.now() })
@@ -510,6 +517,9 @@ export async function listArtifacts(
   db: AppDb,
   caller: { id: string; orgId: string; orgAdmin: boolean; mine?: boolean },
 ): Promise<ArtifactSummaryRow[]> {
+  const liveTeam = exists(db.select({ id: teams.id }).from(teams).where(and(
+    eq(teams.id, artifacts.ownerId), eq(teams.orgId, caller.orgId),
+  )));
   const teamMember = exists(db.select({ id: teams.id }).from(teams)
     .innerJoin(teamMembers, eq(teamMembers.teamId, teams.id))
     .innerJoin(orgMembers, and(eq(orgMembers.orgId, teams.orgId), eq(orgMembers.userId, teamMembers.userId)))
@@ -529,7 +539,7 @@ export async function listArtifacts(
         caller.mine ? eq(artifacts.actorUserId, caller.id) : undefined,
         or(
           teamMember,
-          and(eq(artifacts.teamAudience, "organization"), isNull(artifacts.revokedAt)),
+          and(eq(artifacts.teamAudience, "organization"), isNull(artifacts.revokedAt), liveTeam),
         ),
       ),
     ),
@@ -553,8 +563,7 @@ export async function listArtifactsForOwner(
         eq(artifacts.orgId, orgId),
         eq(artifacts.ownerType, owner.type),
         eq(artifacts.ownerId, owner.id),
-        // The paged gallery omits revoked links before selecting a page.
-        page ? isNull(artifacts.revokedAt) : undefined,
+        isNull(artifacts.revokedAt),
         page?.cursor ? or(
           lt(artifacts.updatedAt, page.cursor.updatedAt),
           and(eq(artifacts.updatedAt, page.cursor.updatedAt), lt(artifacts.id, page.cursor.id)),
