@@ -538,6 +538,7 @@ CREATE TABLE "artifacts" (
 	"version" bigint DEFAULT 1 NOT NULL,
 	"shared_version" bigint,
 	"visibility" text DEFAULT 'org' NOT NULL,
+	"team_audience" text DEFAULT 'team' NOT NULL,
 	"public_by" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,

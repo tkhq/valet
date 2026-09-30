@@ -398,9 +398,11 @@ Publish, memory share, and revoke-by-path validate the team scope in the service
 
 Publish, memory share, revoke-by-path, and personal-to-team copy hold `FOR SHARE` locks on both authorizing membership rows until transaction commit. Membership deletion waits for an authorized mutation to commit. If deletion holds the row first, the mutation waits and then refuses access after deletion commits. The team ownership lock separately serializes team deletion.
 
-There is no audience-grant mechanism for team artifacts. Public widening is rejected without changing the artifact or its version pin. Personal org/public sharing retains its existing rules. Copying a personal artifact to a team creates a team-only snapshot.
+Team artifacts use `team_audience`, separate from personal `visibility`. The values are `team` and `organization`. A missing or legacy value repairs to `team`; stored `visibility = org` or `public` never widens a team artifact. Public widening stays rejected. Copying a personal artifact to a team creates a team-only snapshot.
 
-The gallery and page show **Team-only** for team artifacts, including legacy public rows. The team gallery explains that only current members can open its links. Team memory has no public-share control. Personal share controls exclude team snapshots even when their path and publishing actor match. A refused page asks the reader to check access with the sender.
+Team admins and organization admins can change the audience. A team admin must have live organization and owning-team membership. An organization admin needs live organization membership and does not need team membership. Organization audience grants access only to the artifact token, comments, downloads, and gallery rows. It grants no team sessions, credentials, other artifacts, or management rights. Every request checks current membership. Narrowing to `team` revokes organization-only readers immediately.
+
+The gallery and page show **Team-only** or **Organization-wide** from `team_audience`, including legacy rows with personal visibility flags. The gallery shows the audience control only when the API reports audience-management permission. Team memory has no public-share control. Personal share controls exclude team snapshots even when their path and publishing actor match. A refused page asks the reader to check access with the sender.
 
 Regression checks cover members, nonmembers, nonmember admins, removed publishers, stale team rows without org membership, foreign organizations, anonymous callers, team keys, and direct service calls. UI checks cover team-only labels and personal-share collisions.
 

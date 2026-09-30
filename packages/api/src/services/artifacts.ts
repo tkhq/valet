@@ -14,10 +14,9 @@
  * sandboxed frame. Markdown compiles through GFM here, at publish, so the
  * web client never compiles.
  *
- * Visibility rules live in `decideArtifactAccess`, a pure function so the
- * whole matrix is unit-testable without an HTTP server: `org` needs a
- * logged-in member of the artifact's org; personal `public` pages need the
- * org opt-in. Team ownership always requires live membership.
+ * Personal visibility and team audience are separate decisions. Team pages
+ * require a live organization member and either live team membership or the
+ * explicit `organization` audience.
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, exists, isNull, lt, ne, or } from "drizzle-orm";
@@ -35,13 +34,14 @@ import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { normalizePath } from "../lib/okf.js";
 import { artifactComments, artifactVersions, artifacts, orgMembers, orgs, teamMembers, teams } from "../schema/index.js";
-import { getTeamInOrg, lockTeamForOwnership } from "./teams.js";
+import { canAdministerTeam, getTeamInOrg, lockTeamForOwnership } from "./teams.js";
 import { readFile, type MemoryScope } from "./memory.js";
 
 export type ArtifactRow = typeof artifacts.$inferSelect;
 export type ArtifactVersionRow = typeof artifactVersions.$inferSelect;
 export type ArtifactCommentRow = typeof artifactComments.$inferSelect;
 export type ArtifactVisibility = "org" | "public";
+export type TeamArtifactAudience = "team" | "organization";
 
 export interface ArtifactScope extends MemoryScope {
   /** Verified caller. Internal tools use their authenticated owner principal. */
@@ -217,7 +217,7 @@ export async function copyArtifactToTeam(
       id: randomUUID(), token: mintToken(), ownerType: "team", ownerId: input.teamId,
       orgId, actorUserId: scope.actorUserId, sourceSessionId: "", sourceMemoryPath: key,
       title: source.title, content: source.content, rendered: source.rendered, format: source.format,
-      description: source.description, icon: source.icon, version: 1, visibility: "org",
+      description: source.description, icon: source.icon, version: 1, visibility: "org", teamAudience: "team",
       createdAt: now, updatedAt: now,
     }).onConflictDoNothing().returning();
     if (!copy) throw new ValidationError("A team artifact already uses that key. Choose another key.");
@@ -282,7 +282,7 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
         updatedAt: now,
         revokedAt: null,
         ...(reactivating
-          ? { visibility: "org" as const, publicBy: null, sharedVersion: null }
+          ? { visibility: "org" as const, teamAudience: "team" as const, publicBy: null, sharedVersion: null }
           : {}),
       })
       .where(and(eq(artifacts.id, existing.id), eq(artifacts.orgId, input.orgId)))
@@ -311,6 +311,7 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
       icon: input.icon,
       version: 1,
       visibility: "org",
+      teamAudience: "team",
       createdAt: now,
       updatedAt: now,
     })
@@ -464,6 +465,8 @@ export async function setArtifactSharedVersion(
  * the database. */
 export interface ArtifactSummaryRow {
   ownerType: string;
+  ownerId: string;
+  orgId: string;
   id: string;
   token: string;
   sourceMemoryPath: string;
@@ -473,6 +476,7 @@ export interface ArtifactSummaryRow {
   version: number;
   sharedVersion: number | null;
   visibility: "org" | "public";
+  teamAudience: "team" | "organization";
   actorUserId: string;
   revokedAt: number | null;
   createdAt: number;
@@ -481,6 +485,8 @@ export interface ArtifactSummaryRow {
 
 const summaryColumns = {
   ownerType: artifacts.ownerType,
+  ownerId: artifacts.ownerId,
+  orgId: artifacts.orgId,
   id: artifacts.id,
   token: artifacts.token,
   sourceMemoryPath: artifacts.sourceMemoryPath,
@@ -490,6 +496,7 @@ const summaryColumns = {
   version: artifacts.version,
   sharedVersion: artifacts.sharedVersion,
   visibility: artifacts.visibility,
+  teamAudience: artifacts.teamAudience,
   actorUserId: artifacts.actorUserId,
   revokedAt: artifacts.revokedAt,
   createdAt: artifacts.createdAt,
@@ -501,20 +508,25 @@ const summaryColumns = {
  * always require current membership, including for the publishing actor. */
 export async function listArtifacts(
   db: AppDb,
-  caller: { id: string; orgId: string; orgAdmin: boolean },
+  caller: { id: string; orgId: string; orgAdmin: boolean; mine?: boolean },
 ): Promise<ArtifactSummaryRow[]> {
+  const teamMember = exists(db.select({ id: teams.id }).from(teams)
+    .innerJoin(teamMembers, eq(teamMembers.teamId, teams.id))
+    .innerJoin(orgMembers, and(eq(orgMembers.orgId, teams.orgId), eq(orgMembers.userId, teamMembers.userId)))
+    .where(and(
+      eq(teams.id, artifacts.ownerId), eq(teams.orgId, caller.orgId),
+      eq(teamMembers.userId, caller.id),
+    )));
   const where = and(
     eq(artifacts.orgId, caller.orgId),
-    caller.orgAdmin ? undefined : eq(artifacts.actorUserId, caller.id),
-    or(
+    caller.orgAdmin && !caller.mine ? undefined : or(
+      and(ne(artifacts.ownerType, "team"), eq(artifacts.actorUserId, caller.id)),
+      and(eq(artifacts.ownerType, "team"), caller.mine ? eq(artifacts.actorUserId, caller.id) : undefined),
+    ),
+    caller.orgAdmin && !caller.mine ? undefined : or(
       ne(artifacts.ownerType, "team"),
-      exists(db.select({ id: teams.id }).from(teams)
-        .innerJoin(teamMembers, eq(teamMembers.teamId, teams.id))
-        .innerJoin(orgMembers, and(eq(orgMembers.orgId, teams.orgId), eq(orgMembers.userId, teamMembers.userId)))
-        .where(and(
-          eq(teams.id, artifacts.ownerId), eq(teams.orgId, caller.orgId),
-          eq(teamMembers.userId, caller.id),
-        ))),
+      teamMember,
+      eq(artifacts.teamAudience, "organization"),
     ),
   );
   return db.select(summaryColumns).from(artifacts).where(where).orderBy(desc(artifacts.updatedAt));
@@ -527,6 +539,7 @@ export async function listArtifactsForOwner(
   orgId: string,
   owner: { type: string; id: string },
   page?: { limit: number; cursor?: { updatedAt: number; id: string } },
+  organizationAudienceOnly = false,
 ): Promise<ArtifactSummaryRow[]> {
   const query = db
     .select(summaryColumns)
@@ -536,6 +549,7 @@ export async function listArtifactsForOwner(
         eq(artifacts.orgId, orgId),
         eq(artifacts.ownerType, owner.type),
         eq(artifacts.ownerId, owner.id),
+        organizationAudienceOnly ? eq(artifacts.teamAudience, "organization") : undefined,
         // The paged gallery omits revoked links before selecting a page.
         page ? isNull(artifacts.revokedAt) : undefined,
         page?.cursor ? or(
@@ -546,6 +560,41 @@ export async function listArtifactsForOwner(
     )
     .orderBy(desc(artifacts.updatedAt), desc(artifacts.id));
   return page ? query.limit(page.limit + 1) : query;
+}
+
+export async function canChangeTeamArtifactAudience(
+  db: AppDb, artifact: Pick<ArtifactRow, "ownerType" | "ownerId" | "orgId">, actorUserId: string,
+): Promise<boolean> {
+  return artifact.ownerType === "team" &&
+    await hasCurrentOrgMembership(db, artifact.orgId, actorUserId) &&
+    await canAdministerTeam(db, artifact.ownerId, actorUserId);
+}
+
+export async function setTeamArtifactAudience(
+  db: AppDb, id: string, audience: TeamArtifactAudience, actorUserId: string,
+): Promise<ArtifactRow> {
+  return db.transaction(async (tx) => {
+    const existing = await getArtifactById(tx, id);
+    if (!existing || existing.ownerType !== "team") throw new NotFoundError("artifact", id);
+
+    await lockTeamForOwnership(tx, existing.ownerId);
+    const [orgMembership] = await tx.select({ role: orgMembers.role }).from(orgMembers).where(and(
+      eq(orgMembers.orgId, existing.orgId), eq(orgMembers.userId, actorUserId),
+    )).for("share");
+    const [teamMembership] = await tx.select({ role: teamMembers.role }).from(teamMembers).where(and(
+      eq(teamMembers.teamId, existing.ownerId), eq(teamMembers.userId, actorUserId),
+    )).for("share");
+    const authorized = orgMembership?.role === "admin" || teamMembership?.role === "admin";
+    if (!orgMembership || !authorized || !(await getTeamInOrg(tx, existing.orgId, existing.ownerId))) {
+      throw new NotFoundError("artifact", id);
+    }
+
+    const [row] = await tx.update(artifacts).set({ teamAudience: audience, updatedAt: Date.now() })
+      .where(and(eq(artifacts.id, id), eq(artifacts.orgId, existing.orgId), eq(artifacts.ownerType, "team")))
+      .returning();
+    if (!row) throw new NotFoundError("artifact", id);
+    return row;
+  });
 }
 
 export async function setArtifactVisibility(
@@ -697,14 +746,14 @@ export type ArtifactAccess =
 export function decideArtifactAccess(opts: {
   artifact: Pick<ArtifactRow, "ownerType" | "orgId" | "visibility" | "revokedAt"> | undefined;
   allowPublicArtifacts: boolean;
-  teamMember?: boolean;
+  teamAccess?: boolean;
   user: { orgId: string } | undefined;
 }): ArtifactAccess {
   const { artifact, user } = opts;
   if (!artifact || artifact.revokedAt !== null) return { kind: "not_found" };
   if (artifact.ownerType === "team") {
     if (!user) return { kind: "login" };
-    if (user.orgId !== artifact.orgId || opts.teamMember !== true) return { kind: "not_found" };
+    if (user.orgId !== artifact.orgId || opts.teamAccess !== true) return { kind: "not_found" };
     return { kind: "serve" };
   }
   if (artifact.visibility === "public" && opts.allowPublicArtifacts) return { kind: "serve" };
@@ -713,7 +762,7 @@ export function decideArtifactAccess(opts: {
   return { kind: "serve" };
 }
 
-/** Team ownership takes precedence over actor and visibility on every surface. */
+/** Current membership in the owning team and organization. Audience never changes this management gate. */
 export async function hasArtifactTeamAccess(
   db: AppDb,
   artifact: Pick<ArtifactRow, "ownerType" | "ownerId" | "orgId">,
@@ -722,4 +771,24 @@ export async function hasArtifactTeamAccess(
   if (artifact.ownerType !== "team") return true;
   if (!user || user.orgId !== artifact.orgId) return false;
   return (await artifactMemberships(db, artifact.orgId, artifact.ownerId, user.id)).length > 0;
+}
+
+async function hasCurrentOrgMembership(db: AppDb, orgId: string, userId: string): Promise<boolean> {
+  const rows = await db.select({ userId: orgMembers.userId }).from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId))).limit(1);
+  return rows.length > 0;
+}
+
+/** Read access for a team artifact. Organization audience drops only the team-membership join. */
+export async function hasArtifactReadAccess(
+  db: AppDb,
+  artifact: Pick<ArtifactRow, "ownerType" | "ownerId" | "orgId" | "teamAudience">,
+  user: { id: string; orgId: string } | undefined,
+): Promise<boolean> {
+  if (artifact.ownerType !== "team") return true;
+  if (!user || user.orgId !== artifact.orgId || !(await hasCurrentOrgMembership(db, artifact.orgId, user.id))) return false;
+  if (artifact.teamAudience === "organization") {
+    return (await getTeamInOrg(db, artifact.orgId, artifact.ownerId)) !== undefined;
+  }
+  return hasArtifactTeamAccess(db, artifact, user);
 }

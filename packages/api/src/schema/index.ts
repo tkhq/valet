@@ -927,6 +927,8 @@ export const artifacts = pgTable(
     version: bigint("version", { mode: "number" }).notNull().default(1),
     sharedVersion: bigint("shared_version", { mode: "number" }),
     visibility: text("visibility", { enum: ["org", "public"] }).notNull().default("org"),
+    // Separate from personal visibility. Existing and new team rows default narrow.
+    teamAudience: text("team_audience", { enum: ["team", "organization"] }).notNull().default("team"),
     publicBy: text("public_by"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),

@@ -39,9 +39,9 @@ async function setup() {
   const teamRows = await Promise.all(["one", "two", "three"].map((key) => publish({ type: "team", id: "team-a" }, key)));
   const revoked = await publish({ type: "team", id: "team-a" }, "revoked");
   await db.update(artifacts).set({ revokedAt: 100, updatedAt: 9999 }).where(eq(artifacts.id, revoked.id));
-  await publish({ type: "team", id: "team-b" }, "other-team");
+  const otherTeam = await publish({ type: "team", id: "team-b" }, "other-team");
   await db.delete(teamMembers).where(eq(teamMembers.userId, "local-user"));
-  return { target, personal, otherPersonal, teamRows, revoked };
+  return { target, personal, otherPersonal, teamRows, revoked, otherTeam };
 }
 
 async function list(target: TestApi, query: string, userId = "local-user") {
@@ -67,10 +67,16 @@ describe("workspace artifact lists", () => {
     expect(team.nextCursor).toBeNull();
   });
 
-  it("refuses nonmembers, other personal owners, missing teams, and foreign-org teams", async () => {
-    const { target } = await setup();
+  it("lists only organization-audience rows for nonmembers", async () => {
+    const { target, otherTeam } = await setup();
+    const empty = await list(target, "ownerType=team&ownerId=team-b", "test-member");
+    expect(empty.artifacts).toEqual([]);
+    await target.providers.db.update(artifacts).set({ teamAudience: "organization" })
+      .where(eq(artifacts.id, otherTeam.id));
+    const widened = await list(target, "ownerType=team&ownerId=team-b", "test-member");
+    expect(widened.artifacts).toMatchObject([{ id: otherTeam.id, audience: "organization" }]);
+
     for (const [query, userId] of [
-      ["ownerType=team&ownerId=team-b", "test-member"],
       ["ownerType=user&ownerId=test-member", "local-user"],
       ["ownerType=team&ownerId=missing", "local-user"],
       ["ownerType=team&ownerId=foreign-team", "local-user"],
@@ -80,13 +86,9 @@ describe("workspace artifact lists", () => {
       });
       expect(response.status).toBe(404);
     }
-    // Org admin authority does not grant team artifact access.
-    expect((await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-b`)).status).toBe(404);
     await target.providers.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
-    const removed = await fetch(`${target.baseUrl}/api/artifacts?ownerType=team&ownerId=team-a&limit=50`, {
-      headers: { "x-valet-test-user-id": "test-member" },
-    });
-    expect(removed.status).toBe(404);
+    const removed = await list(target, "ownerType=team&ownerId=team-a&limit=50", "test-member");
+    expect(removed.artifacts).toEqual([]);
   });
 
   it("pages active rows without skipping timestamp ties or crossing workspace boundaries", async () => {

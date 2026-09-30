@@ -617,6 +617,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "model_tiers" jsonb',
   },
   {
+    // Team artifact audience is separate from personal visibility. The team
+    // default preserves every existing row's access.
+    describe: "artifacts.team_audience column",
+    probe: { kind: "column", table: "artifacts", column: "team_audience" },
+    sql: `ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "team_audience" text DEFAULT 'team' NOT NULL`,
+  },
+  {
     // Which compiler produced `rendered` (artifact-pages design). 'markdown'
     // matches every pre-pages row, whose content was always markdown.
     describe: "artifacts.format column",

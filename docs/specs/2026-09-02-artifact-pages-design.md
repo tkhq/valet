@@ -63,8 +63,8 @@ Three things do not change:
 - Sharing is explicit. Writing a file never publishes it.
 - The tool surface can only create `org` visibility. Personal artifacts can
   widen to `public` through the web UI with the org's `allowPublicArtifacts`
-  opt-in. Team artifacts always require current team membership. The gallery
-  and page show Team-only, regardless of their stored visibility.
+  opt-in. Team artifacts use a separate `team | organization` audience and
+  never serve anonymously. The gallery and page show that audience.
 - An artifact is a snapshot, never a live reference.
 
 ## What we take from Claude Code artifacts, and what we reject
@@ -725,3 +725,12 @@ implements against.
   never compiles; it renders what the api stored.
 - `ArtifactFrame` remounts on a `srcDoc` change — a republished page must not
   keep the previous document's script state.
+
+
+## Team artifact organization audience (TKAI-569)
+
+Team artifacts store `team_audience` separately from personal `visibility`. The default is `team` for new and existing rows. A personal visibility value never changes the team audience.
+
+The `organization` audience lets any current member of the owning organization read the token page, source download, and comments. Artifact lists include organization-audience rows for organization members. Team-only rows remain hidden from nonmembers. Version history, pinning, revoke, sessions, credentials, and other team resources keep their existing authorization.
+
+A team admin with live team and organization membership can change the audience. An organization admin with live organization membership can also change it without joining the team. The authenticated gallery shows `Only this team` and `Anyone in the organization` only to those callers. Narrowing takes effect on the next request.

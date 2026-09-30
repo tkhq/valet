@@ -164,7 +164,14 @@ function ArtifactPage() {
             {doc.title}
           </h1>
           {doc.ownerType === "team" && (
-            <span className="shrink-0 text-[11px] text-muted" title="Only current members of the owning team can open this link.">Team-only</span>
+            <span
+              className="shrink-0 text-[11px] text-muted"
+              title={doc.audience === "organization"
+                ? "Any current member of the organization can open this link."
+                : "Only current members of the owning team can open this link."}
+            >
+              {doc.audience === "organization" ? "Organization-wide" : "Team-only"}
+            </span>
           )}
           <p className="hidden shrink-0 text-[11px] text-muted sm:block">
             {doc.sharedBy ? `${doc.sharedBy} · ` : ""}v{doc.version} · {relativeTime(doc.updatedAt)}

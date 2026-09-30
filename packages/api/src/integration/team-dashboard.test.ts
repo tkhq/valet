@@ -7,7 +7,7 @@
  *   - GET /api/usage/breakdown?scope=team:<id> — team-owned spend,
  *     member-gated.
  *   - GET /api/artifacts?ownerType=team&ownerId=<id> — team artifacts,
- *     member-gated.
+ *     filtered by the caller's artifact audience access.
  *
  * `local-user` is the member; `test-member` (the `x-valet-test-user-id`
  * stub header) stays OFF the team so every gate has a non-member to refuse.
@@ -248,7 +248,7 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
     });
   }
 
-  it("lists the team's artifacts for a member; 404s a non-member; 400s a malformed filter", async () => {
+  it("lists team artifacts for a member and hides team-only rows from an organization member", async () => {
     api = await bootTestApi();
     await seedTeam(api);
     await seedArtifact(api, { id: "art-team", ownerType: "team", ownerId: "team_1", title: "Postmortem" });
@@ -259,10 +259,11 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
     const body = (await res.json()) as ListArtifactsResponse;
     expect(body.artifacts.map((a) => a.id)).toEqual(["art-team"]);
 
-    const nonMember = await fetch(`${api.baseUrl}/api/artifacts?ownerType=team&ownerId=team_1`, {
+    const organizationMember = await fetch(`${api.baseUrl}/api/artifacts?ownerType=team&ownerId=team_1`, {
       headers: NON_MEMBER_HEADERS,
     });
-    expect(nonMember.status).toBe(404);
+    expect(organizationMember.status).toBe(200);
+    expect(await organizationMember.json()).toMatchObject({ artifacts: [] });
 
     const malformed = await fetch(`${api.baseUrl}/api/artifacts?ownerType=user`);
     expect(malformed.status).toBe(400);
