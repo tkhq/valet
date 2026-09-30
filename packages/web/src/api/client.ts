@@ -11,6 +11,8 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
 import type {
   WorkspaceOutcomesResponse,
   WorkspaceBriefingsResponse,
+  DismissWorkspaceBriefingRequest,
+  DismissWorkspaceBriefingResponse,
   WorkspaceActiveWorkResponse,
   AbortThreadRequest,
   AddTeamMemberRequest,
@@ -567,6 +569,8 @@ export const api = {
     request<WorkspaceActiveWorkResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/active-work?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getWorkspaceBriefings: (owner: OwnerFilter) =>
     request<WorkspaceBriefingsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings`),
+  dismissWorkspaceBriefing: (owner: OwnerFilter, briefingId: string, body: DismissWorkspaceBriefingRequest) =>
+    request<DismissWorkspaceBriefingResponse>("POST", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings/${encodeURIComponent(briefingId)}/dismiss`, body),
   listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
     request<WorkspaceOutcomesResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/outcomes?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getThreadAddress: (id: string) =>

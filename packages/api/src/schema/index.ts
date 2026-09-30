@@ -2674,6 +2674,17 @@ export const workspaceBriefingCache = pgTable("workspace_briefing_cache", {
   leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
 }, t => [primaryKey({ columns: [t.orgId,t.ownerType,t.ownerId] })]);
 
+/** A brief one person dismissed in one workspace. A brief's id hashes its
+ * sources, so new activity makes a new brief that shows again. */
+export const briefingDismissals = pgTable("briefing_dismissals", {
+  userId: text("user_id").notNull(),
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  briefingId: text("briefing_id").notNull(),
+  dismissedAt: bigint("dismissed_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.userId, t.ownerType, t.ownerId, t.briefingId] })]);
+
 /** Durable permissions confined to a workflow and its current owner. */
 export const workflowActionGrants = pgTable("workflow_action_grants", {
   id: text("id").primaryKey(),

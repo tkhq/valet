@@ -10,7 +10,7 @@ let owner: OwnerFilter | undefined;
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
 vi.mock("~/api/settings", () => ({ useMe: () => ({ error: null }) }));
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
-vi.mock("~/api/client", () => ({ api: { getWorkspaceBriefings: vi.fn() } }));
+vi.mock("~/api/client", () => ({ api: { getWorkspaceBriefings: vi.fn(), dismissWorkspaceBriefing: vi.fn() } }));
 vi.mock("./workspace-activity", () => ({ WorkspaceActivity: () => <div>Detailed activity</div>, safeResultUrl: (value?: string) => {
   try { const url = new URL(value ?? ""); return ["https:", "http:"].includes(url.protocol) ? url.href : undefined; } catch { return undefined; }
 } }));
@@ -45,6 +45,17 @@ it("links a brief back to the Slack thread that started it, and only over http(s
   expect(within(article).getByRole("link", { name: "Open in Slack" }).getAttribute("href")).toBe("https://slack.com/archives/C1/p1700000000000100");
   const unsafe = await screen.findByRole("article", { name: "Unsafe origin" });
   expect(within(unsafe).queryByRole("link", { name: "Open in Slack" })).toBeNull();
+});
+it("dismisses a brief with its threads and reports what stayed open", async () => {
+  vi.mocked(api.dismissWorkspaceBriefing).mockResolvedValue({ dismissed: true, archived: 1, keptWaiting: 1 });
+  setup();
+  fireEvent.click(await screen.findByRole("button", { name: `Dismiss ${briefing.title}` }));
+  await waitFor(() => expect(api.dismissWorkspaceBriefing).toHaveBeenCalledWith(owner, briefing.id, { threads: [
+    { sessionId: "runtime", threadId: "rollout-review" },
+    { sessionId: "runtime", threadId: "design" },
+  ] }));
+  expect(await screen.findByRole("status")).toHaveProperty("textContent",
+    `Dismissed "${briefing.title}". Archived 1 thread. 1 waiting on an approval stays open.`);
 });
 it("briefs one goal across conversations and runs with one concise summary", async () => {
   setup();

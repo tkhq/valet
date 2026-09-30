@@ -1,9 +1,9 @@
-import { useId, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, ArrowUpRight, FileText, GitPullRequest, MessageSquare, Workflow } from "lucide-react";
+import { ArrowRight, ArrowUpRight, FileText, GitPullRequest, MessageSquare, Workflow, X } from "lucide-react";
 import type { WorkspaceBriefing, WorkspaceBriefingSource } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
-import { useWorkspaceBriefings } from "~/api/catch-up";
+import { useDismissBriefing, useWorkspaceBriefings } from "~/api/catch-up";
 import { useMe } from "~/api/settings";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
@@ -23,6 +23,19 @@ export function WorkspaceCatchUp({ owner: explicitOwner }: { owner?: OwnerFilter
 
 function ScopedBriefings({ owner }: { owner: OwnerFilter }) {
   const briefings = useWorkspaceBriefings(owner);
+  const dismiss = useDismissBriefing(owner);
+  const [dismissNote, setDismissNote] = useState<string>();
+  function dismissBriefing(briefing: WorkspaceBriefing) {
+    setDismissNote(undefined);
+    dismiss.mutate(briefing, {
+      onSuccess: ({ archived, keptWaiting }) => setDismissNote(
+        `Dismissed "${briefing.title}".` +
+        (archived > 0 ? ` Archived ${archived} ${archived === 1 ? "thread" : "threads"}.` : "") +
+        (keptWaiting > 0 ? ` ${keptWaiting} waiting on an approval ${keptWaiting === 1 ? "stays" : "stay"} open.` : ""),
+      ),
+      onError: () => setDismissNote("Could not dismiss the brief. Try again."),
+    });
+  }
 
   return <div className="space-y-6">
     {briefings.isError ? (
@@ -42,7 +55,9 @@ function ScopedBriefings({ owner }: { owner: OwnerFilter }) {
       </BriefingPlaceholder>
     ) : (
       <div className="space-y-4">
-        {briefings.data.briefings.map(briefing => <BriefingCard key={briefing.id} briefing={briefing} />)}
+        {dismissNote && <p role="status" className="text-xs text-muted">{dismissNote}</p>}
+        {briefings.data.briefings.map(briefing => <BriefingCard key={briefing.id} briefing={briefing}
+          onDismiss={() => dismissBriefing(briefing)} dismissing={dismiss.isPending && dismiss.variables?.id === briefing.id} />)}
         <p className="text-xs text-muted">Based on recent work{briefings.data.checkedAt ? ` · Checked ${relativeTime(briefings.data.checkedAt)}` : ""}{briefings.data.refreshing ? " · Updating…" : ""}</p>
       </div>
     )}
@@ -81,7 +96,7 @@ const STATUS: Record<WorkspaceBriefing["status"], { label: string; variant: "war
   updated: { label: "Updated", variant: "neutral" },
 };
 
-function BriefingCard({ briefing }: { briefing: WorkspaceBriefing }) {
+function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: WorkspaceBriefing; onDismiss: () => void; dismissing: boolean }) {
   const headingId = useId();
   const status = STATUS[briefing.status];
   const sources = [...briefing.sources].sort((a, b) => Number(b.kind === "pull_request") - Number(a.kind === "pull_request"));
@@ -90,6 +105,11 @@ function BriefingCard({ briefing }: { briefing: WorkspaceBriefing }) {
     <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <h2 id={headingId} className="min-w-0 flex-1 break-words text-sm font-medium text-ink">{briefing.title}</h2>
       <Badge variant={status.variant}>{status.label}</Badge>
+      <button type="button" onClick={onDismiss} disabled={dismissing}
+        title="Dismiss this brief and archive its threads. Threads waiting on an approval stay open."
+        aria-label={`Dismiss ${briefing.title}`}
+        className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink disabled:opacity-50"
+      ><X aria-hidden className="h-3.5 w-3.5" /></button>
     </header>
     <p className="mt-1 whitespace-pre-line text-sm text-muted">{briefing.summary}</p>
     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">

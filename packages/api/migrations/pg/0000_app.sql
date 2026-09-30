@@ -2483,3 +2483,10 @@ CREATE TABLE IF NOT EXISTS "workflow_action_grants" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "workflow_action_grants_workflow" ON "workflow_action_grants" ("org_id", "workflow_id");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "briefing_dismissals" (
+  "user_id" text NOT NULL, "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "briefing_id" text NOT NULL, "dismissed_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "owner_type", "owner_id", "briefing_id")
+);

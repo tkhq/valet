@@ -5344,6 +5344,17 @@ export interface WorkspaceBriefing {
   originUrl?: string;
   sources: WorkspaceBriefingSource[];
 }
+export interface DismissWorkspaceBriefingRequest {
+  /** The brief's threads to archive with it. Threads waiting on an approval stay open. */
+  threads?: Array<{ sessionId: string; threadId: string }>;
+}
+export interface DismissWorkspaceBriefingResponse {
+  dismissed: true;
+  /** Threads archived with the brief. */
+  archived: number;
+  /** Threads left open because an approval is pending on them. */
+  keptWaiting: number;
+}
 export interface WorkspaceBriefingsResponse {
   checkedAt?: number | null;
   refreshing?: boolean;

@@ -308,6 +308,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     "lease_token" text, "lease_until" bigint NOT NULL DEFAULT 0,
     PRIMARY KEY ("org_id", "owner_type", "owner_id")
   )` },
+  { describe: "briefing dismissals", probe: { kind: "table", table: "briefing_dismissals" }, sql: `CREATE TABLE IF NOT EXISTS "briefing_dismissals" (
+    "user_id" text NOT NULL, "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+    "briefing_id" text NOT NULL, "dismissed_at" bigint NOT NULL,
+    PRIMARY KEY ("user_id", "owner_type", "owner_id", "briefing_id")
+  )` },
   { describe: "event receipts table", probe: { kind: "table", table: "event_receipts" }, sql: `CREATE TABLE IF NOT EXISTS "event_receipts" (
   "id" text PRIMARY KEY, "org_id" text NOT NULL, "service" text NOT NULL,
   "external_id" text, "metadata" jsonb NOT NULL DEFAULT '{}',

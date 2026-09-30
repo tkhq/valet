@@ -1,4 +1,5 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
 
 export const qkCatchUp = {
@@ -46,5 +47,26 @@ export function useWorkspaceBriefings(owner: OwnerFilter) {
     queryFn: () => api.getWorkspaceBriefings(owner),
     staleTime: 60_000,
     refetchInterval: query => query.state.data?.refreshing ? 2_000 : 60_000,
+  });
+}
+
+/** The threads a brief names: its conversation and its thread sources. */
+export function briefingThreads(briefing: WorkspaceBriefing): Array<{ sessionId: string; threadId: string }> {
+  const threads = new Map<string, { sessionId: string; threadId: string }>();
+  const add = (sessionId?: string, threadId?: string) => { if (sessionId && threadId) threads.set(`${sessionId}:${threadId}`, { sessionId, threadId }); };
+  add(briefing.latestThread?.sessionId, briefing.latestThread?.threadId);
+  for (const source of briefing.sources) if (source.kind === "thread") add(source.sessionId, source.threadId);
+  return [...threads.values()];
+}
+
+/** Dismisses a brief for the caller and archives its threads. */
+export function useDismissBriefing(owner: OwnerFilter) {
+  const qc = useQueryClient();
+  return useMutation<DismissWorkspaceBriefingResponse, Error, WorkspaceBriefing>({
+    mutationFn: (briefing) => api.dismissWorkspaceBriefing(owner, briefing.id, { threads: briefingThreads(briefing) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkCatchUp.briefings(owner) });
+      void qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
   });
 }
