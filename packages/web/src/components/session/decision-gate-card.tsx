@@ -13,10 +13,9 @@
 import { useState } from "react";
 import { AlertTriangle, HelpCircle, KeyRound, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
-import { Button, Spinner, Textarea, Tooltip } from "~/components/primitives";
+import { Badge, Button, Spinner, Textarea, Tooltip } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
 import { useMe } from "~/api/settings";
-import { cn } from "~/lib/cn";
 
 // The gate action id the policy resolver offers on a `require_approval`
 // decision that grants an org-wide `allow` policy going forward — the API
@@ -72,58 +71,36 @@ export function DecisionGateCard({
   }
 
   const Icon = ICON_FOR_TYPE[gate.type];
-  const tone = TONE_FOR_TYPE[gate.type];
+  const kind = KIND_FOR_TYPE[gate.type];
 
   return (
     <div
-      className={cn(
-        "border-t border-x mx-3 mt-3 rounded-md",
-        "border-amber-300 dark:border-amber-700/60",
-        "bg-amber-50/70 dark:bg-amber-950/40",
-      )}
+      className="mx-3 mt-3 rounded-lg border border-line bg-paper"
       role="dialog"
       aria-live="polite"
       aria-labelledby={`gate-${gate.id}-title`}
     >
       <header className="flex items-start gap-2.5 px-3.5 pt-3 pb-1.5">
-        <span
-          className={cn(
-            "mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full",
-            tone.iconBg,
-          )}
-        >
-          <Icon className={cn("h-3.5 w-3.5", tone.iconFg)} />
-        </span>
+        <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
         <div className="min-w-0 flex-1">
-          <div className={cn("text-[10px] font-semibold uppercase tracking-wider", tone.label)}>
-            {LABEL_FOR_TYPE[gate.type]} • agent paused
-          </div>
-          <h3
-            id={`gate-${gate.id}-title`}
-            className="text-sm font-semibold text-[--fg] mt-0.5"
-          >
+          <Badge variant={kind.variant}>{kind.label} · Valet is waiting</Badge>
+          <h3 id={`gate-${gate.id}-title`} className="mt-1.5 text-sm font-medium text-ink">
             {gate.title}
           </h3>
         </div>
-        <button
-          type="button"
-          onClick={cancel}
-          disabled={busy}
-          aria-label="Cancel and dismiss"
-          className="text-muted hover:text-[--fg] disabled:opacity-50 -mr-1 mt-0.5"
-        >
-          <X className="h-4 w-4" />
-        </button>
+        <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
+          <X aria-hidden className="h-3.5 w-3.5" />
+        </Button>
       </header>
 
       {gate.body && (
-        <div className="px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap">
+        <div className="pl-10 pr-3.5 pb-2 text-sm text-muted whitespace-pre-wrap">
           {gate.body}
         </div>
       )}
 
       {gate.provenance && (
-        <div className="px-3.5 pb-2 text-[11px] text-muted" data-testid="gate-provenance">
+        <div className="pl-10 pr-3.5 pb-2 text-xs text-muted" data-testid="gate-provenance">
           {provenanceLine(gate.provenance)}
         </div>
       )}
@@ -131,22 +108,23 @@ export function DecisionGateCard({
       {gate.type === "question" ? (
         <>
         {gate.actions.length > 0 && (
-          <div className="px-3.5 pb-2 flex flex-wrap gap-2">
+          <div className="pl-10 pr-3.5 pb-2 flex flex-wrap gap-2">
             {gate.actions.map((a) => (
-              <Button key={a.id} variant="secondary" onClick={() => pickAction(a.id)} disabled={busy}>{a.label}</Button>
+              <Button key={a.id} variant="secondary" size="sm" onClick={() => pickAction(a.id)} disabled={busy}>{a.label}</Button>
             ))}
           </div>
         )}
-        <div className="px-3.5 pb-3 flex items-end gap-2">
+        <div className="pl-10 pr-3.5 pb-3 flex items-end gap-2">
           <Textarea
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={gate.actions.length > 0 ? "Or type a different answer…" : "Your answer…"}
             rows={2}
-            className="flex-1 bg-white/70 dark:bg-neutral-900/40"
+            className="flex-1"
             disabled={busy}
           />
           <Button
+            size="sm"
             onClick={submitValue}
             disabled={busy || value.trim().length === 0}
           >
@@ -155,13 +133,14 @@ export function DecisionGateCard({
         </div>
         </>
       ) : (
-        <div className="px-3.5 pb-3 flex flex-wrap gap-2">
+        <div className="pl-10 pr-3.5 pb-3 flex flex-wrap gap-2">
           {gate.actions.map((a) => {
             const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
             const disabled = busy || (isAlwaysAllow && !isAdmin);
             const button = (
               <Button
                 key={a.id}
+                size="sm"
                 onClick={() => pickAction(a.id)}
                 disabled={disabled}
                 variant={
@@ -227,29 +206,8 @@ const ICON_FOR_TYPE = {
   credential_request: KeyRound,
 } as const;
 
-const LABEL_FOR_TYPE: Record<DecisionGate["type"], string> = {
-  approval: "Approval needed",
-  question: "Question",
-  credential_request: "Credential needed",
-};
-
-const TONE_FOR_TYPE: Record<
-  DecisionGate["type"],
-  { iconBg: string; iconFg: string; label: string }
-> = {
-  approval: {
-    iconBg: "bg-amber-200 dark:bg-amber-900/60",
-    iconFg: "text-amber-800 dark:text-amber-300",
-    label: "text-amber-800 dark:text-amber-300",
-  },
-  question: {
-    iconBg: "bg-blue-200 dark:bg-blue-900/60",
-    iconFg: "text-blue-800 dark:text-blue-300",
-    label: "text-blue-800 dark:text-blue-300",
-  },
-  credential_request: {
-    iconBg: "bg-violet-200 dark:bg-violet-900/60",
-    iconFg: "text-violet-800 dark:text-violet-300",
-    label: "text-violet-800 dark:text-violet-300",
-  },
+const KIND_FOR_TYPE: Record<DecisionGate["type"], { label: string; variant: "warning" | "accent" | "neutral" }> = {
+  approval: { label: "Approval needed", variant: "warning" },
+  question: { label: "Question", variant: "accent" },
+  credential_request: { label: "Credential needed", variant: "neutral" },
 };
