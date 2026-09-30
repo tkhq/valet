@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionPolicies, actionPolicyOverrides, workflowActionGrants, workflowRuns, workflowDefinitions, workflowVersions } from "../schema/index.js";
-import { createTeam } from "../services/teams.js";
+import { addMember, createTeam } from "../services/teams.js";
 import { resolveActionPolicy } from "../policies/service.js";
 import { isRiskLevel } from "../policies/admin.js";
 import type {
@@ -81,7 +81,7 @@ const DEFINITION = {
 
 async function insertWorkflow(
   localApi: TestApi,
-  opts: { ownerId?: string; ownerType?: "user" | "team" } = {},
+  opts: { ownerId?: string; ownerType?: "user" | "team"; definition?: unknown } = {},
 ): Promise<string> {
   const now = Date.now();
   const id = `wf_perm_${now}_${Math.random().toString(36).slice(2, 8)}`;
@@ -89,7 +89,7 @@ async function insertWorkflow(
     id,
     orgId: "local-org",
     name: "perm-test-wf",
-    definition: DEFINITION,
+    definition: opts.definition ?? DEFINITION,
     ownerType: opts.ownerType ?? "user",
     ownerId: opts.ownerId ?? "local-user",
     createdAt: now,
@@ -100,7 +100,7 @@ async function insertWorkflow(
     workflowId: id,
     version: 1,
     name: "perm-test-wf",
-    definition: DEFINITION,
+    definition: opts.definition ?? DEFINITION,
     createdAt: now,
   });
   return id;
@@ -226,6 +226,33 @@ describe("team workflow permissions", () => {
     expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(2);
     const outsider = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST", headers: { "x-valet-test-user-id": "test-member" } });
     expect(outsider.status).toBe(404);
+  });
+});
+
+describe("workflow grants after a definition change", () => {
+  it("survive an approver's edit and are revoked by a member's edit", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Grant team", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    // Each edit adds one more step that uses the approved action.
+    const ships = (count: number) => {
+      const ids = Array.from({ length: count }, (_, index) => `ship${index}`);
+      return { version: "dag/v1",
+        nodes: [{ id: "trigger", type: "trigger" }, ...ids.map((id) => ({ id, type: "tool", service: "widgets", action: "deploy", params: {} })), { id: "stop", type: "stop" }],
+        edges: ["trigger", ...ids, "stop"].slice(1).map((to, index) => ({ from: ["trigger", ...ids][index]!, to })) };
+    };
+    const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id, definition: ships(1) });
+    expect((await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
+    const edit = (count: number, headers: Record<string, string> = {}) => fetch(`${api!.baseUrl}/api/workflows/${wfId}`, {
+      method: "PUT", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ definition: ships(count) }),
+    });
+    // The admin who granted it edits the steps: the approval stands.
+    expect((await edit(2)).status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
+    // A member adds another use of the approved action: the grants go, so an approver must look again.
+    expect((await edit(3, { "x-valet-test-user-id": "test-member" })).status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
   });
 });
 

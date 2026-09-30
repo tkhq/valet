@@ -1362,6 +1362,17 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     expect(await localApi.providers.db.select().from(runtimeGrants)).toHaveLength(0);
   });
 
+  it("a human approval sent with the legacy always scope approves, as before", async () => {
+    const { localApi, runId } = await setupRun();
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [{ kind: "signal", signalType: "approval:gate", nodeId: "gate" }]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved: true, scope: "always" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await localApi.providers.db.select().from(runtimeGrants)).toHaveLength(0);
+  });
+
   it("policy gate + scope=always + non-admin → 403", async () => {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });

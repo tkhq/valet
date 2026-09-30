@@ -102,7 +102,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
         SELECT left(COALESCE(cp.error,cp.result->>'response',cp.result->>'text',cp.result->>'message',cp.result->>'output',''),3000) AS output
         FROM workflow_checkpoints cp WHERE cp.run_id=r.id AND cp.status IN ('completed','failed')
           AND (cp.status='failed' OR EXISTS(SELECT 1 FROM jsonb_path_query(r.definition,'$.** ? (exists (@.id))') n
-            WHERE n->>'id'=cp.node_id AND n->>'type' IN ('stop','session','thread','llm')))
+            WHERE n->>'id'=cp.node_id AND n->>'type' IN ('stop','session','orchestrator','llm')))
         ORDER BY cp.created_at DESC,cp.node_id DESC LIMIT 3
       ) c) AS output FROM recent_runs r
       LEFT JOIN LATERAL (SELECT s.id AS session_id,t.id AS thread_id FROM agent_sessions s

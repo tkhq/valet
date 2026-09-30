@@ -132,22 +132,30 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
-  await reactivateRestoredAssistantSessions(db);
+  await syncAssistantSessionStatus(db);
 }
 
-/** dev-v2 deleted a workspace assistant by archiving it and marking its
- * session `deleted`. The singleton cutover restores that assistant when its
- * owner still exists, but its session row stayed `deleted`: the reconcile
- * sweep then treats the live runtime's sandbox as orphaned, and threads,
- * briefs and approvals drop out of every list. The runtime session can no
- * longer be deleted, so only rows from before the cutover match. This runs
- * on every boot to also fix databases that were cut over before it existed.
- * Idempotent: a live assistant with an active session is untouched. */
-export async function reactivateRestoredAssistantSessions(db: PgDb): Promise<void> {
+/** Keeps each assistant's session status in line with the assistant.
+ * dev-v2 deleted an assistant by archiving it and marking its session
+ * `deleted`. The singleton cutover restores that assistant when its owner
+ * still exists, so its session becomes `active` again; otherwise the
+ * reconcile sweep destroys the runtime's sandbox and its threads drop out
+ * of every list. The cutover also retires extra assistants, and their
+ * sessions become `deleted`, so thread, brief, active-work, and approval
+ * lists stop showing threads a retired assistant can no longer open.
+ * Runs on every boot, so databases cut over before it existed are fixed
+ * too. Idempotent: rows already in line are untouched. */
+export async function syncAssistantSessionStatus(db: PgDb): Promise<void> {
+  const now = Date.now();
   await db.query(
     `UPDATE agent_sessions s SET status = 'active', updated_at = $1 FROM assistants a
       WHERE s.id = a.session_id AND a.archived_at IS NULL AND s.status = 'deleted'`,
-    [Date.now()],
+    [now],
+  );
+  await db.query(
+    `UPDATE agent_sessions s SET status = 'deleted', updated_at = $1 FROM assistants a
+      WHERE s.id = a.session_id AND a.archived_at IS NOT NULL AND s.status <> 'deleted'`,
+    [now],
   );
 }
 

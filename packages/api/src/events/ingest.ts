@@ -197,7 +197,10 @@ export async function ingestEvent(
     // dropped and never touches the events table. This is a privacy rule: Valet
     // retains event data only when a subscription asked for it, so an org that
     // watches one repo does not accumulate every other event its webhook happens
-    // to deliver. Subscribing is what turns persistence on.
+    // to deliver. Subscribing is what turns persistence on. The one exception
+    // is the diagnostic receipt (`events/receipts.ts`): each verified delivery
+    // keeps routing metadata such as channel, actor, and message ids, never the
+    // message text, for RECEIPT_RETENTION_DAYS, and only org admins can read it.
     //
     // The match is the full key + filter test, so an event a subscription
     // excludes by filter is dropped like one no subscription names at all — the

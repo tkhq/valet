@@ -235,6 +235,11 @@ describe("workspace briefing evidence", () => {
     const afterRetry = await collectWorkspaceBriefingSources(db, "local-org", user);
     expect(afterRetry.find(item => item.source.runId === "failed")).toBeUndefined();
     expect(afterRetry.find(item => item.source.runId === "retry-success")).toMatchObject({ state: "updated", content: "Concurrent verification passed." });
+    // A Thread step is stored as `orchestrator`; its reply is run evidence.
+    const threadStep = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, { id: "report", type: "orchestrator", prompt: "Report." }], edges: [{ from: "trigger", to: "report" }] };
+    await db.insert(workflowRuns).values({ id: "thread-step", workflowId: "wf", definitionVersionId: "v2", definition: threadStep, params: {}, ownerType: "user", ownerId: "local-user", status: "settled", outcome: "completed", createdAt: 30, updatedAt: 31 });
+    await db.insert(workflowCheckpoints).values({ runId: "thread-step", nodeId: "report", status: "completed", attempt: 1, result: { response: "Thread step reported the result." }, createdAt: 31 });
+    expect((await collectWorkspaceBriefingSources(db, "local-org", user)).find(item => item.source.runId === "thread-step")?.content).toContain("Thread step reported the result.");
     expect(await collectWorkspaceBriefingSources(db,"local-org",{ type: "team", id: "other" })).toEqual([]);
   });
 });

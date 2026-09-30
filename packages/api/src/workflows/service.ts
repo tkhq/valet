@@ -1,4 +1,4 @@
-import { prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
+import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
  * routes (`routes/workflows.ts`) and the agent-facing action plugin
@@ -38,6 +38,7 @@ import {
   contentSources,
   eventSubscriptions,
   sessionThreads,
+  workflowActionGrants,
   workflowDefinitions,
   workflowSignals,
   workflowRuns,
@@ -783,6 +784,11 @@ export async function updateWorkflowDefinition(
       input.definition,
       now,
     );
+    // A grant approves the steps as they were. When someone who could not
+    // have granted it changes them, an approver must look again.
+    if (!(await canGrantWorkflowPermissions(deps, owner, row))) {
+      await deps.db.delete(workflowActionGrants).where(and(eq(workflowActionGrants.orgId, row.orgId), eq(workflowActionGrants.workflowId, id)));
+    }
   }
 
   return {
@@ -1753,8 +1759,6 @@ export async function resolveWorkflowApproval(
     via: "web" | "agent";
   },
 ): Promise<ResolveApprovalOutcome> {
-  // Legacy workflow clients used "always" for org-wide approval. Narrow it to this workflow.
-  if (input.scope === "always") input = { ...input, scope: "workflow" };
   const run = await ownedRun(deps, owner, input.runId, "act");
   if (!run) return "not_found";
   const iter = input.iteration ?? 0;
@@ -1775,6 +1779,10 @@ export async function resolveWorkflowApproval(
 
   const node = findNodeInDefinition(run.definition, input.nodeId);
   const isPolicyGate = node?.type === "tool";
+  // Older clients send "always" for org-wide approval. On a policy gate it now
+  // means this workflow. A human approval never took a scope, so it is dropped,
+  // as the previous server ignored it.
+  if (input.scope === "always") input = { ...input, scope: isPolicyGate ? "workflow" : undefined };
   if (isPolicyGate && input.via === "agent") return "human_only";
 
   let workflowPermission: Awaited<ReturnType<typeof prepareWorkflowPermissions>> = null;

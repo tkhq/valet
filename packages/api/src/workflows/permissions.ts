@@ -200,7 +200,8 @@ export async function prepareWorkflowPermissions(
   return { ok: true, result: { allowed, blocked }, grants };
 }
 
-async function canGrantWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, summary: WorkflowDefinitionSummary) {
+/** Who may approve a workflow's actions for every later run: the owning user, or an admin of the owning team. */
+export async function canGrantWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, summary: Pick<WorkflowDefinitionSummary, "ownerType" | "ownerId">) {
   if (owner.principal?.type === "team") return false;
   return summary.ownerType === "user" ? summary.ownerId === owner.userId
     : summary.ownerType === "team" && await canAdministerTeam(deps.db, summary.ownerId, owner.userId);

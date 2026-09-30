@@ -77,6 +77,21 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM teams WHERE id = 'live-team'");
   });
 
+  it("marks the session of a retired extra assistant deleted", async () => {
+    await restorePreviousSchema();
+    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, is_default, created_at, archived_at)
+      VALUES ('main', 'org', 'user', 'two-assistants', 'main-session', true, 1, NULL),
+             ('extra', 'org', 'user', 'two-assistants', 'extra-session', false, 2, NULL)`);
+    await db.query(`INSERT INTO agent_sessions(id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
+      VALUES ('main-session', 'two-assistants', 'org', '/', 'active', 'user', 'two-assistants', 1, 1),
+             ('extra-session', 'two-assistants', 'org', '/', 'active', 'user', 'two-assistants', 2, 2)`);
+    await applyAppMigrations(db);
+    const statuses = await db.query("SELECT id, status FROM agent_sessions WHERE id IN ('main-session', 'extra-session') ORDER BY id");
+    expect(statuses.rows).toEqual([{ id: "extra-session", status: "deleted" }, { id: "main-session", status: "active" }]);
+    await db.query("DELETE FROM agent_sessions WHERE id IN ('main-session', 'extra-session')");
+    await db.query("DELETE FROM assistants WHERE org_id = 'org'");
+  });
+
   it("rewrites stored workflows that use thread steps or assistantId", async () => {
     const legacy = JSON.stringify({ version: "dag/v1", assistantId: "asst_old",
       nodes: [{ id: "o", type: "thread", prompt: "hi" }], edges: [] });
