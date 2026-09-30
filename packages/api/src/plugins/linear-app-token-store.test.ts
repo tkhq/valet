@@ -55,6 +55,18 @@ describe("LinearAppTokenStore", () => {
     expect((await inner.get(ORG, "linear"))?.metadata?.refreshFailedAt).toBe(NOW);
   });
 
+  it("does not bring back a credential an admin disconnected during renewal", async () => {
+    const held: { inner?: MemoryStore } = {};
+    const { store, inner } = await setup(NOW + DAY / 2, { oauthToken: () => {
+      // The admin disconnects while Linear is answering.
+      void held.inner?.delete(ORG, "linear");
+      return { status: 200, body: { access_token: "late", token_type: "Bearer", expires_in: 30 * 24 * 60 * 60, scope: "read write" } };
+    } });
+    held.inner = inner;
+    expect(await store.get(ORG, "linear")).toBeNull();
+    expect(await inner.get(ORG, "linear")).toBeNull();
+  });
+
   it("does not call Linear again until the retry window after a failed renewal", async () => {
     let now = NOW;
     const { inner, f } = await setup(NOW - 1, { oauthToken: () => ({ status: 401, body: { error: "invalid_client" } }) });

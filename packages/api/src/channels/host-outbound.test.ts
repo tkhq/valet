@@ -1357,8 +1357,10 @@ describe("ChannelHost outbound delivery", () => {
    * Opens one approval gate on a channel-bound thread and waits for its card.
    * Returns the gate, the thread it lives on, and the card's prompt ref.
    */
-  async function openChannelGate(): Promise<{ sessionId: string; threadId: string; gateId: string; ref: GatePromptRef }> {
-    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+  async function openChannelGate(
+    owner: { type: "user" | "team"; id: string } = { type: "user", id: USER_ID },
+  ): Promise<{ sessionId: string; threadId: string; gateId: string; ref: GatePromptRef }> {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, owner, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const gateId = `gate-${randomUUID()}`;
     await eventStream.append(
@@ -1412,6 +1414,12 @@ describe("ChannelHost outbound delivery", () => {
       actions: target["gateActions"].size,
     };
   }
+
+  it("tells the channel that only the team can approve a team Valet's card", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-ops", orgId: ORG_ID, name: "Ops", createdAt: 1 });
+    await openChannelGate({ type: "team", id: "team-ops" });
+    expect(fakeTransport.gatePrompts[0]?.prompt.body).toContain("Only members of Ops can approve.");
+  });
 
   it("keeps a posted card usable when saving its callback reference fails", async () => {
     vi.spyOn(engineStore, "getDecisionGate").mockImplementation(async (sessionId, gateId) => ({

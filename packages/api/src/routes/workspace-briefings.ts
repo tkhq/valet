@@ -1,18 +1,16 @@
 import { and, eq, inArray, lt } from "drizzle-orm";
-import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
-import { agentSessions, briefingDismissals, sessionThreads } from "../schema/index.js";
+import { agentSessions, briefingDismissals, sessionThreads, workspaceBriefingCache } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import { getWorkspaceBriefings } from "../services/workspace-briefings.js";
 import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import type { DismissWorkspaceBriefingResponse, WorkspaceBriefingsResponse } from "../wire/types.js";
+import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing, WorkspaceBriefingsResponse } from "../wire/types.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 
 /** Dismissals stop mattering once their brief ids stop appearing. */
 const DISMISSAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-const MAX_DISMISS_THREADS = 30;
 
 /** Removes the briefs this person dismissed in this workspace. */
 export async function hideDismissedBriefings(
@@ -39,23 +37,28 @@ workspaceBriefingsRouter.get("/:workspace/briefings", async c => {
  * sidebar clears with it. A thread waiting on an approval stays open:
  * archiving would withdraw an approval someone may still answer.
  */
+/** The threads a brief names: its conversation and its thread sources. */
+export function briefThreads(brief: WorkspaceBriefing): Array<{ sessionId: string; threadId: string }> {
+  const threads = new Map<string, { sessionId: string; threadId: string }>();
+  const add = (sessionId?: string, threadId?: string) => { if (sessionId && threadId) threads.set(`${sessionId}:${threadId}`, { sessionId, threadId }); };
+  add(brief.latestThread?.sessionId, brief.latestThread?.threadId);
+  for (const source of brief.sources) if (source.kind === "thread") add(source.sessionId, source.threadId);
+  return [...threads.values()];
+}
+
 workspaceBriefingsRouter.post("/:workspace/briefings/:briefingId/dismiss", async c => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const briefingId = c.req.param("briefingId");
   if (!/^brief:[a-f0-9]{24}$/.test(briefingId)) return c.json({ error: "Unknown brief. Reload the page and try again." }, 400);
-  // An empty body dismisses without archiving. A malformed one is refused before
-  // any state changes, so a truncated request cannot hide the brief.
-  const body = await readOptionalJsonObject(c);
-  if (!body) return c.json({ error: "Send a JSON object with a threads array, or an empty body. Reload the page and try again." }, 400);
-  const rawThreads = body.threads;
-  const threads = Array.isArray(rawThreads)
-    ? rawThreads.flatMap(item => typeof item === "object" && item !== null && "sessionId" in item && "threadId" in item
-      && typeof item.sessionId === "string" && typeof item.threadId === "string" ? [{ sessionId: item.sessionId, threadId: item.threadId }] : [])
-    : [];
-  if (threads.length > MAX_DISMISS_THREADS) return c.json({ error: `Send at most ${MAX_DISMISS_THREADS} threads.` }, 400);
-
   const { db, engineStore } = c.var.providers;
+  // The brief's threads come from the server's copy of the brief, never from
+  // the request, so a dismissal can archive only threads that brief names.
+  const [cached] = await db.select({ response: workspaceBriefingCache.response }).from(workspaceBriefingCache)
+    .where(and(eq(workspaceBriefingCache.orgId, c.var.user.orgId), eq(workspaceBriefingCache.ownerType, owner.type), eq(workspaceBriefingCache.ownerId, owner.id))).limit(1);
+  const brief = cached?.response?.briefings.find(candidate => candidate.id === briefingId);
+  if (!brief) return c.json({ error: "Unknown brief. Reload the page and try again." }, 404);
+  const threads = briefThreads(brief);
   const now = Date.now();
   await db.insert(briefingDismissals).values({ userId: c.var.user.id, orgId: c.var.user.orgId, ownerType: owner.type, ownerId: owner.id, briefingId, dismissedAt: now })
     .onConflictDoNothing();

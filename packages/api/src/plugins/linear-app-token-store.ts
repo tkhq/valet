@@ -79,8 +79,7 @@ export class LinearAppTokenStore implements CredentialStore {
     } catch (err) {
       console.error(`linear app token renewal failed for org ${owner.id}:`, err);
       const stamped: StoredCredential = { ...stored, metadata: { ...stored.metadata, refreshFailedAt: now } };
-      await this.inner.save(owner, LINEAR_CREDENTIAL_SERVICE, stamped);
-      return stored;
+      return (await this.saveIfUnchanged(owner, stored, stamped)) === stamped ? stored : this.inner.get(owner, LINEAR_CREDENTIAL_SERVICE);
     }
     const { refreshFailedAt: _cleared, ...metadata } = stored.metadata ?? {};
     const fresh: StoredCredential = {
@@ -88,8 +87,22 @@ export class LinearAppTokenStore implements CredentialStore {
       accessToken: token.accessToken,
       metadata: { ...metadata, tokenExpiresAt: token.expiresAt },
     };
-    await this.inner.save(owner, LINEAR_CREDENTIAL_SERVICE, fresh);
-    return fresh;
+    return this.saveIfUnchanged(owner, stored, fresh);
+  }
+
+  /**
+   * Saves a renewal only if the stored credential is still the one it renewed.
+   * An admin can disconnect or reconnect Linear while the token request is in
+   * flight; saving then would bring back a revoked installation. Returns what
+   * callers should use: `next` when saved, otherwise the current row, or null
+   * after a disconnect. The store offers no compare-and-swap, so a write that
+   * lands between this read and the save can still lose to it.
+   */
+  private async saveIfUnchanged(owner: CredentialOwner, expected: StoredCredential, next: StoredCredential): Promise<StoredCredential | null> {
+    const current = await this.inner.get(owner, LINEAR_CREDENTIAL_SERVICE);
+    if (!current || current.accessToken !== expected.accessToken) return current;
+    await this.inner.save(owner, LINEAR_CREDENTIAL_SERVICE, next);
+    return next;
   }
 
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void> {

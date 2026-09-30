@@ -77,20 +77,11 @@ export function useWorkspaceBriefings(owner: OwnerFilter) {
   });
 }
 
-/** The threads a brief names: its conversation and its thread sources. */
-export function briefingThreads(briefing: WorkspaceBriefing): Array<{ sessionId: string; threadId: string }> {
-  const threads = new Map<string, { sessionId: string; threadId: string }>();
-  const add = (sessionId?: string, threadId?: string) => { if (sessionId && threadId) threads.set(`${sessionId}:${threadId}`, { sessionId, threadId }); };
-  add(briefing.latestThread?.sessionId, briefing.latestThread?.threadId);
-  for (const source of briefing.sources) if (source.kind === "thread") add(source.sessionId, source.threadId);
-  return [...threads.values()];
-}
-
 /** Dismisses a brief for the caller and archives its threads. */
 export function useDismissBriefing(owner: OwnerFilter) {
   const qc = useQueryClient();
   return useMutation<DismissWorkspaceBriefingResponse, Error, WorkspaceBriefing>({
-    mutationFn: (briefing) => api.dismissWorkspaceBriefing(owner, briefing.id, { threads: briefingThreads(briefing) }),
+    mutationFn: (briefing) => api.dismissWorkspaceBriefing(owner, briefing.id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkCatchUp.briefings(owner) });
       void qc.invalidateQueries({ queryKey: ["sessions"] });

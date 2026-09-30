@@ -25,7 +25,7 @@ A source carries `originUrl` for a Slack origin. A thread keyed `slack:{channel}
 
 **Dismiss** hides a brief for the person who dismissed it. The `briefing_dismissals` table stores one row per person, workspace, and brief. A brief's id is a hash of its sources, so new activity produces a new brief that shows again. Rows older than 30 days are removed when the same person dismisses again.
 
-Dismiss also archives the brief's threads that belong to the workspace. A thread waiting on an approval stays open, because archiving it would withdraw an approval that someone may still answer. The response reports how many threads were archived and how many stayed open.
+Dismiss also archives the brief's threads that belong to the workspace. The server reads the brief's threads from its own cached copy of the brief, not from the request, and refuses a brief it does not know. A thread waiting on an approval stays open, because archiving it would withdraw an approval that someone may still answer. The response reports how many threads were archived and how many stayed open.
 
 ## Needs attention
 

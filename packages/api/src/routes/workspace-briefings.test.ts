@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, sessionThreads } from "../schema/index.js";
+import { sessionThreads, workspaceBriefingCache } from "../schema/index.js";
 import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing } from "../wire/types.js";
 import { hideDismissedBriefings } from "./workspace-briefings.js";
 
@@ -25,21 +25,20 @@ it("hides a dismissed brief for the caller and archives its threads, except one 
   api = await bootTestApi();
   const plain = await createThread(api.baseUrl);
   const waiting = await createThread(api.baseUrl);
+  const unrelated = await createThread(api.baseUrl);
   await api.providers.engineStore.saveDecisionGate(waiting.sessionId, waiting.id, {
     id: "gate-waiting", sessionId: waiting.sessionId, threadId: waiting.id, queueItemId: "q", resumeKey: "rk", ordinal: 0,
     type: "approval", title: "Approve?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
   });
-  // Another person's session: never archived through this workspace.
-  await api.providers.db.insert(agentSessions).values({ id: "someone-else", userId: "other", orgId: "local-org", workspace: "/",
-    ownerType: "user", ownerId: "other", createdAt: 1, updatedAt: 1 });
+  // The server's copy of the brief names its threads; the request cannot add others.
+  const withThreads: WorkspaceBriefing = { ...briefs[0]!, latestThread: { sessionId: plain.sessionId, threadId: plain.id },
+    sources: [{ id: "t", kind: "thread", title: "Waiting", updatedAt: 1, sessionId: waiting.sessionId, threadId: waiting.id }] };
+  await api.providers.db.insert(workspaceBriefingCache).values({ orgId: "local-org", ownerType: "user", ownerId: "local-user",
+    version: "v", response: { briefings: [withThreads, briefs[1]!], generatedAt: 1, coverage: "recent" } });
 
   const dismiss = await fetch(`${api.baseUrl}/api/workspaces/user/briefings/${briefs[0]!.id}/dismiss`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ threads: [
-      { sessionId: plain.sessionId, threadId: plain.id },
-      { sessionId: waiting.sessionId, threadId: waiting.id },
-      { sessionId: "someone-else", threadId: "x" },
-    ] }),
+    body: JSON.stringify({ threads: [{ sessionId: unrelated.sessionId, threadId: unrelated.id }] }),
   });
   expect(dismiss.status).toBe(200);
   expect(await dismiss.json() as DismissWorkspaceBriefingResponse).toEqual({ dismissed: true, archived: 1, keptWaiting: 1 });
@@ -55,13 +54,10 @@ it("hides a dismissed brief for the caller and archives its threads, except one 
   expect(plainRow?.archivedAt).toBeTypeOf("number");
   const [waitingRow] = await api.providers.db.select().from(sessionThreads).where(eq(sessionThreads.id, waiting.id));
   expect(waitingRow?.archivedAt ?? null).toBeNull();
+  const [unrelatedRow] = await api.providers.db.select().from(sessionThreads).where(eq(sessionThreads.id, unrelated.id));
+  expect(unrelatedRow?.archivedAt ?? null).toBeNull();
+  // A brief the server does not know is refused.
+  expect((await fetch(`${api.baseUrl}/api/workspaces/user/briefings/brief:${"f".repeat(24)}/dismiss`, { method: "POST" })).status).toBe(404);
 
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/briefings/not-a-brief/dismiss`, { method: "POST" })).status).toBe(400);
-  // A truncated body is refused and hides nothing.
-  const truncated = await fetch(`${api.baseUrl}/api/workspaces/user/briefings/${briefs[1]!.id}/dismiss`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: '{"threads":[',
-  });
-  expect(truncated.status).toBe(400);
-  const stillVisible = await hideDismissedBriefings(api.providers.db, "local-user", user, { briefings: briefs, generatedAt: 1, coverage: "recent" });
-  expect(stillVisible.briefings.map((brief) => brief.id)).toEqual([briefs[1]!.id]);
 });

@@ -958,6 +958,17 @@ export class ChannelHost {
    * override set — the transport then posts under the bot's own identity.
    * Best-effort: a lookup failure must not stop the delivery.
    */
+  /** "Only members of <team> can approve.", or undefined when the team is gone. */
+  private async teamApproverNote(teamId: string): Promise<string | undefined> {
+    try {
+      const [team] = await this.deps.db.select({ name: teams.name }).from(teams).where(eq(teams.id, teamId)).limit(1);
+      return team ? `Only members of ${team.name} can approve.` : undefined;
+    } catch (err) {
+      console.error("[channels] team name lookup failed", err);
+      return undefined;
+    }
+  }
+
   private async workspaceSenderForSession(
     sessionId: string,
   ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
@@ -1045,8 +1056,10 @@ export class ChannelHost {
     const digest = digestGate(gate);
     const source = await this.deps.engineStore.getSession(sessionId);
     const link = this.openInValetLink(attentionHref(sessionId, gate.threadId, source?.owner));
-    const body =
-      link === undefined ? digest.body : digest.body === undefined ? link : `${digest.body}\n\n${link}`;
+    // Anyone in the channel can mention a team's Valet, but only the team can
+    // settle its approvals. Say so on the card, so its buttons are not a dead end.
+    const who = source?.owner?.type === "team" ? await this.teamApproverNote(source.owner.id) : undefined;
+    const body = [digest.body, who, link].filter((part): part is string => part !== undefined).join("\n\n") || undefined;
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,

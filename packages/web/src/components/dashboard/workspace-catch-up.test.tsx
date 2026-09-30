@@ -51,10 +51,8 @@ it("dismisses a brief with its threads and reports what stayed open", async () =
   vi.mocked(api.dismissWorkspaceBriefing).mockResolvedValue({ dismissed: true, archived: 1, keptWaiting: 1 });
   setup();
   fireEvent.click(await screen.findByRole("button", { name: `Dismiss ${briefing.title}` }));
-  await waitFor(() => expect(api.dismissWorkspaceBriefing).toHaveBeenCalledWith(owner, briefing.id, { threads: [
-    { sessionId: "runtime", threadId: "rollout-review" },
-    { sessionId: "runtime", threadId: "design" },
-  ] }));
+  // The server archives the threads its own copy of the brief names.
+  await waitFor(() => expect(api.dismissWorkspaceBriefing).toHaveBeenCalledWith(owner, briefing.id));
   expect(await screen.findByRole("status")).toHaveProperty("textContent",
     `Dismissed "${briefing.title}". Archived 1 thread. 1 waiting on an approval stays open.`);
 });
