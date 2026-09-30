@@ -30,3 +30,25 @@ it("lists pending gates from the caller's own and team sessions only", async () 
   const body = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
   expect(body.items.map((item) => item.sessionId).sort()).toEqual(["own", "team-mine"]);
 });
+
+it("keeps another member's helper-thread approvals out of the inbox, and the viewer's own in", async () => {
+  api = await bootTestApi();
+  await api.providers.db.insert(teams).values({ id: "mine", orgId: "local-org", name: "Mine", createdAt: 1 });
+  await api.providers.db.insert(teamMembers).values([
+    { teamId: "mine", userId: "local-user", role: "member" },
+    { teamId: "mine", userId: "test-member", role: "member" },
+  ]);
+  const open = async (asUser?: string) => await (await fetch(`${api!.baseUrl}/api/workspaces/mine/conversation`, {
+    method: "POST", headers: asUser ? { "x-valet-test-user-id": asUser } : {},
+  })).json() as { sessionId: string; threadId: string };
+  const theirs = await open("test-member");
+  const own = await open();
+  for (const [thread, id] of [[theirs, "gate-theirs"], [own, "gate-own"]] as const) {
+    await api.providers.engineStore.saveDecisionGate(thread.sessionId, thread.threadId, {
+      id, sessionId: thread.sessionId, threadId: thread.threadId, queueItemId: `q-${id}`, resumeKey: `rk-${id}`, ordinal: 0,
+      type: "approval", title: "Approve?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+    });
+  }
+  const body = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
+  expect(body.items.map((item) => item.gate.id)).toEqual(["gate-own"]);
+});

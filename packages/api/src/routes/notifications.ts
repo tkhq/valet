@@ -23,6 +23,7 @@ import type { AppEnv } from "../env.js";
 import { agentSessions, workflowRuns, workflowDefinitions, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
 import { canResolveSessionGate } from "../services/session-access.js";
 import { engineGateToWire } from "../engine/bridge.js";
+import { isSharedThreadKey } from "../services/thread-read-state.js";
 import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
@@ -52,10 +53,22 @@ notificationsRouter.get("/decisions", async (c) => {
     sql`EXISTS (SELECT 1 FROM engine_decision_gates g WHERE g.session_id = ${agentSessions.id} AND g.status = 'pending')`,
   ));
   const items: ListNotificationDecisionsResponse["items"] = [];
+  // Another member's helper or workflow editor thread is theirs alone in the
+  // app; its approvals stay out of this person's inbox. The viewer's own stay in.
+  const keys = new Map<string, string | undefined>();
+  const visible = async (sessionId: string, threadId: string) => {
+    const cacheKey = `${sessionId}:${threadId}`;
+    if (!keys.has(cacheKey)) keys.set(cacheKey, (await engineStore.getThread(sessionId, threadId))?.key);
+    const key = keys.get(cacheKey);
+    return key === `app-assistant:${c.var.user.id}` || isSharedThreadKey(key, c.var.user.id);
+  };
   for (const session of sessions) {
     if (!await canResolveSessionGate(db, session, c.var.principal)) continue;
     const gates = await engineStore.listDecisionGates(session.id, undefined, "pending");
-    for (const gate of gates) items.push({ sessionId: session.id, title: session.title || "Thread approval", gate: engineGateToWire(gate) });
+    for (const gate of gates) {
+      if (!await visible(session.id, gate.threadId)) continue;
+      items.push({ sessionId: session.id, title: session.title || "Thread approval", gate: engineGateToWire(gate) });
+    }
   }
   // Workflow agent sessions have no app session row. Their run owns the gates.
   const workflowSessions = await db.selectDistinct({
