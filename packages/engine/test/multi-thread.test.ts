@@ -219,6 +219,10 @@ describe("thread_read references (TKAI-394)", () => {
       expect(entries.length, ref).toBeGreaterThan(0);
     }
     expect(threadReference("web:default")).toBe("web:default");
+    // A malformed escape does not throw; the link is kept and finds nothing.
+    const malformed = "https://valet.example/threads/%E0%A4%A";
+    expect(threadReference(malformed)).toBe(malformed);
+    expect(threadReference("https://valet.example/chat?thread=a%2520b")).toBe("a%20b");
     faux.unregister();
   });
 });

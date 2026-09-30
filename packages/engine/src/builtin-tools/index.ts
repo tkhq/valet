@@ -357,8 +357,13 @@ export function threadReference(value: string): string {
   let url: URL;
   try { url = new URL(trimmed); } catch { return trimmed; }
   const fromPath = /\/threads\/([^/]+)/.exec(url.pathname)?.[1];
-  const found = fromPath ?? url.searchParams.get("thread");
-  return found ? decodeURIComponent(found) : trimmed;
+  if (fromPath) {
+    // A malformed escape in a pasted link is not a thread id; keep the link so
+    // the lookup reports it as not found instead of throwing.
+    try { return decodeURIComponent(fromPath); } catch { return trimmed; }
+  }
+  // URLSearchParams has already decoded the value.
+  return url.searchParams.get("thread") || trimmed;
 }
 
 export const threadReadTool = defineTool({
