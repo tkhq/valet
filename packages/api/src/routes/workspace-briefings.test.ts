@@ -1,15 +1,16 @@
 import { eq } from "drizzle-orm";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
-import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing, WorkspaceBriefingsResponse } from "../wire/types.js";
+import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing } from "../wire/types.js";
+import { hideDismissedBriefings } from "./workspace-briefings.js";
 
+// The api project runs with `isolate: false`, so a module mock would not
+// reach an app another test file already loaded. The GET filter is tested
+// through the exported function instead of a mocked generator.
 const briefs: WorkspaceBriefing[] = ["a", "b"].map((letter) => ({
   id: `brief:${letter.repeat(24)}`, title: `Brief ${letter}`, summary: "Summary.", status: "updated",
   updatedAt: 1, latestThread: null, sources: [],
-}));
-vi.mock("../services/workspace-briefings.js", () => ({
-  getWorkspaceBriefings: async (): Promise<WorkspaceBriefingsResponse> => ({ briefings: briefs, generatedAt: 1, coverage: "recent" }),
 }));
 
 let api: TestApi | undefined;
@@ -43,8 +44,13 @@ it("hides a dismissed brief for the caller and archives its threads, except one 
   expect(dismiss.status).toBe(200);
   expect(await dismiss.json() as DismissWorkspaceBriefingResponse).toEqual({ dismissed: true, archived: 1, keptWaiting: 1 });
 
-  const listed = await (await fetch(`${api.baseUrl}/api/workspaces/user/briefings`)).json() as WorkspaceBriefingsResponse;
-  expect(listed.briefings.map((brief) => brief.id)).toEqual([briefs[1]!.id]);
+  const user = { type: "user", id: "local-user" } as const;
+  const visible = await hideDismissedBriefings(api.providers.db, "local-user", user, { briefings: briefs, generatedAt: 1, coverage: "recent" });
+  expect(visible.briefings.map((brief) => brief.id)).toEqual([briefs[1]!.id]);
+  // Another person in the same workspace still sees it.
+  const other = await hideDismissedBriefings(api.providers.db, "another-user", user, { briefings: briefs, generatedAt: 1, coverage: "recent" });
+  expect(other.briefings).toHaveLength(2);
+
   const [plainRow] = await api.providers.db.select().from(sessionThreads).where(eq(sessionThreads.id, plain.id));
   expect(plainRow?.archivedAt).toBeTypeOf("number");
   const [waitingRow] = await api.providers.db.select().from(sessionThreads).where(eq(sessionThreads.id, waiting.id));

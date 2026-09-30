@@ -4,25 +4,33 @@ import type { AppEnv } from "../env.js";
 import { agentSessions, briefingDismissals, sessionThreads } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import { getWorkspaceBriefings } from "../services/workspace-briefings.js";
-import type { DismissWorkspaceBriefingResponse } from "../wire/types.js";
+import type { Principal } from "@valet/engine";
+import type { AppDb } from "../lib/drizzle.js";
+import type { DismissWorkspaceBriefingResponse, WorkspaceBriefingsResponse } from "../wire/types.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 
 /** Dismissals stop mattering once their brief ids stop appearing. */
 const DISMISSAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_DISMISS_THREADS = 30;
 
+/** Removes the briefs this person dismissed in this workspace. */
+export async function hideDismissedBriefings(
+  db: AppDb, userId: string, owner: Principal, response: WorkspaceBriefingsResponse,
+): Promise<WorkspaceBriefingsResponse> {
+  if (response.briefings.length === 0) return response;
+  const dismissed = new Set((await db.select({ id: briefingDismissals.briefingId }).from(briefingDismissals).where(and(
+    eq(briefingDismissals.userId,userId), eq(briefingDismissals.ownerType,owner.type), eq(briefingDismissals.ownerId,owner.id),
+    inArray(briefingDismissals.briefingId,response.briefings.map(brief => brief.id)),
+  ))).map(row => row.id));
+  return { ...response, briefings: response.briefings.filter(brief => !dismissed.has(brief.id)) };
+}
+
 export const workspaceBriefingsRouter = new Hono<AppEnv>();
 workspaceBriefingsRouter.get("/:workspace/briefings", async c => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const { db } = c.var.providers;
-  const response = await getWorkspaceBriefings(db,c.var.user.orgId,owner);
-  if (response.briefings.length === 0) return c.json(response);
-  const dismissed = new Set((await db.select({ id: briefingDismissals.briefingId }).from(briefingDismissals).where(and(
-    eq(briefingDismissals.userId,c.var.user.id), eq(briefingDismissals.ownerType,owner.type), eq(briefingDismissals.ownerId,owner.id),
-    inArray(briefingDismissals.briefingId,response.briefings.map(brief => brief.id)),
-  ))).map(row => row.id));
-  return c.json({ ...response, briefings: response.briefings.filter(brief => !dismissed.has(brief.id)) });
+  return c.json(await hideDismissedBriefings(db,c.var.user.id,owner,await getWorkspaceBriefings(db,c.var.user.orgId,owner)));
 });
 
 /**
