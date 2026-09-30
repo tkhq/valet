@@ -197,3 +197,9 @@ Two credentials, one file, both independent of better-auth:
 - The in-sandbox auth gateway itself (v1's :9000 proxy) and any in-sandbox services consuming the service JWTs — this pass ships the tested token/JWT contract only.
 - Multi-org.
 - Per-service integration OAuth connect flows (Linear, Notion, Google APIs, etc. beyond the login-doubles-as-connect hook above) — specified in `2026-07-20-integration-oauth-design.md`.
+
+## Unrestricted signup
+
+`AUTH_ALLOW_SIGNUP=1` admits users without an invitation or allowed email domain. The default remains invitation/domain admission. Enable it only on a deployment that means to accept any account.
+
+The first-user administrator bootstrap and explicit invitation roles keep their existing behavior. Other unrestricted signups receive the member role. Existing login, sessions, account records, and integration connections remain unchanged. Set the flag to `0` or remove it to require invitations again. Existing accounts remain valid after that change.

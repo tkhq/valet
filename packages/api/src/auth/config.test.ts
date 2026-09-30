@@ -433,3 +433,9 @@ describe("loadAuthConfig", () => {
     });
   });
 });
+
+it("only explicitly enabled unrestricted signup changes admission configuration", () => {
+  expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test", AUTH_ALLOW_SIGNUP: "1" })?.allowSignup).toBe(true);
+  expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test" })?.allowSignup).toBeUndefined();
+  expect(loadAuthConfig({ BETTER_AUTH_SECRET: "test", AUTH_ALLOW_SIGNUP: "0" })?.allowSignup).toBeUndefined();
+});
