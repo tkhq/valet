@@ -4,11 +4,13 @@ Status: implemented on 2026-09-30. This note records six changes from the briefs
 
 ## Briefs
 
+Brief evidence, active work, and **Waiting on you** leave out threads that are private to one person: each person's app-assistant helper thread, and workflow editor conversations. Active work and **Waiting on you** show the viewer's own editor conversations. Briefs are shared by every member, so they show none. One SQL helper (`sharedThreadKey` in `services/thread-read-state.ts`) holds this rule.
+
 A brief covers a line of work: it combines at least two kinds of source, such as a conversation with its pull request, a workflow run, an artifact, or a sent message. A goal whose only evidence is conversations gets no brief, because the thread list and **Waiting on you** show those threads with exact state. The parser drops a single-kind group even when the model returns one.
 
 Briefs show in two columns. A card shows a title, a status, the next action, and one line of links. The summary and the sources sit behind **Details**. The next action is one instruction of at most 12 words. Without one, the card says what its status means: open the thread for a brief that needs attention, or nothing waits on the reader.
 
-`VALET_BRIEFING_MODEL` names the model that writes brief text. Without it, an OpenAI key selects `gpt-5.6-luna`, and Claude Haiku 4.5 is the fallback. The prompt asks for a teammate's status note: plain nouns, no filler, and no process verbs such as "Clarified" or "Identified". The card links to its conversation with **Open thread**. When the work started in Slack, the card also links to that Slack thread with **Open in Slack**.
+`VALET_BRIEFING_MODEL` names the model that writes brief text. Without it, an OpenAI key selects `gpt-5.6-luna`, and Claude Haiku 4.5 is the fallback. Like thread auto-titles, brief text is written with the instance's own provider key from the environment, not the organization's model settings, so this usage is not metered to the organization. A deployment without an instance key gets no briefs. Moving these utility calls onto the organization's model resolution and usage record is a follow-up. The prompt asks for a teammate's status note: plain nouns, no filler, and no process verbs such as "Clarified" or "Identified". The card links to its conversation with **Open thread**. When the work started in Slack, the card also links to that Slack thread with **Open in Slack**.
 
 A brief finds its conversation in this order:
 

@@ -24,7 +24,7 @@ workspaceActiveWorkRouter.get("/:workspace/active-work", async c => {
     }
     cursor = { at: parsed.at, id: parsed.id };
   }
-  return c.json(await listWorkspaceActiveWork(c.var.providers.db, c.var.user.orgId, owner, limit, cursor));
+  return c.json(await listWorkspaceActiveWork(c.var.providers.db, c.var.user.orgId, owner, limit, cursor, c.var.user.id));
 });
 
 /** Threads that wait on a person's reply, newest first. */

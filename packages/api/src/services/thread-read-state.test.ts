@@ -2,9 +2,10 @@ import { sql } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { sessionThreads } from "../schema/index.js";
+import { collectWorkspaceBriefingSources } from "./workspace-briefing-sources.js";
 import type { ListThreadsResponse, WaitingThreadsResponse } from "../wire/types.js";
 import {
-  lastAgentAsk, listWaitingThreads, parsePullRequestUrl, pullRequestWebhookState, recordThreadPullRequest,
+  lastAgentAsk, listWaitingThreads, parsePullRequestUrl, sharedThreadKey, pullRequestWebhookState, recordThreadPullRequest,
   setPullRequestState, wireThreadPullRequests,
 } from "./thread-read-state.js";
 
@@ -131,4 +132,24 @@ it("lists threads that wait on a reply until someone replies or archives them", 
 
   await api.providers.db.update(sessionThreads).set({ archivedAt: now }).where(sql`id = ${waiting.id}`);
   expect(await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user")).toEqual([]);
+});
+
+it("keeps private helper and editor threads out of shared workspace lists", async () => {
+  api = await bootTestApi();
+  const shared = async (key: string | null, viewer?: string) =>
+    ((await api!.providers.db.execute(sql`SELECT ${sharedThreadKey(sql`${key}::text`, viewer)} AS ok`)) as { rows: Array<{ ok: boolean }> }).rows[0]!.ok;
+  expect(await shared(null)).toBe(true);
+  expect(await shared("web:abc")).toBe(true);
+  expect(await shared("app-assistant:u1", "u1")).toBe(false);
+  expect(await shared("workflow:wf_1:u1", "u1")).toBe(true);
+  expect(await shared("workflow:wf_1:u1", "u2")).toBe(false);
+  expect(await shared("workflow:wf_1:u1")).toBe(false);
+
+  // Brief evidence is shared by every member, so it never reads a helper thread.
+  const now = Date.now();
+  const helper = await (await fetch(`${api.baseUrl}/api/workspaces/user/conversation`, { method: "POST" })).json() as { sessionId: string; threadId: string };
+  await api.providers.db.insert(sessionThreads).values({ id: helper.threadId, sessionId: helper.sessionId, createdAt: now, lastUserActivityAt: now });
+  await agentMessage(api, { id: helper.threadId, sessionId: helper.sessionId }, now);
+  const sources = await collectWorkspaceBriefingSources(api.providers.db, "local-org", { type: "user", id: "local-user" });
+  expect(sources.some(item => item.source.threadId === helper.threadId)).toBe(false);
 });

@@ -5,6 +5,7 @@ import { encodePageCursor } from "../lib/page-cursor.js";
 import { deriveRunState, type RunStateSubmission } from "../sessions/run-state.js";
 import type { WorkspaceActiveWorkItem, WorkspaceActiveWorkResponse } from "../wire/types.js";
 import type { OutcomeCursor } from "./workspace-outcomes.js";
+import { sharedThreadKey } from "./thread-read-state.js";
 
 interface ActiveWorkRow {
   id: string;
@@ -17,7 +18,7 @@ interface ActiveWorkRow {
 }
 
 export async function listWorkspaceActiveWork(
-  db: AppDb, orgId: string, owner: Principal, limit: number, cursor?: OutcomeCursor,
+  db: AppDb, orgId: string, owner: Principal, limit: number, cursor?: OutcomeCursor, viewerId?: string,
 ): Promise<WorkspaceActiveWorkResponse> {
   const after = cursor ? sql`AND (q.updated_at,q.id)<(${cursor.at},${cursor.id})` : sql``;
   // Filter queue work before paging; newer idle sessions cannot hide old work.
@@ -28,6 +29,7 @@ export async function listWorkspaceActiveWork(
     LEFT JOIN session_threads t ON t.session_id=q.session_id AND t.id=q.thread_id
     WHERE s.status<>'deleted' AND s.org_id=${orgId} AND s.owner_type=${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id}
+      AND ${sharedThreadKey(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=q.session_id AND et.id=q.thread_id)`, viewerId)}
       AND q.status<>'settled'
       AND (q.status IN ('blocked_on_decision_gate','collecting','queued','running') OR q.outcome='failed')
       ${after}

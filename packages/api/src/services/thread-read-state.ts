@@ -1,5 +1,5 @@
 import type { EventStream, Principal } from "@valet/engine";
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, threadPullRequests, threadReads } from "../schema/index.js";
 import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
@@ -161,6 +161,17 @@ export async function recheckOpenPullRequests(
   }
 }
 
+/**
+ * True for a thread every member of a workspace may see in a shared list. Each
+ * person's app-assistant helper thread is private, as the sidebar treats it. A
+ * workflow editor conversation (`workflow:<id>:<viewer>`) belongs to its viewer;
+ * without a viewer, as in workspace briefs, every editor conversation is left out.
+ */
+export function sharedThreadKey(key: SQL, viewerId?: string): SQL {
+  return sql`(${key} IS NULL OR (${key} NOT LIKE 'app-assistant:%' AND (${key} NOT LIKE 'workflow:%'
+    OR ${viewerId === undefined ? sql`false` : sql`split_part(${key}, ':', 3) IN ('', ${viewerId})`})))`;
+}
+
 /** A thread counts as waiting only while its newest agent message is this recent. */
 export const WAITING_WINDOW_MS = 14 * 24 * 60 * 60_000;
 
@@ -187,12 +198,9 @@ export async function listWaitingThreads(
     WHERE s.status <> 'deleted' AND s.org_id = ${orgId} AND s.owner_type = ${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END) = ${owner.id}
       AND t.archived_at IS NULL AND t.last_user_activity_at IS NOT NULL
-      -- The sidebar hides each person's app-assistant helper thread; so does this list.
-      AND (et.key IS NULL OR et.key NOT LIKE 'app-assistant:%')
-      -- A workflow editor conversation belongs to one viewer, and the editor of a
-      -- deleted workflow has nothing left to answer.
-      AND (et.key IS NULL OR et.key NOT LIKE 'workflow:%'
-        OR (w.id IS NOT NULL AND split_part(et.key, ':', 3) IN ('', ${viewerId})))
+      AND ${sharedThreadKey(sql`et.key`, viewerId)}
+      -- The editor of a deleted workflow has nothing left to answer.
+      AND (et.key IS NULL OR et.key NOT LIKE 'workflow:%' OR w.id IS NOT NULL)
       AND e.created_at > t.last_user_activity_at AND e.created_at > ${now - WAITING_WINDOW_MS}
       AND NOT EXISTS (SELECT 1 FROM engine_queue_items q
         WHERE q.session_id = t.session_id AND q.thread_id = t.id AND q.status <> 'settled')

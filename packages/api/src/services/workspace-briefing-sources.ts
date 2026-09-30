@@ -2,6 +2,7 @@ import type { Principal } from "@valet/engine";
 import { sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkspaceBriefingSource } from "../wire/types.js";
+import { sharedThreadKey } from "./thread-read-state.js";
 import { listWorkspaceOutcomes } from "./workspace-outcomes.js";
 
 export interface BriefingEvidence {
@@ -54,7 +55,9 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
       JOIN LATERAL (SELECT e.created_at FROM engine_entries e
         WHERE e.session_id=s.id AND e.thread_id=t.id AND e.entry_type='message' AND e.role IN ('user','assistant') AND ${hasNarrative}
         ORDER BY e.created_at DESC,e.id DESC LIMIT 1) latest ON true
-      WHERE ${scopedSession} ORDER BY latest.created_at DESC,t.id DESC LIMIT 30
+      WHERE ${scopedSession}
+        AND ${sharedThreadKey(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=s.id AND et.id=t.id)`)}
+      ORDER BY latest.created_at DESC,t.id DESC LIMIT 30
     ) SELECT t.*,m.role,m.text,m.created_at AS message_at,
       EXISTS(SELECT 1 FROM engine_queue_items q WHERE q.session_id=t.session_id AND q.thread_id=t.thread_id
         AND (q.status='blocked_on_decision_gate' OR (q.status<>'settled' AND q.outcome='failed'))) AS needs_attention,
