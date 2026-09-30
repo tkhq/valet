@@ -13,6 +13,7 @@ import {
   formatRunDuration,
   runNeedsApproval,
   statusByNodeId,
+  runLabel,
 } from "~/components/workflows/run-detail-helpers";
 import { RunResultPanel } from "~/components/workflows/run-detail-result";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
@@ -130,8 +131,8 @@ export function RunDetailBody({
             `min-width: auto`, so without `min-w-0` the heading refuses to
             shrink and pushes the status chip and the run controls off the
             row. */}
-        <h1 className="min-w-0 break-all text-lg sm:truncate font-semibold tracking-tight text-ink font-display">
-          {run.runId}
+        <h1 className="min-w-0 break-words text-lg sm:truncate font-semibold tracking-tight text-ink font-display" title={run.runId}>
+          {runLabel(run)}
         </h1>
         <div className="flex max-w-full flex-wrap items-center gap-2">
           <RunStatusChip

@@ -302,7 +302,9 @@ describe("WorkflowEditorPage", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     // `1+`, not `1`: the count is the page's length, not the run total.
     fireEvent.click(screen.getByRole("button", { name: "Runs (1+)" }));
-    expect(screen.getByText("wfrun_0")).toBeTruthy();
+    // The row names the run; the raw id is only its tooltip.
+    const row = screen.getByTitle("wfrun_0");
+    expect(row.textContent).toMatch(/run · /);
     expect(screen.getByText(/Newest 1 runs shown/)).toBeTruthy();
   });
 

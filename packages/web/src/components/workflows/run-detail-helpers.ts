@@ -426,3 +426,17 @@ export function formatRunDuration(startedAt: number, endedAt: number): string | 
   const minutes = Math.floor((ms % HOUR_MS) / MINUTE_MS);
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
+
+/**
+ * A readable name for a run in lists and headings. A run id is an opaque
+ * machine id, so the label says what started the run and when; callers keep
+ * the id available as a tooltip. The summary carries no trigger type, so a
+ * run with no acting user is "Automatic" (schedule, event, or webhook).
+ */
+export function runLabel(run: { createdAt: number; actorUserId?: string; parentRunId?: string; parentIteration?: number }): string {
+  const when = new Date(run.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const kind = run.parentRunId !== undefined
+    ? `Batch run${run.parentIteration !== undefined ? ` ${run.parentIteration + 1}` : ""}`
+    : run.actorUserId !== undefined ? "Manual run" : "Automatic run";
+  return `${kind} · ${when}`;
+}

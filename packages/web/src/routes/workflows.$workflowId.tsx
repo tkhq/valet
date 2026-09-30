@@ -1,4 +1,5 @@
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
+import { runLabel } from "~/components/workflows/run-detail-helpers";
 import type {
   GetWorkflowPermissionsResponse,
   ListWorkflowRunsResponse, WorkflowDefinitionSummary, WorkflowNodePermissionWire
@@ -587,7 +588,7 @@ function RunsDrawer({
               >
                 {r.needsApproval ? "needs approval" : (r.outcome ?? r.status)}
               </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">{r.runId}</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-ink" title={r.runId}>{runLabel(r)}</span>
               <span className="shrink-0 text-[10px] text-muted">{relativeTime(r.createdAt)}</span>
             </Link>
           </li>
