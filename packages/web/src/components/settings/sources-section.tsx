@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
-import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch, StatusDot } from "~/components/primitives";
 import { BakeQueuePanel } from "~/components/settings/bake-queue-panel";
 import { Section } from "~/components/settings/section";
 import { RepoSandboxResourcesForm } from "~/components/settings/repo-sandbox-resources-form";
@@ -351,7 +351,7 @@ function RepoSourceRow({
               {source.repoFullName ?? source.name}
             </span>
             <Badge variant={status.variant} className="shrink-0 gap-1.5 rounded-full px-2" role="status">
-              <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+              <StatusDot tone="current" size="sm" />
               {status.label}
             </Badge>
           </div>

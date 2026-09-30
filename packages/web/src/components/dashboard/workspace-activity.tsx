@@ -7,7 +7,7 @@ import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitin
 import { useArtifacts } from "~/api/artifacts";
 import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { relativeTime } from "~/lib/relative-time";
-import { Badge, Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, StatusDot } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
 
 export function WorkspaceActivity({ owner }: { owner: OwnerFilter }) {
@@ -132,34 +132,48 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
 function Section({ title, count, icon, children }: { title: string; count: number; icon?: ReactNode; children: ReactNode }) {
   return <section aria-label={title}><div className="mb-3 flex items-center gap-2">{icon}<h2 className="font-display text-lg">{title}</h2><span className="text-xs text-muted">{count}</span></div><div className="divide-y divide-line rounded-lg border border-line bg-paper">{children}</div></section>;
 }
+/** One row layout for every work list here: a title link, an optional status,
+ * the time, and optional detail and actions. */
+function WorkRow({ title, badge, time, detail, leading, actions }: {
+  title: ReactNode; badge?: ReactNode; time: number; detail?: ReactNode; leading?: ReactNode; actions?: ReactNode;
+}) {
+  return <div className="flex items-start gap-3 px-4 py-3">
+    {leading !== undefined && <span className="mt-1.5 flex h-2 w-2 shrink-0">{leading}</span>}
+    <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="min-w-0 flex-1 break-words text-sm font-medium [&_a:hover]:underline">{title}</span>
+        {badge}
+        <span className="text-xs text-muted">{relativeTime(time)}</span>
+      </div>
+      {detail && <p className="mt-1 break-words text-sm text-muted">{detail}</p>}
+    </div>
+    {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+  </div>;
+}
 function ActiveRow({ row }: { row: WorkspaceActiveWorkItem }) {
-  return <div className="flex flex-wrap items-center gap-3 px-4 py-3"><Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title || "Untitled thread"}</Link><RunStateBadge state={row.state} /><span className="text-xs text-muted">{relativeTime(row.updatedAt)}</span></div>;
+  return <WorkRow title={<Link to="/threads/$threadId" params={{ threadId: row.threadId }}>{row.title || "Untitled thread"}</Link>}
+    badge={<RunStateBadge state={row.state} />} time={row.updatedAt} />;
 }
 function WaitingRow({ row, onDone }: { row: WaitingThread; onDone: () => void }) {
   const detail = row.question ?? row.preview;
-  return <div className="flex items-start gap-3 px-4 py-3">
-    <span className="mt-1.5 h-2 w-2 shrink-0">{row.unread && <span role="img" aria-label="Unread" className="block h-2 w-2 rounded-full bg-blue-500" />}</span>
-    <div className="min-w-0 flex-1">
-      <div className="flex flex-wrap items-baseline gap-x-2">
-        <Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="min-w-0 break-words text-sm font-medium hover:underline">{row.title}</Link>
-        <span className="text-xs text-muted">{relativeTime(row.lastAgentActivityAt)}</span>
-      </div>
-      {detail && <p className="mt-0.5 break-words text-sm text-muted">{row.question ? <span className="font-medium text-ink">Valet asks: </span> : null}{detail}</p>}
-    </div>
-    <div className="flex shrink-0 items-center gap-2">
-      <Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="rounded-md border border-line px-2 py-1 text-xs font-medium text-ink hover:bg-ink-wash">Reply</Link>
-      <button type="button" onClick={onDone} title="Archive this thread. It leaves this list and the sidebar." aria-label={`Done with ${row.title}`}
-        className="rounded-md px-2 py-1 text-xs text-muted hover:bg-ink-wash hover:text-ink">Done</button>
-    </div>
-  </div>;
+  return <WorkRow
+    leading={row.unread ? <StatusDot tone="info" label="Unread" /> : null}
+    title={<Link to="/threads/$threadId" params={{ threadId: row.threadId }}>{row.title}</Link>}
+    time={row.lastAgentActivityAt}
+    detail={detail && <>{row.question ? <span className="font-medium text-ink">Valet asks: </span> : null}{detail}</>}
+    actions={<>
+      <Button asChild variant="secondary" size="sm"><Link to="/threads/$threadId" params={{ threadId: row.threadId }}>Reply</Link></Button>
+      <Button variant="ghost" size="sm" onClick={onDone} title="Archive this thread. It leaves this list and the sidebar." aria-label={`Done with ${row.title}`}>Done</Button>
+    </>} />;
 }
-
 function SessionRow({ row }: { row: SessionSummary }) {
-  return <div className="flex flex-wrap items-center gap-3 px-4 py-3"><Link to="/sessions/$sessionId" params={{ sessionId: row.id }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title || "Untitled work"}</Link><RunStateBadge state={row.runState} /><span className="text-xs text-muted">{relativeTime(row.lastActivityAt)}</span></div>;
+  return <WorkRow title={<Link to="/sessions/$sessionId" params={{ sessionId: row.id }}>{row.title || "Untitled work"}</Link>}
+    badge={<RunStateBadge state={row.runState} />} time={row.lastActivityAt} />;
 }
 function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: string }) {
   const label = row.needsApproval ? "Approval needed" : row.outcome === "failed" ? "Failed" : row.status === "parked" ? "Waiting" : row.status === "pending" ? "Queued" : row.status === "terminalizing" ? "Finishing" : "Running";
-  return <div className="px-4 py-3"><div className="flex flex-wrap items-center gap-3"><Link to="/workflows/runs/$runId" params={{ runId: row.runId }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.workflowName}</Link><Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge><span className="text-xs text-muted">{relativeTime(row.updatedAt)}</span></div>{prompt && <p className="mt-2 text-sm text-muted">{prompt}</p>}</div>;
+  return <WorkRow title={<Link to="/workflows/runs/$runId" params={{ runId: row.runId }}>{row.workflowName}</Link>}
+    badge={<Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt} />;
 }
 function ResultRow({ item }: { item: ResultItem }) {
   const Icon = item.kind === "pull_request" ? GitPullRequest : item.kind === "message" ? MessageSquare : FileText;
@@ -167,8 +181,8 @@ function ResultRow({ item }: { item: ResultItem }) {
   return <li className="flex gap-3"><Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-moss" /><div className="min-w-0 flex-1">
     {item.token ? <Link to="/a/$token" params={{ token: item.token }} className="break-words text-sm font-medium hover:underline">{item.title}</Link> : item.url ? <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 break-words text-sm font-medium hover:underline">{item.title}<ArrowUpRight className="h-3 w-3 shrink-0" /></a> : <span className="break-words text-sm font-medium">{item.title}</span>}
     <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted"><span>{label}</span><span>{relativeTime(item.time)}</span>
-      {item.threadId ? <Link to="/threads/$threadId" params={{ threadId: item.threadId }} className="text-moss hover:underline">Open thread</Link> : item.sessionId && <Link to="/sessions/$sessionId" params={{ sessionId: item.sessionId }} className="text-moss hover:underline">Open work</Link>}
-      {item.runId && <Link to="/workflows/runs/$runId" params={{ runId: item.runId }} className="text-moss hover:underline">Open workflow run</Link>}
+      {item.threadId ? <Link to="/threads/$threadId" params={{ threadId: item.threadId }} className={textLinkClass}>Open thread</Link> : item.sessionId && <Link to="/sessions/$sessionId" params={{ sessionId: item.sessionId }} className={textLinkClass}>Open work</Link>}
+      {item.runId && <Link to="/workflows/runs/$runId" params={{ runId: item.runId }} className={textLinkClass}>Open workflow run</Link>}
     </div>
   </div></li>;
 }

@@ -30,6 +30,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   Label,
+  StatusDot,
   Textarea,
 } from "~/components/primitives";
 import {
@@ -372,11 +373,7 @@ function EditorDraft({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
           {effectiveDirty && (
-            <span
-              data-testid="unsaved-indicator"
-              title="Unsaved changes"
-              className="inline-block h-2 w-2 rounded-full bg-amber"
-            />
+            <StatusDot data-testid="unsaved-indicator" title="Unsaved changes" tone="warning" />
           )}
           {/* JSON mode is the escape hatch for a change the assistant
               cannot express, so it stays — but out of the way. Reaching it

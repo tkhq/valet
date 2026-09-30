@@ -75,6 +75,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   Spinner,
+  StatusDot,
   Tooltip,
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
@@ -839,7 +840,7 @@ function ThreadNode({
               <ThreadOriginIcon thread={thread} />
               <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>{label}</span>
               {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
-              {unread && <span role="img" aria-label="Unread" className="mx-1.5 h-2 w-2 shrink-0 rounded-full bg-blue-500" />}
+              {unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
               <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
               {pinnedModelLabel && (
                 <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>

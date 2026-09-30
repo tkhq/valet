@@ -10,7 +10,7 @@ import {
   WorkspaceSwitcher,
   workspaceOptions,
 } from "~/components/layout/workspace-switcher";
-import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/primitives";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
@@ -168,7 +168,7 @@ export function TopNav() {
     <span className="inline-flex items-center gap-1.5">
       {label}
       {label === "Changelog" && changelogUnread && (
-        <span className="h-1.5 w-1.5 rounded-full bg-accent-500" aria-label="New releases" />
+        <StatusDot tone="accent" size="sm" label="New releases" />
       )}
     </span>
   );

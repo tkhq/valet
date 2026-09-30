@@ -3,7 +3,7 @@ import { forwardRef, type ButtonHTMLAttributes } from "react";
 import { cn } from "~/lib/cn";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
-type Size = "sm" | "md" | "lg";
+type Size = "sm" | "md" | "lg" | "icon";
 
 const VARIANT: Record<Variant, string> = {
   // Calm-companion palette (decision 9): moss is the accent for actions.
@@ -20,6 +20,8 @@ const SIZE: Record<Size, string> = {
   sm: "h-8 px-2.5 text-xs gap-1.5",
   md: "h-9 px-3.5 text-sm gap-2",
   lg: "h-10 px-4 text-sm gap-2",
+  // A square button that holds only an icon. Give it an aria-label.
+  icon: "h-6 w-6 p-0 text-muted",
 };
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -53,3 +55,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     />
   );
 });
+
+/** The text-link style: a moss label that underlines on hover. Apply it to a
+ * router `Link` or an `<a>`; a link is not a button, so it has no wrapper. */
+export const textLinkClass = "inline-flex items-center gap-1 font-medium text-moss underline-offset-4 hover:underline";

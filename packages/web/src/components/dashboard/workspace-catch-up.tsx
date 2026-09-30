@@ -7,7 +7,7 @@ import { useDismissBriefing, useWorkspaceBriefings } from "~/api/catch-up";
 import { useMe } from "~/api/settings";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
-import { Badge, Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Badge, Button, ErrorRow, LoadingRow, textLinkClass } from "~/components/primitives";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 
 export function WorkspaceCatchUp({ owner: explicitOwner }: { owner?: OwnerFilter }) {
@@ -118,11 +118,10 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
     <header className="flex h-6 items-center gap-2">
       <h2 id={headingId} title={briefing.title} className="min-w-0 flex-1 truncate text-sm font-medium leading-6 text-ink">{briefing.title}</h2>
       <Badge variant={status.variant} className="shrink-0">{status.label}</Badge>
-      <button type="button" onClick={onDismiss} disabled={dismissing}
+      <Button variant="ghost" size="icon" onClick={onDismiss} disabled={dismissing} className="-mr-1"
         title="Dismiss this brief and archive its threads. Threads waiting on an approval stay open."
         aria-label={`Dismiss ${briefing.title}`}
-        className="-mr-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink disabled:opacity-50"
-      ><X aria-hidden className="h-3.5 w-3.5" /></button>
+      ><X aria-hidden className="h-3.5 w-3.5" /></Button>
     </header>
     <p title={briefing.nextAction} className={`mt-2 line-clamp-2 h-10 text-sm leading-5 ${briefing.nextAction ? "text-ink" : "text-muted"}`}>
       {briefing.nextAction ? <><span className="font-medium">Next: </span>{briefing.nextAction}</> : NO_ACTION[briefing.status]}
@@ -131,14 +130,14 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
       {briefing.latestThread ? <Link
         to="/threads/$threadId"
         params={{ threadId: briefing.latestThread.threadId }}
-        className="inline-flex items-center gap-1 font-medium text-moss underline-offset-4 hover:underline"
+        className={textLinkClass}
       >Open thread <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : latestRun ? <Link
         to="/workflows/runs/$runId"
         params={{ runId: latestRun }}
-        className="inline-flex items-center gap-1 font-medium text-moss underline-offset-4 hover:underline"
+        className={textLinkClass}
       >Open run <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : <span className="text-muted">No linked conversation</span>}
       {originUrl && <a href={originUrl} target="_blank" rel="noopener noreferrer"
-        className="inline-flex items-center gap-1 font-medium text-moss underline-offset-4 hover:underline"
+        className={textLinkClass}
       >Open in Slack <ArrowUpRight aria-hidden className="h-3.5 w-3.5" /></a>}
       <span className="ml-auto shrink-0 text-muted">Updated {relativeTime(briefing.updatedAt)}</span>
     </div>

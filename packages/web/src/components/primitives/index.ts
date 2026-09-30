@@ -17,3 +17,4 @@ export * from "./confirm-dialog.js";
 export * from "./query-state.js";
 export * from "./select-menu.js";
 export * from "./tab-bar.js";
+export * from "./status-dot.js";

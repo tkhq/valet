@@ -3,7 +3,7 @@ import { Bell, X } from "lucide-react";
 import type { NotificationSummary } from "@valet/api/wire";
 import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications, useNotificationDecisions } from "~/api/queries";
 import { useWorkflowActionRequired } from "~/api/workflows";
-import { Badge, Button, Popover, PopoverContent, PopoverTrigger } from "~/components/primitives";
+import { Badge, Button, Popover, PopoverContent, PopoverTrigger, StatusDot } from "~/components/primitives";
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { attentionSessionIds, isActionable } from "~/lib/use-attention-ping";
@@ -69,7 +69,7 @@ export function NotificationsBell() {
         <Button variant="ghost" size="sm" className="relative px-2" aria-label={pendingCount ? `Notifications: ${pendingCount} pending approvals` : "Notifications"}>
           <Bell className={`h-4 w-4 ${pendingCount ? "text-warning-fg" : ""}`} aria-hidden />
           {pendingCount > 0 ? <Badge variant="warning" className="absolute -right-1 -top-1 px-1 py-0 text-[10px]">{pendingCount}</Badge>
-            : unread > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent-500" />}
+            : unread > 0 && <StatusDot tone="accent" size="sm" className="absolute right-1 top-1" />}
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" aria-label="Notifications" className="w-[520px] max-h-[min(720px,calc(100dvh-6rem))] bg-paper p-0">
