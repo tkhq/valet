@@ -27,6 +27,9 @@ it("parses only github.com pull request URLs", () => {
   expect(parsePullRequestUrl("https://github.com/acme/app/pull/42")).toEqual({ owner: "acme", repo: "app", number: 42 });
   expect(parsePullRequestUrl("https://github.com/acme/app/issues/42")).toBeNull();
   expect(parsePullRequestUrl("https://evil.example/acme/app/pull/42")).toBeNull();
+  expect(parsePullRequestUrl("https://github.acme.internal/acme/app/pull/42", "https://github.acme.internal")).toEqual({ owner: "acme", repo: "app", number: 42 });
+  expect(parsePullRequestUrl("https://github.com/acme/app/pull/42", "https://github.acme.internal")).toBeNull();
+  expect(parsePullRequestUrl("https://github.com/acme/app/pull/42/files")).toBeNull();
   expect(pullRequestWebhookState({ pull_request: { html_url: "https://github.com/a/b/pull/1", state: "closed", merged: true } }))
     .toEqual({ url: "https://github.com/a/b/pull/1", state: "merged" });
   expect(pullRequestWebhookState({ pull_request: { html_url: "https://github.com/a/b/pull/1", state: "closed", merged: false } })?.state).toBe("closed");
@@ -48,6 +51,10 @@ it("marks a thread unread after an agent message and read once the viewer opens 
   expect(after?.readAt).toBeTypeOf("number");
   expect((await fetch(`${api.baseUrl}/api/sessions/${thread.sessionId}/threads/read`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threadIds: "x" }),
+  })).status).toBe(400);
+  // A malformed body is refused rather than read as "mark every thread".
+  expect((await fetch(`${api.baseUrl}/api/sessions/${thread.sessionId}/threads/read`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{",
   })).status).toBe(400);
 });
 

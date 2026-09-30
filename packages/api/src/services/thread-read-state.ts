@@ -3,13 +3,12 @@ import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, threadPullRequests, threadReads } from "../schema/index.js";
 import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
-import { resolveGithubApiUrl } from "./github-env.js";
+import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { resolveGitHubToken, type GitHubTokenDeps } from "./github-tokens.js";
 
 /** An open pull request is checked against GitHub at most this often. */
 export const PULL_REQUEST_RECHECK_MS = 10 * 60_000;
 const RECHECK_BATCH = 5;
-const PULL_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)$/;
 
 export interface ThreadActivity {
   readAt?: number;
@@ -17,11 +16,21 @@ export interface ThreadActivity {
   pullRequests?: ThreadPullRequest[];
 }
 
-/** Parses a github.com pull request URL. Other hosts and shapes return null. */
-export function parsePullRequestUrl(url: string): { owner: string; repo: string; number: number } | null {
-  const match = PULL_URL.exec(url.trim());
-  if (!match) return null;
-  return { owner: match[1]!, repo: match[2]!, number: Number(match[3]) };
+const NAME = /^[A-Za-z0-9_.-]+$/;
+
+/** Parses a pull request URL on the configured GitHub host (`GITHUB_URL`,
+ * github.com by default). Other hosts and shapes return null. */
+export function parsePullRequestUrl(
+  url: string, githubUrl = resolveGithubUrl(process.env),
+): { owner: string; repo: string; number: number } | null {
+  let parsed: URL, host: URL;
+  try { parsed = new URL(url.trim()); host = new URL(githubUrl); } catch { return null; }
+  if (parsed.protocol !== "https:" || parsed.host !== host.host || parsed.search || parsed.hash) return null;
+  const base = host.pathname.replace(/\/+$/, "");
+  if (base && !parsed.pathname.startsWith(`${base}/`)) return null;
+  const [owner, repo, kind, number, ...rest] = parsed.pathname.slice(base.length).split("/").filter(Boolean);
+  if (rest.length || kind !== "pull" || !owner || !repo || !NAME.test(owner) || !NAME.test(repo) || !number || !/^\d+$/.test(number)) return null;
+  return { owner, repo, number: Number(number) };
 }
 
 /** Read state, the last agent message, and pull requests for the threads the viewer lists. */

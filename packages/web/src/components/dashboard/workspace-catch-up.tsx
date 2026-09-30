@@ -98,6 +98,13 @@ const STATUS: Record<WorkspaceBriefing["status"], { label: string; variant: "war
   updated: { label: "Updated", variant: "neutral" },
 };
 
+/** Shown when the brief names no next action, so the text never contradicts the status. */
+const NO_ACTION: Record<WorkspaceBriefing["status"], string> = {
+  needs_attention: "Open the thread to see what it needs.",
+  in_progress: "Valet is still working on this.",
+  updated: "Nothing waits on you.",
+};
+
 function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: WorkspaceBriefing; onDismiss: () => void; dismissing: boolean }) {
   const headingId = useId();
   const status = STATUS[briefing.status];
@@ -118,7 +125,7 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
     </header>
     {briefing.nextAction
       ? <p className="mt-2 text-sm text-ink"><span className="font-medium">Next: </span>{briefing.nextAction}</p>
-      : <p className="mt-2 text-sm text-muted">Nothing waits on you.</p>}
+      : <p className="mt-2 text-sm text-muted">{NO_ACTION[briefing.status]}</p>}
     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
       {briefing.latestThread ? <Link
         to="/threads/$threadId"

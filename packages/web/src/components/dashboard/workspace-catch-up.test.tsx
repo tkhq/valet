@@ -89,6 +89,12 @@ it("links the run, not an invented conversation, when only workflow evidence exi
   expect(screen.queryByText("Next step")).toBeNull();
   expect(screen.queryByText("Completed")).toBeNull();
 });
+it("never pairs a needs-attention badge with nothing to do", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, nextAction: undefined }], generatedAt: 100, coverage: "recent" });
+  setup();
+  expect(await screen.findByText("Open the thread to see what it needs.")).toBeTruthy();
+  expect(screen.queryByText("Nothing waits on you.")).toBeNull();
+});
 it("prepares without an unscoped request while identity is unresolved", () => {
   owner = undefined;
   setup();

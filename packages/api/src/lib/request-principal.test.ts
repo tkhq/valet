@@ -158,6 +158,9 @@ describe("teamApiKeyPathAllowed", () => {
     expect(teamApiKeyPathAllowed("/api/workspaces/team_1/runtime/info", "GET", TEAM)).toBe(true);
     expect(teamApiKeyPathAllowed("/api/workspaces/user/runtime", "POST", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/workspaces/team_2/runtime/info", "GET", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/teams/team_1/orchestrator", "POST", TEAM)).toBe(true);
+    expect(teamApiKeyPathAllowed("/api/teams/team_2/orchestrator", "POST", TEAM)).toBe(false);
+    expect(teamApiKeyPathAllowed("/api/orchestrator", "POST", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/workspaces/team_1/runtime/x", "POST", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/teams/team_1", "GET", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/teams/team_1/members", "POST", TEAM)).toBe(false);

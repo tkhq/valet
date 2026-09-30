@@ -6,7 +6,7 @@ Status: implemented on 2026-09-30. This note records six changes from the briefs
 
 A brief covers a line of work: it combines at least two kinds of source, such as a conversation with its pull request, a workflow run, an artifact, or a sent message. A goal whose only evidence is conversations gets no brief, because the thread list and **Waiting on you** show those threads with exact state. The parser drops a single-kind group even when the model returns one.
 
-Briefs show in two columns. A card shows a title, a status, the next action, and one line of links. The summary and the sources sit behind **Details**. The next action is one instruction of at most 12 words, and it is absent when nothing waits on the reader.
+Briefs show in two columns. A card shows a title, a status, the next action, and one line of links. The summary and the sources sit behind **Details**. The next action is one instruction of at most 12 words. Without one, the card says what its status means: open the thread for a brief that needs attention, or nothing waits on the reader.
 
 `VALET_BRIEFING_MODEL` names the model that writes brief text. Without it, an OpenAI key selects `gpt-5.6-luna`, and Claude Haiku 4.5 is the fallback. The prompt asks for a teammate's status note: plain nouns, no filler, and no process verbs such as "Clarified" or "Identified". The card links to its conversation with **Open thread**. When the work started in Slack, the card also links to that Slack thread with **Open in Slack**.
 
@@ -33,9 +33,9 @@ Dismiss also archives the brief's threads that belong to the workspace. A thread
 
 ## Thread sidebar
 
-A blue dot marks an unread thread: its newest agent message is later than the viewer's last read and last action. The `thread_reads` table stores one read time per person and thread. Opening a thread marks it read, and so does a new reply while it is open. **Mark all as read** in the sidebar options menu marks every thread in the session.
+A blue dot marks an unread thread: its newest agent message is later than the viewer's last read and last action. The `thread_reads` table stores one read time per person and thread. Opening a thread marks it read, and so does a new reply while it is open. **Mark all as read** in the sidebar options menu marks every thread in the session. The endpoint marks every thread only for an empty body; a malformed body is refused.
 
-A thread that created a pull request shows its state: open, merged, or closed. The `thread_pull_requests` table stores each pull request with its thread. A `gh pr create` in the terminal and the GitHub `create_pull_request` action both put a `pull_request_created` outcome on the engine `tool_end` event, and the API records it. A GitHub `pull_request` webhook updates the state. If no webhook arrives, listing threads checks up to five open pull requests that were not checked in the last 10 minutes.
+A thread that created a pull request shows its state: open, merged, or closed. The `thread_pull_requests` table stores each pull request with its thread. A `gh pr create` in the terminal and the GitHub `create_pull_request` action both put a `pull_request_created` outcome on the engine `tool_end` event, and the API records it. Only a pull request URL on the configured GitHub host (`GITHUB_URL`, github.com by default) is recorded. A GitHub `pull_request` webhook updates the state. If no webhook arrives, listing threads checks up to five open pull requests that were not checked in the last 10 minutes.
 
 Each thread row shows its origin: Slack, another channel, web chat, an automation, or another agent. The origin comes from the engine thread key (`packages/web/src/lib/thread-origin.ts`). The sidebar options menu has **Show threads from**, with a count for each origin. An active filter shows above the list with a **Clear** link. The browser remembers the choice.
 

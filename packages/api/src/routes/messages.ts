@@ -389,7 +389,18 @@ messagesRouter.post("/:id/threads/read", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
-  const body = await c.req.json<MarkThreadsReadRequest>().catch((): MarkThreadsReadRequest => ({}));
+  // An empty body marks every thread. A body that is not a JSON object is
+  // refused, so a malformed request cannot mark everything read.
+  const raw = (await c.req.text()).trim();
+  let body: MarkThreadsReadRequest = {};
+  if (raw) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return c.json({ error: "Send a JSON object, such as {\"threadIds\": [\"<thread id>\"]}, or an empty body to mark every thread read." }, 400);
+    }
+    body = parsed;
+  }
   const known = new Set(engineSession.listThreads().map((t) => t.id));
   if (body.threadIds !== undefined && !Array.isArray(body.threadIds)) {
     return c.json({ error: "threadIds must be an array of thread ids." }, 400);
