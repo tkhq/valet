@@ -192,7 +192,7 @@ export async function createWorkflowSchedule(
   }
 
   const values = {
-    id: input.proposalKey ? proposalId("schedule", owner.orgId, scheduleOwner.ownerType, scheduleOwner.ownerId, input.proposalKey) : randomUUID(),
+    id: input.proposalKey ? proposalId("schedule", owner.orgId, scheduleOwner.ownerType, scheduleOwner.ownerId, input.proposalKey, hasWorkflow ? input.workflowId : undefined) : randomUUID(),
     orgId: owner.orgId,
     ownerType: scheduleOwner.ownerType,
     ownerId: scheduleOwner.ownerId,

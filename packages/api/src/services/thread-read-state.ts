@@ -187,8 +187,12 @@ export async function listWaitingThreads(
     WHERE s.status <> 'deleted' AND s.org_id = ${orgId} AND s.owner_type = ${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END) = ${owner.id}
       AND t.archived_at IS NULL AND t.last_user_activity_at IS NOT NULL
-      -- The editor conversation of a deleted workflow has nothing left to answer.
-      AND (et.key IS NULL OR et.key NOT LIKE 'workflow:%' OR w.id IS NOT NULL)
+      -- The sidebar hides each person's app-assistant helper thread; so does this list.
+      AND (et.key IS NULL OR et.key NOT LIKE 'app-assistant:%')
+      -- A workflow editor conversation belongs to one viewer, and the editor of a
+      -- deleted workflow has nothing left to answer.
+      AND (et.key IS NULL OR et.key NOT LIKE 'workflow:%'
+        OR (w.id IS NOT NULL AND split_part(et.key, ':', 3) IN ('', ${viewerId})))
       AND e.created_at > t.last_user_activity_at AND e.created_at > ${now - WAITING_WINDOW_MS}
       AND NOT EXISTS (SELECT 1 FROM engine_queue_items q
         WHERE q.session_id = t.session_id AND q.thread_id = t.id AND q.status <> 'settled')

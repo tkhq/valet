@@ -178,6 +178,13 @@ async function ensureAssistantSession(
     .from(agentSessions)
     .where(eq(agentSessions.id, sessionId))
     .limit(1);
+  if (existingRows[0]?.status === "deleted") {
+    // A live assistant's session is never deleted by this version. During a
+    // rolling deploy an older pod can still mark it deleted; the boot sweep
+    // (syncAssistantSessionStatus) repairs that only on restart, so use does it now.
+    await deps.db.update(agentSessions).set({ status: "active", updatedAt: Date.now() })
+      .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "deleted")));
+  }
   if (!existingRows[0]) {
     const now = Date.now();
     const data = await session.toData();

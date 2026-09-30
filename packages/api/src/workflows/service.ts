@@ -1826,7 +1826,13 @@ export async function resolveWorkflowApproval(
   const stored = prepared?.ok ? await deps.db.transaction(async (tx) => {
     const [inserted] = await tx.insert(workflowSignals).values(signal)
       .onConflictDoNothing({ target: [workflowSignals.runId, workflowSignals.signalId] }).returning();
-    if (!inserted) return { payload: null };
+    if (!inserted) {
+      // As the store's insertSignal does: return the existing row, so an
+      // identical retry after a lost response reads as success, not a conflict.
+      const [existing] = await tx.select().from(workflowSignals)
+        .where(and(eq(workflowSignals.runId, input.runId), eq(workflowSignals.signalId, signalId))).limit(1);
+      return existing ?? { payload: null };
+    }
     await persistWorkflowPermissions(tx, prepared.grants);
     await tx.update(actionInvocations).set({ status: "approved", resolvedBy: owner.userId })
       .where(and(eq(actionInvocations.orgId, orgId), eq(actionInvocations.invocationId, `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`)));

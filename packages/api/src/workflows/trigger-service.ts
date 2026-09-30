@@ -125,7 +125,7 @@ export async function createWorkflowTrigger(
 
   const now = Date.now();
   const values = {
-    id: input.proposalKey ? proposalId("trigger", owner.orgId, owned.ownerType === "team" ? "team" : "user", owned.ownerType === "team" ? owned.ownerId : owner.userId, input.proposalKey) : randomUUID(),
+    id: input.proposalKey ? proposalId("trigger", owner.orgId, owned.ownerType === "team" ? "team" : "user", owned.ownerType === "team" ? owned.ownerId : owner.userId, input.proposalKey, input.workflowId) : randomUUID(),
     orgId: owner.orgId,
     // Owner follows the workflow, team only — see the insert in `routes/events.ts`.
     ownerType: owned.ownerType === "team" ? ("team" as const) : ("user" as const),

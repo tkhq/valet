@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { teams, teamMembers } from "../schema/index.js";
+import { agentSessions, teams, teamMembers } from "../schema/index.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 describe("workspace runtime authorization", () => {
@@ -15,6 +15,15 @@ describe("workspace runtime authorization", () => {
     expect(await (await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" })).json()).toEqual(first);
     expect(await (await fetch(`${api.baseUrl}/api/orchestrator`)).json()).toEqual({ sessionId: first.sessionId, exists: true });
     expect((await fetch(`${api.baseUrl}/api/teams/unknown/orchestrator`, { method: "POST" })).status).toBe(404);
+  });
+  it("reactivates the runtime session an older pod marked deleted", async () => {
+    api = await bootTestApi();
+    const root = `${api.baseUrl}/api/workspaces/user/runtime`;
+    const { sessionId } = await (await fetch(root, { method: "POST" })).json() as { sessionId: string };
+    await api.providers.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, sessionId));
+    expect(await (await fetch(root, { method: "POST" })).json()).toEqual({ sessionId });
+    const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId));
+    expect(row?.status).toBe("active");
   });
   it("answers a team runtime on the older team path for a member", async () => {
     api = await bootTestApi();

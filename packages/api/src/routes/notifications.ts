@@ -17,7 +17,7 @@
  * a kind with no row reports `web: true` and `teamDm: false`.
  */
 import { Hono } from "hono";
-import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { agentSessions, workflowRuns, workflowDefinitions, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
@@ -37,9 +37,18 @@ export const notificationsRouter = new Hono<AppEnv>();
 /** Read durable gates without waking their sessions or relying on notification read state. */
 notificationsRouter.get("/decisions", async (c) => {
   const { db, engineStore } = c.var.providers;
+  const caller = c.var.principal;
+  // The same reach canViewSession grants, as SQL, so each poll reads only the
+  // caller's own and team sessions instead of every pending gate in the org.
+  // canResolveSessionGate below stays the authority.
+  const reachable = (ownerType: SQL, ownerId: SQL, userId: SQL) => caller.type === "team"
+    ? sql`(${ownerType} = 'team' AND ${ownerId} = ${caller.id})`
+    : sql`((${ownerType} = 'team' AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = ${ownerId} AND tm.user_id = ${caller.id}))
+        OR (${ownerType} <> 'team' AND ${userId} = ${caller.id}))`;
   const sessions = await db.select().from(agentSessions).where(and(
     eq(agentSessions.orgId, c.var.user.orgId),
     ne(agentSessions.status, "deleted"),
+    reachable(sql`${agentSessions.ownerType}`, sql`${agentSessions.ownerId}`, sql`${agentSessions.userId}`),
     sql`EXISTS (SELECT 1 FROM engine_decision_gates g WHERE g.session_id = ${agentSessions.id} AND g.status = 'pending')`,
   ));
   const items: ListNotificationDecisionsResponse["items"] = [];
@@ -55,7 +64,8 @@ notificationsRouter.get("/decisions", async (c) => {
   }).from(sql`engine_decision_gates g`)
     .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(g.session_id, ':', 2)`)
     .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
-    .where(and(eq(workflowDefinitions.orgId, c.var.user.orgId), sql`g.status = 'pending' and g.session_id LIKE 'wf:%'`));
+    .where(and(eq(workflowDefinitions.orgId, c.var.user.orgId), sql`g.status = 'pending' and g.session_id LIKE 'wf:%'`,
+      reachable(sql`${workflowRuns.ownerType}`, sql`${workflowRuns.ownerId}`, sql`${workflowRuns.ownerId}`)));
   for (const session of workflowSessions) {
     if (!await canResolveSessionGate(db, {
       ownerType: session.owner_type, ownerId: session.owner_id,
