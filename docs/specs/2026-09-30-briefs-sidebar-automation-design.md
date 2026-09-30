@@ -6,7 +6,9 @@ Status: implemented on 2026-09-30. This note records six changes from the briefs
 
 A brief covers a line of work: it combines at least two kinds of source, such as a conversation with its pull request, a workflow run, an artifact, or a sent message. A goal whose only evidence is conversations gets no brief, because the thread list and **Waiting on you** show those threads with exact state. The parser drops a single-kind group even when the model returns one.
 
-A brief card is compact: a small title, a short summary, and one line of links. The card links to its conversation with **Open thread**. When the work started in Slack, the card also links to that Slack thread with **Open in Slack**.
+Briefs show in two columns. A card shows a title, a status, the next action, and one line of links. The summary and the sources sit behind **Details**. The next action is one instruction of at most 12 words, and it is absent when nothing waits on the reader.
+
+`VALET_BRIEFING_MODEL` names the model that writes brief text. Without it, an OpenAI key selects `gpt-5.6-luna`, and Claude Haiku 4.5 is the fallback. The prompt asks for a teammate's status note: plain nouns, no filler, and no process verbs such as "Clarified" or "Identified". The card links to its conversation with **Open thread**. When the work started in Slack, the card also links to that Slack thread with **Open in Slack**.
 
 A brief finds its conversation in this order:
 

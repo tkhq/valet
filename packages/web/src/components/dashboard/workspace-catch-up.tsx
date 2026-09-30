@@ -56,8 +56,10 @@ function ScopedBriefings({ owner }: { owner: OwnerFilter }) {
     ) : (
       <div className="space-y-4">
         {dismissNote && <p role="status" className="text-xs text-muted">{dismissNote}</p>}
-        {briefings.data.briefings.map(briefing => <BriefingCard key={briefing.id} briefing={briefing}
-          onDismiss={() => dismissBriefing(briefing)} dismissing={dismiss.isPending && dismiss.variables?.id === briefing.id} />)}
+        <div className="grid gap-4 md:grid-cols-2">
+          {briefings.data.briefings.map(briefing => <BriefingCard key={briefing.id} briefing={briefing}
+            onDismiss={() => dismissBriefing(briefing)} dismissing={dismiss.isPending && dismiss.variables?.id === briefing.id} />)}
+        </div>
         <p className="text-xs text-muted">Based on recent work{briefings.data.checkedAt ? ` · Checked ${relativeTime(briefings.data.checkedAt)}` : ""}{briefings.data.refreshing ? " · Updating…" : ""}</p>
       </div>
     )}
@@ -104,8 +106,8 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
   // A run a schedule or an event started has no conversation. Link the newest run instead.
   const latestRun = briefing.latestThread ? undefined
     : [...briefing.sources].filter(source => source.kind === "workflow" && source.runId).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.runId;
-  return <article aria-labelledby={headingId} className="rounded-lg border border-line bg-paper px-4 py-3">
-    <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
+  return <article aria-labelledby={headingId} className="flex flex-col rounded-lg border border-line bg-paper px-4 py-3">
+    <header className="flex items-start gap-2">
       <h2 id={headingId} className="min-w-0 flex-1 break-words text-sm font-medium text-ink">{briefing.title}</h2>
       <Badge variant={status.variant}>{status.label}</Badge>
       <button type="button" onClick={onDismiss} disabled={dismissing}
@@ -114,7 +116,9 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
         className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink disabled:opacity-50"
       ><X aria-hidden className="h-3.5 w-3.5" /></button>
     </header>
-    <p className="mt-1 whitespace-pre-line text-sm text-muted">{briefing.summary}</p>
+    {briefing.nextAction
+      ? <p className="mt-2 text-sm text-ink"><span className="font-medium">Next: </span>{briefing.nextAction}</p>
+      : <p className="mt-2 text-sm text-muted">Nothing waits on you.</p>}
     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
       {briefing.latestThread ? <Link
         to="/threads/$threadId"
@@ -130,17 +134,13 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
       >Open in Slack <ArrowUpRight aria-hidden className="h-3.5 w-3.5" /></a>}
       <span className="ml-auto text-muted">Updated {relativeTime(briefing.updatedAt)}</span>
     </div>
-    {sources.length > 0 && <div className="mt-2 border-t border-line pt-2">
-      <ul aria-label="Sources" className="flex flex-wrap gap-2">
-        {sources.slice(0, 3).map(source => <BriefingSource key={source.id} source={source} />)}
-      </ul>
-      {sources.length > 3 && <details className="mt-3">
-        <summary className="cursor-pointer text-xs text-muted hover:text-ink">{sources.length - 3} more {sources.length === 4 ? "source" : "sources"}</summary>
-        <ul aria-label="More sources" className="mt-2 flex flex-wrap gap-2">
-          {sources.slice(3).map(source => <BriefingSource key={source.id} source={source} />)}
-        </ul>
-      </details>}
-    </div>}
+    <details className="mt-2 border-t border-line pt-2">
+      <summary className="cursor-pointer text-xs text-muted hover:text-ink">Details{sources.length > 0 ? ` · ${sources.length} ${sources.length === 1 ? "source" : "sources"}` : ""}</summary>
+      <p className="mt-2 whitespace-pre-line text-sm text-muted">{briefing.summary}</p>
+      {sources.length > 0 && <ul aria-label="Sources" className="mt-2 flex flex-wrap gap-2">
+        {sources.map(source => <BriefingSource key={source.id} source={source} />)}
+      </ul>}
+    </details>
   </article>;
 }
 

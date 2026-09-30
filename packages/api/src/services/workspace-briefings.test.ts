@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { budgetBriefingEvidence, collectWorkspaceBriefingSources, slackUrlForThreadKey, type BriefingEvidence } from "./workspace-briefing-sources.js";
-import { createBriefingGenerator, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
+import { briefingModelRef, createBriefingGenerator, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
 
 const user = { type: "user" as const, id: "local-user" };
 const evidence: BriefingEvidence[] = [
@@ -36,6 +36,17 @@ describe("workspace briefing synthesis", () => {
     const withPr = [...evidence, pr];
     const runAndPr = JSON.stringify({ briefings: [{ title: "Intake verification", summary: "Concurrent deliveries remain untested.", sourceIds: ["run","pr"] }] });
     expect(parseWorkspaceBriefings(runAndPr,withPr)[0].latestThread).toBeNull();
+  });
+  it("keeps a short next action and drops one with a link", () => {
+    const reply = (nextAction: string) => JSON.stringify({ briefings: [{ title: "Intake", summary: "The fix is in review.", nextAction, sourceIds: ["latest","run"] }] });
+    expect(parseWorkspaceBriefings(reply("Approve the concurrent check."),evidence)[0].nextAction).toBe("Approve the concurrent check.");
+    expect(parseWorkspaceBriefings(reply("Open https://evil.example now"),evidence)[0].nextAction).toBeUndefined();
+  });
+  it("writes briefs with OpenAI when a key exists, unless a model is configured", () => {
+    expect(briefingModelRef({})).toEqual({ provider: "anthropic", model: "claude-haiku-4-5" });
+    expect(briefingModelRef({ OPENAI_API_KEY: "k" })).toEqual({ provider: "openai", model: "gpt-5.6-luna" });
+    expect(briefingModelRef({ OPENAI_API_KEY: "k", VALET_BRIEFING_MODEL: "anthropic/claude-sonnet-5-5" })).toEqual({ provider: "anthropic", model: "claude-sonnet-5-5" });
+    expect(briefingModelRef({ VALET_BRIEFING_MODEL: "no-slash" })).toEqual({ provider: "anthropic", model: "claude-haiku-4-5" });
   });
   it("keeps only lines of work that combine more than one kind of source", () => {
     const reply = JSON.stringify({ briefings: [

@@ -17,6 +17,7 @@ vi.mock("./workspace-activity", () => ({ WorkspaceActivity: () => <div>Detailed 
 const briefing: WorkspaceBriefing = {
   id: "goal-routing", title: "Make event routing reliable",
   summary: "The routing change and replay checks are ready. The PR and report cover the implementation; rollout awaits your review.",
+  nextAction: "Review the rollout thread before release.",
   status: "needs_attention", updatedAt: 100,
   latestThread: { sessionId: "runtime", threadId: "rollout-review", title: "Review routing rollout" },
   sources: [
@@ -69,8 +70,9 @@ it("briefs one goal across conversations and runs with one concise summary", asy
   expect(within(article).getByRole("link", { name: "Replay report" }).getAttribute("href")).toBe("/a/replay-report");
   expect(within(article).getByRole("list", { name: "Sources" }).querySelector("a")?.textContent).toBe("TKAI-42 routing PR");
   expect(screen.getByText("Detailed activity")).toBeTruthy();
+  expect(within(article).getByText("Review the rollout thread before release.")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Replay verification" }).closest("details")?.open).toBe(false);
-  fireEvent.click(screen.getByText("1 more source"));
+  fireEvent.click(screen.getByText("Details · 4 sources"));
   expect(screen.getByRole("link", { name: "Replay verification" }).closest("details")?.open).toBe(true);
   expect(screen.getByRole("link", { name: "Replay verification" }).getAttribute("href")).toBe("/workflows/runs/run-verification");
 });

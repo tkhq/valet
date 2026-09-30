@@ -5371,6 +5371,8 @@ export interface WorkspaceBriefing {
   id: string;
   title: string;
   summary: string;
+  /** The one thing a person should do next, as a short instruction. Absent when nothing is pending. */
+  nextAction?: string;
   status: "needs_attention" | "in_progress" | "updated";
   updatedAt: number;
   latestThread: { sessionId: string; threadId: string; title?: string } | null;
