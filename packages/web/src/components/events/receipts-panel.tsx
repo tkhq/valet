@@ -3,7 +3,8 @@ import { Link } from "@tanstack/react-router";
 import type { ListEventReceiptsResponse } from "@valet/api/wire";
 import { useEventReceipts } from "~/api/events";
 import { useMe } from "~/api/settings";
-import { Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Badge, Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { relativeTime } from "~/lib/relative-time";
 import { SearchInput } from "~/components/search-input";
 
 type Receipt = ListEventReceiptsResponse["receipts"][number];
@@ -59,15 +60,15 @@ export function ReceiptsPanel() {
       <div className="mt-2 space-y-2">
         <p>Organization-wide metadata only. No message bodies. Retained for up to 7 days or 10,000 receipts, whichever comes first.</p>
         <p>Open a matched event for delivery attempts and outcomes.</p>
-        <p>Missing an event? Check the rejections above for verification or credential errors, then the provider’s delivery logs. A missing receipt does not confirm a delivery failure.</p>
+        <p>Missing an event? Check Rejected and Failed in the Log for verification or credential errors, then the provider’s delivery logs. A missing receipt does not confirm a delivery failure.</p>
       </div>
     </details>
-    {data && <p className="text-xs text-muted">{data.lastReceiptAt !== null ? <>Last recorded receipt: <Timestamp value={data.lastReceiptAt} /></> : "No recent receipts."}</p>}
+    {data && <p className="text-xs text-muted">{data.lastReceiptAt !== null ? `Last receipt ${relativeTime(data.lastReceiptAt)}.` : "No recent receipts."}</p>}
     <SearchInput aria-label="Search incoming events" placeholder="Search provider ID, channel, event key, or reference" value={query} maxLength={200} onSettled={next => { setQuery(next.trim()); setCursors([]); }} />
     {receiptsQ.isPending && <LoadingRow label="Loading incoming events…" />}
     {receiptsQ.error && <ErrorRow>Could not load delivery receipts. <button className="underline" onClick={() => void receiptsQ.refetch()}>Retry</button>{cursor && <> or <button className="underline" onClick={() => setCursors([])}>Return to the first page</button>.</>}</ErrorRow>}
     {data?.receipts.length === 0 && <EmptyRow>{query ? "No receipts match this search in the last 7 days." : "No receipts recorded in the last 7 days. Check the provider’s delivery logs for missing events."}</EmptyRow>}
-    {data && <ul className="divide-y divide-line border-y border-line">{data.receipts.map(receipt => <ReceiptRow key={receipt.id} receipt={receipt} />)}</ul>}
+    {data && data.receipts.length > 0 && <ul className="divide-y divide-line rounded-lg border border-line bg-paper">{data.receipts.map(receipt => <ReceiptRow key={receipt.id} receipt={receipt} />)}</ul>}
     <nav aria-label="Incoming event pages" className="flex gap-2">
       <Button variant="secondary" disabled={!cursor || receiptsQ.isFetching} onClick={() => setCursors(previous => previous.slice(0, -1))}>Previous</Button>
       <Button variant="secondary" disabled={!data?.nextCursor || receiptsQ.isFetching} onClick={() => { const next = data?.nextCursor; if (next) setCursors(previous => [...previous, next]); }}>Next</Button>
@@ -83,12 +84,15 @@ function ReceiptRow({ receipt }: { receipt: Receipt }) {
     ?? stages.find(stage => stage.stage === "subscription_match")
     ?? stages.find(stage => stage.stage === "persistence")
     ?? stages.at(-1);
-  return <li className="py-3">
+  const outcome = latest ? label(latest.outcome) : "Received";
+  return <li className="px-4 py-3">
     <details>
-      <summary className="cursor-pointer rounded py-1 text-sm focus-visible:outline focus-visible:outline-moss">
-        <span className="font-medium">{label(receipt.service)} · {receipt.eventKey ? <code>{receipt.eventKey}</code> : "Incoming delivery"}</span>
-        <span className="ml-2 text-muted">{latest ? label(latest.outcome) : "Received"}{latest?.outcome === "started" ? " · no completion recorded" : ""}</span>
-        <span className="mt-1 block"><Timestamp value={receipt.createdAt} /></span>
+      <summary className="cursor-pointer list-none rounded text-sm focus-visible:outline focus-visible:outline-moss">
+        <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="min-w-0 flex-1 font-medium">{label(receipt.service)}{receipt.eventKey ? <> · <span className="font-mono text-xs">{receipt.eventKey}</span></> : " · Incoming delivery"}</span>
+          <Badge variant={latest?.outcome === "failed" ? "danger" : latest?.outcome === "rejected" ? "warning" : "neutral"}>{outcome}{latest?.outcome === "started" ? " · no completion recorded" : ""}</Badge>
+          <span className="text-xs text-muted" title={new Date(receipt.createdAt).toISOString()}>{relativeTime(receipt.createdAt)}</span>
+        </span>
         {latest?.detail && <span className="mt-1 block text-muted">{latest.detail}</span>}
         <span className="mt-1 block break-all text-xs text-muted">Reference: {receipt.id}{receipt.externalId ? ` · Provider ID: ${receipt.externalId}` : ""}</span>
       </summary>

@@ -5,6 +5,7 @@
  * methods, mirroring `settings.ts`/`workflows.ts` conventions.
  */
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -16,9 +17,8 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
+  EventLogStatus,
   ListEventReceiptsResponse,
-  ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
@@ -52,10 +52,9 @@ export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
   filterOptions: (source: string, q: string, deps: Record<string, string>) =>
     filterOptionsKey(source, q, deps),
-  feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
-    ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
+  log: (owner?: OwnerFilter, status?: string, q?: string) =>
+    ["events", "log", owner?.ownerType ?? "", owner?.ownerId ?? "", status ?? "", q ?? ""] as const,
   detail: (id: string) => ["events", "detail", id] as const,
-  drops: (q = "", cursor = "", direction = "") => ["events", "drops", q, cursor, direction] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
@@ -91,26 +90,6 @@ export function useFilterOptions(
   });
 }
 
-/** `owner` narrows the feed to events delivered to that owner's
- * subscriptions. Undefined keeps the whole org's feed, unless the caller
- * also disabled the query, which means "one workspace, owner still
- * unknown". */
-export function useEvents(
-  params?: { service?: string; key?: string },
-  owner?: OwnerFilter,
-  opts?: Partial<UseQueryOptions<ListEventsResponse>>,
-) {
-  // Held for a missing owner, not unscoped on purpose — see `ownerKey`.
-  const held = owner === undefined && opts?.enabled === false;
-  return useQuery<ListEventsResponse>({
-    queryKey: qkEvents.feed(params?.service, params?.key, owner, held),
-    queryFn: () => api.listEvents(params, owner),
-    // New events arrive from external webhooks at any time.
-    refetchInterval: 30_000,
-    ...opts,
-  });
-}
-
 export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResponse>>) {
   return useQuery<GetEventResponse>({
     queryKey: qkEvents.detail(id),
@@ -122,23 +101,15 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
   });
 }
 
-/** A substring search cannot use the paging index, so it loads once instead
- * of polling. Unfiltered drops poll like the feed. */
-export function eventDropsRefetchInterval(q?: string): false | 30_000 {
-  return q ? false : 30_000;
-}
-
-/** Recent reasons an event arrived but did not become a feed row, plus the
- * last time any event reached ingest. */
-export function useEventDrops(
-  params: { q?: string; cursor?: string; direction?: "previous" } = {},
-  opts?: Partial<UseQueryOptions<ListEventDropsResponse>>,
-) {
-  return useQuery<ListEventDropsResponse>({
-    queryKey: qkEvents.drops(params.q, params.cursor, params.direction),
-    queryFn: () => api.listEventDrops(params),
-    placeholderData: (previousData) => previousData,
-    refetchInterval: eventDropsRefetchInterval(params.q),
+/** The Log: stored events and recorded problems, newest first, one page at a
+ * time. Polls the first page while nothing is searched. */
+export function useEventLog(params: { owner?: OwnerFilter; status?: EventLogStatus; q?: string }, opts: { enabled?: boolean } = {}) {
+  return useInfiniteQuery({
+    queryKey: qkEvents.log(params.owner, params.status, params.q),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.getEventLog({ ...params, ...(pageParam ? { cursor: pageParam } : {}) }),
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    refetchInterval: params.q ? false : 30_000,
     ...opts,
   });
 }
@@ -153,6 +124,7 @@ export function useRedeliverEvent(id: string) {
     mutationFn: () => api.redeliverEvent(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkEvents.detail(id) });
+      qc.invalidateQueries({ queryKey: ["events", "log"] });
     },
   });
 }

@@ -72,3 +72,21 @@ Telegram and Slack DMs are not channels in this view. A DM is a personal convers
 ## Demo data
 
 `scripts/seed-threads-demo.mjs channels` (API running), then `offline` (API stopped), seeds a Slack channel thread with a personal listener and messages both ways. With `pull-requests` seeded first, it also adds a review comment and a reply on the open pull request.
+
+## Events page Log
+
+The Events page has three tabs: Channels, Log, and Subscriptions. The Log replaces the Activity and Event Logs tabs, which showed stored events and recorded problems as two unrelated lists, one above the other.
+
+`GET /api/events/log` returns stored events and `event_drop_log` problems in one timeline, newest first. Each source is read in `(time, id)` keyset order and merged, so one cursor pages the combined list. Each row has one status:
+
+| Status | Source |
+|---|---|
+| Delivered, In progress, Failed | A stored event, from its deliveries: a failure wins, then work in flight. |
+| Filtered out | `filter_excluded`. |
+| No match | `no_subscription_match`. |
+| Rejected | Verification, workspace, classification, and duplicate reasons. |
+| Failed | Every other problem reason, such as a reply that was not posted. |
+
+Status chips narrow the list to one status. `status`, `scope`, and `q` live in the URL, so Back and a shared link restore the view. A workspace scope shows the last 30 days of events that reached that workspace. Problems carry no owner, so they are listed for the whole organization in every scope. Members do not see the two Slack form diagnostics. A stored event opens its own page for deliveries, the payload, and redelivery.
+
+Raw incoming receipts stay admin-only. They open from their own chip, in place of the list. The old `tab=activity`, `logs`, `problems`, and `receipts` links open the Log, and `problemsQ` becomes its search.

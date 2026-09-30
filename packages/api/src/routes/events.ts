@@ -31,6 +31,7 @@ import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
+  EventLogResponse,
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
   EventSubscriptionCollisionErrorWire,
@@ -52,6 +53,7 @@ import type {
 import { armableDefinitionRow } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { readOwnerFilter } from "./_owner-filter.js";
+import { EVENT_LOG_STATUSES, EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -403,6 +405,48 @@ function escapeLike(value: string): string {
  * fire" when the feed is empty. Registered before `/events/:id` so the literal
  * path wins over the id param. No payload is exposed — the drop-log holds none.
  */
+/**
+ * `GET /api/events/log` — stored events and recorded problems in one
+ * timeline. `status` picks one kind of outcome; `ownerType`/`ownerId` scope
+ * events to a workspace (problems are org-wide). Registered before
+ * `/events/:id` so the literal path wins.
+ */
+eventsRouter.get("/events/log", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const limit = readLimit(c.req.query("limit"), FEED_DEFAULT_LIMIT, FEED_MAX_LIMIT);
+  if (limit === undefined) return c.json({ error: "limit must be a whole number of 1 or more" }, 400);
+  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error) return c.json({ error: filter.error }, 400);
+  const rawStatus = c.req.query("status");
+  const status = EVENT_LOG_STATUSES.find((candidate) => candidate === rawStatus);
+  if (rawStatus !== undefined && !status) return c.json({ error: `status must be one of: ${EVENT_LOG_STATUSES.join(", ")}.` }, 400);
+  const q = c.req.query("q")?.trim() || undefined;
+  if (q && q.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
+  const service = c.req.query("service") || undefined;
+  const scopeKey = JSON.stringify([filter.owner ?? null, status ?? null, service ?? null, q ?? null]);
+  const rawCursor = c.req.query("cursor");
+  const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
+  const before = decoded && decoded.orgId === user.orgId && decoded.scope === scopeKey &&
+    typeof decoded.at === "number" && Number.isFinite(decoded.at) && typeof decoded.id === "string"
+    ? { at: decoded.at, id: decoded.id } : undefined;
+  if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor no longer matches these filters. Load the Log again from the top." }, 400);
+
+  const admin = await isOrgAdminUser(c);
+  const { items, hasMore } = await listEventLog(db, {
+    orgId: user.orgId, owner: filter.owner ?? null, admin, limit,
+    ...(status ? { status } : {}), ...(service ? { service } : {}), ...(q ? { q } : {}), ...(before ? { before } : {}),
+  });
+  const last = items.at(-1);
+  const resp: EventLogResponse = {
+    items,
+    nextCursor: hasMore && last ? encodePageCursor({ orgId: user.orgId, scope: scopeKey, at: last.at, id: last.id }) : null,
+    lastEventAt: await lastEventLogActivity(db, user.orgId, admin),
+    windowDays: filter.owner ? EVENT_LOG_WINDOW_MS / (24 * 60 * 60 * 1000) : null,
+  };
+  return c.json(resp);
+});
+
 eventsRouter.get("/events/drops", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;

@@ -203,9 +203,9 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
+  EventLogResponse,
+  EventLogStatus,
   ListEventReceiptsResponse,
-  ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
@@ -1059,13 +1059,13 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  listEvents: (params?: { service?: string; key?: string }, owner?: OwnerFilter) => {
+  getEventLog: (params: { owner?: OwnerFilter; status?: EventLogStatus; q?: string; cursor?: string }) => {
     const qs = new URLSearchParams();
-    if (params?.service) qs.set("service", params.service);
-    if (params?.key) qs.set("key", params.key);
-    const q = qs.toString();
-    const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
-    return request<ListEventsResponse>("GET", path);
+    if (params.owner) { qs.set("ownerType", params.owner.ownerType); qs.set("ownerId", params.owner.ownerId); }
+    if (params.status) qs.set("status", params.status);
+    if (params.q) qs.set("q", params.q);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
   },
   listEventReceipts: (params: { q?: string; cursor?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
@@ -1073,13 +1073,6 @@ export const api = {
     if (params.cursor) qs.set("cursor", params.cursor);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     return request<ListEventReceiptsResponse>("GET", `/events/receipts${qs.size ? `?${qs}` : ""}`);
-  },
-  listEventDrops: (params: { q?: string; cursor?: string; direction?: "previous" } = {}) => {
-    const qs = new URLSearchParams();
-    if (params.q) qs.set("q", params.q);
-    if (params.cursor) qs.set("cursor", params.cursor);
-    if (params.direction) qs.set("direction", params.direction);
-    return request<ListEventDropsResponse>("GET", `/events/drops${qs.size ? `?${qs}` : ""}`);
   },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>

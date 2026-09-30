@@ -19,3 +19,4 @@ export * from "./select-menu.js";
 export * from "./tab-bar.js";
 export * from "./status-dot.js";
 export * from "./work-row.js";
+export * from "./filter-chips.js";

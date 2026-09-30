@@ -2,39 +2,38 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { TabBar, tabPanelId } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
-import { EventFeed, type FeedScope } from "~/components/events/feed";
+import { EventLog, type LogFilter, type LogScope } from "~/components/events/event-log";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
 import { ChannelsPanel } from "~/components/channels/channels-panel";
-import { useMe } from "~/api/settings";
-import { ReceiptsPanel } from "~/components/events/receipts-panel";
-import { DropsPanel } from "~/components/events/drops-panel";
 import { textParam } from "~/lib/search-params";
 
-/** Activity, subscriptions, and recorded event diagnostics. Legacy tab URLs
- * remain readable so existing links keep their searches and cursors. */
-type TabId = "channels" | "activity" | "subscriptions" | "logs";
+/** Channels, the Log (events and problems in one list), and subscriptions.
+ * Legacy tab URLs (`activity`, `logs`, `problems`, `receipts`) open the Log. */
+type TabId = "channels" | "log" | "subscriptions";
 
 interface EventsSearch {
   tab?: TabId;
   review?: string;
-  scope?: FeedScope;
-  problemsQ?: string;
-  problemsCursor?: string;
-  problemsDirection?: "previous";
+  scope?: LogScope;
+  status?: LogFilter;
+  q?: string;
 }
 
+const LOG_FILTERS: readonly LogFilter[] = ["all", "delivered", "failed", "filtered", "no_match", "rejected", "receipts"];
+
 /** Only non-default values are written to the URL. An absent or hand-edited
- * value reads as the default tab and workspace scope. */
+ * value reads as the default tab, workspace scope, and every status. */
 export function readEventsSearch(raw: unknown): EventsSearch {
   const tabValue = textParam(raw, "tab");
-  const tab = tabValue === "subscriptions" || tabValue === "activity" ? tabValue
-    : ["logs", "problems", "receipts"].includes(tabValue ?? "") ? "logs" : undefined;
+  const tab = tabValue === "subscriptions" ? tabValue
+    : ["log", "activity", "logs", "problems", "receipts"].includes(tabValue ?? "") ? "log" : undefined;
   const scope = textParam(raw, "scope") === "all" ? "all" : undefined;
-  const problemsQ = textParam(raw, "problemsQ");
-  const problemsCursor = textParam(raw, "problemsCursor");
-  const problemsDirection = textParam(raw, "problemsDirection") === "previous" ? "previous" as const : undefined;
+  const statusValue = tabValue === "receipts" ? "receipts" : textParam(raw, "status");
+  const status = LOG_FILTERS.find((candidate) => candidate === statusValue && candidate !== "all");
+  // `problemsQ` is the old Event Logs search; it now searches the Log.
+  const q = textParam(raw, "q") ?? textParam(raw, "problemsQ");
   const review = textParam(raw, "review");
-  return { ...(review ? { review } : {}), ...(tab ? { tab } : {}), ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}), ...(problemsDirection ? { problemsDirection } : {}) };
+  return { ...(review ? { review } : {}), ...(tab ? { tab } : {}), ...(scope ? { scope } : {}), ...(status ? { status } : {}), ...(q ? { q } : {}) };
 }
 
 export const Route = createFileRoute("/events/")({
@@ -45,9 +44,8 @@ export const Route = createFileRoute("/events/")({
 const TABS_LABEL = "Events sections";
 const TABS = [
   { id: "channels", label: "Channels" },
-  { id: "activity", label: "Activity" },
+  { id: "log", label: "Log" },
   { id: "subscriptions", label: "Subscriptions" },
-  { id: "logs", label: "Event Logs" },
 ] as const;
 
 export function EventsPage() {
@@ -55,21 +53,30 @@ export function EventsPage() {
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
-  const me = useMe();
-  const isAdmin = !me.error && me.data?.orgRole === "admin";
   const [selectedTab, setTab] = useState<TabId>(search.tab ?? "channels");
   const tab = selectedTab;
-  const tabs = TABS;
   useEffect(() => setTab(search.tab ?? "channels"), [search.tab]);
-  const scope: FeedScope = search.scope ?? "workspace";
+
+  /** Writes the Log's filters to the URL, so Back and a shared link restore them. */
+  function setLog(next: Partial<Pick<EventsSearch, "scope" | "status" | "q">>) {
+    const merged = { scope: search.scope, status: search.status, q: search.q, ...next };
+    void navigate({
+      to: "/events",
+      search: {
+        tab: "log" as const,
+        ...(merged.scope === "all" ? { scope: "all" as const } : {}),
+        ...(merged.status && merged.status !== "all" ? { status: merged.status } : {}),
+        ...(merged.q ? { q: merged.q } : {}),
+      },
+    });
+  }
 
   function selectTab(next: TabId) {
     setTab(next);
     void navigate({
       to: "/events",
       search: (previous) => {
-        const current = readEventsSearch(previous);
-        const { tab: _tab, ...rest } = current;
+        const { tab: _tab, ...rest } = readEventsSearch(previous);
         return next === "channels" ? rest : { ...rest, tab: next };
       },
     });
@@ -87,7 +94,7 @@ export function EventsPage() {
         </p>
 
         <div className="mt-6">
-          <TabBar tabs={tabs} active={tab} onSelect={selectTab} label={TABS_LABEL} />
+          <TabBar tabs={TABS} active={tab} onSelect={selectTab} label={TABS_LABEL} />
         </div>
 
         <div
@@ -97,35 +104,17 @@ export function EventsPage() {
           className="mt-6"
         >
           {tab === "channels" && <ChannelsPanel />}
-          {tab === "activity" && (
-            <EventFeed
-              scope={scope}
-              onScopeChange={(next) =>
-                void navigate({ to: "/events", search: { tab: "activity" as const, ...(next === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(search.problemsCursor ? { problemsCursor: search.problemsCursor } : {}), ...(search.problemsDirection ? { problemsDirection: search.problemsDirection } : {}) } })
-              }
+          {tab === "log" && (
+            <EventLog
+              scope={search.scope ?? "workspace"}
+              onScopeChange={(scope) => setLog({ scope })}
+              filter={search.status ?? "all"}
+              onFilterChange={(status) => setLog({ status })}
+              query={search.q ?? ""}
+              onQueryChange={(q) => setLog({ q })}
             />
           )}
-
           {tab === "subscriptions" && <SubscriptionsPanel reviewId={search.review} onReviewClose={() => void navigate({ to: "/events", search: { tab: "subscriptions" } })} />}
-          {tab === "logs" && (
-            <div className="space-y-8">
-            <section aria-label="Rejections and failures">
-            <h2 className="mb-2 text-base font-medium">Rejections and failures</h2>
-            <DropsPanel
-              query={search.problemsQ}
-              cursor={search.problemsCursor}
-              direction={search.problemsDirection}
-              onQueryChange={(problemsQ) => {
-                problemsQ = problemsQ.trim() ? problemsQ : "";
-                void navigate({ to: "/events", search: { tab: "logs", ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
-              }}
-              onPrevious={(problemsCursor) => void navigate({ to: "/events", search: { tab: "logs", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor, problemsDirection: "previous" as const } : {}) } })}
-              onNext={(problemsCursor) => void navigate({ to: "/events", search: { tab: "logs", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } })}
-            />
-            </section>
-            {isAdmin && <section aria-label="Incoming events"><h2 className="mb-2 text-base font-medium">Incoming events</h2><ReceiptsPanel key={me.data?.orgId} /></section>}
-            </div>
-          )}
         </div>
       </div>
     </div>

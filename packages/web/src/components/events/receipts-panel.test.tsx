@@ -93,5 +93,5 @@ it("shows unfinished processing without declaring failure", () => {
   render(<ReceiptsPanel />);
   expect(screen.getByText("Started · no completion recorded")).toBeTruthy();
   fireEvent.click(screen.getByText("About this log"));
-  expect(screen.getByText(/Check the rejections above/)).toBeTruthy();
+  expect(screen.getByText(/Check Rejected and Failed in the Log/)).toBeTruthy();
 });

@@ -4724,6 +4724,35 @@ export interface EventDropWire {
 /** `GET /api/events/drops` — recent drops plus the last time ANY event reached
  * ingest (matched or not), so the Problems tab can tell "nothing arrived" from
  * "arrived but matched nothing". */
+/** One row of the Events Log: a stored event, or a recorded problem. */
+export type EventLogStatus = "delivered" | "pending" | "failed" | "filtered" | "no_match" | "rejected";
+
+export interface EventLogItem {
+  kind: "event" | "problem";
+  id: string;
+  at: number;
+  status: EventLogStatus;
+  service: string | null;
+  eventKey: string | null;
+  /** A stored event's summary. */
+  summary: string | null;
+  actor: string | null;
+  /** A problem's reason code, such as `filter_excluded`. */
+  reason: string | null;
+  detail: string | null;
+  deliveryCount: number;
+}
+
+/** `GET /api/events/log`. */
+export interface EventLogResponse {
+  items: EventLogItem[];
+  nextCursor: string | null;
+  /** When anything last reached ingest, matched or not. */
+  lastEventAt: number | null;
+  /** Days of events a workspace-scoped Log covers. Null for the whole org. */
+  windowDays: number | null;
+}
+
 export interface ListEventDropsResponse {
   drops: EventDropWire[];
   /** Opaque cursor for the next older page, or null at the end. */

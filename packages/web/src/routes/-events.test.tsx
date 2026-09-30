@@ -35,65 +35,8 @@ const catalogData = {
   ],
 };
 
-const eventsData = {
-  events: [
-    {
-      id: "evt_1",
-      service: "github",
-      eventKey: "github.pr.opened",
-      summary: "PR #7 opened: fix login",
-      refs: { repo: "acme/app" },
-      actor: { externalId: "u-ext", login: "octocat" },
-      occurredAt: 1_723_200_000_000,
-      receivedAt: 1_723_200_000_000,
-    },
-  ],
-};
-
 /** A long error, so a truncation regression shows up as a failed substring
  * match rather than a passing prefix match. */
-const LONG_ERROR =
-  "Error: workflow wf_1 not found in org acme — the definition was deleted while the delivery was in flight";
-
-const eventDetailData = {
-  event: { ...eventsData.events[0], payload: { action: "opened", number: 7 } },
-  deliveries: [
-    {
-      id: "d1",
-      subscriptionId: "sub_1",
-      subscriptionName: "PR alerts",
-      status: "delivered" as const,
-      attempts: 1,
-      lastError: null,
-      deliveredAt: 1_723_200_001_000,
-      nextAttemptAt: null,
-    },
-    {
-      id: "d2",
-      subscriptionId: "sub_2",
-      subscriptionName: "Deploy watcher",
-      status: "failed" as const,
-      attempts: 2,
-      lastError: LONG_ERROR,
-      deliveredAt: null,
-      // Eight minutes out, with 30s of slack: the countdown rounds DOWN, so
-      // the assertion stays "in 8 minutes" however long the suite takes to
-      // reach this file.
-      nextAttemptAt: Date.now() + 8 * 60_000 + 30_000,
-    },
-    {
-      id: "d3",
-      subscriptionId: "sub_3",
-      subscriptionName: "Nightly triage",
-      status: "dead" as const,
-      attempts: 4,
-      lastError: "Error: connect ECONNREFUSED 127.0.0.1:8788",
-      deliveredAt: null,
-      nextAttemptAt: null,
-    },
-  ],
-};
-
 const subscriptionsData: { subscriptions: EventSubscriptionWire[] } = {
   subscriptions: [
     {
@@ -144,7 +87,6 @@ const deleteMutate = vi.fn();
  * that needs the new value on screen must cause a render of its own, which
  * is what a tab click does. Reset in `afterEach`. */
 let orgRole = "member";
-const receiptsHook = vi.fn();
 let searchState: Record<string, unknown> = {};
 type NavigateSearch = Record<string, unknown> | ((previous: Record<string, unknown>) => Record<string, unknown>);
 const navigateCalls: { search?: NavigateSearch }[] = [];
@@ -175,22 +117,17 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("~/components/channels/channels-panel", () => ({ ChannelsPanel: () => <p>Channels list</p> }));
 
+/** The props the page last gave the Log. Its own behaviour is `event-log.test.tsx`'s. */
+let logProps: { scope: string; filter: string; query: string; onFilterChange: (next: string) => void } | undefined;
+vi.mock("~/components/events/event-log", () => ({
+  EventLog: (props: { scope: string; filter: string; query: string; onFilterChange: (next: string) => void }) => {
+    logProps = props;
+    return <p>Log list</p>;
+  },
+}));
+
 vi.mock("~/api/events", () => ({
-  useEventReceipts: (...args: unknown[]) => { receiptsHook(...args); return { data: { receipts: [], nextCursor: null, lastReceiptAt: null, retentionDays: 7 } }; },
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
-  useEvents: () => ({
-    data: eventsData,
-    isPending: false,
-    isFetching: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
-  useEventDrops: () => ({
-    data: { lastEventAt: null, drops: [] },
-    isPending: false,
-    error: null,
-  }),
-  useEvent: () => ({ data: eventDetailData, isLoading: false, error: null }),
   useEventSubscriptions: () => ({ data: subscriptionsData, isPending: false, error: null }),
   usePatchEventSubscription: () => ({ mutate: patchMutate, isPending: false }),
   useCreateEventSubscription: () => ({ mutate: createMutate, isPending: false }),
@@ -244,7 +181,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   };
 });
 
-import { EventsPage } from "./events.index";
+import { EventsPage, readEventsSearch } from "./events.index";
 
 function team(id: string, name: string, callerRole: "admin" | "member" | null): TeamSummary {
   return {
@@ -262,7 +199,6 @@ function team(id: string, name: string, callerRole: "admin" | "member" | null): 
 
 beforeEach(() => {
   orgRole = "member";
-  receiptsHook.mockClear();
   patchMutate.mockClear();
   createMutate.mockClear();
   deleteMutate.mockClear();
@@ -283,129 +219,38 @@ describe("EventsPage — Channels", () => {
   });
 });
 
-describe("EventsPage — Activity", () => {
-  // Channels is the default tab, so every Activity case names its tab.
-  beforeEach(() => { searchState = { tab: "activity" }; });
-
-  it("renders the feed with service, key, summary, and actor", () => {
-    render(<EventsPage />);
-    expect(screen.getByText("PR #7 opened: fix login")).toBeTruthy();
-    expect(screen.getByText("github.pr.opened")).toBeTruthy();
-    expect(screen.getByText("octocat")).toBeTruthy();
+describe("EventsPage — Log", () => {
+  it("opens the Log from the old Activity, Event Logs, and Problems links", () => {
+    for (const tab of ["activity", "logs", "problems"]) {
+      expect(readEventsSearch({ tab }).tab).toBe("log");
+    }
+    expect(readEventsSearch({ tab: "problems", problemsQ: "signature" }).q).toBe("signature");
+    expect(readEventsSearch({ tab: "receipts" })).toEqual({ tab: "log", status: "receipts" });
   });
 
-  it("links each row to the event's own URL", () => {
+  it("passes the URL's scope, status, and search to the Log", () => {
+    searchState = { tab: "log", scope: "all", status: "failed", q: "slack" };
     render(<EventsPage />);
-    const link = screen.getByRole("link", { name: /Open PR #7/ }) as HTMLAnchorElement;
-    expect(link.getAttribute("href")).toBe("/events/$eventId");
+    expect(screen.getByRole("tab", { name: "Log" }).getAttribute("aria-selected")).toBe("true");
+    expect(logProps).toMatchObject({ scope: "all", filter: "failed", query: "slack" });
   });
 
-  it("expands an event into its deliveries and payload", () => {
+  it("writes a filter change to the URL and keeps the other filters", () => {
+    searchState = { tab: "log", scope: "all", q: "slack" };
     render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText("delivered")).toBeTruthy();
-    expect(screen.getByText(/"action": "opened"/)).toBeTruthy();
-  });
-
-  it("names the subscription each delivery was trying to reach", () => {
-    render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText("PR alerts")).toBeTruthy();
-    expect(screen.getByText("Deploy watcher")).toBeTruthy();
-  });
-
-  it("separates a delivery that retries from one that gave up", () => {
-    render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText(/Retries in 8 minutes/)).toBeTruthy();
-    expect(screen.getByText(/Gave up after 4 attempts\. To send it again, press Redeliver\./)).toBeTruthy();
-  });
-
-  it("shows the whole error string, never a truncated one", () => {
-    render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText(LONG_ERROR)).toBeTruthy();
-  });
-
-  it("says how far back the workspace-scoped feed reaches", () => {
-    render(<EventsPage />);
-    expect(screen.getByText(/covers the last 30 days/)).toBeTruthy();
-  });
-
-  it("drops that note on All, which has no window", () => {
-    searchState = { tab: "activity", scope: "all" };
-    render(<EventsPage />);
-    expect(screen.queryByText(/covers the last 30 days/)).toBeNull();
-  });
-
-  // The diagnosis this page exists for is a round trip: select All to find
-  // an event that matched nothing, open Subscriptions to read the rule,
-  // come back. The tabs unmount each other, so a local-state scope would
-  // hide the event again on the way back.
-  it("keeps an explicit All across a tab round trip", async () => {
-    render(<EventsPage />);
-    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), {
-      key: "Enter",
-    });
-    fireEvent.click(await screen.findByText("All"));
-    // The choice went to the URL, not into the component.
-    expect(searchState).toEqual({ tab: "activity", scope: "all" });
-
-    fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
-    expect(screen.queryByRole("button", { name: /^Scope: / })).toBeNull();
-
-    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
-    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
-  });
-
-  it("starts a fresh mount from the scope the URL carries", () => {
-    searchState = { tab: "activity", scope: "all" };
-    render(<EventsPage />);
-    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
-  });
-
-  it("opens Problems from a shared Problems URL", () => {
-    searchState = {
-      tab: "problems",
-      problemsQ: "signature",
-      problemsCursor: "cursor_2",
-      problemsDirection: "previous",
-    };
-    render(<EventsPage />);
-
-    expect(screen.getByRole("tab", { name: "Event Logs" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("searchbox", { name: "Search rejections and failures" })).toBeTruthy();
+    logProps?.onFilterChange("rejected");
+    expect(searchState).toEqual({ tab: "log", scope: "all", status: "rejected", q: "slack" });
+    logProps?.onFilterChange("all");
+    expect(searchState).toEqual({ tab: "log", scope: "all", q: "slack" });
   });
 
   it("writes tab changes to the URL so history restores the selected tab", async () => {
     const page = render(<EventsPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Event Logs" }));
-    expect(searchState).toEqual({ tab: "logs" });
-    expect(screen.getByRole("tab", { name: "Event Logs" }).getAttribute("aria-selected")).toBe("true");
-
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
+    expect(searchState).toEqual({ tab: "log" });
     searchState = {};
     page.rerender(<EventsPage />);
     await waitFor(() => expect(screen.getByRole("tab", { name: "Channels" }).getAttribute("aria-selected")).toBe("true"));
-
-    searchState = { tab: "problems" };
-    page.rerender(<EventsPage />);
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Event Logs" }).getAttribute("aria-selected")).toBe("true"));
-  });
-
-  it("keeps a Problems backward cursor when Activity scope changes", async () => {
-    searchState = { tab: "activity", problemsQ: "signature", problemsCursor: "cursor_2", problemsDirection: "previous" };
-    render(<EventsPage />);
-
-    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), { key: "Enter" });
-    fireEvent.click(await screen.findByText("All"));
-
-    expect(searchState).toEqual({
-      tab: "activity",
-      scope: "all",
-      problemsQ: "signature",
-      problemsCursor: "cursor_2",
-      problemsDirection: "previous",
-    });
   });
 });
 
@@ -741,19 +586,4 @@ describe("EventsPage — Subscriptions", () => {
       subscriptionsData.subscriptions[0].eventKeys = ["github.pr.opened"];
     }
   });
-});
-
-it("shows Event Logs without querying admin receipts for a member deep link", () => {
-  searchState = { tab: "receipts" };
-  render(<EventsPage />);
-  expect(screen.getByRole("tab", { name: "Event Logs" })).toBeTruthy();
-  expect(receiptsHook).not.toHaveBeenCalled();
-});
-it("opens admin receipts within Event Logs", () => {
-  orgRole = "admin";
-  render(<EventsPage />);
-  fireEvent.click(screen.getByRole("tab", { name: "Event Logs" }));
-  expect(receiptsHook).toHaveBeenCalledWith("org_1", expect.anything(), true);
-  expect(screen.getByText(/No receipts recorded in the last 7 days/)).toBeTruthy();
-  expect(searchState.tab).toBe("logs");
 });
