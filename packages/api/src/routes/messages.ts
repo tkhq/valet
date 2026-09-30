@@ -64,6 +64,7 @@ import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { listThreadActivity, markThreadsRead, recheckOpenPullRequests } from "../services/thread-read-state.js";
 
 export const messagesRouter = new Hono<AppEnv>();
@@ -389,17 +390,11 @@ messagesRouter.post("/:id/threads/read", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
-  // An empty body marks every thread. A body that is not a JSON object is
-  // refused, so a malformed request cannot mark everything read.
-  const raw = (await c.req.text()).trim();
-  let body: MarkThreadsReadRequest = {};
-  if (raw) {
-    let parsed: unknown;
-    try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return c.json({ error: "Send a JSON object, such as {\"threadIds\": [\"<thread id>\"]}, or an empty body to mark every thread read." }, 400);
-    }
-    body = parsed;
+  // An empty body marks every thread. A malformed one is refused rather than
+  // read as that default.
+  const body: MarkThreadsReadRequest | null = await readOptionalJsonObject(c);
+  if (!body) {
+    return c.json({ error: "Send a JSON object, such as {\"threadIds\": [\"<thread id>\"]}, or an empty body to mark every thread read." }, 400);
   }
   const known = new Set(engineSession.listThreads().map((t) => t.id));
   if (body.threadIds !== undefined && !Array.isArray(body.threadIds)) {

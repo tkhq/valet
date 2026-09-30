@@ -57,4 +57,11 @@ it("hides a dismissed brief for the caller and archives its threads, except one 
   expect(waitingRow?.archivedAt ?? null).toBeNull();
 
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/briefings/not-a-brief/dismiss`, { method: "POST" })).status).toBe(400);
+  // A truncated body is refused and hides nothing.
+  const truncated = await fetch(`${api.baseUrl}/api/workspaces/user/briefings/${briefs[1]!.id}/dismiss`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: '{"threads":[',
+  });
+  expect(truncated.status).toBe(400);
+  const stillVisible = await hideDismissedBriefings(api.providers.db, "local-user", user, { briefings: briefs, generatedAt: 1, coverage: "recent" });
+  expect(stillVisible.briefings.map((brief) => brief.id)).toEqual([briefs[1]!.id]);
 });

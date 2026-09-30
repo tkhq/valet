@@ -4,7 +4,19 @@ The application migration preserves retired assistant profile fields, default fl
 and follow/schedule assistant addresses. Current models omit these fields, while
 older binaries can still read them. New singleton identities default to the legacy
 default flag. Both the workspace uniqueness index and legacy default index remain.
-Duplicate profiles cause upgrade to reject without deleting history.
+The upgrade keeps one assistant per owner and moves extra profiles to a retired
+owner key, so no history is deleted.
+
+Accepted limits during a rolling update or after a rollback:
+
+- The workspace uniqueness index stays in place. A dev-v2 pod still reads and uses
+  each owner's default assistant, but it cannot create a second assistant profile
+  for that owner. One assistant per workspace is the point of this change.
+- An open tab running the previous web bundle must reload. `GET` and `POST
+  /api/orchestrator` and `POST /api/teams/:id/orchestrator` still answer, so older
+  CLI builds keep working. The other routes that bundle calls, such as
+  `/api/orchestrator/info`, `/api/orchestrator/children`, and `/api/assistants`,
+  return 404.
 
 Stored workflows keep the dev-v2 step type `orchestrator`, which the app labels
 "Thread", so dev-v2 can validate and run them after a rollback or during a

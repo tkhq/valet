@@ -1,4 +1,5 @@
 import { and, eq, inArray, lt } from "drizzle-orm";
+import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, briefingDismissals, sessionThreads } from "../schema/index.js";
@@ -43,9 +44,11 @@ workspaceBriefingsRouter.post("/:workspace/briefings/:briefingId/dismiss", async
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const briefingId = c.req.param("briefingId");
   if (!/^brief:[a-f0-9]{24}$/.test(briefingId)) return c.json({ error: "Unknown brief. Reload the page and try again." }, 400);
-  let body: unknown = {};
-  try { body = await c.req.json(); } catch { /* An empty body archives nothing. */ }
-  const rawThreads = typeof body === "object" && body !== null && "threads" in body ? body.threads : undefined;
+  // An empty body dismisses without archiving. A malformed one is refused before
+  // any state changes, so a truncated request cannot hide the brief.
+  const body = await readOptionalJsonObject(c);
+  if (!body) return c.json({ error: "Send a JSON object with a threads array, or an empty body. Reload the page and try again." }, 400);
+  const rawThreads = body.threads;
   const threads = Array.isArray(rawThreads)
     ? rawThreads.flatMap(item => typeof item === "object" && item !== null && "sessionId" in item && "threadId" in item
       && typeof item.sessionId === "string" && typeof item.threadId === "string" ? [{ sessionId: item.sessionId, threadId: item.threadId }] : [])
