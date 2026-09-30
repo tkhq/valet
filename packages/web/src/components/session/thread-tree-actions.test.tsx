@@ -578,6 +578,29 @@ describe("ThreadTree — sort preference", () => {
   });
 });
 
+describe("ThreadTree — origin", () => {
+  it("marks each row with its origin and filters by origin", async () => {
+    const user = userEvent.setup();
+    threads = [
+      thread({ id: "slack-thread", title: "From the channel", key: "slack:C1:1.2" }),
+      thread({ id: "web-thread", title: "Typed here", key: "web:abc" }),
+    ];
+    renderTree();
+    expect(screen.getByRole("img", { name: "From Slack" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "From web chat" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Sidebar options" }));
+    await user.hover(screen.getByRole("menuitem", { name: "Show threads from" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Slack and other channels/ }));
+    expect(screen.getByText("From the channel")).toBeTruthy();
+    expect(screen.queryByText("Typed here")).toBeNull();
+    expect(window.localStorage.getItem("valet:thread-origin")).toBe("channel");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.getByText("Typed here")).toBeTruthy();
+  });
+});
+
 vi.mock("~/api/child-work", async (importOriginal) => {
  const actual = await importOriginal<typeof import("~/api/child-work")>();
  return { ...actual,

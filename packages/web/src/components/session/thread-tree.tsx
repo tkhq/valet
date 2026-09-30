@@ -1,4 +1,5 @@
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
+import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
@@ -6,6 +7,11 @@ import {
   Archive,
   ArchiveRestore,
   ArrowDownUp,
+  Bot,
+  Filter,
+  Hash,
+  Slack,
+  Zap,
   Folder,
   FolderOpen,
   PanelLeft,
@@ -78,6 +84,31 @@ export function untitledThreadLabel(thread: ThreadSummary, isNewestCreated: bool
 
 const THREAD_DRAG_TYPE = "application/x-valet-thread";
 const THREAD_SORT_STORAGE_KEY = "valet:thread-sort";
+const THREAD_ORIGIN_STORAGE_KEY = "valet:thread-origin";
+
+function loadStoredOriginFilter(): ThreadOriginBucket {
+  try {
+    const raw = window.localStorage.getItem(THREAD_ORIGIN_STORAGE_KEY);
+    const match = THREAD_ORIGIN_FILTERS.find((candidate) => candidate.id === raw);
+    if (match) return match.id;
+  } catch {
+    // Fall through.
+  }
+  return "all";
+}
+
+/** Where a thread came from, as a small row icon: Slack, another channel,
+ * web chat, an automation, or another agent. */
+export function ThreadOriginIcon({ thread }: { thread: Pick<ThreadSummary, "key"> }) {
+  const bucket = threadOriginBucket(thread);
+  const channel = threadChannelType(thread);
+  const [Icon, label] = bucket === "channel"
+    ? channel === "slack" ? [Slack, "From Slack"] as const : [Hash, `From ${channel ?? "a channel"}`] as const
+    : bucket === "auto" ? [Zap, "From an automation"] as const
+    : bucket === "other" ? [Bot, "From another agent"] as const
+    : [MessageSquare, "From web chat"] as const;
+  return <Icon role="img" aria-label={label} className="mr-2 h-3.5 w-3.5 shrink-0 text-muted"><title>{label}</title></Icon>;
+}
 
 export const THREAD_SORT_MODES = [
   { id: "last-user-activity", label: "Last user activity" },
@@ -284,7 +315,17 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setSearchOpen(false);
     navigate({ search: (prev) => ({ ...prev, view: undefined, thread: threadId, child: undefined }) });
   }
-  const visible = threads;
+  const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
+  const originCounts = useMemo(() => bucketCounts(threads), [threads]);
+  const visible = originFilter === "all" ? threads : threads.filter((thread) => threadOriginBucket(thread) === originFilter);
+  function selectOriginFilter(next: ThreadOriginBucket) {
+    setOriginFilter(next);
+    try {
+      window.localStorage.setItem(THREAD_ORIGIN_STORAGE_KEY, next);
+    } catch {
+      // In-session only when storage is unavailable.
+    }
+  }
   // A gate on an archived thread has no row in `visible`; without this the
   // gate would be invisible while the archived section is closed.
   const archivedGated = threadsQ.data !== undefined && hasGateOutsideList(threadsQ.data?.threads ?? [], gatedThreadIds);
@@ -468,6 +509,10 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
                 <DropdownMenuSub>
+                  <DropdownMenuSubTrigger><Filter className="h-4 w-4" />Show threads from</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>{THREAD_ORIGIN_FILTERS.map((option) => <DropdownMenuItem key={option.id} role="menuitemradio" aria-checked={originFilter === option.id} onSelect={() => selectOriginFilter(option.id)}><Check className={cn("h-4 w-4", originFilter !== option.id && "invisible")} /><span className="flex-1">{option.label}</span><span className="text-xs text-muted">{originCounts[option.id]}</span></DropdownMenuItem>)}</DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSub>
                   <DropdownMenuSubTrigger><ArrowDownUp className="h-4 w-4" />Sort chats by</DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>{THREAD_SORT_MODES.map((mode) => <DropdownMenuItem key={mode.id} role="menuitemradio" aria-checked={sortMode === mode.id} onSelect={() => selectThreadSort(mode.id)}><Check className={cn("h-4 w-4", sortMode !== mode.id && "invisible")} />{mode.label}</DropdownMenuItem>)}</DropdownMenuSubContent>
                 </DropdownMenuSub>
@@ -475,6 +520,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             </DropdownMenu>
             <button aria-label="New project" disabled={!viewer.data?.id} onClick={() => { setProjectError(undefined); setProjectName(""); setProjectDialog(true); }} className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><Plus className="h-4 w-4" /></button>
           </div>
+          {originFilter !== "all" && (
+            <p className="flex items-center gap-2 px-4 pb-1 text-xs text-muted">
+              Showing {THREAD_ORIGIN_FILTERS.find((option) => option.id === originFilter)?.label.toLowerCase()}
+              <button type="button" className="underline hover:text-ink" onClick={() => selectOriginFilter("all")}>Clear</button>
+            </p>
+          )}
           <Dialog open={projectDialog} onOpenChange={setProjectDialog}>
             <DialogContent title="New project">
               <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); createProject(); }}>
@@ -748,6 +799,7 @@ function ThreadNode({
                 startEditing();
               }}
             >
+              <ThreadOriginIcon thread={thread} />
               <span className="flex-1 truncate">{label}</span>
               <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
               {pinnedModelLabel && (

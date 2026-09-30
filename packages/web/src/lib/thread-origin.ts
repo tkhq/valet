@@ -20,11 +20,11 @@ import { matchesNeedle } from "./text-match";
 export type ThreadOriginBucket = "all" | "chat" | "auto" | "channel" | "other";
 
 export const THREAD_ORIGIN_FILTERS: readonly { id: ThreadOriginBucket; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "chat", label: "Chat" },
-  { id: "auto", label: "Auto" },
-  { id: "channel", label: "Channels" },
-  { id: "other", label: "Other" },
+  { id: "all", label: "All threads" },
+  { id: "chat", label: "Web chat" },
+  { id: "channel", label: "Slack and other channels" },
+  { id: "auto", label: "Automations" },
+  { id: "other", label: "Other agents" },
 ];
 
 const CHANNEL_KEY_PREFIXES = ["telegram:", "slack:", "discord:", "email:", "sms:"];
@@ -35,6 +35,15 @@ export function threadOriginBucket(thread: Pick<ThreadSummary, "key">): Exclude<
   if (key === "events" || key.startsWith("signal:workflow:")) return "auto";
   if (CHANNEL_KEY_PREFIXES.some((p) => key.startsWith(p))) return "channel";
   return "other";
+}
+
+/** The channel a channel-owned thread lives in (`slack`, `telegram`, …),
+ * read from its key prefix. Undefined for every other origin. */
+export function threadChannelType(thread: Pick<ThreadSummary, "key">): string | undefined {
+  const key = thread.key;
+  if (!key) return undefined;
+  const prefix = CHANNEL_KEY_PREFIXES.find((p) => key.startsWith(p));
+  return prefix?.slice(0, -1);
 }
 
 /** Per-bucket totals over the loaded threads (client-side; the V2
