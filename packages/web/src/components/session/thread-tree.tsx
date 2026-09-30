@@ -50,7 +50,7 @@ import {
   useSetThreadArchived,
   useThreads,
 } from "~/api/queries";
-import { isThreadUnread, rowPullRequest } from "~/lib/thread-read";
+import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { useThreadProjects } from "~/lib/thread-projects";
@@ -341,7 +341,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   function openSearch() { setSearchQuery(""); setSearchIndex(0); setSearchOpen(true); }
   function selectSearchThread(threadId: string) {
     setSearchOpen(false);
-    navigate({ search: (prev) => ({ ...prev, view: undefined, thread: threadId, child: undefined }) });
+    navigate({ search: (prev) => ({ ...prev, thread: threadId, child: undefined }) });
   }
   const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
   const originCounts = useMemo(() => bucketCounts(threads), [threads]);
@@ -372,7 +372,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   async function createAndNavigate() {
     // A new top-level thread uses current defaults, not the active thread's settings.
     const thread = await createThread.mutateAsync();
-    navigate({ search: (prev) => ({ ...prev, view: undefined, thread: thread.id, child: undefined }) });
+    navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
     // Land the cursor in the composer — a fresh thread exists to be
     // typed into.
     useComposerPrefillStore.getState().requestFocus();
@@ -381,7 +381,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const archiveActive = useCallback(() => {
     if (!activeThreadId || isAppAssistantThread(threadsQ.data?.threads.find((thread) => thread.id === activeThreadId) ?? {})) return;
     void setArchived.mutateAsync({ threadId: activeThreadId, archived: true });
-    navigate({ search: (prev) => ({ ...prev, view: undefined, thread: undefined, child: undefined }) });
+    navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
   }, [activeThreadId, navigate, setArchived, threadsQ.data]);
 
   // Register this surface's hotkey targets for the global listener.
@@ -456,7 +456,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                 // view on a thread absent from the list — return to the
                 // default thread.
                 if (threadId === activeThreadId) {
-                  navigate({ search: (prev) => ({ ...prev, view: undefined, thread: undefined, child: undefined }) });
+                  navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
                 }
               }}
               onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
@@ -692,6 +692,8 @@ function ThreadNode({
     if (openUnread) markReadMutate({ threadIds: [thread.id] });
   }, [openUnread, markReadMutate, thread.id, thread.lastAgentActivityAt]);
   const pullRequest = rowPullRequest(thread.pullRequests);
+  // A question waiting on a reply outranks plain unread: it asks for an answer.
+  const question = pendingAgentQuestion(thread);
   const queueState = useQueueStateForThread(thread.sessionId, thread.id);
   const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id));
 
@@ -817,7 +819,6 @@ function ThreadNode({
               to="/chat"
               search={(prev) => ({
                 ...prev,
-                view: undefined,
                 thread: isDefault ? undefined : thread.id,
                 child: undefined,
               })}
@@ -840,7 +841,9 @@ function ThreadNode({
               <ThreadOriginIcon thread={thread} />
               <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>{label}</span>
               {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
-              {unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
+              {question
+                ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
+                : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
               <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
               {pinnedModelLabel && (
                 <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>
@@ -921,7 +924,7 @@ function ThreadNode({
             <li key={c.sessionId} className="group/child flex items-center gap-1">
               <Link
                 to="/chat"
-                search={(prev) => ({ ...prev, view: undefined, child: c.sessionId })}
+                search={(prev) => ({ ...prev, child: c.sessionId })}
                 className={cn(
                   "flex-1 min-w-0 max-md:min-h-11 flex items-center gap-2 rounded px-2 py-1.5 text-xs transition-colors",
                   "focus-visible:outline-none focus-visible:bg-ink-wash",

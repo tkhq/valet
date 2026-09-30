@@ -82,6 +82,11 @@ delegate pushes, branches, and PRs to a child session.
 8. **Verify before you report.** Read the child's result against the brief. Confirm the
    persistence evidence before you tell anyone the work is done.
 
+## Questions
+
+When a decision or a missing fact blocks the work, call ask_question instead of ending your turn with a question in text.
+Give options when the answer is one of a few choices; each becomes a button in the app and in Slack.
+
 ## Workflows
 
 Name a workflow by what it does, in 3 to 7 plain words, for example "Label new Slack bug reports".

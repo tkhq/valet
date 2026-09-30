@@ -129,11 +129,19 @@ export function DecisionGateCard({
       )}
 
       {gate.type === "question" ? (
+        <>
+        {gate.actions.length > 0 && (
+          <div className="px-3.5 pb-2 flex flex-wrap gap-2">
+            {gate.actions.map((a) => (
+              <Button key={a.id} variant="secondary" onClick={() => pickAction(a.id)} disabled={busy}>{a.label}</Button>
+            ))}
+          </div>
+        )}
         <div className="px-3.5 pb-3 flex items-end gap-2">
           <Textarea
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder="Your answer…"
+            placeholder={gate.actions.length > 0 ? "Or type a different answer…" : "Your answer…"}
             rows={2}
             className="flex-1 bg-white/70 dark:bg-neutral-900/40"
             disabled={busy}
@@ -145,6 +153,7 @@ export function DecisionGateCard({
             {busy ? <Spinner size={14} /> : "Submit"}
           </Button>
         </div>
+        </>
       ) : (
         <div className="px-3.5 pb-3 flex flex-wrap gap-2">
           {gate.actions.map((a) => {

@@ -13,6 +13,7 @@ const RECHECK_BATCH = 5;
 export interface ThreadActivity {
   readAt?: number;
   lastAgentActivityAt?: number;
+  agentQuestion?: string;
   pullRequests?: ThreadPullRequest[];
 }
 
@@ -48,16 +49,21 @@ export async function listThreadActivity(
     db.select({ threadId: threadReads.threadId, readAt: threadReads.readAt }).from(threadReads)
       .where(and(eq(threadReads.userId, userId), inArray(threadReads.threadId, threadIds))),
     // One index probe per thread on engine_entries(session_id, thread_id, created_at).
-    db.execute(sql`SELECT ids.id AS thread_id, e.created_at
+    db.execute(sql`SELECT ids.id AS thread_id, e.created_at, e.tail
       FROM unnest(ARRAY[${sql.join(threadIds.map(id => sql`${id}`), sql`,`)}]::text[]) AS ids(id)
-      JOIN LATERAL (SELECT created_at FROM engine_entries
+      JOIN LATERAL (SELECT created_at, right(content, 2000) AS tail FROM engine_entries
         WHERE session_id = ${sessionId} AND thread_id = ids.id AND entry_type = 'message' AND role = 'assistant'
-        ORDER BY created_at DESC LIMIT 1) e ON true`) as Promise<{ rows: Array<{ thread_id: string; created_at: string | number }> }>,
+        ORDER BY created_at DESC LIMIT 1) e ON true`) as Promise<{ rows: Array<{ thread_id: string; created_at: string | number; tail: string | null }> }>,
     db.select().from(threadPullRequests)
       .where(and(eq(threadPullRequests.sessionId, sessionId), inArray(threadPullRequests.threadId, threadIds))),
   ]);
   for (const row of reads) entry(row.threadId).readAt = row.readAt;
-  for (const row of latest.rows) entry(row.thread_id).lastAgentActivityAt = Number(row.created_at);
+  for (const row of latest.rows) {
+    const value = entry(row.thread_id);
+    value.lastAgentActivityAt = Number(row.created_at);
+    const { question } = lastAgentAsk(row.tail ?? "");
+    if (question) value.agentQuestion = question;
+  }
   for (const row of pulls.sort((a, b) => a.createdAt - b.createdAt)) {
     const value = entry(row.threadId);
     (value.pullRequests ??= []).push({ url: row.url, repo: row.repo, number: row.number, state: row.state });

@@ -603,6 +603,20 @@ describe("ThreadTree — origin", () => {
   });
 });
 
+describe("ThreadTree — questions", () => {
+  it("marks a thread amber while Valet's question waits on a reply", () => {
+    threads = [
+      thread({ id: "home", title: "Home", key: "default" }),
+      thread({ id: "asked", title: "Asked", lastUserActivityAt: 10, lastAgentActivityAt: 20, agentQuestion: "Merge it once CI passes?" }),
+      thread({ id: "answered", title: "Answered", lastUserActivityAt: 30, lastAgentActivityAt: 20, readAt: 40, agentQuestion: "Merge it?" }),
+    ];
+    renderTree();
+    expect(screen.getAllByLabelText("Valet asked you a question")).toHaveLength(1);
+    // The question outranks the unread dot on the same row.
+    expect(screen.queryAllByLabelText("Unread")).toHaveLength(0);
+  });
+});
+
 describe("ThreadTree — unread and pull requests", () => {
   it("dots unread threads, shows pull request state, and marks all read", async () => {
     const user = userEvent.setup();

@@ -42,6 +42,12 @@ Each row has **Reply**, which opens the thread, and **Done**, which archives it.
 
 ## Thread sidebar
 
+An amber dot marks a thread whose newest agent message asks a question that nobody has answered yet; its tooltip shows the question. It takes the place of the unread dot. A thread waiting on an `ask_question` or approval gate is amber through its status dot.
+
+`ask_question` is a built-in engine tool, the V2 port of V1's question tool. It opens a `question` decision gate: the question, optional detail, and up to six options. Each option becomes a button on the web card and on the Slack card, and the web card also takes a typed answer. The tool returns the answer to the model, or tells it to continue without asking again when the question expires.
+
+The threads sidebar no longer links to a Briefing view: the workspace home page shows the briefing.
+
 A blue dot marks an unread thread: its newest agent message is later than the viewer's last read and last action. The `thread_reads` table stores one read time per person and thread. Opening a thread marks it read, and so does a new reply while it is open. **Mark all as read** in the sidebar options menu marks every thread in the session. The endpoint marks every thread only for an empty body; a malformed body is refused.
 
 A thread that created a pull request shows its state: open, merged, or closed. The `thread_pull_requests` table stores each pull request with its thread. A `gh pr create` in the terminal and the GitHub `create_pull_request` action both put a `pull_request_created` outcome on the engine `tool_end` event, and the API records it. Only a pull request URL on the configured GitHub host (`GITHUB_URL`, github.com by default) is recorded. A GitHub `pull_request` webhook updates the state. If no webhook arrives, listing threads checks up to five open pull requests that were not checked in the last 10 minutes.

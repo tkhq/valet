@@ -874,6 +874,9 @@ export interface ThreadSummary {
   readAt?: number;
   /** Time of the newest assistant message. Later than `readAt` means unread. */
   lastAgentActivityAt?: number;
+  /** The question the newest assistant message asks, as plain text. It waits on
+   * a reply while `lastAgentActivityAt` is later than `lastUserActivityAt`. */
+  agentQuestion?: string;
   /** Pull requests this thread created, oldest first. */
   pullRequests?: ThreadPullRequest[];
 }

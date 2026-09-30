@@ -1,4 +1,3 @@
-import { Link } from "@tanstack/react-router";
 import type { TeamSummary } from "@valet/api/wire";
 import { useWorkspaceConversation } from "~/hooks/use-workspace-conversation";
 import { ThreadTree, ThreadTreeWaiting } from "./thread-tree";
@@ -10,7 +9,6 @@ export function AssistantRail() {
     Could not load threads. <button className="underline" onClick={() => void conversation.refetch()}>Retry</button>
   </div>;
   return <>
-    <Link to="/chat" search={prev => ({ workspace: prev.workspace, view: "work" })} className="flex min-h-[--nav-height] shrink-0 items-center border-b border-line px-4 py-2 text-sm hover:bg-ink-wash">Briefing</Link>
     {conversation.data ? <ThreadTree sessionId={conversation.data.sessionId} /> : <ThreadTreeWaiting />}
   </>;
 }

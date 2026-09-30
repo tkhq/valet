@@ -739,6 +739,48 @@ export const askApprovalTool = defineTool({
   },
 });
 
+export const askQuestionTool = defineTool({
+  name: "ask_question",
+  description:
+    "Ask the person a question and wait for the answer. Use it when a decision or a missing " +
+    "fact blocks the work, not to confirm something you can check yourself. Give `options` " +
+    "when the answer is one of a few choices: each becomes a button, in the app and in Slack. " +
+    "In the app the person can also type a different answer. Blocks until someone answers " +
+    "or the question expires.",
+  parameters: Type.Object({
+    question: Type.String({ minLength: 1, maxLength: 300, description: "One question, e.g. 'Which workflow should I build first?'" }),
+    options: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), {
+      maxItems: 6, description: "Up to six short answers to choose from.",
+    })),
+    detail: Type.Optional(Type.String({ maxLength: 2000, description: "Context the person needs to answer." })),
+  }),
+  execute: async (args, ctx) => {
+    const options = args.options ?? [];
+    let resolution;
+    try {
+      resolution = await ctx.requestDecision({
+        type: "question",
+        title: args.question,
+        body: args.detail,
+        actions: options.map((label, index) => ({ id: `option-${index}`, label })),
+        resumeKey: `ask_question:${args.question}`,
+      });
+    } catch (err) {
+      if (isDecisionGateExpired(err)) {
+        return {
+          text:
+            `question expired: "${args.question}". Nobody answered before the deadline. ` +
+            "Do not ask again in this turn. Continue without the answer if you can, and say what you assumed.",
+        };
+      }
+      throw err;
+    }
+    const picked = resolution.actionId?.startsWith("option-") ? options[Number(resolution.actionId.slice("option-".length))] : undefined;
+    const answer = resolution.value?.trim() || picked;
+    return { text: answer ? `answer to "${args.question}": ${answer}` : `the question "${args.question}" was closed without an answer.` };
+  },
+});
+
 export const taskTool = defineTool({
   name: "task",
   description:
@@ -862,6 +904,7 @@ export const builtinTools: ToolDef[] = [
   listThreadsTool,
   switchModelTool,
   askApprovalTool,
+  askQuestionTool,
   taskTool,
   childReadTool,
   childSendTool,

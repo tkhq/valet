@@ -52,6 +52,8 @@ it("marks a thread unread after an agent message and read once the viewer opens 
   await agentMessage(api, thread, Date.now() + 1_000);
   const [before] = (await listThreads(api, thread.sessionId)).filter(t => t.id === thread.id);
   expect(before?.lastAgentActivityAt).toBeGreaterThan(before?.readAt ?? 0);
+  // The agent's message asks a question, so the row can mark it.
+  expect(before?.agentQuestion).toBe("Which one first?");
 
   const read = await fetch(`${api.baseUrl}/api/sessions/${thread.sessionId}/threads/read`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threadIds: [thread.id, "not-in-session"] }),

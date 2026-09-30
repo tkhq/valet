@@ -127,4 +127,13 @@ describe("DecisionGateCard — always_allow admin gate", () => {
     expect((screen.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Deny" }) as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it("offers a question's options as buttons beside the typed answer", async () => {
+    const user = userEvent.setup();
+    resolveMutateAsync.mockClear();
+    renderCard(gate({ type: "question", title: "Which workflow first?", actions: [{ id: "option-0", label: "Linear sync" }, { id: "option-1", label: "PR review" }] }));
+    expect(screen.getByPlaceholderText("Or type a different answer…")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "PR review" }));
+    expect(resolveMutateAsync).toHaveBeenCalledWith({ gateId: "gate_1", body: { actionId: "option-1" } });
+  });
 });

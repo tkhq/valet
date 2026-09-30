@@ -107,10 +107,9 @@ describe("ThreadTree — new thread affordance", () => {
       expect.objectContaining({ search: expect.any(Function) }),
     );
     const call = navigate.mock.calls[0][0] as { search: (prev: Record<string, unknown>) => Record<string, unknown> };
-    expect(call.search({ thread: "thread-1", child: "child-1", view: "events" })).toEqual({
+    expect(call.search({ thread: "thread-1", child: "child-1" })).toEqual({
       thread: "thread-new",
       child: undefined,
-      view: undefined,
     });
   });
 });

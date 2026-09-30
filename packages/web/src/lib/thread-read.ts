@@ -6,6 +6,12 @@ export function isThreadUnread(thread: Pick<ThreadSummary, "lastAgentActivityAt"
   return thread.lastAgentActivityAt > Math.max(thread.readAt ?? 0, thread.lastUserActivityAt);
 }
 
+/** The question Valet asked in its newest message, while nobody has replied since. */
+export function pendingAgentQuestion(thread: Pick<ThreadSummary, "agentQuestion" | "lastAgentActivityAt" | "lastUserActivityAt">): string | undefined {
+  if (!thread.agentQuestion || thread.lastAgentActivityAt === undefined) return undefined;
+  return thread.lastAgentActivityAt > thread.lastUserActivityAt ? thread.agentQuestion : undefined;
+}
+
 /** The pull request a thread row shows: an open one first, then the newest. */
 export function rowPullRequest(pullRequests: ThreadPullRequest[] | undefined): ThreadPullRequest | undefined {
   if (!pullRequests?.length) return undefined;
