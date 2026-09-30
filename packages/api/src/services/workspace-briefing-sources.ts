@@ -9,13 +9,28 @@ export interface BriefingEvidence {
   content: string;
   state: "needs_attention" | "in_progress" | "updated";
 }
+/** A Slack permalink for a thread root. Slack routes a signed-in reader to
+ * the right workspace, so the team id is not needed. */
+export function slackThreadUrl(channel: string, ts: string): string | undefined {
+  if (!/^[A-Z0-9]+$/.test(channel) || !/^\d+\.\d+$/.test(ts)) return undefined;
+  return `https://slack.com/archives/${channel}/p${ts.replace(".", "")}`;
+}
+
+/** The Slack thread an engine thread key names (`slack:{channel}:{thread_ts}`). */
+export function slackUrlForThreadKey(key: string | null | undefined): string | undefined {
+  const match = /^slack:([^:]+):([^:]+)$/.exec(key ?? "");
+  return match ? slackThreadUrl(match[1]!, match[2]!) : undefined;
+}
+
 interface ThreadRow {
-  session_id: string; thread_id: string; title: string; updated_at: number | string;
+  session_id: string; thread_id: string; thread_key: string | null; title: string; updated_at: number | string;
   role: string; text: string; message_at: number | string;
   needs_attention: boolean; in_progress: boolean;
 }
 interface RunRow {
   id: string; title: string; updated_at: number | string; status: string;
+  origin_session_id: string | null; origin_thread_id: string | null;
+  event_key: string | null; event_channel: string | null; event_ts: string | null;
   needs_attention: boolean; prompt: string | null; output: string | null; wait_description: string | null;
 }
 interface ArtifactRow {
@@ -33,6 +48,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
   const [threadResult, runResult, artifactResult, outcomes] = await Promise.all([
     db.execute(sql`WITH recent_threads AS MATERIALIZED (
       SELECT s.id AS session_id,t.id AS thread_id,COALESCE(NULLIF(t.title,''),NULLIF(s.title,''),'Conversation') AS title,
+        (SELECT et.key FROM engine_threads et WHERE et.session_id=s.id AND et.id=t.id) AS thread_key,
         latest.created_at AS updated_at
       FROM session_threads t JOIN agent_sessions s ON s.id=t.session_id
       JOIN LATERAL (SELECT e.created_at FROM engine_entries e
@@ -61,7 +77,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
       FROM selected e
     ) m ON true ORDER BY t.updated_at DESC,t.thread_id DESC,m.created_at ASC,m.id ASC`) as Promise<{ rows: ThreadRow[] }>,
     db.execute(sql`WITH recent_runs AS MATERIALIZED (
-      SELECT r.id,d.name AS title,r.updated_at,r.status,r.outcome,r.waiting_on,r.definition
+      SELECT r.id,d.name AS title,r.updated_at,r.status,r.outcome,r.waiting_on,r.definition,r.params
       FROM workflow_runs r JOIN workflow_definitions d ON d.id=r.workflow_id
       WHERE d.org_id=${orgId} AND r.owner_type=${owner.type} AND r.owner_id=${owner.id}
         AND d.owner_type=r.owner_type AND d.owner_id=r.owner_id
@@ -70,6 +86,11 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
             AND (newer.created_at,newer.id) > (r.created_at,r.id))
       ORDER BY r.updated_at DESC,r.id DESC LIMIT 12
     ) SELECT r.id,r.title,r.updated_at,r.status,
+      -- Only a thread in this same workspace: a team run started from a
+      -- personal chat must not link team members to that personal thread.
+      o.session_id AS origin_session_id,o.thread_id AS origin_thread_id,
+      r.params->'input'->'data'->>'key' AS event_key,r.params->'input'->'data'->'payload'->>'channel' AS event_channel,
+      COALESCE(r.params->'input'->'data'->'payload'->>'thread_ts',r.params->'input'->'data'->'payload'->>'ts') AS event_ts,
       CASE WHEN r.status='parked' THEN left((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
         'kind',w->>'kind','node',w->>'nodeId','signal',w->>'signalType','wakeAt',w->'wakeAt')))::text
         FROM (SELECT value AS w FROM jsonb_array_elements(r.waiting_on) LIMIT 6) waits),1000) END AS wait_description,
@@ -83,7 +104,11 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
           AND (cp.status='failed' OR EXISTS(SELECT 1 FROM jsonb_path_query(r.definition,'$.** ? (exists (@.id))') n
             WHERE n->>'id'=cp.node_id AND n->>'type' IN ('stop','session','thread','llm')))
         ORDER BY cp.created_at DESC,cp.node_id DESC LIMIT 3
-      ) c) AS output FROM recent_runs r ORDER BY r.updated_at DESC,r.id DESC`) as Promise<{ rows: RunRow[] }>,
+      ) c) AS output FROM recent_runs r
+      LEFT JOIN LATERAL (SELECT s.id AS session_id,t.id AS thread_id FROM agent_sessions s
+        JOIN session_threads t ON t.session_id=s.id AND t.id=r.params->'origin'->>'threadId'
+        WHERE s.id=r.params->'origin'->>'assistantSessionId' AND ${scopedSession} LIMIT 1) o ON true
+      ORDER BY r.updated_at DESC,r.id DESC`) as Promise<{ rows: RunRow[] }>,
     db.execute(sql`SELECT a.id,a.token,a.title,a.updated_at,left(a.content,2000) AS content,s.id AS session_id,t.id AS thread_id
       FROM artifacts a
       LEFT JOIN agent_sessions s ON s.id=a.source_session_id AND ${scopedSession}
@@ -98,7 +123,9 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
     const id = `thread:${row.session_id}:${row.thread_id}`;
     let evidence = threads.get(id);
     if (!evidence) {
-      evidence = { source: { id, kind: "thread", title: row.title, updatedAt: Number(row.updated_at), sessionId: row.session_id, threadId: row.thread_id },
+      const originUrl = slackUrlForThreadKey(row.thread_key);
+      evidence = { source: { id, kind: "thread", title: row.title, updatedAt: Number(row.updated_at), sessionId: row.session_id, threadId: row.thread_id,
+        ...(originUrl ? { originUrl } : {}) },
         content: "", state: row.needs_attention ? "needs_attention" : row.in_progress ? "in_progress" : "updated" };
       threads.set(id,evidence);
     }
@@ -108,7 +135,13 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
   for (const row of runResult.rows) {
     const content = [row.prompt ? `Pending approval: ${row.prompt}` : "", row.output || "", row.wait_description ? `Pending workflow wait: ${row.wait_description}` : ""].filter(Boolean).join("\n");
     if (!content.trim()) continue;
-    candidates.push({ source: { id: `workflow:${row.id}`, kind: "workflow", title: row.title, updatedAt: Number(row.updated_at), runId: row.id },
+    // A run started from a conversation reports into it; a run a Slack
+    // event started links back to that Slack thread.
+    const originUrl = row.event_key?.startsWith("slack.") && row.event_channel && row.event_ts
+      ? slackThreadUrl(row.event_channel, row.event_ts) : undefined;
+    candidates.push({ source: { id: `workflow:${row.id}`, kind: "workflow", title: row.title, updatedAt: Number(row.updated_at), runId: row.id,
+      ...(row.origin_session_id && row.origin_thread_id ? { sessionId: row.origin_session_id, threadId: row.origin_thread_id } : {}),
+      ...(originUrl ? { originUrl } : {}) },
       content, state: row.needs_attention ? "needs_attention" : ["pending","running","parked","terminalizing"].includes(row.status) ? "in_progress" : "updated" });
   }
   for (const row of artifactResult.rows) candidates.push({

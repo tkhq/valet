@@ -85,23 +85,25 @@ function BriefingCard({ briefing }: { briefing: WorkspaceBriefing }) {
   const headingId = useId();
   const status = STATUS[briefing.status];
   const sources = [...briefing.sources].sort((a, b) => Number(b.kind === "pull_request") - Number(a.kind === "pull_request"));
-  return <article aria-labelledby={headingId} className="rounded-xl border border-line bg-paper p-5 sm:p-6">
-    <header className="mb-4 space-y-2">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <h2 id={headingId} className="min-w-0 flex-1 break-words font-display text-xl text-ink">{briefing.title}</h2>
-        <Badge variant={status.variant}>{status.label}</Badge>
-      </div>
+  const originUrl = safeResultUrl(briefing.originUrl);
+  return <article aria-labelledby={headingId} className="rounded-lg border border-line bg-paper px-4 py-3">
+    <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <h2 id={headingId} className="min-w-0 flex-1 break-words text-sm font-medium text-ink">{briefing.title}</h2>
+      <Badge variant={status.variant}>{status.label}</Badge>
     </header>
-    <p className="whitespace-pre-line text-base leading-relaxed text-ink">{briefing.summary}</p>
-    <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+    <p className="mt-1 whitespace-pre-line text-sm text-muted">{briefing.summary}</p>
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
       {briefing.latestThread ? <Link
         to="/threads/$threadId"
         params={{ threadId: briefing.latestThread.threadId }}
-        className="inline-flex min-h-11 items-center gap-2 text-sm font-medium text-moss underline-offset-4 hover:underline sm:min-h-0"
-      >Latest thread <ArrowRight aria-hidden className="h-4 w-4" /></Link> : <span className="text-sm text-muted">No linked conversation</span>}
-      <span className="text-xs text-muted">Updated {relativeTime(briefing.updatedAt)}</span>
+        className="inline-flex min-h-11 items-center gap-1 font-medium text-moss underline-offset-4 hover:underline sm:min-h-0"
+      >Open thread <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : <span className="text-muted">No linked conversation</span>}
+      {originUrl && <a href={originUrl} target="_blank" rel="noopener noreferrer"
+        className="inline-flex min-h-11 items-center gap-1 font-medium text-moss underline-offset-4 hover:underline sm:min-h-0"
+      >Open in Slack <ArrowUpRight aria-hidden className="h-3.5 w-3.5" /></a>}
+      <span className="ml-auto text-muted">Updated {relativeTime(briefing.updatedAt)}</span>
     </div>
-    {sources.length > 0 && <div className="mt-4 border-t border-line pt-3">
+    {sources.length > 0 && <div className="mt-2 border-t border-line pt-2">
       <ul aria-label="Sources" className="flex flex-wrap gap-2">
         {sources.slice(0, 3).map(source => <BriefingSource key={source.id} source={source} />)}
       </ul>

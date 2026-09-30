@@ -35,13 +35,24 @@ function setup() {
   const view = render(<QueryClientProvider client={client}><WorkspaceCatchUp /></QueryClientProvider>);
   return { client, ...view };
 }
+it("links a brief back to the Slack thread that started it, and only over http(s)", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [
+    { ...briefing, originUrl: "https://slack.com/archives/C1/p1700000000000100" },
+    { ...briefing, id: "brief:unsafe", title: "Unsafe origin", originUrl: "javascript:alert(1)" },
+  ], generatedAt: 100, coverage: "recent" });
+  setup();
+  const article = await screen.findByRole("article", { name: briefing.title });
+  expect(within(article).getByRole("link", { name: "Open in Slack" }).getAttribute("href")).toBe("https://slack.com/archives/C1/p1700000000000100");
+  const unsafe = await screen.findByRole("article", { name: "Unsafe origin" });
+  expect(within(unsafe).queryByRole("link", { name: "Open in Slack" })).toBeNull();
+});
 it("briefs one goal across conversations and runs with one concise summary", async () => {
   setup();
   const article = await screen.findByRole("article", { name: briefing.title });
   expect(screen.getAllByRole("article")).toHaveLength(1);
   expect(within(article).getByText(briefing.summary)).toBeTruthy();
   expect(within(article).queryByText("Next step")).toBeNull();
-  expect(within(article).getByRole("link", { name: "Latest thread" }).getAttribute("href")).toBe("/threads/rollout-review");
+  expect(within(article).getByRole("link", { name: "Open thread" }).getAttribute("href")).toBe("/threads/rollout-review");
   expect(within(article).getByRole("link", { name: "Routing design" }).getAttribute("href")).toBe("/threads/design");
   expect(within(article).getByRole("link", { name: "TKAI-42 routing PR" }).getAttribute("href")).toBe("https://github.com/acme/app/pull/42");
   expect(within(article).getByRole("link", { name: "Replay report" }).getAttribute("href")).toBe("/a/replay-report");
@@ -56,7 +67,7 @@ it("does not invent a conversation or completion when only workflow evidence exi
   vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, latestThread: null, status: "updated", sources: [{ id: "run", kind: "workflow", title: "Verification run", updatedAt: 1, runId: "run" }, { id: "unknown", kind: "message", title: "Imported note", updatedAt: 1, url: "javascript:alert(1)" }] }], generatedAt: 100, coverage: "recent" });
   setup();
   expect(await screen.findByText("No linked conversation")).toBeTruthy();
-  expect(screen.queryByRole("link", { name: "Latest thread" })).toBeNull();
+  expect(screen.queryByRole("link", { name: "Open thread" })).toBeNull();
   expect(screen.getByRole("link", { name: "Verification run" }).getAttribute("href")).toBe("/workflows/runs/run");
   expect(screen.queryByRole("link", { name: "Imported note" })).toBeNull();
   expect(screen.getByText("Imported note")).toBeTruthy();
@@ -76,7 +87,7 @@ it("hides cached briefs on refresh failure and retries explicitly", async () => 
   await act(async () => { await client.refetchQueries({ queryKey: ["workspace-briefings"] }); });
   expect(await screen.findByText("Could not prepare your briefing.")).toBeTruthy();
   expect(screen.queryByText(briefing.summary)).toBeNull();
-  expect(screen.queryByRole("link", { name: "Latest thread" })).toBeNull();
+  expect(screen.queryByRole("link", { name: "Open thread" })).toBeNull();
   vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [briefing], generatedAt: 100, coverage: "recent" });
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByText(briefing.summary)).toBeTruthy();

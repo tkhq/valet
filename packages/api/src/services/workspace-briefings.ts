@@ -74,7 +74,11 @@ export function parseWorkspaceBriefings(text: string, evidence: readonly Briefin
     attachRelatedBriefingEffects(group,evidence);
     if (!group.some(item => ["thread","workflow","artifact"].includes(item.source.kind))) throw new Error("Briefing has no contextual source.");
     group.sort((a,b) => b.source.updatedAt-a.source.updatedAt || a.source.id.localeCompare(b.source.id));
-    const latest = group.find(item => item.source.kind === "thread" && item.source.sessionId && item.source.threadId)?.source;
+    // Prefer a collected conversation. A brief built only from runs,
+    // artifacts, or effects still links the thread one of them names.
+    const latest = (group.find(item => item.source.kind === "thread" && item.source.sessionId && item.source.threadId)
+      ?? group.find(item => item.source.sessionId && item.source.threadId))?.source;
+    const originUrl = group.find(item => item.source.originUrl)?.source.originUrl;
     const demo = group.some(item => /\[(?:local )?demo\]/i.test(`${item.source.title}\n${item.content}`));
     const title = brief.title.trim();
     return {
@@ -85,6 +89,7 @@ export function parseWorkspaceBriefings(text: string, evidence: readonly Briefin
         : group.some(item => item.state === "in_progress") ? "in_progress" : "updated",
       updatedAt: Math.max(...group.map(item => item.source.updatedAt)),
       latestThread: latest?.sessionId && latest.threadId ? { sessionId: latest.sessionId, threadId: latest.threadId, title: latest.title } : null,
+      ...(originUrl ? { originUrl } : {}),
       sources: group.map(item => item.source),
     };
   }).sort((a,b) => b.updatedAt-a.updatedAt || a.id.localeCompare(b.id));
@@ -137,7 +142,7 @@ export function createBriefingGenerator(options: {
 
 const generateBriefings = createBriefingGenerator();
 // Bump the algorithm prefix for changes to source collection, grouping or rendering.
-const CACHE_VERSION = `briefings-v3-latest-run:${digest(SYSTEM_PROMPT)}`;
+const CACHE_VERSION = `briefings-v4-origin-links:${digest(SYSTEM_PROMPT)}`;
 export const getWorkspaceBriefings = createDurableBriefingCache({
   version: CACHE_VERSION,
   collect: collectWorkspaceBriefingSources,

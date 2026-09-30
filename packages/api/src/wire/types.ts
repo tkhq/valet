@@ -5330,6 +5330,8 @@ export interface WorkspaceBriefingSource {
   runId?: string;
   token?: string;
   url?: string;
+  /** The channel conversation this came from, such as a Slack thread link. */
+  originUrl?: string;
 }
 export interface WorkspaceBriefing {
   id: string;
@@ -5338,6 +5340,8 @@ export interface WorkspaceBriefing {
   status: "needs_attention" | "in_progress" | "updated";
   updatedAt: number;
   latestThread: { sessionId: string; threadId: string; title?: string } | null;
+  /** The channel conversation the work started in, such as a Slack thread. */
+  originUrl?: string;
   sources: WorkspaceBriefingSource[];
 }
 export interface WorkspaceBriefingsResponse {

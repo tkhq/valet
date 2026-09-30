@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
-import { budgetBriefingEvidence, collectWorkspaceBriefingSources, type BriefingEvidence } from "./workspace-briefing-sources.js";
+import { budgetBriefingEvidence, collectWorkspaceBriefingSources, slackUrlForThreadKey, type BriefingEvidence } from "./workspace-briefing-sources.js";
 import { createBriefingGenerator, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
 
 const user = { type: "user" as const, id: "local-user" };
@@ -34,6 +34,21 @@ describe("workspace briefing synthesis", () => {
     expect(() => parseWorkspaceBriefings(answer.replace("Intake deduplication","https://evil.example"),evidence)).toThrow();
     const runOnly = JSON.stringify({ briefings: [{ title: "Intake verification", summary: "Concurrent deliveries remain untested.", sourceIds: ["run"] }] });
     expect(parseWorkspaceBriefings(runOnly,evidence)[0].latestThread).toBeNull();
+  });
+  it("links a run-only brief to the conversation and Slack thread the run names", () => {
+    const run: BriefingEvidence = { source: { id: "slack-run", kind: "workflow", title: "Intake", updatedAt: 40, runId: "slack-run",
+      sessionId: "runtime", threadId: "origin-thread", originUrl: "https://slack.com/archives/C1/p1700000000000100" },
+      content: "Triaged the request.", state: "updated" };
+    const reply = JSON.stringify({ briefings: [{ title: "Intake triage", summary: "The request was triaged.", sourceIds: ["slack-run"] }] });
+    const [brief] = parseWorkspaceBriefings(reply,[run]);
+    expect(brief.latestThread).toMatchObject({ sessionId: "runtime", threadId: "origin-thread" });
+    expect(brief.originUrl).toBe("https://slack.com/archives/C1/p1700000000000100");
+  });
+  it("builds a Slack permalink only from a Slack thread key", () => {
+    expect(slackUrlForThreadKey("slack:C0123:1700000000.000100")).toBe("https://slack.com/archives/C0123/p1700000000000100");
+    expect(slackUrlForThreadKey("web:abc")).toBeUndefined();
+    expect(slackUrlForThreadKey("slack:C0123:not-a-ts")).toBeUndefined();
+    expect(slackUrlForThreadKey(null)).toBeUndefined();
   });
   it("coalesces identical requests and binds the cache to full evidence, org and owner", async () => {
     let release: ((value: string) => void) | undefined;
@@ -130,6 +145,29 @@ describe("workspace briefing evidence", () => {
     expect(sources.reduce((n,item) => n+item.content.length,0)).toBeLessThanOrEqual(24_000);
     const team = await collectWorkspaceBriefingSources(db,"local-org",{ type: "team", id: "team" });
     expect(team.map(item => item.source.sessionId)).toEqual(["team"]);
+  });
+  it("links a Slack-triggered run to its Slack thread and a same-workspace origin to its thread", async () => {
+    api = await bootTestApi(); const db = api.providers.db;
+    const definition = { version: "dag/v1", nodes: [{ id: "finish", type: "stop" }], edges: [] };
+    await db.insert(agentSessions).values([
+      { id: "mine", userId: "local-user", orgId: "local-org", workspace: "/", ownerType: "user", ownerId: "local-user", createdAt: 1, updatedAt: 1 },
+      { id: "theirs", userId: "other-user", orgId: "local-org", workspace: "/", ownerType: "user", ownerId: "other-user", createdAt: 1, updatedAt: 1 },
+    ]);
+    await db.insert(sessionThreads).values([{ id: "my-thread", sessionId: "mine", createdAt: 1 }, { id: "their-thread", sessionId: "theirs", createdAt: 1 }]);
+    await db.insert(workflowDefinitions).values({ id: "wf", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Intake", definition, createdAt: 1, updatedAt: 1 });
+    const slackEvent = { type: "event", data: { key: "slack.app_mention", payload: { channel: "C1", ts: "1700000000.000200", thread_ts: "1700000000.000100" } } };
+    await db.insert(workflowRuns).values([
+      { id: "slack-run", workflowId: "wf", definitionVersionId: "v", definition, params: { input: slackEvent, origin: { assistantSessionId: "mine", threadId: "my-thread" } }, ownerType: "user", ownerId: "local-user", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 10 },
+    ]);
+    await db.insert(workflowCheckpoints).values({ runId: "slack-run", nodeId: "finish", status: "completed", attempt: 1, result: { output: "Triaged." }, createdAt: 9 });
+    const run = (await collectWorkspaceBriefingSources(db,"local-org",user)).find(item => item.source.runId === "slack-run");
+    expect(run?.source).toMatchObject({ sessionId: "mine", threadId: "my-thread", originUrl: "https://slack.com/archives/C1/p1700000000000100" });
+
+    // A run whose origin is another person's thread never links to it.
+    await db.execute(sql`UPDATE workflow_runs SET params=jsonb_set(params,'{origin}','{"assistantSessionId":"theirs","threadId":"their-thread"}') WHERE id='slack-run'`);
+    const foreign = (await collectWorkspaceBriefingSources(db,"local-org",user)).find(item => item.source.runId === "slack-run");
+    expect(foreign?.source.sessionId).toBeUndefined();
+    expect(foreign?.source.threadId).toBeUndefined();
   });
   it("uses scoped narrative workflow checkpoints, current approval prompts and failed findings", async () => {
     api = await bootTestApi(); const db = api.providers.db;
