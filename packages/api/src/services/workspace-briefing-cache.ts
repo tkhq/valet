@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, gt, lte, or, ne } from "drizzle-orm";
-import type { Principal } from "@valet/engine";
+import type { CredentialStore, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { workspaceBriefingCache as cache } from "../schema/index.js";
 import type { WorkspaceBriefingsResponse } from "../wire/types.js";
@@ -17,10 +17,16 @@ export function briefingEvidenceHash(evidence: readonly BriefingEvidence[]): str
   }).sort((a,b) => a.source.id.localeCompare(b.source.id));
   return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
 }
+/** What brief generation needs to reach the organization's own models and keys. */
+export interface BriefingModelAccess {
+  db: AppDb;
+  credentials?: CredentialStore;
+}
+
 interface CacheOptions {
   version: string;
   collect: (db: AppDb, orgId: string, owner: Principal) => Promise<BriefingEvidence[]>;
-  generate: (orgId: string, owner: Principal, evidence: readonly BriefingEvidence[]) => Promise<WorkspaceBriefingsResponse>;
+  generate: (orgId: string, owner: Principal, evidence: readonly BriefingEvidence[], access: BriefingModelAccess) => Promise<WorkspaceBriefingsResponse>;
   validate?: typeof canReadCachedBriefingSources;
   now?: () => number;
   checkIntervalMs?: number;
@@ -49,7 +55,7 @@ export function createDurableBriefingCache(options: CacheOptions) {
     briefings: [], generatedAt: null, coverage: "recent", unavailable: true, checkedAt,
     ...(refreshing ? { refreshing: true } : {}),
   });
-  return async (db: AppDb, orgId: string, owner: Principal): Promise<WorkspaceBriefingsResponse> => {
+  return async (db: AppDb, orgId: string, owner: Principal, credentials?: CredentialStore): Promise<WorkspaceBriefingsResponse> => {
     const scope = and(eq(cache.orgId,orgId),eq(cache.ownerType,owner.type),eq(cache.ownerId,owner.id));
     const visible = async (row: CacheRow | undefined): Promise<WorkspaceBriefingsResponse> => {
       const refreshing = !!row?.leaseToken && row.leaseUntil > now();
@@ -106,7 +112,7 @@ export function createDurableBriefingCache(options: CacheOptions) {
 
     async function regenerate(evidence: BriefingEvidence[], evidenceHash: string, checkedAt: number, keepShown: boolean) {
       try {
-        let response = evidence.length ? await options.generate(orgId,owner,evidence)
+        let response = evidence.length ? await options.generate(orgId,owner,evidence,{ db, ...(credentials ? { credentials } : {}) })
           : { briefings: [], generatedAt: null, coverage: "recent" as const };
         if (!response.unavailable && !await validate(db,orgId,owner,response)) response = unavailable(checkedAt);
         if (response.unavailable && keepShown) return await fail(new Error("Briefing generation was unavailable."), true);

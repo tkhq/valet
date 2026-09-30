@@ -1444,6 +1444,19 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.gatePrompts[0]?.prompt.body).toContain("Only members of Ops can approve.");
   });
 
+  it("tells a non-member who clicks a team's card that only the team can approve", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-ops", orgId: ORG_ID, name: "Ops", createdAt: 1 });
+    const { ref } = await openChannelGate({ type: "team", id: "team-ops" });
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId: "approve", callbackId: "cb-non-member", ref },
+    }));
+    await vi.waitFor(() => expect(fakeTransport.answered).toContainEqual({
+      callbackId: "cb-non-member", text: "Only members of Ops can approve. Ask a team member to answer it.",
+    }));
+  });
+
   it("tells the channel to answer an open question in Valet", async () => {
     await openChannelGate(undefined, { type: "question", title: "Which repo?", actions: [] });
     expect(fakeTransport.gatePrompts[0]?.prompt.actions).toEqual([]);

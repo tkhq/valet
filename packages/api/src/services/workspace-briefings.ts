@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
-import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Principal } from "@valet/engine";
 import type { WorkspaceBriefing, WorkspaceBriefingsResponse } from "../wire/types.js";
-import { createDurableBriefingCache } from "./workspace-briefing-cache.js";
+import { createDurableBriefingCache, type BriefingModelAccess } from "./workspace-briefing-cache.js";
+import { resolveModelSpec } from "./model-resolution.js";
 import { attachRelatedBriefingEffects } from "./workspace-briefing-links.js";
 import { collectWorkspaceBriefingSources, type BriefingEvidence } from "./workspace-briefing-sources.js";
 
-export type BriefingSummarizer = (evidence: readonly BriefingEvidence[], signal: AbortSignal) => Promise<string>;
+export type BriefingSummarizer = (
+  evidence: readonly BriefingEvidence[], signal: AbortSignal, org: Partial<BriefingModelAccess> & { orgId: string },
+) => Promise<string>;
 const SYSTEM_PROMPT = `You write the catch-up list for a busy engineer. For each substantive line of work in the evidence, write one brief.
 A line of work combines more than one kind of source, such as a conversation with its pull request, workflow run, artifact, or sent message.
 Skip a goal whose only evidence is conversations: the app lists those threads separately.
@@ -28,29 +31,26 @@ Return JSON only: {"briefings":[{"title":"...","nextAction":"...","summary":"...
 Use ONLY supplied sourceIds. Do not put links, markdown, IDs such as wf_..., or timestamps in the text. Call a workflow by its name.`;
 
 /**
- * The model that writes brief text. `VALET_BRIEFING_MODEL` names one as
- * `provider/model`. Without it, an OpenAI key selects gpt-5.6-luna, whose
- * plainer prose reviewers preferred, and Claude Haiku 4.5 is the fallback.
+ * The model that writes brief text, as the organization resolves it: the org's
+ * model tier map and stored provider keys, like a workflow model step.
+ * `VALET_BRIEFING_MODEL` names a model or tier; the default is the `s` tier,
+ * a fast model that writes plain prose.
  */
-export function briefingModelRef(env: NodeJS.ProcessEnv): { provider: string; model: string } {
-  const configured = env.VALET_BRIEFING_MODEL?.trim();
-  const slash = configured ? configured.indexOf("/") : -1;
-  if (configured && slash > 0 && slash < configured.length - 1) {
-    return { provider: configured.slice(0, slash), model: configured.slice(slash + 1) };
-  }
-  return env.OPENAI_API_KEY ? { provider: "openai", model: "gpt-5.6-luna" } : { provider: "anthropic", model: "claude-haiku-4-5" };
+export function briefingModelSpec(env: NodeJS.ProcessEnv): string {
+  return env.VALET_BRIEFING_MODEL?.trim() || "s";
 }
 
-export const defaultBriefingSummarizer: BriefingSummarizer = async (evidence, signal) => {
-  const ref = briefingModelRef(process.env);
-  // `getModel` is typed to its built-in catalog; a configured id is checked at runtime.
-  const model = (getModel as (provider: string, id: string) => ReturnType<typeof getModel> | undefined)(ref.provider, ref.model);
-  if (!model) throw new Error(`Briefing model ${ref.provider}/${ref.model} is unavailable. Set VALET_BRIEFING_MODEL to a known provider/model.`);
-  const result = await completeSimple(model, {
+export const defaultBriefingSummarizer: BriefingSummarizer = async (evidence, signal, org) => {
+  const spec = briefingModelSpec(process.env);
+  if (!org.db || !org.credentials) throw new Error("Briefing generation needs the database and the credential store.");
+  const resolved = await resolveModelSpec(org.db, org.credentials, org.orgId, spec);
+  if (!resolved) throw new Error(`Briefing model ${spec} is unavailable. Configure the model tier in organization settings, or set VALET_BRIEFING_MODEL.`);
+  const reasoning = resolved.model.reasoning === true;
+  const result = await completeSimple(resolved.model, {
     systemPrompt: SYSTEM_PROMPT,
     messages: [{ role: "user", timestamp: Date.now(), content: [{ type: "text", text: JSON.stringify(evidence.map(item => ({ ...item, content: withoutInternalIds(item.content) }))) }] }],
     // Reasoning models spend output tokens before the answer, and reject a temperature.
-  }, { ...(ref.provider === "anthropic" ? { temperature: 0.2, maxTokens: 3000 } : { maxTokens: 12_000 }), signal });
+  }, { apiKey: resolved.apiKey, ...(reasoning ? { maxTokens: 12_000 } : { temperature: 0.2, maxTokens: 3000 }), signal });
   if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error("Briefing generation failed.");
   return result.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map(part => part.text).join("");
 };
@@ -137,7 +137,7 @@ export function createBriefingGenerator(options: {
   const pending = new Map<string, Promise<WorkspaceBriefingsResponse>>();
   const max = Math.max(1,options.maxCacheEntries ?? 128);
   const unavailable = (): WorkspaceBriefingsResponse => ({ briefings: [], generatedAt: null, coverage: "recent", unavailable: true });
-  return async (orgId: string, owner: Principal, evidence: readonly BriefingEvidence[]): Promise<WorkspaceBriefingsResponse> => {
+  return async (orgId: string, owner: Principal, evidence: readonly BriefingEvidence[], access?: BriefingModelAccess): Promise<WorkspaceBriefingsResponse> => {
     if (!evidence.length) return { briefings: [], generatedAt: null, coverage: "recent" };
     const key = digest(JSON.stringify({ orgId, owner, evidence }));
     const cached = cache.get(key);
@@ -153,7 +153,7 @@ export function createBriefingGenerator(options: {
           timer = setTimeout(() => { controller.abort(); reject(new Error("Briefing timed out.")); },options.timeoutMs ?? 20_000);
           timer.unref?.();
         });
-        const raw = await Promise.race([summarize(evidence,controller.signal),timeout]);
+        const raw = await Promise.race([summarize(evidence,controller.signal,{ ...access, orgId }),timeout]);
         const response: WorkspaceBriefingsResponse = { briefings: parseWorkspaceBriefings(raw,evidence), generatedAt: now(), coverage: "recent" };
         if (cache.size >= max) {
           const oldest = cache.keys().next().value;
@@ -175,7 +175,7 @@ export function createBriefingGenerator(options: {
 
 const generateBriefings = createBriefingGenerator();
 // Bump the algorithm prefix for changes to source collection, grouping or rendering.
-const CACHE_VERSION = `briefings-v8-shared-threads:${briefingModelRef(process.env).provider}:${digest(SYSTEM_PROMPT)}`;
+const CACHE_VERSION = `briefings-v9-org-model:${briefingModelSpec(process.env)}:${digest(SYSTEM_PROMPT)}`;
 export const getWorkspaceBriefings = createDurableBriefingCache({
   version: CACHE_VERSION,
   collect: collectWorkspaceBriefingSources,

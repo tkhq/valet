@@ -30,7 +30,7 @@ workspaceBriefingsRouter.get("/:workspace/briefings", async c => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const { db } = c.var.providers;
-  return c.json(await hideDismissedBriefings(db,c.var.user.id,owner,await getWorkspaceBriefings(db,c.var.user.orgId,owner)));
+  return c.json(await hideDismissedBriefings(db,c.var.user.id,owner,await getWorkspaceBriefings(db,c.var.user.orgId,owner,c.var.providers.engineCredentials)));
 });
 
 /**

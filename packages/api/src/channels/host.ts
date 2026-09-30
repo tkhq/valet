@@ -1646,7 +1646,15 @@ export class ChannelHost {
       return;
     }
     if (sessionRow && (sessionRow.orgId !== orgId || (!workflow?.ok && !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))))) {
-      await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
+      // A team's card already names who may approve, so a non-member's click
+      // gets that answer, not "expired". Every other refusal keeps the reply
+      // that cannot be told apart from an unknown card.
+      const teamNote = sessionRow.orgId === orgId && sessionRow.ownerType === "team" && sessionRow.ownerId
+        ? await this.teamApproverNote(sessionRow.ownerId) : undefined;
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        teamNote ? `${teamNote} Ask a team member to answer it.` : "This approval has expired — resolve it on the web.",
+      );
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
       return;
     }

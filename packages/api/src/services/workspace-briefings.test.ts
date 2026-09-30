@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { budgetBriefingEvidence, collectWorkspaceBriefingSources, slackUrlForThreadKey, type BriefingEvidence } from "./workspace-briefing-sources.js";
-import { briefingModelRef, createBriefingGenerator, withoutInternalIds, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
+import { briefingModelSpec, defaultBriefingSummarizer, createBriefingGenerator, withoutInternalIds, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
 
 const user = { type: "user" as const, id: "local-user" };
 const evidence: BriefingEvidence[] = [
@@ -51,11 +51,13 @@ describe("workspace briefing synthesis", () => {
     expect(parseWorkspaceBriefings(reply("Approve the concurrent check."),evidence)[0].nextAction).toBe("Approve the concurrent check.");
     expect(parseWorkspaceBriefings(reply("Open https://evil.example now"),evidence)[0].nextAction).toBeUndefined();
   });
-  it("writes briefs with OpenAI when a key exists, unless a model is configured", () => {
-    expect(briefingModelRef({})).toEqual({ provider: "anthropic", model: "claude-haiku-4-5" });
-    expect(briefingModelRef({ OPENAI_API_KEY: "k" })).toEqual({ provider: "openai", model: "gpt-5.6-luna" });
-    expect(briefingModelRef({ OPENAI_API_KEY: "k", VALET_BRIEFING_MODEL: "anthropic/claude-sonnet-5-5" })).toEqual({ provider: "anthropic", model: "claude-sonnet-5-5" });
-    expect(briefingModelRef({ VALET_BRIEFING_MODEL: "no-slash" })).toEqual({ provider: "anthropic", model: "claude-haiku-4-5" });
+  it("writes briefs with the organization's s tier, unless a model or tier is configured", () => {
+    expect(briefingModelSpec({})).toBe("s");
+    expect(briefingModelSpec({ VALET_BRIEFING_MODEL: "anthropic/claude-sonnet-5-5" })).toBe("anthropic/claude-sonnet-5-5");
+    expect(briefingModelSpec({ VALET_BRIEFING_MODEL: "  " })).toBe("s");
+  });
+  it("refuses to write briefs without the organization's credential store", async () => {
+    await expect(defaultBriefingSummarizer([], new AbortController().signal, { orgId: "o1" })).rejects.toThrow(/credential store/);
   });
   it("keeps only lines of work that combine more than one kind of source", () => {
     const reply = JSON.stringify({ briefings: [

@@ -1,3 +1,4 @@
+import { InMemoryCredentialStore } from "@valet/engine";
 import { and, eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -28,7 +29,10 @@ describe("durable workspace briefing cache", () => {
     const generate = vi.fn(async () => snapshot);
     const options = { version: "v1", collect, generate, validate: valid, now: () => clock };
     const first = createDurableBriefingCache(options);
-    expect((await first(db,"local-org",owner)).generatedAt).toBe(1000);
+    const credentials = new InMemoryCredentialStore();
+    expect((await first(db,"local-org",owner,credentials)).generatedAt).toBe(1000);
+    // Generation reaches the organization's models through the caller's credential store.
+    expect(generate).toHaveBeenCalledWith("local-org", owner, evidence, { db, credentials });
     const restarted = createDurableBriefingCache(options);
     expect((await restarted(db,"local-org",owner)).checkedAt).toBe(1000);
     expect(collect).toHaveBeenCalledTimes(1); expect(generate).toHaveBeenCalledTimes(1);
