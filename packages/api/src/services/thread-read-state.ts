@@ -167,6 +167,15 @@ export async function recheckOpenPullRequests(
  * workflow editor conversation (`workflow:<id>:<viewer>`) belongs to its viewer;
  * without a viewer, as in workspace briefs, every editor conversation is left out.
  */
+export function isSharedThreadKey(key: string | null | undefined, viewerId?: string): boolean {
+  if (!key) return true;
+  if (key.startsWith("app-assistant:")) return false;
+  if (!key.startsWith("workflow:")) return true;
+  const viewer = key.split(":")[2] ?? "";
+  return viewerId !== undefined && (viewer === "" || viewer === viewerId);
+}
+
+/** `isSharedThreadKey` as SQL, for filtering inside a query. */
 export function sharedThreadKey(key: SQL, viewerId?: string): SQL {
   return sql`(${key} IS NULL OR (${key} NOT LIKE 'app-assistant:%' AND (${key} NOT LIKE 'workflow:%'
     OR ${viewerId === undefined ? sql`false` : sql`split_part(${key}, ':', 3) IN ('', ${viewerId})`})))`;

@@ -2,7 +2,6 @@
  * Explicit policy restrictions remain authoritative; human approval nodes are separate.
  */
 import type { AppQueryable } from "../lib/drizzle.js";
-import { and, eq } from "drizzle-orm";
 import { workflowActionGrants } from "../schema/index.js";
 import { canAdministerTeam } from "../services/teams.js";
 import { resolvePolicyDecision } from "../policies/resolution.js";
@@ -13,7 +12,7 @@ import type {
   WorkflowNodePermissionWire,
   WorkflowDefinitionSummary,
 } from "../wire/types.js";
-import { getWorkflowDefinition, type WorkflowOwner, type WorkflowServiceDeps } from "./service.js";
+import { getWorkflowDefinition, revokeWorkflowGrants, type WorkflowOwner, type WorkflowServiceDeps } from "./service.js";
 
 /** A tool node's identity, narrowed from the stored definition JSON. The
  * definition was validated at save time, but tool-node rows can predate the
@@ -210,7 +209,7 @@ export async function canGrantWorkflowPermissions(deps: WorkflowServiceDeps, own
 export async function revokeWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary || !(await canGrantWorkflowPermissions(deps, owner, summary))) return false;
-  await deps.db.delete(workflowActionGrants).where(and(eq(workflowActionGrants.orgId, owner.orgId), eq(workflowActionGrants.workflowId, workflowId)));
+  await revokeWorkflowGrants(deps.db, owner.orgId, workflowId);
   return true;
 }
 

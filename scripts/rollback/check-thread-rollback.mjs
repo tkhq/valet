@@ -1,6 +1,6 @@
 /** Run with mise exec node@22 -- node scripts/rollback/check-thread-rollback.mjs. */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -15,7 +15,21 @@ mkdirSync(old);
 const archive = execFileSync('git', ['archive', sha], { cwd: root, maxBuffer: 128 * 1024 * 1024 });
 execFileSync('tar', ['-x', '-C', old], { input: archive });
 // Only external dependencies are shared. All Valet imports resolve inside each source tree.
-symlinkSync(join(root, 'node_modules'), join(scratch, 'node_modules'));
+// pnpm can place a dependency in the root or only under packages/api, so link
+// both, the api package's own copies first.
+const modules = join(scratch, 'node_modules');
+mkdirSync(modules);
+for (const dir of [join(root, 'packages/api/node_modules'), join(root, 'node_modules')]) {
+  if (!existsSync(dir)) continue;
+  for (const name of readdirSync(dir)) {
+    if (name.startsWith('.')) continue;
+    const entries = name.startsWith('@') ? readdirSync(join(dir, name)).map((sub) => join(name, sub)) : [name];
+    if (name.startsWith('@')) mkdirSync(join(modules, name), { recursive: true });
+    for (const entry of entries) {
+      if (!existsSync(join(modules, entry))) symlinkSync(join(dir, entry), join(modules, entry));
+    }
+  }
+}
 const require = createRequire(join(root, 'packages/api/package.json'));
 const { build } = require('esbuild');
 const { inlineAssetsPlugin } = await import(pathToFileURL(join(root, 'packages/api/build/inline-assets.mjs')));

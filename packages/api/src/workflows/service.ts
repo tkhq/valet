@@ -786,9 +786,7 @@ export async function updateWorkflowDefinition(
     );
     // A grant approves the steps as they were. When someone who could not
     // have granted it changes them, an approver must look again.
-    if (!(await canGrantWorkflowPermissions(deps, owner, row))) {
-      await deps.db.delete(workflowActionGrants).where(and(eq(workflowActionGrants.orgId, row.orgId), eq(workflowActionGrants.workflowId, id)));
-    }
+    if (!(await canGrantWorkflowPermissions(deps, owner, row))) await revokeWorkflowGrants(deps.db, row.orgId, id);
   }
 
   return {
@@ -1184,11 +1182,18 @@ export async function disarmWorkflowTriggers(
 
 /** The definition, its version history, and everything that could start it.
  * Settled runs are kept: they are history, reachable by their run id. */
+/** Removes every workflow-scoped action grant. A grant approves the steps as
+ * they were; any change to them outside an approver's own edit ends it. */
+export async function revokeWorkflowGrants(db: AppQueryable, orgId: string, workflowId: string): Promise<void> {
+  await db.delete(workflowActionGrants).where(and(eq(workflowActionGrants.orgId, orgId), eq(workflowActionGrants.workflowId, workflowId)));
+}
+
 export async function purgeWorkflowRows(
   db: AppQueryable,
   orgId: string,
   workflowId: string,
 ): Promise<void> {
+  await revokeWorkflowGrants(db, orgId, workflowId);
   await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
   await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, workflowId));
   await disarmWorkflowTriggers(db, orgId, workflowId);

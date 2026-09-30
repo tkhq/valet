@@ -133,6 +133,21 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
   await syncAssistantSessionStatus(db);
+  await reportRetiredAssistantSettings(db);
+}
+
+/** The runtime no longer applies an assistant's stored behavior allow-list,
+ * model, or reasoning; those columns stay only for a rollback. Say once at boot
+ * how many live assistants carried them, so the change is visible in the logs. */
+async function reportRetiredAssistantSettings(db: PgDb): Promise<void> {
+  const result = await db.query(
+    `SELECT count(*)::int AS n FROM assistants WHERE archived_at IS NULL
+      AND (behavior IS NOT NULL OR model IS NOT NULL OR reasoning IS NOT NULL)`,
+  );
+  const n = Number(result.rows[0]?.n ?? 0);
+  if (n > 0) {
+    console.warn(`[migrations] ${n} assistant(s) have stored behavior, model, or reasoning settings that no longer apply. Workspaces now use the organization's model defaults and per-thread model choice.`);
+  }
 }
 
 /** Keeps each assistant's session status in line with the assistant.
@@ -147,6 +162,13 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
  * too. Idempotent: rows already in line are untouched. */
 export async function syncAssistantSessionStatus(db: PgDb): Promise<void> {
   const now = Date.now();
+  // A live, non-retired assistant is its owner's default. An older pod can
+  // clear the legacy flag; after a rollback dev-v2 would then find no default
+  // and could not insert one under the unique index.
+  await db.query(
+    `UPDATE assistants SET is_default = true
+      WHERE archived_at IS NULL AND position(':retired:' in owner_id) = 0 AND NOT is_default`,
+  );
   await db.query(
     `UPDATE agent_sessions s SET status = 'active', updated_at = $1 FROM assistants a
       WHERE s.id = a.session_id AND a.archived_at IS NULL AND s.status = 'deleted'`,

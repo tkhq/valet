@@ -103,8 +103,11 @@ async function ownerExists(db: AppQueryable, orgId: string, principal: Principal
 async function liveOrRestored(db: AppQueryable, orgId: string, principal: Principal, row: AssistantRow): Promise<AssistantRow> {
   if (row.archivedAt === null) return row;
   if (!(await ownerExists(db, orgId, principal))) throw new ArchivedAssistantError();
+  // Restore the legacy default flag too: after a rollback, dev-v2 finds the
+  // workspace's assistant by it and cannot insert another under the unique index.
   const [restored] = await db.update(assistants).set({ archivedAt: null })
     .where(eq(assistants.id, row.id)).returning();
+  await db.execute(sql`UPDATE assistants SET is_default = true WHERE id = ${row.id}`);
   return restored ?? { ...row, archivedAt: null };
 }
 

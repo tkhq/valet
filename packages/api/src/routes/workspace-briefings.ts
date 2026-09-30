@@ -8,6 +8,7 @@ import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing, WorkspaceBriefingsResponse } from "../wire/types.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
+import { isSharedThreadKey } from "../services/thread-read-state.js";
 
 /** Dismissals stop mattering once their brief ids stop appearing. */
 const DISMISSAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -72,7 +73,8 @@ workspaceBriefingsRouter.post("/:workspace/briefings/:briefingId/dismiss", async
     if (!session || session.ownerType !== owner.type || (session.ownerId || session.userId) !== owner.id) continue;
     if (!await canViewSession(db,session,c.var.principal)) continue;
     const thread = await engineStore.getThread(sessionId,threadId);
-    if (!thread) continue;
+    // A brief cached before private threads were left out may still name one.
+    if (!thread || !isSharedThreadKey(thread.key, c.var.user.id)) continue;
     if ((await engineStore.listDecisionGates(sessionId,threadId,"pending")).length > 0) { keptWaiting += 1; continue; }
     await db.insert(sessionThreads).values({ id: threadId, sessionId, createdAt: thread.createdAt, archivedAt: now })
       .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: now } });

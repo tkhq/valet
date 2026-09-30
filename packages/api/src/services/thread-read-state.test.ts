@@ -5,7 +5,7 @@ import { sessionThreads } from "../schema/index.js";
 import { collectWorkspaceBriefingSources } from "./workspace-briefing-sources.js";
 import type { ListThreadsResponse, WaitingThreadsResponse } from "../wire/types.js";
 import {
-  lastAgentAsk, listWaitingThreads, parsePullRequestUrl, sharedThreadKey, pullRequestWebhookState, recordThreadPullRequest,
+  isSharedThreadKey, lastAgentAsk, listWaitingThreads, parsePullRequestUrl, sharedThreadKey, pullRequestWebhookState, recordThreadPullRequest,
   setPullRequestState, wireThreadPullRequests,
 } from "./thread-read-state.js";
 
@@ -138,12 +138,15 @@ it("keeps private helper and editor threads out of shared workspace lists", asyn
   api = await bootTestApi();
   const shared = async (key: string | null, viewer?: string) =>
     ((await api!.providers.db.execute(sql`SELECT ${sharedThreadKey(sql`${key}::text`, viewer)} AS ok`)) as { rows: Array<{ ok: boolean }> }).rows[0]!.ok;
-  expect(await shared(null)).toBe(true);
-  expect(await shared("web:abc")).toBe(true);
-  expect(await shared("app-assistant:u1", "u1")).toBe(false);
-  expect(await shared("workflow:wf_1:u1", "u1")).toBe(true);
-  expect(await shared("workflow:wf_1:u1", "u2")).toBe(false);
-  expect(await shared("workflow:wf_1:u1")).toBe(false);
+  // The SQL and the JavaScript forms of the rule agree on every case.
+  const cases: Array<[string | null, string | undefined, boolean]> = [
+    [null, undefined, true], ["web:abc", undefined, true], ["app-assistant:u1", "u1", false],
+    ["workflow:wf_1:u1", "u1", true], ["workflow:wf_1:u1", "u2", false], ["workflow:wf_1:u1", undefined, false], ["workflow:wf_1", "u1", true],
+  ];
+  for (const [key, viewer, expected] of cases) {
+    expect(await shared(key, viewer), `${key} for ${viewer}`).toBe(expected);
+    expect(isSharedThreadKey(key, viewer), `${key} for ${viewer}`).toBe(expected);
+  }
 
   // Brief evidence is shared by every member, so it never reads a helper thread.
   const now = Date.now();

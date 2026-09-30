@@ -53,6 +53,7 @@ import {
   hasUnsettledWorkflowRun,
   newWorkflowId,
   purgeWorkflowRows,
+  revokeWorkflowGrants,
 } from "../../workflows/service.js";
 import { nextFireAt } from "../../workflows/schedule-service.js";
 import {
@@ -64,7 +65,6 @@ import type { OnePasswordService } from "../onepassword.js";
 import { toolNodesOf, workflowCallsOf } from "../../workflows/tool-nodes.js";
 import { validateSubscriptionWrite } from "../../events/subscription-write.js";
 import type { SubscriptionFilter } from "../../events/match.js";
-import type { SkillTreeEntry } from "../skill-repo-reader.js";
 import type {
   CollectorDiscoverContext,
   CollectorNoticeContext,
@@ -395,6 +395,8 @@ class WorkflowPass implements CollectorPass {
           })
           .where(eq(workflowDefinitions.id, row.id));
         if (canonicalJson(parsed.file.definition) !== canonicalJson(row.definition)) {
+          // A repository commit is not an approver's edit.
+          await revokeWorkflowGrants(db, source.orgId, row.id);
           await snapshot(
             db,
             row.id,

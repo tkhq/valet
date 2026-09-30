@@ -254,6 +254,15 @@ describe("workflow grants after a definition change", () => {
     expect((await edit(3, { "x-valet-test-user-id": "test-member" })).status).toBe(200);
     expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
   });
+
+  it("are removed with the workflow", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const wfId = await insertWorkflow(api);
+    expect((await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    expect((await api.providers.db.select().from(workflowActionGrants)).length).toBeGreaterThan(0);
+    expect((await fetch(`${api.baseUrl}/api/workflows/${wfId}`, { method: "DELETE" })).ok).toBe(true);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+  });
 });
 
 describe("POST /api/workflows/:id/permissions/allow", () => {

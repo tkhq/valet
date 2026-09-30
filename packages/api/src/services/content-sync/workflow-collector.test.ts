@@ -28,6 +28,7 @@ import {
   teamMembers,
   teams,
   users,
+  workflowActionGrants,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
@@ -383,11 +384,18 @@ describe("workflow collector", () => {
     const id = await teamSource();
     await serviceFor(f).syncOnce(id);
 
+    // An admin allowed an action for this workflow.
+    const [synced] = await db.select().from(workflowDefinitions);
+    await db.insert(workflowActionGrants).values({ id: "grant", orgId: synced!.orgId, workflowId: synced!.id,
+      ownerType: synced!.ownerType, ownerId: synced!.ownerId, actionId: "slack.post_message", grantedBy: "admin", createdAt: 1 });
+
     repo.sha = "c2";
     // A different graph, still valid: the stop node is renamed, which moves
     // the definition hash and so mints a version.
     repo.files[".valet/workflows/nightly.yaml"] = workflowYaml("Nightly", "done");
     const outcome = await serviceFor(f).syncOnce(id);
+    // A repository commit is not an approver's edit, so the grant goes.
+    expect(await db.select().from(workflowActionGrants)).toHaveLength(0);
     expect(outcome?.warnings).toEqual([]);
     expect(outcome?.status).toBe("ok");
 

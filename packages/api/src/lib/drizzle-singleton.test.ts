@@ -92,6 +92,14 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
   });
 
+  it("restores the legacy default flag an older pod cleared on a live assistant", async () => {
+    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, is_default, created_at, archived_at)
+      VALUES ('flag-cleared', 'org', 'team', 'flag-team', 'flag-session', false, 1, NULL)`);
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT is_default FROM assistants WHERE id = 'flag-cleared'")).rows).toEqual([{ is_default: true }]);
+    await db.query("DELETE FROM assistants WHERE id = 'flag-cleared'");
+  });
+
   it("rewrites stored workflows that use thread steps or assistantId", async () => {
     const legacy = JSON.stringify({ version: "dag/v1", assistantId: "asst_old",
       nodes: [{ id: "o", type: "thread", prompt: "hi" }], edges: [] });
