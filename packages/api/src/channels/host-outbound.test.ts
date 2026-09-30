@@ -93,6 +93,10 @@ class KeyedTransport extends FakeTransport {
   conversationKeyFromThreadKey(threadKey: string): string | null {
     return threadKey.startsWith("keyed:") ? `keyed:R1:${threadKey.slice("keyed:".length)}` : null;
   }
+  /** Not a Slack key, so a sent reply records nothing unless a case overrides this. */
+  threadKeyFromConversationKey(_conversationKey: string): string | null {
+    return null;
+  }
 }
 
 /**
@@ -864,6 +868,22 @@ describe("ChannelHost outbound delivery", () => {
       expect(feedback?.type === "message" ? feedback.content : "").toContain(`Delivery failed: ${reason}`);
       expect(feedback?.type === "message" ? feedback.content : "").not.toContain(forbidden);
     });
+  });
+
+  it("never asks for a retry when only recording a posted reply fails", async () => {
+    faux.setResponses([fauxAssistantMessage("retrying")]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const send = vi.spyOn(keyedTransport, "send");
+    vi.spyOn(keyedTransport, "threadKeyFromConversationKey").mockImplementation(() => { throw new Error("store unavailable"); });
+    const { session, threadId } = await emitTerminalTurn({
+      queueItemId: "qi-record-failure",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+      content: "first response",
+    });
+
+    await vi.waitFor(() => expect(error.mock.calls.some(([message]) => message === "[channels] could not record a sent reply")).toBe(true));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(0);
   });
 
   it("retries and logs unrelated feedback admission failures", async () => {

@@ -134,13 +134,13 @@ export const PULL_REQUEST_CONVERSATION_EVENTS: ReadonlySet<string> = new Set([
 interface GithubPayload {
   issue?: { pull_request?: { html_url?: string } };
   pull_request?: { html_url?: string };
-  comment?: { id?: number; html_url?: string; body?: string; user?: { login?: string } };
-  review?: { id?: number; html_url?: string; body?: string | null; state?: string; user?: { login?: string } };
+  comment?: { id?: number; html_url?: string; body?: string; user?: { login?: string; type?: string } };
+  review?: { id?: number; html_url?: string; body?: string | null; state?: string; user?: { login?: string; type?: string } };
 }
 
 /**
  * The pull request URL and the comment a GitHub event carries, or null for an
- * event that is not a comment or review on a pull request.
+ * event that is not a person's comment or review on a pull request.
  */
 export function pullRequestComment(eventKey: string, payload: unknown): {
   pullRequestUrl: string; message: InboundChannelMessage; channelKey: string;
@@ -150,6 +150,10 @@ export function pullRequestComment(eventKey: string, payload: unknown): {
   const pullRequestUrl = body.pull_request?.html_url ?? body.issue?.pull_request?.html_url;
   const item = body.comment ?? body.review;
   if (!pullRequestUrl || !item?.id) return null;
+  // A bot's comment, Valet's own GitHub App included, is not a person
+  // continuing the conversation. It stays on the shared events thread, so the
+  // agent never wakes on the comment it just posted.
+  if (item.user?.type === "Bot" || item.user?.login?.endsWith("[bot]")) return null;
   const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)$/.exec(pullRequestUrl);
   if (!match) return null;
   const channelKey = githubPullRequestKey(match[1]!, match[2]!, Number(match[3]));

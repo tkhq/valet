@@ -30,6 +30,7 @@ import {
   type GatePromptRef,
   type InboundChannelEvent,
   type PromptAttachment,
+  type SendRef,
   type Session,
   type SessionEntry,
   type SessionStore,
@@ -824,13 +825,13 @@ export class ChannelHost {
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
     const sender = await this.workspaceSenderForSession(sessionId);
+    let sent: SendRef;
     try {
-      const sent = await transport.send(target.conversationKey, {
+      sent = await transport.send(target.conversationKey, {
         markdown: first.content,
         ...(sender !== undefined ? { sender } : {}),
       });
       this.markDelivered(dedupeKey);
-      await this.recordSentReply(target.channelType, target.conversationKey, sessionId, threadId, sent.messageId, first.id);
     } catch (error) {
       // This is the live first-response path. A durable child dispatcher must
       // keep provider errors observable so it can retain and retry its intent.
@@ -844,14 +845,30 @@ export class ChannelHost {
       }
       await this.retryFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason);
       this.markDelivered(dedupeKey);
+      return;
     }
+    // Outside the send's error handling: the reply is already posted, so a
+    // failed record must never tell the agent to post it again.
+    await this.recordSentReply(target.channelType, target.conversationKey, sessionId, threadId, sent.messageId, first.id);
   }
 
   /**
    * Records a reply Valet posted in a channel thread, with the engine message
-   * it carried. A DM is not a channel, so it records nothing.
+   * it carried. A DM is not a channel, so it records nothing. Best effort: it
+   * logs a failure and never throws, because the reply is already posted.
    */
   private async recordSentReply(
+    channelType: string, conversationKey: string, sessionId: string, threadId: string,
+    providerMessageId: string, engineMessageId: string,
+  ): Promise<void> {
+    try {
+      await this.recordSentReplyOrThrow(channelType, conversationKey, sessionId, threadId, providerMessageId, engineMessageId);
+    } catch (err) {
+      console.error("[channels] could not record a sent reply", err);
+    }
+  }
+
+  private async recordSentReplyOrThrow(
     channelType: string, conversationKey: string, sessionId: string, threadId: string,
     providerMessageId: string, engineMessageId: string,
   ): Promise<void> {

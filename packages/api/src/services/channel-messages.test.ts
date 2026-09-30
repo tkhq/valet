@@ -81,6 +81,16 @@ describe("pullRequestComment", () => {
     expect(pullRequestComment("github.push", {})).toBeNull();
   });
 
+  it("leaves a bot's comment, Valet's own included, off the pull request thread", () => {
+    const payload = (user: { login: string; type?: string }) => ({
+      issue: { pull_request: { html_url: "https://github.com/acme/app/pull/12" } },
+      comment: { id: 6, body: "Pinned it.", user },
+    });
+    expect(pullRequestComment("github.issue_comment.created", payload({ login: "valet[bot]", type: "Bot" }))).toBeNull();
+    expect(pullRequestComment("github.issue_comment.created", payload({ login: "ci[bot]" }))).toBeNull();
+    expect(pullRequestComment("github.issue_comment.created", payload({ login: "rev", type: "User" }))).not.toBeNull();
+  });
+
   it("describes a review with no body by its state", () => {
     const review = pullRequestComment("github.pull_request_review.submitted", {
       pull_request: { html_url: "https://github.com/acme/app/pull/12" },

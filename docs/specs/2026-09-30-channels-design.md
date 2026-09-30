@@ -41,11 +41,11 @@ Writers:
 - Outbound: the first addressed reply (`ChannelHost.deliverFirstAssistantReply`), a streamed reply when its stream closes (`ChannelStreamBridge`), and completed `slack.send_message`, `slack.reply_to_origin`, and `github.create_comment` invocations (the policy audit sink, which knows the thread).
 - Inbound: a Slack mention delivered to an orchestrator, a followed-thread message, and a GitHub pull request comment or review routed to a thread.
 
-A write failure logs and never fails the delivery. The table is a view aid, not a delivery ledger.
+A write failure logs and never fails the delivery, and it never makes Valet report a posted reply as failed. The table is a view aid, not a delivery ledger.
 
 ## Pull request routing
 
-A GitHub pull request event for an orchestrator subscription goes to the thread that opened the pull request when one exists in the subscriber's runtime session (a `thread_pull_requests` row with the same URL). Otherwise it goes to the `events` thread as before. The events are `github.issue_comment.created` on a pull request, `github.pull_request_review.submitted`, and `github.pull_request_review_comment.created`. The agent answers with `github.create_comment`; there is no automatic reply to GitHub.
+A GitHub pull request event for an orchestrator subscription goes to the thread that opened the pull request when one exists in the subscriber's runtime session (a `thread_pull_requests` row with the same URL). Otherwise it goes to the `events` thread as before. The events are `github.issue_comment.created` on a pull request, `github.pull_request_review.submitted`, and `github.pull_request_review_comment.created`. The agent answers with `github.create_comment`; there is no automatic reply to GitHub. A comment or review by a bot, including Valet's own GitHub App, stays on the `events` thread, so the agent never wakes on the comment it just posted.
 
 ## API
 
