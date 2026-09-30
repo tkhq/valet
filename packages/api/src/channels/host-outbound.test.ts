@@ -28,7 +28,7 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -1586,6 +1586,35 @@ describe("ChannelHost outbound delivery", () => {
       { timeout: 3000 },
     );
     expect(fakeTransport.answered.some((a) => a.callbackId === "cb2" && a.text === undefined)).toBe(true);
+  });
+
+  it("posts a child's approval card in the channel thread that spawned it (TKAI-564)", async () => {
+    const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const childId = `child-origin-${randomUUID()}`;
+    await testDb.appDb.insert(agentSessions).values({
+      id: childId, userId: USER_ID, orgId: ORG_ID, workspace: "/tmp/child-origin",
+      ownerType: "user", ownerId: USER_ID, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: parent.id, parentThreadId: parent.thread().id,
+      actorUserId: USER_ID, orgId: ORG_ID, owner: parent.owner, workspace: "/tmp/child-origin",
+    });
+    // What the spawner records when a channel message started the work.
+    await testDb.appDb.insert(childWatches).values({
+      childSessionId: childId, queueItemId: "qi-origin", parentSessionId: parent.id,
+      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled: false,
+      originJson: JSON.stringify({ channelType: "fake", threadKey: "fake:C-origin", reply: "auto" }), createdAt: Date.now(),
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "child action" }, { id: "child-origin-action" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("child finished"),
+    ]);
+    await child.thread().submitPrompt({ text: "perform the child action" }, { dispatchId: `child:${randomUUID()}` });
+    await vi.waitFor(() => expect(fakeTransport.gatePrompts).toHaveLength(1), { timeout: 5000 });
+    const prompt = fakeTransport.gatePrompts[0]!;
+    // The same conversation the parent's own channel thread posts to.
+    expect(prompt.conversationKey).toBe(host.channelThreadFor("fake:C-origin")?.conversationKey);
+    expect(host.gateForRef(prompt)).toMatchObject({ sessionId: child.id, gateId: prompt.prompt.gateId });
   });
 
   it("routes a child gate through its parent audience to Slack and resolves only the child after host restart", async () => {

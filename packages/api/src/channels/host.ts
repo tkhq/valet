@@ -53,6 +53,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import { activeChildWatch } from "../orchestrator/children.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
@@ -917,6 +918,12 @@ export class ChannelHost {
    * through `conversationKeyFromThreadKey`. Without this hop every outbound
    * call for such a transport is handed a key it did not mint.
    */
+  /** The channel conversation that spawned an unsettled child session. */
+  private async childOriginConversation(sessionId: string): Promise<{ channelType: string; conversationKey: string } | null> {
+    const watch = await activeChildWatch(this.deps.db, sessionId);
+    return watch?.origin ? this.channelThreadFor(watch.origin.threadKey) : null;
+  }
+
   channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
     const idx = key.indexOf(":");
     if (idx === -1) return null;
@@ -1008,7 +1015,11 @@ export class ChannelHost {
   private async deliverGatePrompt(sessionId: string, gate: DecisionGate): Promise<void> {
     const thread = await this.deps.engineStore.getThread(sessionId, gate.threadId);
     if (!thread) return;
-    const mapped = this.channelThreadFor(thread.key);
+    // A child's own thread is never a channel thread. Its card goes to the
+    // conversation that spawned the work, so the person who asked there can
+    // answer it (TKAI-564). The callback still resolves the child's gate.
+    const direct = this.channelThreadFor(thread.key);
+    const mapped = direct ?? await this.childOriginConversation(sessionId);
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;
@@ -1018,8 +1029,10 @@ export class ChannelHost {
     // channel, its card would be a live approve/deny button with zero
     // surrounding context — an invitation to approve an action the channel
     // reader never saw described.
-    const entries = await this.deps.engineStore.getEntries(sessionId, gate.threadId);
-    if (submissionIsWebPrompt(entries, gate.queueItemId)) {
+    // A child's prompt comes from its parent, not from a web user, and the
+    // stored origin already proves the work started in this conversation.
+    const entries = direct ? await this.deps.engineStore.getEntries(sessionId, gate.threadId) : [];
+    if (direct && submissionIsWebPrompt(entries, gate.queueItemId)) {
       console.debug(
         `[channels] web-origin gate stays off ${mapped.channelType} (session=${sessionId} gate=${gate.id})`,
       );

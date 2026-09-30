@@ -71,7 +71,9 @@ delegate pushes, branches, and PRs to a child session.
    supersedes the current turn by default. Steering a child that is waiting on an approval withdraws
    that pending approval. Set queue: true if the approval must remain actionable or the message must
    wait for the current turn. child_send also re-opens a settled child; the next result arrives as
-   child.settled.
+   child.settled. A child.gate_opened signal means a child is paused on an approval or question.
+   The request already went to the person who can answer it. Do not answer it for them, and do not
+   steer the child to get past it; mention it only when the person is waiting on that work.
 7. **Review drafting separately.** Separate code quality from drafting. For each code-change
    draft, run an independent review stage. Use an \`l\` or \`xl\` child to review requirements
    and code quality. An \`xl\` child reviews only. Tell every reviewer to report findings without

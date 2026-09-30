@@ -28,6 +28,7 @@ import {
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
+  type EventStream,
   type Principal,
   type SessionStore,
   type SpawnChildRequest,
@@ -219,6 +220,15 @@ async function enforceLimits(
     await writeDropLog(db, { orgId, reason: "org_ceiling", conversationKey: parentSessionId, detail: message });
     throw new ChildLimitError("org_ceiling", message);
   }
+}
+
+/** The unsettled watch for a child session: its parent thread and the
+ * channel conversation that started the work. Undefined for any session that
+ * is not an unsettled child. */
+export async function activeChildWatch(db: AppDb, childSessionId: string): Promise<ArmArgs | undefined> {
+  const [row] = await db.select().from(childWatches)
+    .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.settled, false))).limit(1);
+  return row ? watchRowToArgs(row) : undefined;
 }
 
 function watchRowToArgs(row: ChildWatchRow): ArmArgs {
@@ -440,7 +450,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
   };
 }
 
-interface ArmArgs {
+export interface ArmArgs {
   childSessionId: string;
   queueItemId: string;
   parentSessionId: string;
@@ -524,6 +534,38 @@ export class ChildWatcher {
   constructor(private readonly deps: ChildrenDeps) {
     this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
     this.maxAttempts = deps.maxRetryAttempts ?? DEFAULT_WATCHER_MAX_ATTEMPTS;
+  }
+
+  /**
+   * Tells the parent thread that its child stopped at a gate (TKAI-564).
+   * Settlement reports only the end of the work, so without this the parent
+   * sees a silent child until someone answers. The approval itself already
+   * reaches the parent's owner through attention, and a channel-started
+   * child's card reaches the originating thread, so the signal carries the
+   * origin with manual replies: the parent can mention it, never auto-post.
+   * One signal per gate: the dispatchId makes a repeat a no-op.
+   */
+  async reportGateOpened(childSessionId: string, gate: { id: string; title: string; type: string }): Promise<void> {
+    const watch = await activeChildWatch(this.deps.db, childSessionId);
+    if (!watch) return;
+    const childData = await this.deps.engineStore.getSession(childSessionId);
+    if (!childData) return;
+    await admitSignal(this.deps, {
+      from: { sessionId: childSessionId, owner: childData.owner },
+      to: watch.parentSessionId,
+      threadKey: watch.parentThreadId,
+      content: {
+        kind: "signal",
+        signalType: "child.gate_opened",
+        body:
+          `Child ${childSessionId} is paused on a ${gate.type} request: "${gate.title}". ` +
+          "The request was sent to the person who can answer it. The child resumes when it is answered. " +
+          "Do not answer it for them; mention it only if the person is waiting on this work.",
+        attributes: { child_session_id: childSessionId, gate_id: gate.id, gate_type: gate.type },
+        ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
+      },
+      dispatchId: `gate-opened:${childSessionId}:${gate.id}`,
+    });
   }
 
   /** Fire-and-forget: arms `awaitResult` for one watch row. `attempt` is 1-based, reset to 1 on every `arm`/`rearm` call. */
@@ -952,6 +994,17 @@ const CHILD_READ_DEFAULT_LIMIT = 30;
  * readable, which is the point — the parent reads it after the truncated
  * result arrives.
  */
+/** Reports every gate a child opens to its parent thread (TKAI-564). Call
+ * once at boot, before restore work can open gates. Returns the unsubscribe. */
+export function wireChildGateReports(eventStream: EventStream, watcher: ChildWatcher): () => void {
+  return eventStream.subscribe({ eventTypes: ["decision_gate"] }, (delivered) => {
+    if (delivered.event.type !== "decision_gate") return;
+    watcher.reportGateOpened(delivered.sessionId, delivered.event.gate).catch((err) => {
+      console.error(`child gate report failed for ${delivered.sessionId}:`, err);
+    });
+  });
+}
+
 export function buildChildReader(deps: ChildrenDeps): ChildReader {
   return async (req, ctx) => {
     const rows = await deps.db
