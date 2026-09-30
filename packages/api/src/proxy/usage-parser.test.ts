@@ -27,15 +27,33 @@ describe("parseUsage", () => {
   it("extracts OpenAI Responses usage, model, and response id", () => {
     const r = parseUsage("openai", fx("openai-responses-stream.txt"));
     expect(r).not.toBeNull();
-    expect(r!.model).toBe("gpt-5");
+    expect(r!.model).toBe("gpt-5.6-sol");
     expect(r!.providerResponseId).toBe("resp_01XYZ");
     expect(r!.usage).toEqual({
-      input: 900,
+      // input_tokens 900 minus 30 cached and 20 written — categories are disjoint.
+      input: 850,
       output: 220,
       cacheRead: 30,
-      cacheWrite: 0,
+      cacheWrite: 20,
       total: 1120,
     });
+  });
+
+  it("normalizes OpenAI input so category totals match the provider total", () => {
+    const body = JSON.stringify({
+      object: "response",
+      id: "resp_cache",
+      model: "gpt-5",
+      usage: {
+        input_tokens: 15_000,
+        output_tokens: 1000,
+        total_tokens: 16_000,
+        input_tokens_details: { cached_tokens: 12_000, cache_write_tokens: 3000 },
+      },
+    });
+    const r = parseUsage("openai", body);
+    // Disjoint categories: 0 + 1000 + 12000 + 3000 equals the provider total.
+    expect(r!.usage).toEqual({ input: 0, output: 1000, cacheRead: 12_000, cacheWrite: 3000, total: 16_000 });
   });
   it("returns null when no usage is present", () => {
     expect(parseUsage("anthropic", "event: ping\ndata: {}\n")).toBeNull();
@@ -58,13 +76,13 @@ describe("parseUsage", () => {
       object: "response",
       id: "resp_ns",
       model: "gpt-4o-mini-2024-07-18",
-      usage: { input_tokens: 9, output_tokens: 11, total_tokens: 20, input_tokens_details: { cached_tokens: 3 } },
+      usage: { input_tokens: 9, output_tokens: 11, total_tokens: 20, input_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 } },
     });
     const r = parseUsage("openai", body);
     expect(r).not.toBeNull();
     expect(r!.model).toBe("gpt-4o-mini-2024-07-18");
     expect(r!.providerResponseId).toBe("resp_ns");
-    expect(r!.usage).toEqual({ input: 9, output: 11, cacheRead: 3, cacheWrite: 0, total: 20 });
+    expect(r!.usage).toEqual({ input: 4, output: 11, cacheRead: 3, cacheWrite: 2, total: 20 });
   });
 
   it("extracts usage from a NON-streaming Chat Completions body (prompt/completion tokens)", () => {
@@ -73,24 +91,24 @@ describe("parseUsage", () => {
       id: "chatcmpl-ns",
       model: "gpt-4o-mini-2024-07-18",
       choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42, prompt_tokens_details: { cached_tokens: 8 } },
+      usage: { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42, prompt_tokens_details: { cached_tokens: 8, cache_write_tokens: 5 } },
     });
     const r = parseUsage("openai", body, "/v1/chat/completions");
     expect(r).not.toBeNull();
     expect(r!.model).toBe("gpt-4o-mini-2024-07-18");
     expect(r!.providerResponseId).toBe("chatcmpl-ns");
-    expect(r!.usage).toEqual({ input: 30, output: 12, cacheRead: 8, cacheWrite: 0, total: 42 });
+    expect(r!.usage).toEqual({ input: 17, output: 12, cacheRead: 8, cacheWrite: 5, total: 42 });
   });
 
   it("extracts usage from a STREAMING Chat Completions terminal chunk", () => {
     const body =
       `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-5","choices":[{"index":0,"delta":{"content":"hey"}}]}\n\n` +
-      `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-5","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}\n\n` +
+      `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-5","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":2,"cache_write_tokens":1}}}\n\n` +
       `data: [DONE]\n`;
     const r = parseUsage("openai", body, "/v1/chat/completions");
     expect(r).not.toBeNull();
     expect(r!.model).toBe("gpt-5");
-    expect(r!.usage).toEqual({ input: 5, output: 7, cacheRead: 0, cacheWrite: 0, total: 12 });
+    expect(r!.usage).toEqual({ input: 2, output: 7, cacheRead: 2, cacheWrite: 1, total: 12 });
   });
 
   it("extracts usage from a legacy Completions body", () => {
