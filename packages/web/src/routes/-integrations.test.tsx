@@ -1284,8 +1284,8 @@ describe("IntegrationsPage — the search box", () => {
   });
 
   it("sends the search to the URL once typing settles", async () => {
-    // Fake timers drive the debounce by hand; see use-live-query.test.tsx
-    // for why waitFor and vitest's clock do not mix.
+    // Fake timers drive the debounce by hand. Testing Library's waitFor polls
+    // on a clock that only vi.advanceTimersByTimeAsync moves, so it is not used.
     vi.useFakeTimers();
     try {
       render(<IntegrationsPage />);

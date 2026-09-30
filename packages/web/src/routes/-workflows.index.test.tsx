@@ -18,7 +18,6 @@ import userEvent from "@testing-library/user-event";
 import { api } from "~/api/client";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
-  ListAllWorkflowRunsResponse,
   ListWorkflowActionRequiredResponse,
   WorkflowDefinitionSummary,
 } from "@valet/api/wire";
@@ -88,22 +87,6 @@ const triggersData = {
         nextFireAt: Date.now() + 86400000,
         lastFiredAt: null,
       },
-    },
-  ],
-};
-
-const runsQuery = vi.fn();
-const allRunsData: ListAllWorkflowRunsResponse = {
-  nextCursor: "cursor_2",
-  runs: [
-    {
-      runId: "wfrun_1",
-      workflowId: "wf_1",
-      workflowName: "Deploy pipeline",
-      status: "settled" as const,
-      outcome: "completed" as const,
-      createdAt: Date.now() - 10000,
-      updatedAt: Date.now() - 5000,
     },
   ],
 };
@@ -240,10 +223,6 @@ vi.mock("~/api/workflows", () => ({
     isLoading: false,
     error: null,
   }),
-  useAllWorkflowRuns: (...args: unknown[]) => {
-    runsQuery(...args);
-    return { data: { ...allRunsData }, isLoading: false, error: null };
-  },
   useUpdateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUpdateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useDeleteSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),

@@ -240,7 +240,6 @@ workflowTriggersRouter.post("/schedules/:id/run", async (c) => {
 // ── Event triggers ───────────────────────────────────────────────────────
 
 workflowTriggersRouter.post("/event-triggers", async (c) => {
-  const { db, plugins } = c.var.providers;
   const owner = ownerFrom(c);
   let body: CreateWorkflowEventTriggerRequest;
   try {
@@ -295,5 +294,3 @@ workflowTriggersRouter.delete("/event-triggers/:id", async (c) => {
     return c.json({ error: "trigger not found. Confirm the id and that you have access to it." }, 404);
   return c.json({ ok: true });
 });
-
-export type WorkflowTriggersRouter = typeof workflowTriggersRouter;

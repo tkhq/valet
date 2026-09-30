@@ -47,15 +47,6 @@ vi.mock("~/api/events", () => ({
   useFilterOptions: () => ({ data: { options: [], reason: "Connect Slack first." }, isLoading: false }),
 }));
 
-// The assistant picker reads this list. One assistant per owner by default, so
-// the picker stays hidden and these cases pin the no-choice wire body; the
-// dedicated picker cases below re-mock it with several.
-let assistantsData: { assistants: unknown[] } = {
-  assistants: [
-    { id: "a-mine", name: "Mine", owner: { type: "user", id: "u1" } },
-  ],
-};
-
 // The reply step warns when the caller's Slack account is not linked.
 vi.mock("~/api/queries", () => ({
   useIdentityLinks: () => ({
@@ -112,11 +103,6 @@ beforeEach(() => {
   createSchedule.mockReset();
   workflowsData = { workflows: [] };
   teamsData = { teams: [{ id: "t_platform", name: "Platform", memberCount: 3 }] };
-  assistantsData = {
-    assistants: [
-      { id: "a-mine", name: "Mine", owner: { type: "user", id: "u1" } },
-    ],
-  };
 });
 
 afterEach(() => {
@@ -174,10 +160,6 @@ describe("AutomationWizard", () => {
   }
 
   it("homepage setup requires channels and an explicit team assistant, then saves that target", () => {
-    assistantsData = { assistants: [
-      { id: "a-team", name: "Reviewer", owner: { type: "team", id: "t_platform" } },
-      { id: "a-other", name: "Other", owner: { type: "team", id: "t_other" } },
-    ] };
     render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
     expect(screen.getByRole("heading", { name: "Set up Slack replies" })).toBeTruthy();
     expect(screen.queryByText("What should happen?")).toBeNull();
@@ -199,9 +181,6 @@ describe("AutomationWizard", () => {
   });
 
   it("homepage setup opens on the organization audience and posts it", () => {
-    assistantsData = { assistants: [
-      { id: "a-team", name: "Reviewer", owner: { type: "team", id: "t_platform" } },
-    ] };
     render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
     const anyone = screen.getByLabelText(/Anyone in the organization/) as HTMLInputElement;
     expect(anyone.checked).toBe(true);
@@ -222,9 +201,6 @@ describe("AutomationWizard", () => {
   });
 
   it("the team-only audience posts audience team", () => {
-    assistantsData = { assistants: [
-      { id: "a-team", name: "Reviewer", owner: { type: "team", id: "t_platform" } },
-    ] };
     render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
     fireEvent.click(screen.getByLabelText(/Only members of Platform/));
     addReplyChannel("C123");
@@ -314,10 +290,6 @@ describe("AutomationWizard", () => {
 
   it("a team reply rule keeps the selected assistant through review and create", () => {
     scopeTeamId = "t_platform";
-    assistantsData = { assistants: [
-      { id: "team-default", name: "Default", owner: { type: "team", id: "t_platform" } },
-      { id: "team-ops", name: "Ops", owner: { type: "team", id: "t_platform" } },
-    ] };
     render(<AutomationWizard open onOpenChange={() => {}} />);
     clickNext();
     addReplyChannel("C123");
@@ -637,7 +609,6 @@ describe("AutomationWizard", () => {
   }
 
   it("homepage setup never offers to override a colliding responder", () => {
-    assistantsData = { assistants: [{ id: "a-team", name: "Reviewer", owner: { type: "team", id: "t_platform" } }] };
     createSubscription.mockImplementation((_body: unknown, handlers: { onError: (err: Error) => void }) => {
       handlers.onError(new ApiError(409, "collision", { error: "collides", collisions: collisionPayload("blocking") }));
     });

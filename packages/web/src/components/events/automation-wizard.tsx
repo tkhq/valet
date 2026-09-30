@@ -106,23 +106,6 @@ function initialTarget(scopedTeamId: string | undefined): TargetChoice {
     : { kind: "orchestrator", orchestrator: "user" };
 }
 
-/**
- * The owner's assistants, as a dropdown, when the owner has more than one.
- *
- * Hidden for a single-assistant owner: with nothing to choose between, the
- * control would only ask the reader to confirm the one answer, and the wizard
- * already names that assistant in the radio beside it. Hidden for the org
- * choice too, which has no listable assistants.
- *
- * The empty option is not "none" — it is the owner's default, resolved at
- * delivery. Choosing it stores no id, which is what keeps a rule following a
- * later change of default.
- *
- * Each named row goes through the shared `assistantLabel`, so an unnamed
- * assistant reads here exactly as it reads in the rail, the chat header and
- * the team dashboard: a seeded default is "Default assistant", not "Untitled
- * assistant".
- */
 function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
   if (outcome === "reply") {
     return { labels: ["What", "Reply", "Review"], count: 3 };

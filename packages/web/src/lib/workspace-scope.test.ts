@@ -13,7 +13,6 @@
  * `?assistant=` — `/skills`, `/workflows` and `/events` all read as personal
  * no matter which workspace the reader was in.
  */
-import type { TeamSummary } from "@valet/api/wire";
 import { describe, expect, it } from "vitest";
 import {
   PERSONAL,
@@ -21,21 +20,6 @@ import {
   workspaceKeyForOwner,
 } from "./workspace-scope";
 
-const ME = { type: "user", id: "u1" } as const;
-
-function team(id: string): TeamSummary {
-  return {
-    id,
-    orgId: "org_1",
-    name: id,
-    origin: "local",
-    externalId: null,
-    createdAt: 0,
-    memberCount: 2,
-    callerRole: "member",
-    defaultModel: null,
-  };
-}
 
 
 

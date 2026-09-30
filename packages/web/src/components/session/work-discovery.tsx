@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { api, type OwnerFilter } from "~/api/client";
 import { qkCatchUp } from "~/api/catch-up";
-import { Button, ErrorRow, LoadingRow } from "~/components/primitives";
+import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { WorkspaceCatchUp } from "~/components/dashboard/workspace-catch-up";
 
 export function WorkDiscovery() {

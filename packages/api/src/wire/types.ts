@@ -607,20 +607,6 @@ export interface SecuritySetPlanResponse {
   cellCount: number;
 }
 
-/** POST /api/sessions/:id/security/resume — request body (v1 Part 09 §Resume).
- * Absent `cellIds` defaults to failed cells + cells with open needs. */
-export interface SecurityResumeRequest {
-  cellIds?: string[];
-  reason?: string;
-}
-
-/** POST /api/sessions/:id/security/resume — response. Names the cells the
- * service reset to `pending`. The engagement is `running` on success. */
-export interface SecurityResumeResponse {
-  status: "running";
-  resetCellIds: string[];
-}
-
 /** POST /api/sessions/:id/security/config — edit the engagement's focus, known
  * invariants, and loaded threat categories during planning (dynamic-config
  * M-F3, M-P2a). Returns the saved values; null/empty when cleared. */

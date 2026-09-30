@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, lt, or } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { identityLinkCodes, userIdentityLinks } from "../schema/index.js";
 
@@ -52,11 +52,6 @@ export async function consumeLinkCode(
   const row = rows[0];
   if (!row || row.expiresAt < now) return null;
   return { userId: row.userId };
-}
-
-/** Opportunistic GC — callers may invoke on mint; not required for correctness. */
-export async function pruneExpiredLinkCodes(db: AppDb, now = Date.now()): Promise<void> {
-  await db.delete(identityLinkCodes).where(lt(identityLinkCodes.expiresAt, now));
 }
 
 export async function linkIdentity(

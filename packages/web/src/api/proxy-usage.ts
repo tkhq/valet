@@ -8,7 +8,6 @@
  */
 import { useQuery, useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
-  ProxyUsageSummary,
   ProxyRequestListItem,
   ProxyRequestDetail,
   ProxySettingsResponse,
@@ -36,18 +35,6 @@ export interface ProxyRequestPage {
   nextCursor?: string;
   pageSize: number;
   hasMore: boolean;
-}
-
-export function useProxyUsageSummary(
-  window: string = "7d",
-  opts?: Partial<UseQueryOptions<ProxyUsageSummary>>,
-) {
-  return useQuery<ProxyUsageSummary>({
-    queryKey: qkProxy.summary(window),
-    queryFn: () => api.proxyUsageSummary(window),
-    staleTime: 60_000,
-    ...opts,
-  });
 }
 
 export function useProxyRequests(

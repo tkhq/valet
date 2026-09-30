@@ -92,14 +92,6 @@ function renderSkillResult(
   return { text: renderTemplate(skill.content, args), skill };
 }
 
-export function renderSkill(
-  skills: Map<string, SkillSource>,
-  name: string,
-  args: Record<string, unknown>,
-): string {
-  return renderSkillResult(skills, name, args).text;
-}
-
 /**
  * Builds the `skill` ToolDef over an assembled plugin set's skills.
  * Returns `null` when the set ships no skills — a tool that can list

@@ -6,7 +6,7 @@ import type {
 } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog, Input, Spinner, Switch, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { livePollInterval } from "~/lib/use-live-query";
+import { livePollInterval } from "~/lib/live-poll";
 import { relativeTime } from "~/lib/relative-time";
 import {
   qkSettings,

@@ -37,7 +37,6 @@ import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
 import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
-import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
@@ -169,25 +168,6 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
         </>
       )}
     </IntegrationCard>
-  );
-}
-
-export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
-  return (
-    <div className="flex items-start gap-3 rounded-lg bg-ink-wash p-4">
-      <ServiceIcon slug={iconSlug(plugin)} label={pluginDisplayName(plugin)} tone="quiet" />
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium text-ink">{pluginDisplayName(plugin)}</div>
-        {plugin.description && (
-          <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">
-            {plugin.description}
-          </p>
-        )}
-      </div>
-      <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">
-        built in
-      </span>
-    </div>
   );
 }
 

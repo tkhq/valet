@@ -8,7 +8,6 @@ import type {
   UsageDrillResponse,
   UsagePeriodSelection,
   UsageBreakdownResponse,
-  UsageSessionsResponse,
   UsageScopeName,
   UsageToolEfficiencyResponse,
   UsageOutcomesResponse,
@@ -81,20 +80,6 @@ export function useUsageItems(
   return useQuery<UsageDrillResponse>({
     queryKey: qkUsage.items(period, scope, useCase, teamId),
     queryFn: () => api.usageItems(period, scope, useCase, teamId),
-    staleTime: 60_000,
-    ...opts,
-  });
-}
-
-/** Kept for backward compatibility with any other callers. */
-export function useUsageSessions(
-  window: string = "7d",
-  useCase?: "orchestrator" | "session",
-  opts?: Partial<UseQueryOptions<UsageSessionsResponse>>,
-) {
-  return useQuery<UsageSessionsResponse>({
-    queryKey: qkUsage.sessions(window, useCase),
-    queryFn: () => api.usageSessions(window, useCase),
     staleTime: 60_000,
     ...opts,
   });

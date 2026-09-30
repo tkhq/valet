@@ -281,8 +281,8 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
   });
 
   it("sends the search box on as a catalog-wide query, once typing settles", async () => {
-    // Fake timers drive the debounce by hand; see use-live-query.test.tsx for
-    // why waitFor and vitest's clock do not mix.
+    // Fake timers drive the debounce by hand. Testing Library's waitFor polls
+    // on a clock that only vi.advanceTimersByTimeAsync moves, so it is not used.
     vi.useFakeTimers();
     try {
       render(<SkillsIndexPage />);

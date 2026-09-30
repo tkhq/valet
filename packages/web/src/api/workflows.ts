@@ -21,7 +21,6 @@ import type {
   WorkflowWebhookResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
-  ListAllWorkflowRunsResponse,
   ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
@@ -165,19 +164,6 @@ export function useWorkflowRuns(
   });
 }
 
-/** Runs across every workflow the caller can reach. Pass `parentRunId` to
- * list one batch parent's child runs. */
-export function useRuns(
-  filter?: WorkflowRunFilter,
-  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
-) {
-  return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.runList(filter),
-    queryFn: () => api.listRuns(filter),
-    ...opts,
-  });
-}
-
 /** Every active workflow gate the calling principal can resolve. */
 export function useWorkflowActionRequired() {
   return useQuery<ListWorkflowActionRequiredResponse>({
@@ -245,20 +231,6 @@ export function useTriggerCatalog() {
     queryKey: qkWorkflows.triggerCatalog(),
     queryFn: () => api.getWorkflowTriggerCatalog(),
     staleTime: 5 * 60_000, // plugin catalog changes only on deploy
-  });
-}
-
-/** `owner` scopes the hub Runs tab to one workspace. */
-export function useAllWorkflowRuns(
-  owner?: OwnerFilter,
-  page?: WorkflowRunPage,
-  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
-) {
-  return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.allRuns(owner, page),
-    queryFn: () => api.listAllWorkflowRuns(owner, page),
-    refetchInterval: 5000, // runs move; same cadence as run detail
-    ...opts,
   });
 }
 

@@ -243,7 +243,6 @@ import type {
   UsageBreakdownResponse,
   UsageSessionsResponse,
   UsageDrillResponse,
-  UsageDrillItem,
   UsageScopeName,
   UsageToolEfficiencyResponse,
   UsageOutcomesResponse,

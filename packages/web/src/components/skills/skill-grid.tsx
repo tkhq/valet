@@ -51,8 +51,6 @@ export interface SkillGridFilters {
   query: string;
 }
 
-export const NO_SKILL_FILTERS: SkillGridFilters = { filter: "all", scope: "all", query: "" };
-
 /** True when any control is narrowing the catalog. An empty page means
  * "nothing matched" then, and "nothing here yet" otherwise. */
 export function hasSkillFilters(filters: SkillGridFilters): boolean {

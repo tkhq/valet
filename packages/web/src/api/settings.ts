@@ -67,7 +67,6 @@ import type {
   TestLlmProviderRequest,
   TestLlmProviderResponse,
 } from "@valet/api/wire";
-import { qk } from "./queries";
 import { api } from "./client";
 import { qkIntegrations } from "./integrations";
 import { qkRepos } from "./repos";

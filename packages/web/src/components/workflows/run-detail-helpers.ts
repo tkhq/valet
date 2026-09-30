@@ -126,7 +126,6 @@ import type { WorkflowPendingGate } from "@valet/api/wire";
  * without a second import path.
  */
 export type { WorkflowPendingGate };
-export type PendingGateLike = WorkflowPendingGate;
 
 /**
  * Returns true only when the run is parked AND at least one pending gate

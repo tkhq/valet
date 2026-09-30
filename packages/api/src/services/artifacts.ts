@@ -39,7 +39,6 @@ import { getTeamInOrg, lockTeamForOwnership } from "./teams.js";
 import { readFile, type MemoryScope } from "./memory.js";
 
 export type ArtifactRow = typeof artifacts.$inferSelect;
-export type ArtifactVersionRow = typeof artifactVersions.$inferSelect;
 export type ArtifactCommentRow = typeof artifactComments.$inferSelect;
 export type ArtifactVisibility = "org" | "public";
 
