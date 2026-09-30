@@ -50,10 +50,12 @@ vi.mock("~/api/integrations", async (importOriginal) => ({
   }),
 }));
 const createMutate = vi.fn();
+const patchMutate = vi.fn();
+const deleteMutate = vi.fn();
 function mentionRule(id: string, ownerId: string, channel: string, enabled = true) {
   return {
     id, name: `${ownerId} replies`, enabled, ownerType: "team", ownerId, createdBy: "u", createdAt: 1, updatedAt: 1,
-    eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: channel }],
+    eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: channel, label: channel === "C1" ? "#general" : "#design" }],
     target: { kind: "orchestrator", orchestrator: "team", teamId: ownerId },
   };
 }
@@ -67,6 +69,8 @@ vi.mock("~/api/events", async (importOriginal) => ({
     data: { options: [{ id: "C1", label: "#general" }, { id: "C2", label: "#design" }, { id: "C3", label: "#launch" }] },
   }),
   useCreateEventSubscription: () => ({ mutate: createMutate, isPending: false, error: null }),
+  usePatchEventSubscription: () => ({ mutate: patchMutate, isPending: false, error: null }),
+  useDeleteEventSubscription: () => ({ mutate: deleteMutate, isPending: false, error: null }),
 }));
 vi.mock("./automation-wizard", () => ({
   AutomationWizard: ({
@@ -93,19 +97,40 @@ beforeEach(() =>
 );
 function open() {
   render(<TeamSlackSetupCard teamId="a" />);
-  fireEvent.click(screen.getByRole("button", { name: "Choose Slack channels" }));
+  fireEvent.click(screen.getByRole("button", { name: state.existing ? "Edit channels" : "Choose channels" }));
 }
 describe("team homepage Slack setup", () => {
-  it("lists channels, marks this team's and other Valets' channels, and saves the picked ones", () => {
+  it("shows where the team listens, and adds channels to its one rule", () => {
     state.existing = true;
-    open();
+    patchMutate.mockClear(); createMutate.mockClear();
+    render(<TeamSlackSetupCard teamId="a" />);
+    expect(screen.getByRole("heading", { name: "Valet is listening" })).toBeTruthy();
+    expect(screen.getByText(/In #general\./)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit channels" }));
     expect(screen.getByRole("dialog", { name: "Where should Valet listen?" })).toBeTruthy();
     const general = screen.getByRole("checkbox", { name: /general/ });
     expect(general).toHaveProperty("checked", true);
-    expect(general).toHaveProperty("disabled", true);
-    expect(screen.getByText("Listening")).toBeTruthy();
+    expect(general).toHaveProperty("disabled", false);
     expect(screen.getByRole("checkbox", { name: /design/ })).toHaveProperty("disabled", true);
     expect(screen.getByText("Taken by Design's Valet")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /launch/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Listen in 2 channels" }));
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(patchMutate).toHaveBeenCalledWith({ id: "mine", body: { filters: [
+      { field: "channel", op: "in", value: ["C1", "C3"], labels: ["#general", "#launch"] },
+    ] } }, expect.anything());
+  });
+  it("stops listening when every channel is unchecked", () => {
+    state.existing = true;
+    deleteMutate.mockClear();
+    open();
+    fireEvent.click(screen.getByRole("checkbox", { name: /general/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop listening" }));
+    expect(deleteMutate).toHaveBeenCalledWith("mine", expect.anything());
+  });
+  it("creates the team's rule for its first channels", () => {
+    createMutate.mockClear();
+    open();
     fireEvent.click(screen.getByRole("checkbox", { name: /launch/ }));
     fireEvent.click(screen.getByRole("button", { name: "Listen in 1 channel" }));
     expect(createMutate).toHaveBeenCalledWith(expect.objectContaining({
@@ -140,7 +165,7 @@ describe("team homepage Slack setup", () => {
     state.connected = false;
     open();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Choose Slack channels" })));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Choose channels" })));
   });
 
   it.each(["failed", "loading", "member"] as const)(

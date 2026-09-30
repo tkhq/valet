@@ -1,12 +1,12 @@
 import { useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Hash } from "lucide-react";
+import { Ear, Hash } from "lucide-react";
 import { useMe, useTeams } from "~/api/settings";
 import { usePlugins } from "~/api/integrations";
-import { useCreateEventSubscription, useEventSubscriptions, useFilterOptions } from "~/api/events";
+import { useCreateEventSubscription, useDeleteEventSubscription, useEventSubscriptions, useFilterOptions, usePatchEventSubscription } from "~/api/events";
 import { Button, Dialog, DialogContent, DialogFooter, Input } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { listenerFor, slackChannelListeners } from "~/lib/slack-listeners";
+import { listenerFor, slackChannelListeners, teamListening } from "~/lib/slack-listeners";
 import { SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { AutomationWizard } from "./automation-wizard";
 
@@ -15,23 +15,39 @@ export function TeamSlackSetupCard({ teamId }: { teamId: string }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const closing = useRef(false);
+  const subscriptionsQ = useEventSubscriptions();
+  const listening = subscriptionsQ.data ? teamListening(subscriptionsQ.data.subscriptions, teamId) : undefined;
+  const active = listening !== undefined && (listening.everywhere || listening.channels.length > 0);
   function changeOpen(value: boolean) {
     closing.current = !value;
     setOpen(value);
   }
   return (
     <section className="flex min-w-0 flex-col gap-4 rounded-lg border border-moss/30 bg-moss/5 p-5 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0 space-y-1">
-        <h2 className="font-display text-lg text-ink">
-          Where should Valet listen?
-        </h2>
-        <p className="text-sm text-muted">
-          Pick the Slack channels where people can mention Valet for this team.
-          Personal Valets answer in direct messages.
-        </p>
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-moss/15 text-moss">
+          <Ear aria-hidden className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 space-y-1">
+          <h2 className="font-display text-lg text-ink">
+            {active ? "Valet is listening" : "Where should Valet listen?"}
+          </h2>
+          {active ? (
+            <p className="text-sm text-muted">
+              {listening.everywhere ? "In every channel the Valet bot is in. " : null}
+              {listening.channels.length > 0 && <>In {listening.channels.map((channel) => `#${channel.label.replace(/^#/, "")}`).join(", ")}. </>}
+              People mention Valet there and it replies in the thread.
+            </p>
+          ) : (
+            <p className="text-sm text-muted">
+              Pick the Slack channels where people can mention this team's Valet. It replies in the thread and follows it.
+            </p>
+          )}
+        </div>
       </div>
       <Button ref={trigger} className="shrink-0" onClick={() => changeOpen(true)}>
-        Choose Slack channels
+        <Ear aria-hidden className="h-4 w-4" />
+        {active ? "Edit channels" : "Choose channels"}
       </Button>
       {open && (
         <TeamSlackSetupModal
@@ -160,11 +176,19 @@ export function TeamSlackChannelPicker({
   onCloseAutoFocus?: (event: Event) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState<Map<string, string>>(new Map());
+  // The picker edits this team's one channel rule. Its channels start checked.
+  const listening = useMemo(() => teamListening(subscriptions, team.id), [subscriptions, team.id]);
+  const [picked, setPicked] = useState<Map<string, string>>(() => new Map(listening.editableChannels.map((channel) => [channel.id, channel.label])));
   const channelsQ = useFilterOptions({ source: "slack.channels", q: query });
   const create = useCreateEventSubscription();
+  const patch = usePatchEventSubscription();
+  const remove = useDeleteEventSubscription();
   const listeners = useMemo(() => slackChannelListeners(subscriptions, team.id, teamName), [subscriptions, team.id, teamName]);
+  const editableIds = useMemo(() => new Set(listening.editableChannels.map((channel) => channel.id)), [listening]);
   const channels = channelsQ.data?.options ?? [];
+  const pending = create.isPending || patch.isPending || remove.isPending;
+  const error = create.error ?? patch.error ?? remove.error;
+  const unchanged = picked.size === editableIds.size && [...picked.keys()].every((id) => editableIds.has(id));
 
   function toggle(id: string, label: string) {
     setPicked((current) => {
@@ -175,16 +199,24 @@ export function TeamSlackChannelPicker({
   }
   function save() {
     const chosen = [...picked.entries()];
+    const done = { onSuccess: () => onOpenChange(false) };
+    const filters = chosen.length === 1
+      ? [{ field: "channel", op: "eq" as const, value: chosen[0]![0], label: chosen[0]![1] }]
+      : [{ field: "channel", op: "in" as const, value: chosen.map(([id]) => id), labels: chosen.map(([, label]) => label) }];
+    if (listening.editable) {
+      // Unchecking every channel stops listening, so the rule goes.
+      if (chosen.length === 0) remove.mutate(listening.editable.id, done);
+      else patch.mutate({ id: listening.editable.id, body: { filters } }, done);
+      return;
+    }
     if (chosen.length === 0) return;
     create.mutate({
       name: `Slack replies for ${team.name}`,
       eventKeys: [SLACK_APP_MENTION],
-      filters: chosen.length === 1
-        ? [{ field: "channel", op: "eq", value: chosen[0]![0], label: chosen[0]![1] }]
-        : [{ field: "channel", op: "in", value: chosen.map(([id]) => id), labels: chosen.map(([, label]) => label) }],
+      filters,
       target: { kind: "orchestrator", orchestrator: "team", teamId: team.id, follow: true },
       audience: "organization",
-    }, { onSuccess: () => onOpenChange(false) });
+    }, done);
   }
 
   return (
@@ -192,7 +224,7 @@ export function TeamSlackChannelPicker({
       <DialogContent
         onCloseAutoFocus={onCloseAutoFocus}
         title="Where should Valet listen?"
-        description={`Pick the Slack channels where people can mention Valet for ${team.name}. Valet replies in the thread and follows it.`}
+        description={`Pick every Slack channel where people can mention ${team.name}'s Valet. A channel another Valet already listens in cannot be picked.`}
         className="max-w-lg"
       >
         <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search channels" aria-label="Search channels" />
@@ -203,27 +235,34 @@ export function TeamSlackChannelPicker({
           )}
           {channels.map((channel) => {
             const listener = listenerFor(listeners, channel.id);
-            const blocked = listener !== undefined;
+            // Another Valet's channel is taken. This team's channel from an advanced
+            // rule is listed as listening, but only advanced setup changes it.
+            const advancedOnly = listener?.kind === "this-team" && !editableIds.has(channel.id);
+            const blocked = listener?.kind === "other" || advancedOnly;
+            const checked = advancedOnly || picked.has(channel.id);
             return (
               <li key={channel.id}>
                 <label className={`flex items-center gap-2 px-3 py-2 text-sm ${blocked ? "text-muted" : "cursor-pointer hover:bg-ink-wash"}`}>
-                  <input type="checkbox" disabled={blocked} checked={listener?.kind === "this-team" || picked.has(channel.id)}
+                  <input type="checkbox" disabled={blocked} checked={checked}
                     onChange={() => toggle(channel.id, channel.label)} />
                   <Hash aria-hidden className="h-3.5 w-3.5 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">{channel.label.replace(/^#/, "")}</span>
-                  {listener?.kind === "this-team" && <span className="text-xs text-moss">Listening</span>}
+                  {checked && !blocked && <span className="inline-flex items-center gap-1 text-xs text-moss"><Ear aria-hidden className="h-3 w-3" />Listening</span>}
+                  {advancedOnly && <span className="text-xs">Listening (advanced setup)</span>}
                   {listener?.kind === "other" && <span className="text-xs">Taken by {listener.owner}</span>}
                 </label>
               </li>
             );
           })}
         </ul>
-        {create.error && <p role="alert" className="text-sm text-danger-600">{errorText(create.error)}</p>}
+        {error && <p role="alert" className="text-sm text-danger-600">{errorText(error)}</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={onAdvanced}>Advanced setup</Button>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={save} disabled={picked.size === 0 || create.isPending}>
-            {create.isPending ? "Saving…" : picked.size > 0 ? `Listen in ${picked.size} ${picked.size === 1 ? "channel" : "channels"}` : "Listen in channels"}
+          <Button onClick={save} disabled={pending || unchanged || (!listening.editable && picked.size === 0)}>
+            {pending ? "Saving…"
+              : picked.size === 0 ? "Stop listening"
+              : `Listen in ${picked.size} ${picked.size === 1 ? "channel" : "channels"}`}
           </Button>
         </DialogFooter>
       </DialogContent>

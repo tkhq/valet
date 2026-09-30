@@ -1,7 +1,6 @@
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { createFileRoute } from "@tanstack/react-router";
 import { MemoryCard } from "~/components/assistant/memory-card";
-import { TeamsCard } from "~/components/assistant/teams-card";
 import { WorkspaceCatchUp } from "~/components/dashboard/workspace-catch-up";
 import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamDashboard } from "~/components/dashboard/team-dashboard";
@@ -59,7 +58,6 @@ function DashboardBody() {
         <div className="grid gap-4 md:grid-cols-2">
           <MemoryCard />
           <UsageCard />
-          <TeamsCard />
         </div>
       </div>
     </div>

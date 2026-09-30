@@ -58,9 +58,13 @@ Workflow run history names each run by what started it and when: Manual run, Aut
 
 ## Team Slack setup
 
-The team card asks where Valet should listen and opens a channel list. This team's channels show as **Listening**. A channel where another Valet already answers mentions shows its owner and cannot be selected, because two listeners would both reply to one mention. A rule with no channel filter counts as listening in every channel. The server refuses the same collision on write.
+The team card shows where the team's Valet listens, with an ear icon. Before any channel is set, it asks where Valet should listen. After that, it lists the channels and offers **Edit channels**.
 
-Saving creates one team reply rule: `slack.app_mention`, a channel filter for the selected channels, a team orchestrator target that follows the thread, and the organization audience. This is the rule that the advanced wizard creates. The wizard stays available behind **Advanced setup**.
+The channel list edits one rule per team: a `slack.app_mention` rule whose only filter is the channel, with a team orchestrator target that follows the thread and the organization audience. The team's channels start checked. Checking more adds them to that rule, and unchecking every channel removes the rule. A team can listen in any number of channels.
+
+A channel where another Valet already answers mentions shows its owner and cannot be selected, because two listeners would both reply to one mention. A rule with no channel filter counts as listening in every channel. The server refuses the same collision on write. A channel that this team listens in through an advanced rule shows as listening, and only **Advanced setup** changes it.
+
+The personal home page no longer shows a teams card. The workspace switcher lists the teams.
 
 ## Not in this change
 
