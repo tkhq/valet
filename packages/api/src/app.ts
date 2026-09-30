@@ -36,6 +36,7 @@ import { teamApiKeysRouter } from "./routes/team-api-keys.js";
 import { memoryRouter } from "./routes/memory.js";
 import { securityRouter } from "./routes/security.js";
 import { workspaceBriefingsRouter } from "./routes/workspace-briefings.js";
+import { workspaceChannelsRouter } from "./routes/workspace-channels.js";
 import { workspaceActiveWorkRouter } from "./routes/workspace-active-work.js";
 import { workspaceOutcomesRouter } from "./routes/workspace-outcomes.js";
 import { legacyOrchestratorRouter, workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
@@ -334,6 +335,7 @@ export function createApp(
   app.route("/api/workspaces", workspaceOutcomesRouter);
   app.route("/api/workspaces", workspaceActiveWorkRouter);
   app.route("/api/workspaces", workspaceBriefingsRouter);
+  app.route("/api/workspaces", workspaceChannelsRouter);
 
   app.route("/api", profilePicturesRouter);
   app.route("/api/notifications", notificationsRouter);

@@ -2504,3 +2504,15 @@ CREATE TABLE IF NOT EXISTS "thread_pull_requests" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "channel_messages" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "channel_key" text NOT NULL, "conversation_key" text NOT NULL, "provider_message_id" text NOT NULL,
+  "direction" text NOT NULL, "author" text, "text" text, "url" text, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_provider_message" ON "channel_messages" ("org_id", "channel_key", "provider_message_id", "direction");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at");

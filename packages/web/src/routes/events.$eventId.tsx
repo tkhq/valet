@@ -25,7 +25,7 @@ function EventDetailPage() {
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
-        <Link to="/events" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
+        <Link to="/events" search={{ tab: "activity" }} className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
           ← Events
         </Link>
         {isLoading && <LoadingRow label="Loading event…" />}

@@ -12,6 +12,7 @@ import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { findFollowedThread, touchFollowedThread } from "../events/followed-threads.js";
 import { followBindingAuthorized, followedMessageActor } from "../events/team-slack-gate.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { inboundSlackMessage } from "../services/channel-messages.js";
 
 export interface FollowRouterDeps {
   /** Bot identity from the verified org credential. */
@@ -157,6 +158,7 @@ async function routeFollowedMessage(
       attributes.rehydrated = "true";
     }
   }
+  const inbound = inboundSlackMessage(threadKey, f.ts, sender, normalized.text);
   try {
     await deliverToAssistantThread(deps, {
       orgId,
@@ -173,6 +175,7 @@ async function routeFollowedMessage(
       },
       dispatchId: `slack:follow:${f.eventId}`,
       mismatchReason: "followed_target_mismatch",
+      ...(inbound ? { inbound } : {}),
     });
   } catch (err) {
     // A Slack retry of an event whose FIRST delivery carried a hydration

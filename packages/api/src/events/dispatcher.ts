@@ -34,6 +34,7 @@ import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js"
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries } from "./ingest.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
+import { inboundSlackMessage, pullRequestComment, threadKeyForPullRequest, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
@@ -65,6 +66,10 @@ export interface OrchestratorDeliverFn {
     actorUserId: string;
     signal: SignalContent;
     dispatchId: string;
+    /** The thread to deliver to, when the event names one other than its origin's. */
+    threadKey?: string;
+    /** The channel message this delivery carries, for the channel record. */
+    inbound?: InboundChannelMessage;
   }): Promise<void>;
 }
 
@@ -251,6 +256,7 @@ export class EventDispatcher {
         const origin = this.deps.resolveChannelOrigin?.(event.service, event.eventKey, event.payload) ?? null;
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
         let body: string;
+        let channelBody = "";
         if (origin) {
           // `actor` is untyped jsonb, owned by ingest (NormalizedEvent.actor is
           // `{ externalId, login? }`) — same narrowing convention as `refs`.
@@ -263,6 +269,7 @@ export class EventDispatcher {
           // The clean text is the body; fall back to the summary only when the
           // message carries no text of its own (e.g. a file-only post).
           body = (normalized.text || event.summary).slice(0, MAX_BODY_EXCERPT_CHARS);
+          channelBody = normalized.text;
           const sender = normalized.senderName ?? actor?.login ?? actor?.externalId;
           if (sender) attributes.sender = sender;
         } else {
@@ -293,6 +300,15 @@ export class EventDispatcher {
               ),
           );
         }
+        // A pull request comment continues in the thread that opened the
+        // pull request, when that thread is in this owner's runtime.
+        const prComment = origin ? null : pullRequestComment(event.eventKey, event.payload);
+        const prThreadKey = prComment && sub.ownerType !== "org"
+          ? await threadKeyForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, prComment.pullRequestUrl)
+          : null;
+        const inbound = origin
+          ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
+          : prThreadKey && prComment ? prComment.message : undefined;
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
           ownerType: sub.ownerType,
@@ -306,6 +322,8 @@ export class EventDispatcher {
             origin: origin ?? undefined,
           },
           dispatchId: `event:${delivery.id}`,
+          ...(prThreadKey ? { threadKey: prThreadKey } : {}),
+          ...(inbound ? { inbound } : {}),
         });
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The

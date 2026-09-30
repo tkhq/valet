@@ -542,7 +542,7 @@ export function AutomationWizard({
           {collisions !== null && (
             <CollisionNotice report={collisions.report} committed={collisions.committed} />
           )}
-          {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">A matching rule already exists. <Link to="/events" className="underline">Open Events</Link> and select Subscriptions to manage it.</p>}
+          {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">A matching rule already exists. <Link to="/events" search={{ tab: "subscriptions" }} className="underline">Open Subscriptions</Link> to manage it.</p>}
           {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
         </div>
 

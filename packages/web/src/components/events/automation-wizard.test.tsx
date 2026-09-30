@@ -619,7 +619,7 @@ describe("AutomationWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
     expect(screen.getByText("Eng channel replies")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Create anyway" })).toBeNull();
-    expect(screen.getByRole("link", { name: "Open Events" }).getAttribute("href")).toBe("/events");
+    expect(screen.getByRole("link", { name: "Open Subscriptions" }).getAttribute("href")).toBe("/events");
     expect(createSubscription).toHaveBeenCalledTimes(1);
   });
 

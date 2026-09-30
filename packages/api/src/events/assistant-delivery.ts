@@ -15,6 +15,7 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
 
 /**
  * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
@@ -48,6 +49,8 @@ export interface AssistantDeliveryArgs {
   dispatchId: string;
   /** Drop-log reason if the resolved assistant belongs to another org. */
   mismatchReason: string;
+  /** The channel message this delivery carries, recorded once it lands. */
+  inbound?: InboundChannelMessage;
 }
 
 export async function deliverToAssistantThread(
@@ -120,4 +123,9 @@ async function deliverToAssistantThreadInner(
     dispatchId: args.dispatchId,
     author: { id: args.actorUserId },
   });
+  if (args.inbound) {
+    await recordChannelMessage(deps.db, {
+      ...args.inbound, orgId: args.orgId, sessionId: session.id, threadId: thread.id, direction: "in",
+    });
+  }
 }

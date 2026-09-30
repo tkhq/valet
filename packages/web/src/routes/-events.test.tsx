@@ -173,6 +173,8 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
+vi.mock("~/components/channels/channels-panel", () => ({ ChannelsPanel: () => <p>Channels list</p> }));
+
 vi.mock("~/api/events", () => ({
   useEventReceipts: (...args: unknown[]) => { receiptsHook(...args); return { data: { receipts: [], nextCursor: null, lastReceiptAt: null, retentionDays: 7 } }; },
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
@@ -273,7 +275,18 @@ afterEach(() => {
   navigateCalls.length = 0;
 });
 
+describe("EventsPage — Channels", () => {
+  it("opens on Channels when the URL names no tab", () => {
+    render(<EventsPage />);
+    expect(screen.getByRole("tab", { name: "Channels" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("Channels list")).toBeTruthy();
+  });
+});
+
 describe("EventsPage — Activity", () => {
+  // Channels is the default tab, so every Activity case names its tab.
+  beforeEach(() => { searchState = { tab: "activity" }; });
+
   it("renders the feed with service, key, summary, and actor", () => {
     render(<EventsPage />);
     expect(screen.getByText("PR #7 opened: fix login")).toBeTruthy();
@@ -320,7 +333,7 @@ describe("EventsPage — Activity", () => {
   });
 
   it("drops that note on All, which has no window", () => {
-    searchState = { scope: "all" };
+    searchState = { tab: "activity", scope: "all" };
     render(<EventsPage />);
     expect(screen.queryByText(/covers the last 30 days/)).toBeNull();
   });
@@ -336,7 +349,7 @@ describe("EventsPage — Activity", () => {
     });
     fireEvent.click(await screen.findByText("All"));
     // The choice went to the URL, not into the component.
-    expect(searchState).toEqual({ scope: "all" });
+    expect(searchState).toEqual({ tab: "activity", scope: "all" });
 
     fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
     expect(screen.queryByRole("button", { name: /^Scope: / })).toBeNull();
@@ -346,7 +359,7 @@ describe("EventsPage — Activity", () => {
   });
 
   it("starts a fresh mount from the scope the URL carries", () => {
-    searchState = { scope: "all" };
+    searchState = { tab: "activity", scope: "all" };
     render(<EventsPage />);
     expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
   });
@@ -372,7 +385,7 @@ describe("EventsPage — Activity", () => {
 
     searchState = {};
     page.rerender(<EventsPage />);
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Activity" }).getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Channels" }).getAttribute("aria-selected")).toBe("true"));
 
     searchState = { tab: "problems" };
     page.rerender(<EventsPage />);
@@ -380,13 +393,14 @@ describe("EventsPage — Activity", () => {
   });
 
   it("keeps a Problems backward cursor when Activity scope changes", async () => {
-    searchState = { problemsQ: "signature", problemsCursor: "cursor_2", problemsDirection: "previous" };
+    searchState = { tab: "activity", problemsQ: "signature", problemsCursor: "cursor_2", problemsDirection: "previous" };
     render(<EventsPage />);
 
     fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), { key: "Enter" });
     fireEvent.click(await screen.findByText("All"));
 
     expect(searchState).toEqual({
+      tab: "activity",
       scope: "all",
       problemsQ: "signature",
       problemsCursor: "cursor_2",

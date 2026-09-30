@@ -142,6 +142,8 @@ export interface ChannelStreamBridgeDeps {
   markDelivered(dedupeKey: string): void;
   /** Stops the engine turn. Called when the reader stops the stream in Slack. */
   abortTurn(sessionId: string, threadId: string): Promise<void>;
+  /** Called once per provider message this bridge closes, for the channel record. */
+  onMessageClosed?(turn: StreamTurn, providerMessageId: string, engineMessageId: string): Promise<void>;
   now?: () => number;
 }
 
@@ -707,6 +709,8 @@ export class ChannelStreamBridge {
     const ref = stream.ref;
     stream.ref = null;
     if (!ref) return;
+    await this.deps.onMessageClosed?.(stream.turn, ref.messageId, stream.engineMessageId)
+      .catch((err: unknown) => console.error("[channels] stream record failed", err));
     if (transport && canStream(transport)) {
       const outcome = await this.tryStop(transport, ref, stream.turn.channelType);
       // The row is the ONLY record that a stream is open. Drop it when the

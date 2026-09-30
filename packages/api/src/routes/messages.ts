@@ -32,6 +32,7 @@ import type {
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
+  ListThreadChannelMessagesResponse,
   MarkThreadsReadRequest,
   Message,
   MessagePart,
@@ -66,6 +67,8 @@ import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUser
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { listThreadActivity, markThreadsRead, recheckOpenPullRequests } from "../services/thread-read-state.js";
+import { threadChannel } from "../services/channels.js";
+import { listThreadChannelMessages } from "../services/channel-messages.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -377,11 +380,31 @@ messagesRouter.get("/:id/threads", async (c) => {
       ),
     );
   const activity = await listThreadActivity(db, c.var.user.id, session.id, summaries.map((t) => t.id));
-  for (const summary of summaries) Object.assign(summary, activity.get(summary.id));
+  for (const summary of summaries) {
+    Object.assign(summary, activity.get(summary.id));
+    const channel = threadChannel(summary.key, summary.pullRequests);
+    if (channel) summary.channel = channel;
+  }
   const { engineCredentials, encryptionKey } = c.var.providers;
   void recheckOpenPullRequests({ db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) }, db, session.id)
     .catch((err) => console.error("[threads] pull request recheck failed", err));
   const body: ListThreadsResponse = { threads: summaries };
+  return c.json(body);
+});
+
+/** The channel messages one thread sent or received, newest first. */
+messagesRouter.get("/:id/threads/:threadId/channel-messages", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+  const threadId = c.req.param("threadId");
+  if (!engineSession.listThreads().some((thread) => thread.id === threadId)) {
+    return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
+  }
+  const rows = await listThreadChannelMessages(c.var.providers.db, session.id, threadId);
+  const body: ListThreadChannelMessagesResponse = {
+    messages: rows,
+  };
   return c.json(body);
 });
 

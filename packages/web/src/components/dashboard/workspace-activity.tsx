@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { FileText, GitPullRequest, MessageSquare, ArrowUpRight, CircleAlert, LoaderCircle, CheckCheck } from "lucide-react";
 import type { ArtifactListItem, GlobalWorkflowRunSummary, SessionSummary, WaitingThread, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
@@ -7,7 +7,7 @@ import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitin
 import { useArtifacts } from "~/api/artifacts";
 import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { relativeTime } from "~/lib/relative-time";
-import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, StatusDot } from "~/components/primitives";
+import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, StatusDot, WorkRow, WorkSection } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
 
 export function WorkspaceActivity({ owner }: { owner: OwnerFilter }) {
@@ -96,20 +96,20 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
     {errors.map(({ label, query }) => <ErrorRow key={label}>Could not load {label}. <button className="underline" onClick={() => void query.refetch()}>Retry</button></ErrorRow>)}
     {loading && <LoadingRow label="Loading work…" />}
     {incomplete && <p className="text-xs text-muted">More active work is available. Use the paging controls below to see it.</p>}
-    {(needsYou.length + attentionRuns.length + questions.length > 0) && <Section title="Needs attention" icon={<CircleAlert className="h-4 w-4 text-amber" />} count={needsYou.length + attentionRuns.length + questions.length}>
+    {(needsYou.length + attentionRuns.length + questions.length > 0) && <WorkSection title="Needs attention" icon={<CircleAlert className="h-4 w-4 text-amber" />} count={needsYou.length + attentionRuns.length + questions.length}>
       {needsYou.map(row => <ActiveRow key={row.id} row={row} />)}
       {questions.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
       {attentionRuns.map(row => <RunRow key={row.runId} row={row} prompt={gates.error ? undefined : gates.data?.items.find(item => item.runId === row.runId && item.owner.type === owner.ownerType && item.owner.id === owner.ownerId)?.gate.prompt} />)}
-    </Section>}
-    {replies.length > 0 && <Section title="Unanswered replies" icon={<MessageSquare className="h-4 w-4 text-muted" />} count={replies.length}>
+    </WorkSection>}
+    {replies.length > 0 && <WorkSection title="Unanswered replies" icon={<MessageSquare className="h-4 w-4 text-muted" />} count={replies.length}>
       {replies.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
-    </Section>}
-    {(inProgress.length + progressRuns.length > 0) && <Section title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} count={inProgress.length + progressRuns.length}>
+    </WorkSection>}
+    {(inProgress.length + progressRuns.length > 0) && <WorkSection title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} count={inProgress.length + progressRuns.length}>
       {inProgress.map(row => <ActiveRow key={row.id} row={row} />)}
       {progressRuns.map(row => <RunRow key={row.runId} row={row} />)}
-    </Section>}
+    </WorkSection>}
     {!activeWork.error && activeWork.hasNextPage && <Button variant="secondary" size="sm" disabled={activeWork.isFetchingNextPage} onClick={() => void activeWork.fetchNextPage()}>Load more active work</Button>}
-    {(resultItems.length > 0 || outcomes.isPending || artifacts.isPending) && <Section title="Recent results" icon={<CheckCheck className="h-4 w-4 text-moss" />} count={resultItems.length}>
+    {(resultItems.length > 0 || outcomes.isPending || artifacts.isPending) && <WorkSection title="Recent results" icon={<CheckCheck className="h-4 w-4 text-moss" />} count={resultItems.length}>
       {(outcomes.isPending || artifacts.isPending) && <LoadingRow label="Loading results…" />}
       {groupResults(resultItems).map(group => {
         const first = group[0]!;
@@ -119,37 +119,16 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
           <ul className="space-y-3">{group.map(item => <ResultRow key={item.id} item={item} />)}</ul>
         </div>;
       })}
-    </Section>}
+    </WorkSection>}
     <div className="flex flex-wrap gap-3">
       {!outcomes.error && outcomes.hasNextPage && <Button size="sm" variant="secondary" disabled={outcomes.isFetchingNextPage} onClick={() => void outcomes.fetchNextPage()}>Load more results</Button>}
       {!artifacts.error && <PageControls cursor={artifactCursor} next={artifacts.data?.nextCursor} onPage={setArtifactCursor} label="artifacts" />}
     </div>
-    {(otherWork.length > 0 || work.hasNextPage) && <details><summary className="cursor-pointer text-sm text-muted">Recent work · {otherWork.length} loaded</summary><div className="mt-3"><Section title="Recent work" count={otherWork.length}><p className="px-4 py-3 text-xs text-muted">Idle and sleeping work may still have unfinished tasks. Open the conversation to check.</p>{otherWork.map(row => <SessionRow key={row.id} row={row} />)}</Section>    {!work.error && work.hasNextPage && <Button variant="secondary" size="sm" disabled={work.isFetchingNextPage} onClick={() => void work.fetchNextPage()}>Load more work</Button>}
+    {(otherWork.length > 0 || work.hasNextPage) && <details><summary className="cursor-pointer text-sm text-muted">Recent work · {otherWork.length} loaded</summary><div className="mt-3"><WorkSection title="Recent work" count={otherWork.length}><p className="px-4 py-3 text-xs text-muted">Idle and sleeping work may still have unfinished tasks. Open the conversation to check.</p>{otherWork.map(row => <SessionRow key={row.id} row={row} />)}</WorkSection>    {!work.error && work.hasNextPage && <Button variant="secondary" size="sm" disabled={work.isFetchingNextPage} onClick={() => void work.fetchNextPage()}>Load more work</Button>}
 </div></details>}
   </div>;
 }
 
-function Section({ title, count, icon, children }: { title: string; count: number; icon?: ReactNode; children: ReactNode }) {
-  return <section aria-label={title}><div className="mb-3 flex items-center gap-2">{icon}<h2 className="font-display text-lg">{title}</h2><span className="text-xs text-muted">{count}</span></div><div className="divide-y divide-line rounded-lg border border-line bg-paper">{children}</div></section>;
-}
-/** One row layout for every work list here: a title link, an optional status,
- * the time, and optional detail and actions. */
-function WorkRow({ title, badge, time, detail, leading, actions }: {
-  title: ReactNode; badge?: ReactNode; time: number; detail?: ReactNode; leading?: ReactNode; actions?: ReactNode;
-}) {
-  return <div className="flex items-start gap-3 px-4 py-3">
-    {leading !== undefined && <span className="mt-1.5 flex h-2 w-2 shrink-0">{leading}</span>}
-    <div className="min-w-0 flex-1">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="min-w-0 flex-1 break-words text-sm font-medium [&_a:hover]:underline">{title}</span>
-        {badge}
-        <span className="text-xs text-muted">{relativeTime(time)}</span>
-      </div>
-      {detail && <p className="mt-1 break-words text-sm text-muted">{detail}</p>}
-    </div>
-    {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
-  </div>;
-}
 function ActiveRow({ row }: { row: WorkspaceActiveWorkItem }) {
   return <WorkRow title={<Link to="/threads/$threadId" params={{ threadId: row.threadId }}>{row.title || "Untitled thread"}</Link>}
     badge={<RunStateBadge state={row.state} />} time={row.updatedAt} />;

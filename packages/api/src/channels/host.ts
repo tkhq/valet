@@ -69,6 +69,7 @@ import { digestGate } from "./gate-digest.js";
 import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
+import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
 
 export interface ChannelHostDeps {
   db: AppDb;
@@ -408,6 +409,8 @@ export class ChannelHost {
       streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
       transportFor: (channelType) => this.transportFor(channelType),
       markDelivered: (dedupeKey) => this.markDelivered(dedupeKey),
+      onMessageClosed: (turn, providerMessageId, engineMessageId) =>
+        this.recordSentReply(turn.channelType, turn.conversationKey, turn.sessionId, turn.threadId, providerMessageId, engineMessageId),
       abortTurn: async (sessionId, threadId) => {
         // Streams only ever run on a channel thread, and channel threads only
         // exist on an assistant's session (`handleMessage` always threads
@@ -822,11 +825,12 @@ export class ChannelHost {
     if (!transport) return;
     const sender = await this.workspaceSenderForSession(sessionId);
     try {
-      await transport.send(target.conversationKey, {
+      const sent = await transport.send(target.conversationKey, {
         markdown: first.content,
         ...(sender !== undefined ? { sender } : {}),
       });
       this.markDelivered(dedupeKey);
+      await this.recordSentReply(target.channelType, target.conversationKey, sessionId, threadId, sent.messageId, first.id);
     } catch (error) {
       // This is the live first-response path. A durable child dispatcher must
       // keep provider errors observable so it can retain and retry its intent.
@@ -841,6 +845,32 @@ export class ChannelHost {
       await this.retryFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason);
       this.markDelivered(dedupeKey);
     }
+  }
+
+  /**
+   * Records a reply Valet posted in a channel thread, with the engine message
+   * it carried. A DM is not a channel, so it records nothing.
+   */
+  private async recordSentReply(
+    channelType: string, conversationKey: string, sessionId: string, threadId: string,
+    providerMessageId: string, engineMessageId: string,
+  ): Promise<void> {
+    const threadKey = this.transports.get(channelType)?.threadKeyFromConversationKey?.(conversationKey);
+    const conversation = slackConversationFromThreadKey(threadKey);
+    if (!threadKey || !conversation || providerMessageId === "") return;
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    const entry = entries.find((candidate) => candidate.id === engineMessageId);
+    const text = entry?.type === "message" ? entry.content : undefined;
+    await recordChannelMessage(this.deps.db, {
+      orgId: this.orgId ?? (await this.deps.resolveOrgId()),
+      sessionId, threadId,
+      channelKey: slackChannelKey(conversation.channelId),
+      conversationKey: threadKey,
+      providerMessageId,
+      direction: "out",
+      ...(text ? { text } : {}),
+      url: slackMessageUrl(conversation.channelId, providerMessageId, conversation.threadTs),
+    });
   }
 
   private async retryFailedReplyFeedback(

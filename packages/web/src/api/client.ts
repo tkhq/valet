@@ -11,6 +11,9 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
 import type {
   WorkspaceOutcomesResponse,
   WorkspaceBriefingsResponse,
+  ListChannelsResponse,
+  ChannelDetailResponse,
+  ListThreadChannelMessagesResponse,
   DismissWorkspaceBriefingResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -570,6 +573,12 @@ export const api = {
     request<WorkspaceBriefingsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings`),
   getWaitingThreads: (owner: OwnerFilter) =>
     request<WaitingThreadsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/waiting`),
+  listWorkspaceChannels: (owner: OwnerFilter) =>
+    request<ListChannelsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channels`),
+  getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
+    request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
+  listThreadChannelMessages: (sessionId: string, threadId: string) =>
+    request<ListThreadChannelMessagesResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/channel-messages`),
   dismissWorkspaceBriefing: (owner: OwnerFilter, briefingId: string) =>
     request<DismissWorkspaceBriefingResponse>("POST", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings/${encodeURIComponent(briefingId)}/dismiss`),
   listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>

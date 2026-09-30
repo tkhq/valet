@@ -879,6 +879,89 @@ export interface ThreadSummary {
   agentQuestion?: string;
   /** Pull requests this thread created, oldest first. */
   pullRequests?: ThreadPullRequest[];
+  /** The channel this thread talks in: its Slack channel, or the newest pull
+   * request it opened. Absent for a thread with no channel. */
+  channel?: ThreadChannel;
+}
+
+/** A channel as a thread names it. */
+export interface ThreadChannel {
+  /** `slack:C123` or `github:owner/repo#12`. */
+  key: string;
+  provider: ChannelProvider;
+  /** Where this thread's own conversation opens in the provider. */
+  conversationUrl?: string;
+}
+
+export type ChannelProvider = "slack" | "github";
+
+/** A mention rule that makes an orchestrator listen in a channel. */
+export interface ChannelListener {
+  subscriptionId: string;
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
+  /** "Ops", "Personal", or "Organization". */
+  ownerName: string;
+  /** The rule listens in every channel, not only this one. */
+  everywhere: boolean;
+  /** The rule belongs to the workspace in view, so this viewer can change it here. */
+  editable: boolean;
+}
+
+/** `GET /api/workspaces/:workspace/channels` — one row per channel. */
+export interface ChannelSummary {
+  key: string;
+  provider: ChannelProvider;
+  /** `#eng`, or `acme/app#12`. */
+  name: string;
+  url?: string;
+  listeners: ChannelListener[];
+  conversationCount: number;
+  messageCount: number;
+  lastActivityAt: number | null;
+  /** A pull request's state. */
+  state?: "open" | "merged" | "closed";
+}
+
+export interface ListChannelsResponse {
+  channels: ChannelSummary[];
+}
+
+/** One Valet thread that talks in a channel. */
+export interface ChannelConversation {
+  sessionId: string;
+  threadId: string;
+  title: string;
+  /** Where this conversation opens in the provider. */
+  url?: string;
+  lastActivityAt: number;
+}
+
+/** A message Valet sent to, or received from, a channel. */
+export interface ChannelMessage {
+  id: string;
+  sessionId: string;
+  threadId: string;
+  channelKey: string;
+  direction: "in" | "out";
+  /** Null for a message Valet sent. */
+  author: string | null;
+  text: string | null;
+  url: string | null;
+  createdAt: number;
+}
+
+/** `GET /api/workspaces/:workspace/channels/:key`. */
+export interface ChannelDetailResponse {
+  channel: ChannelSummary;
+  conversations: ChannelConversation[];
+  /** Newest first. */
+  messages: ChannelMessage[];
+}
+
+/** `GET /api/sessions/:id/threads/:threadId/channel-messages`, newest first. */
+export interface ListThreadChannelMessagesResponse {
+  messages: ChannelMessage[];
 }
 
 export interface ThreadPullRequest {

@@ -2693,6 +2693,28 @@ export const threadReads = pgTable("thread_reads", {
   readAt: bigint("read_at", { mode: "number" }).notNull(),
 }, t => [primaryKey({ columns: [t.userId, t.threadId] })]);
 
+/** Messages Valet sent to, or received from, a channel (a Slack channel or a
+ * pull request), with the engine thread each belongs to. A view aid: a write
+ * failure never fails the delivery it describes. */
+export const channelMessages = pgTable("channel_messages", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  channelKey: text("channel_key").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  providerMessageId: text("provider_message_id").notNull(),
+  direction: text("direction", { enum: ["in", "out"] }).notNull(),
+  author: text("author"),
+  text: text("text"),
+  url: text("url"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, t => [
+  uniqueIndex("channel_messages_provider_message").on(t.orgId, t.channelKey, t.providerMessageId, t.direction),
+  index("channel_messages_channel").on(t.orgId, t.channelKey, t.createdAt),
+  index("channel_messages_thread").on(t.sessionId, t.threadId, t.createdAt),
+]);
+
 /** Pull requests a thread created, with their last known GitHub state. */
 export const threadPullRequests = pgTable("thread_pull_requests", {
   sessionId: text("session_id").notNull(),

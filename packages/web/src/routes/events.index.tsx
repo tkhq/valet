@@ -4,6 +4,7 @@ import { TabBar, tabPanelId } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { EventFeed, type FeedScope } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
+import { ChannelsPanel } from "~/components/channels/channels-panel";
 import { useMe } from "~/api/settings";
 import { ReceiptsPanel } from "~/components/events/receipts-panel";
 import { DropsPanel } from "~/components/events/drops-panel";
@@ -11,7 +12,7 @@ import { textParam } from "~/lib/search-params";
 
 /** Activity, subscriptions, and recorded event diagnostics. Legacy tab URLs
  * remain readable so existing links keep their searches and cursors. */
-type TabId = "activity" | "subscriptions" | "logs";
+type TabId = "channels" | "activity" | "subscriptions" | "logs";
 
 interface EventsSearch {
   tab?: TabId;
@@ -26,7 +27,8 @@ interface EventsSearch {
  * value reads as the default tab and workspace scope. */
 export function readEventsSearch(raw: unknown): EventsSearch {
   const tabValue = textParam(raw, "tab");
-  const tab = tabValue === "subscriptions" ? tabValue : ["logs", "problems", "receipts"].includes(tabValue ?? "") ? "logs" : undefined;
+  const tab = tabValue === "subscriptions" || tabValue === "activity" ? tabValue
+    : ["logs", "problems", "receipts"].includes(tabValue ?? "") ? "logs" : undefined;
   const scope = textParam(raw, "scope") === "all" ? "all" : undefined;
   const problemsQ = textParam(raw, "problemsQ");
   const problemsCursor = textParam(raw, "problemsCursor");
@@ -42,6 +44,7 @@ export const Route = createFileRoute("/events/")({
 
 const TABS_LABEL = "Events sections";
 const TABS = [
+  { id: "channels", label: "Channels" },
   { id: "activity", label: "Activity" },
   { id: "subscriptions", label: "Subscriptions" },
   { id: "logs", label: "Event Logs" },
@@ -54,10 +57,10 @@ export function EventsPage() {
   const navigate = useNavigate();
   const me = useMe();
   const isAdmin = !me.error && me.data?.orgRole === "admin";
-  const [selectedTab, setTab] = useState<TabId>(search.tab ?? "activity");
+  const [selectedTab, setTab] = useState<TabId>(search.tab ?? "channels");
   const tab = selectedTab;
   const tabs = TABS;
-  useEffect(() => setTab(search.tab ?? "activity"), [search.tab]);
+  useEffect(() => setTab(search.tab ?? "channels"), [search.tab]);
   const scope: FeedScope = search.scope ?? "workspace";
 
   function selectTab(next: TabId) {
@@ -67,7 +70,7 @@ export function EventsPage() {
       search: (previous) => {
         const current = readEventsSearch(previous);
         const { tab: _tab, ...rest } = current;
-        return next === "activity" ? rest : { ...rest, tab: next };
+        return next === "channels" ? rest : { ...rest, tab: next };
       },
     });
   }
@@ -93,11 +96,12 @@ export function EventsPage() {
           aria-labelledby={`${tabPanelId(TABS_LABEL, tab)}-tab`}
           className="mt-6"
         >
+          {tab === "channels" && <ChannelsPanel />}
           {tab === "activity" && (
             <EventFeed
               scope={scope}
               onScopeChange={(next) =>
-                void navigate({ to: "/events", search: { ...(tab === "activity" ? {} : { tab }), ...(next === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(search.problemsCursor ? { problemsCursor: search.problemsCursor } : {}), ...(search.problemsDirection ? { problemsDirection: search.problemsDirection } : {}) } })
+                void navigate({ to: "/events", search: { tab: "activity" as const, ...(next === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(search.problemsCursor ? { problemsCursor: search.problemsCursor } : {}), ...(search.problemsDirection ? { problemsDirection: search.problemsDirection } : {}) } })
               }
             />
           )}

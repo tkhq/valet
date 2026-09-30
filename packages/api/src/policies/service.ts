@@ -37,6 +37,7 @@ import type {
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
+import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
   grantPolicyKey,
   resolvePolicyDecision,
@@ -710,6 +711,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         durationMs,
         startedAt,
       });
+      await recordActionChannelMessage(deps.db, record);
     },
   };
 }

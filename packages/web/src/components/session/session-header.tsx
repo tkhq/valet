@@ -55,6 +55,7 @@ import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { ThreadStatusIcon } from "./thread-status-icon";
 import { buildTranscript } from "./transcript";
+import { ThreadChannelChip } from "~/components/channels/thread-channel-chip";
 
 /** Collapse a workspace path down to a header-friendly badge: any
  * multi-segment path shows only its LAST segment ("ws-19",
@@ -372,6 +373,13 @@ export function SessionHeader({
           )}
         </div>
       </Tooltip>
+      {activeThread?.channel && (
+        <ThreadChannelChip
+          channel={activeThread.channel}
+          {...(session.owner.type === "user" || session.owner.type === "team"
+            ? { owner: { ownerType: session.owner.type, ownerId: session.owner.id } } : {})}
+        />
+      )}
       <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
         {canAdminister && (
           <Tooltip content={modelHint}>

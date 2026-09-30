@@ -174,6 +174,25 @@ if (mode === 'bootstrap') {
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   }
   console.log('Created the open and merged pull request threads. Stop the API, then run offline for their transcripts and pull request state.');
+} else if (mode === 'channels') {
+  const me = await request('/me');
+  if (me.id !== 'local-user' || me.orgId !== 'local-org') throw new Error('Seed requires the local stub identity.');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const personal = await request('/workspaces/user/runtime', 'POST', {});
+  manifest.channelThreads ??= [];
+  // A Slack conversation Valet joined, re-keyed offline to a Slack thread key.
+  const examples = [
+    { key: 'slack-eng', title: '[Demo] Deploy question from #eng-demo', channel: 'C0DEMOENG', threadTs: '1790800000.000100', read: false,
+      question: 'Dana: @Valet can you check whether the staging deploy finished?',
+      answer: 'The staging deploy finished at 14:02 and the smoke checks passed. I can promote it to production when you are ready.' },
+  ];
+  for (const example of examples) {
+    if (manifest.channelThreads.some(row => row.key === example.key)) continue;
+    const thread = await request(`/sessions/${encodeURIComponent(personal.sessionId)}/threads`, 'POST', { title: example.title });
+    manifest.channelThreads.push({ ...example, sessionId: personal.sessionId, threadId: thread.id });
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+  console.log('Created the Slack channel thread. Stop the API, then run offline for its channel key, listener, and messages.');
 } else if (mode === 'child-work') {
   const me = await request('/me');
   if (me.id !== 'local-user' || me.orgId !== 'local-org') throw new Error('Seed requires the local stub identity.');
@@ -202,7 +221,7 @@ if (mode === 'bootstrap') {
   try {
     const now = Date.now();
     await db.transaction(async tx => {
-      const transcripts = [...manifest.records, ...(manifest.briefingThreads ?? []), ...(manifest.pullRequestThreads ?? [])];
+      const transcripts = [...manifest.records, ...(manifest.briefingThreads ?? []), ...(manifest.pullRequestThreads ?? []), ...(manifest.channelThreads ?? [])];
       for (const [index, record] of transcripts.entries()) {
         const created = now - (transcripts.length - index) * 60_000;
         await tx.query('INSERT INTO session_threads (id,session_id,title,created_at,last_user_activity_at) VALUES ($1,$2,$3,$4,$4) ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title,last_user_activity_at=EXCLUDED.last_user_activity_at', [record.threadId,record.sessionId,record.title,created]);
@@ -223,6 +242,40 @@ if (mode === 'bootstrap') {
           await tx.query('INSERT INTO thread_reads (user_id,session_id,thread_id,read_at) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id,thread_id) DO UPDATE SET read_at=EXCLUDED.read_at', ['local-user',record.sessionId,record.threadId,now]);
         } else {
           await tx.query('DELETE FROM thread_reads WHERE user_id=$1 AND thread_id=$2', ['local-user',record.threadId]);
+        }
+      }
+      // Channels: the Slack thread's key, a personal listener, and messages both ways.
+      for (const record of manifest.channelThreads ?? []) {
+        const key = `slack:${record.channel}:${record.threadTs}`;
+        await tx.query('UPDATE engine_threads SET key=$1 WHERE id=$2 AND session_id=$3', [key,record.threadId,record.sessionId]);
+        await tx.query(`INSERT INTO event_subscriptions (id,org_id,owner_type,owner_id,name,event_keys,filters,target,enabled,created_by,created_at,updated_at)
+          VALUES ($1,'local-org','user','local-user','[Demo] Listen in #eng-demo','["slack.app_mention"]'::jsonb,$2::jsonb,'{"kind":"orchestrator","follow":true}'::jsonb,true,'local-user',$3,$3)
+          ON CONFLICT (id) DO NOTHING`,
+          [`threads-demo-listen-${record.channel}`, JSON.stringify([{ field: 'channel', op: 'in', value: [record.channel], labels: ['eng-demo'] }]), now]);
+        const messages = [
+          ['in', 'Dana', record.question.replace(/^Dana: /, ''), '1790800000.000100', now - 5 * 60000],
+          ['out', null, record.answer, '1790800060.000200', now - 4 * 60000],
+          ['in', 'Dana', 'Great, promote it after lunch.', '1790800120.000300', now - 3 * 60000],
+        ];
+        for (const [direction, author, text, ts, at] of messages) {
+          await tx.query(`INSERT INTO channel_messages (id,org_id,session_id,thread_id,channel_key,conversation_key,provider_message_id,direction,author,text,url,created_at)
+            VALUES ($1,'local-org',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
+            [`threads-demo-cm-${ts}`,record.sessionId,record.threadId,`slack:${record.channel}`,key,ts,direction,author,text,
+              `https://slack.com/archives/${record.channel}/p${ts.replace('.', '')}${ts === record.threadTs ? '' : `?thread_ts=${record.threadTs}&cid=${record.channel}`}`,at]);
+        }
+      }
+      // The open pull request: a review comment arrives and Valet answers on GitHub.
+      const openPr = (manifest.pullRequestThreads ?? []).find(row => row.key === 'open');
+      if (openPr) {
+        const channelKey = `github:${openPr.pullRequest.repo}#${openPr.pullRequest.number}`;
+        const comments = [
+          ['in', 'reviewer-demo', 'Can you pin the minor version of typebox too?', '9100001', now - 2 * 60000],
+          ['out', null, 'Pinned typebox to 0.34.x in the lockfile override. CI is running again.', '9100002', now - 60000],
+        ];
+        for (const [direction, author, text, id, at] of comments) {
+          await tx.query(`INSERT INTO channel_messages (id,org_id,session_id,thread_id,channel_key,conversation_key,provider_message_id,direction,author,text,url,created_at)
+            VALUES ($1,'local-org',$2,$3,$4,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
+            [`threads-demo-cm-${id}`,openPr.sessionId,openPr.threadId,channelKey,id,direction,author,text,`${openPr.pullRequest.url}#issuecomment-${id}`,at]);
         }
       }
       const origin = manifest.records.find(record => record.scope === 'team');
@@ -270,5 +323,5 @@ if (mode === 'bootstrap') {
     for (const row of manifest.records) console.log(`${row.title}: http://localhost:5173/chat?workspace=${encodeURIComponent(row.scope === 'team' ? manifest.teamId : 'user')}&thread=${encodeURIComponent(row.threadId)}`);
   } finally { await db.close(); }
 } else {
-  throw new Error('Use bootstrap, workflow, review, catch-up, child-work, or pull-requests with the API running, or offline after stopping it.');
+  throw new Error('Use bootstrap, workflow, review, catch-up, child-work, pull-requests, or channels with the API running, or offline after stopping it.');
 }
