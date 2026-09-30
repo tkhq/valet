@@ -15,7 +15,6 @@ import { TooltipProvider } from "~/components/primitives";
 import { useStreamStore } from "~/stores/stream";
 
 const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
-const rateSessionMutate = vi.fn();
 const setModelMutate = vi.fn();
 const setThreadModelMutate = vi.fn();
 const setReasoningMutate = vi.fn();
@@ -30,7 +29,6 @@ let headerThreads: Array<{
   reasoning?: string | null;
 }> = [];
 let sessionRating: "positive" | "negative" | null = null;
-let ratingPending = false;
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 let replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -71,7 +69,6 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
     useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
     useSessionRatings: () => ({ data: { session: sessionRating, entries: {} }, isLoading: false, error: null }),
-    useRateSession: () => ({ isPending: ratingPending, mutate: rateSessionMutate }),
   };
 });
 
@@ -162,9 +159,7 @@ function idleModel(threadId: string) {
 beforeEach(() => {
   useStreamStore.setState({ bySession: {} });
   deleteMutateAsync.mockClear();
-  rateSessionMutate.mockClear();
   sessionRating = null;
-  ratingPending = false;
   setModelMutate.mockClear();
   setThreadModelMutate.mockClear();
   setReasoningMutate.mockClear();

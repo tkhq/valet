@@ -284,16 +284,6 @@ export function useSessionRatings(sessionId: string) {
   });
 }
 
-/** Session-level 👍/👎. `null` clears the rating. */
-export function useRateSession(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<PutRatingResponse, Error, RatingValue | null>({
-    mutationFn: (rating) => api.rateSession(sessionId, { rating }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.ratings(sessionId) });
-    },
-  });
-}
 
 /** Message-level 👍/👎 on one assistant entry. `null` clears the rating. */
 export function useRateMessage(sessionId: string) {

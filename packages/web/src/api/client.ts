@@ -708,8 +708,6 @@ export const api = {
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
   getSessionRatings: (id: string) =>
     request<GetSessionRatingsResponse>("GET", `/sessions/${encodeURIComponent(id)}/ratings`),
-  rateSession: (id: string, body: PutRatingRequest) =>
-    request<PutRatingResponse>("POST", `/sessions/${encodeURIComponent(id)}/rating`, body),
   rateMessage: (sessionId: string, entryId: string, body: PutRatingRequest) =>
     request<PutRatingResponse>(
       "POST",
