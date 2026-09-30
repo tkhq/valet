@@ -174,9 +174,9 @@ export async function listWaitingThreads(
 ): Promise<WaitingThread[]> {
   const result = await db.execute(sql`
     SELECT t.session_id, t.id AS thread_id, COALESCE(NULLIF(t.title,''),NULLIF(s.title,'')) AS title,
-      e.created_at AS agent_at, r.read_at
+      e.created_at AS agent_at, e.tail, r.read_at
     FROM session_threads t JOIN agent_sessions s ON s.id = t.session_id
-    JOIN LATERAL (SELECT created_at FROM engine_entries
+    JOIN LATERAL (SELECT created_at, right(content, 2000) AS tail FROM engine_entries
       WHERE session_id = t.session_id AND thread_id = t.id AND entry_type = 'message' AND role = 'assistant'
       ORDER BY created_at DESC LIMIT 1) e ON true
     LEFT JOIN thread_reads r ON r.user_id = ${viewerId} AND r.thread_id = t.id
@@ -187,13 +187,41 @@ export async function listWaitingThreads(
       AND NOT EXISTS (SELECT 1 FROM engine_queue_items q
         WHERE q.session_id = t.session_id AND q.thread_id = t.id AND q.status <> 'settled')
     ORDER BY e.created_at DESC LIMIT ${limit}`) as {
-      rows: Array<{ session_id: string; thread_id: string; title: string | null; agent_at: string | number; read_at: string | number | null }>;
+      rows: Array<{ session_id: string; thread_id: string; title: string | null; agent_at: string | number; tail: string | null; read_at: string | number | null }>;
     };
   return result.rows.map(row => {
     const lastAgentActivityAt = Number(row.agent_at);
+    const ask = lastAgentAsk(row.tail ?? "");
     return {
       sessionId: row.session_id, threadId: row.thread_id, title: row.title || "Conversation",
       lastAgentActivityAt, unread: row.read_at === null || Number(row.read_at) < lastAgentActivityAt,
+      ...ask,
     };
   });
+}
+
+const PREVIEW_CHARS = 160;
+
+/**
+ * What the agent's last message asks of the reader. The question is the last
+ * sentence that ends with a question mark. Without one, the preview is the
+ * message's last sentence. Markdown markers are removed, so the text reads as
+ * plain prose in a list row.
+ */
+export function lastAgentAsk(text: string): { question?: string; preview?: string } {
+  const plain = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_#>]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!plain) return {};
+  // A sentence ends at punctuation followed by a space, so "gpt-5.6" and URLs stay whole.
+  const sentences = plain.split(/(?<=[.!?])\s+/).map(sentence => sentence.trim()).filter(Boolean);
+  const clip = (value: string) => value.length > PREVIEW_CHARS ? `${value.slice(0, PREVIEW_CHARS - 1).trimEnd()}…` : value;
+  const question = [...sentences].reverse().find(sentence => sentence.endsWith("?"));
+  if (question) return { question: clip(question) };
+  const last = sentences.at(-1);
+  return last ? { preview: clip(last) } : {};
 }

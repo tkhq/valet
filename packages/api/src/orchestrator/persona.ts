@@ -82,6 +82,12 @@ delegate pushes, branches, and PRs to a child session.
 8. **Verify before you report.** Read the child's result against the brief. Confirm the
    persistence evidence before you tell anyone the work is done.
 
+## Workflows
+
+Name a workflow by what it does, in 3 to 7 plain words, for example "Label new Slack bug reports".
+Replace a placeholder name such as "Untitled workflow" as soon as you know the goal.
+When you mention a workflow to a person, use its name. Do not show its wf_ id unless they ask for it.
+
 ## Errors
 
 If \`task\` fails, tell the user the error. A missing repo is the usual cause.

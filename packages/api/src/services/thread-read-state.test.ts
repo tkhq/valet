@@ -4,7 +4,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { sessionThreads } from "../schema/index.js";
 import type { ListThreadsResponse, WaitingThreadsResponse } from "../wire/types.js";
 import {
-  listWaitingThreads, parsePullRequestUrl, pullRequestWebhookState, recordThreadPullRequest,
+  lastAgentAsk, listWaitingThreads, parsePullRequestUrl, pullRequestWebhookState, recordThreadPullRequest,
   setPullRequestState, wireThreadPullRequests,
 } from "./thread-read-state.js";
 
@@ -34,6 +34,15 @@ it("parses only github.com pull request URLs", () => {
     .toEqual({ url: "https://github.com/a/b/pull/1", state: "merged" });
   expect(pullRequestWebhookState({ pull_request: { html_url: "https://github.com/a/b/pull/1", state: "closed", merged: false } })?.state).toBe("closed");
   expect(pullRequestWebhookState({ action: "opened" })).toBeNull();
+});
+
+it("finds the question an agent message asks, or its last sentence", () => {
+  expect(lastAgentAsk("The bump is open as **acme/app#8**. Should I merge it once CI passes?\n\nI can also wait."))
+    .toEqual({ question: "Should I merge it once CI passes?" });
+  expect(lastAgentAsk("Merged as acme/app#12 with gpt-5.6. The lockfile pins typebox again."))
+    .toEqual({ preview: "The lockfile pins typebox again." });
+  expect(lastAgentAsk("```ts\nwhy?\n```\nDone.")).toEqual({ preview: "Done." });
+  expect(lastAgentAsk("")).toEqual({});
 });
 
 it("marks a thread unread after an agent message and read once the viewer opens it", async () => {
@@ -97,7 +106,7 @@ it("lists threads that wait on a reply until someone replies or archives them", 
   expect(res.status).toBe(200);
   const body = await res.json() as WaitingThreadsResponse;
   expect(body.threads.map(t => t.threadId)).toEqual([waiting.id]);
-  expect(body.threads[0]).toMatchObject({ unread: true });
+  expect(body.threads[0]).toMatchObject({ unread: true, question: "Which one first?" });
 
   await api.providers.db.update(sessionThreads).set({ archivedAt: now }).where(sql`id = ${waiting.id}`);
   expect(await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user")).toEqual([]);

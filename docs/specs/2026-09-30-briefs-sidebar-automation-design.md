@@ -29,7 +29,14 @@ Dismiss also archives the brief's threads that belong to the workspace. A thread
 
 ## Needs attention
 
-**Needs attention** also lists threads that wait on a reply (`GET /api/workspaces/:workspace/waiting`). A thread waits when a person acted in it, the newest agent message came after that action, and nobody replied or archived it since. A thread with queued, running, or gated work is left out, because active work lists it. The window is 14 days. An unread dot marks a waiting thread that the viewer has not opened since the agent wrote.
+A thread waits on a reply (`GET /api/workspaces/:workspace/waiting`) when a person acted in it, the newest agent message came after that action, and nobody replied or archived it since. A thread with queued, running, or gated work is left out, because active work lists it. The window is 14 days.
+
+Each waiting thread carries what the agent's last message asks. The question is its last sentence that ends with a question mark, as plain text. Without one, the row shows the message's last sentence.
+
+- A thread whose agent asked a question is listed under **Needs attention**, with "Valet asks:" and the question.
+- Other waiting threads are listed under **Unanswered replies**, with the last sentence.
+
+Each row has **Reply**, which opens the thread, and **Done**, which archives it. An unread dot marks a thread the viewer has not opened since the agent wrote.
 
 ## Thread sidebar
 
@@ -40,6 +47,8 @@ A thread that created a pull request shows its state: open, merged, or closed. T
 Each thread row shows its origin: Slack, another channel, web chat, an automation, or another agent. The origin comes from the engine thread key (`packages/web/src/lib/thread-origin.ts`). The sidebar options menu has **Show threads from**, with a count for each origin. An active filter shows above the list with a **Clear** link. The browser remembers the choice.
 
 ## Automation
+
+The agent names a workflow by what it does, in 3 to 7 plain words, and replaces a placeholder name such as "Untitled workflow" as soon as it knows the goal. It calls workflows by name, not by their `wf_` ids. A new workflow's first message is exactly what the person typed. The editor conversation's system context carries the workflow id and the build instructions.
 
 The **Workflows** nav item and page heading are now **Automation**. URLs stay under `/workflows`.
 

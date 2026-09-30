@@ -5348,6 +5348,10 @@ export interface WaitingThread {
   lastAgentActivityAt: number;
   /** The viewer has not opened the thread since that message. */
   unread: boolean;
+  /** The last question the agent asked in that message, as plain text. */
+  question?: string;
+  /** Without a question, the message's last sentence, as plain text. */
+  preview?: string;
 }
 /** `GET /api/workspaces/:workspace/waiting` */
 export interface WaitingThreadsResponse {

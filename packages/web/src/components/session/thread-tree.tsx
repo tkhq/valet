@@ -104,8 +104,6 @@ function loadStoredOriginFilter(): ThreadOriginBucket {
   return "all";
 }
 
-/** Where a thread came from, as a small row icon: Slack, another channel,
- * web chat, an automation, or another agent. */
 const PR_ICONS = {
   open: { Icon: GitPullRequest, label: "Pull request open", className: "text-emerald-600" },
   merged: { Icon: GitMerge, label: "Pull request merged", className: "text-violet-500" },
@@ -125,6 +123,8 @@ export function ThreadPullRequestIcon({ pr, count }: { pr: ThreadPullRequest; co
   );
 }
 
+/** Where a thread came from, as a small row icon: Slack, another channel,
+ * web chat, an automation, or another agent. */
 export function ThreadOriginIcon({ thread }: { thread: Pick<ThreadSummary, "key"> }) {
   const bucket = threadOriginBucket(thread);
   const channel = threadChannelType(thread);

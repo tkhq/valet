@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { FileText, GitPullRequest, MessageSquare, ArrowUpRight, CircleAlert, LoaderCircle, CheckCheck } from "lucide-react";
 import type { ArtifactListItem, GlobalWorkflowRunSummary, SessionSummary, WaitingThread, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
-import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads } from "~/api/catch-up";
+import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads, useFinishWaitingThread } from "~/api/catch-up";
 import { useArtifacts } from "~/api/artifacts";
 import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { relativeTime } from "~/lib/relative-time";
@@ -73,6 +73,10 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   const needsYou = activeThreads.filter(row => row.state === "needs_you" || row.state === "failed");
   // Threads waiting on a reply, unless active work already lists the thread.
   const waiting = (waitingQ.data?.threads ?? []).filter(row => !activeThreadMap.has(`${row.sessionId}:${row.threadId}`));
+  // A question needs an answer. A plain reply only needs a look, so it waits in a quieter list.
+  const questions = waiting.filter(row => row.question);
+  const replies = waiting.filter(row => !row.question);
+  const finish = useFinishWaitingThread(owner);
   const inProgress = activeThreads.filter(row => row.state === "working");
   const attentionRuns = runs.filter(row => runCategory(row) === "attention");
   const progressRuns = runs.filter(row => runCategory(row) === "progress");
@@ -92,10 +96,13 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
     {errors.map(({ label, query }) => <ErrorRow key={label}>Could not load {label}. <button className="underline" onClick={() => void query.refetch()}>Retry</button></ErrorRow>)}
     {loading && <LoadingRow label="Loading work…" />}
     {incomplete && <p className="text-xs text-muted">More active work is available. Use the paging controls below to see it.</p>}
-    {(needsYou.length + attentionRuns.length + waiting.length > 0) && <Section title="Needs attention" icon={<CircleAlert className="h-4 w-4 text-amber" />} count={needsYou.length + attentionRuns.length + waiting.length}>
+    {(needsYou.length + attentionRuns.length + questions.length > 0) && <Section title="Needs attention" icon={<CircleAlert className="h-4 w-4 text-amber" />} count={needsYou.length + attentionRuns.length + questions.length}>
       {needsYou.map(row => <ActiveRow key={row.id} row={row} />)}
-      {waiting.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} />)}
+      {questions.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
       {attentionRuns.map(row => <RunRow key={row.runId} row={row} prompt={gates.error ? undefined : gates.data?.items.find(item => item.runId === row.runId && item.owner.type === owner.ownerType && item.owner.id === owner.ownerId)?.gate.prompt} />)}
+    </Section>}
+    {replies.length > 0 && <Section title="Unanswered replies" icon={<MessageSquare className="h-4 w-4 text-muted" />} count={replies.length}>
+      {replies.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
     </Section>}
     {(inProgress.length + progressRuns.length > 0) && <Section title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} count={inProgress.length + progressRuns.length}>
       {inProgress.map(row => <ActiveRow key={row.id} row={row} />)}
@@ -128,14 +135,25 @@ function Section({ title, count, icon, children }: { title: string; count: numbe
 function ActiveRow({ row }: { row: WorkspaceActiveWorkItem }) {
   return <div className="flex flex-wrap items-center gap-3 px-4 py-3"><Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title || "Untitled thread"}</Link><RunStateBadge state={row.state} /><span className="text-xs text-muted">{relativeTime(row.updatedAt)}</span></div>;
 }
-function WaitingRow({ row }: { row: WaitingThread }) {
-  return <div className="flex flex-wrap items-center gap-3 px-4 py-3">
-    {row.unread && <span role="img" aria-label="Unread" className="h-2 w-2 shrink-0 rounded-full bg-blue-500" />}
-    <Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title}</Link>
-    <Badge variant="warning">Waiting on you</Badge>
-    <span className="text-xs text-muted">{relativeTime(row.lastAgentActivityAt)}</span>
+function WaitingRow({ row, onDone }: { row: WaitingThread; onDone: () => void }) {
+  const detail = row.question ?? row.preview;
+  return <div className="flex items-start gap-3 px-4 py-3">
+    <span className="mt-1.5 h-2 w-2 shrink-0">{row.unread && <span role="img" aria-label="Unread" className="block h-2 w-2 rounded-full bg-blue-500" />}</span>
+    <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-baseline gap-x-2">
+        <Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="min-w-0 break-words text-sm font-medium hover:underline">{row.title}</Link>
+        <span className="text-xs text-muted">{relativeTime(row.lastAgentActivityAt)}</span>
+      </div>
+      {detail && <p className="mt-0.5 break-words text-sm text-muted">{row.question ? <span className="font-medium text-ink">Valet asks: </span> : null}{detail}</p>}
+    </div>
+    <div className="flex shrink-0 items-center gap-2">
+      <Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="rounded-md border border-line px-2 py-1 text-xs font-medium text-ink hover:bg-ink-wash">Reply</Link>
+      <button type="button" onClick={onDone} title="Archive this thread. It leaves this list and the sidebar." aria-label={`Done with ${row.title}`}
+        className="rounded-md px-2 py-1 text-xs text-muted hover:bg-ink-wash hover:text-ink">Done</button>
+    </div>
   </div>;
 }
+
 function SessionRow({ row }: { row: SessionSummary }) {
   return <div className="flex flex-wrap items-center gap-3 px-4 py-3"><Link to="/sessions/$sessionId" params={{ sessionId: row.id }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title || "Untitled work"}</Link><RunStateBadge state={row.runState} /><span className="text-xs text-muted">{relativeTime(row.lastActivityAt)}</span></div>;
 }

@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing } from "@valet/api/wire";
+import type { DismissWorkspaceBriefingResponse, WaitingThreadsResponse, WorkspaceBriefing } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
 
 export const qkCatchUp = {
@@ -48,6 +48,23 @@ export function useWaitingThreads(owner: OwnerFilter) {
     queryKey: qkCatchUp.waiting(owner),
     queryFn: () => api.getWaitingThreads(owner),
     refetchInterval: 10_000,
+  });
+}
+
+/** Marks a waiting thread done by archiving it. It leaves the list at once. */
+export function useFinishWaitingThread(owner: OwnerFilter) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (thread: { sessionId: string; threadId: string }) => api.patchThread(thread.sessionId, thread.threadId, { archived: true }),
+    onMutate: (thread) => {
+      qc.setQueryData<WaitingThreadsResponse>(qkCatchUp.waiting(owner), (current) => current && ({
+        threads: current.threads.filter((row) => row.threadId !== thread.threadId),
+      }));
+    },
+    onSettled: (_result, _error, thread) => {
+      void qc.invalidateQueries({ queryKey: qkCatchUp.waiting(owner) });
+      void qc.invalidateQueries({ queryKey: ["sessions", thread.sessionId, "threads"] });
+    },
   });
 }
 
