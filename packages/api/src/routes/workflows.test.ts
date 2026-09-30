@@ -598,6 +598,24 @@ describe("PATCH /api/workflows/:id/model", () => {
     expect(models).toEqual([["draft", "l"], ["review", "m"]]);
   });
 
+  it("updates a definition an older pod stored with assistantId", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    const created = await createModelWorkflow(api.baseUrl);
+    // A dev-v2 pod can still write this shape during a rolling deploy.
+    await api.providers.db.update(workflowDefinitions)
+      .set({ definition: { ...MODEL_DEFINITION, assistantId: "asst_old" } })
+      .where(eq(workflowDefinitions.id, created.id));
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "l", nodeIds: ["draft"] }),
+    });
+    expect(res.status).toBe(200);
+    const [row] = await api.providers.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, created.id));
+    expect(row?.definition).not.toHaveProperty("assistantId");
+  });
+
   it("round-trips an active custom catalog model through creation, editing, and focused updates", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();

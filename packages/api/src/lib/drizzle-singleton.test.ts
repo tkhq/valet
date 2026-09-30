@@ -61,6 +61,22 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
   });
 
+  it("reactivates the session of a deleted assistant the cutover restores", async () => {
+    await restorePreviousSchema();
+    await db.query(`INSERT INTO teams(id, org_id, name, created_at) VALUES ('live-team', 'org', 'Live team', 1)`);
+    // dev-v2 deleted a team assistant by archiving it and marking its session deleted.
+    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, is_default, created_at, archived_at)
+      VALUES ('deleted-profile', 'org', 'team', 'live-team', 'deleted-profile-session', false, 1, 2)`);
+    await db.query(`INSERT INTO agent_sessions(id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
+      VALUES ('deleted-profile-session', 'u', 'org', '/', 'deleted', 'team', 'live-team', 1, 1)`);
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT archived_at FROM assistants WHERE id = 'deleted-profile'")).rows).toEqual([{ archived_at: null }]);
+    expect((await db.query("SELECT status FROM agent_sessions WHERE id = 'deleted-profile-session'")).rows).toEqual([{ status: "active" }]);
+    await db.query("DELETE FROM agent_sessions WHERE id = 'deleted-profile-session'");
+    await db.query("DELETE FROM assistants WHERE org_id = 'org'");
+    await db.query("DELETE FROM teams WHERE id = 'live-team'");
+  });
+
   it("rewrites stored workflows that use thread steps or assistantId", async () => {
     const legacy = JSON.stringify({ version: "dag/v1", assistantId: "asst_old",
       nodes: [{ id: "o", type: "thread", prompt: "hi" }], edges: [] });

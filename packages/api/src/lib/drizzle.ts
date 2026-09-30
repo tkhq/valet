@@ -132,6 +132,23 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
+  await reactivateRestoredAssistantSessions(db);
+}
+
+/** dev-v2 deleted a workspace assistant by archiving it and marking its
+ * session `deleted`. The singleton cutover restores that assistant when its
+ * owner still exists, but its session row stayed `deleted`: the reconcile
+ * sweep then treats the live runtime's sandbox as orphaned, and threads,
+ * briefs and approvals drop out of every list. The runtime session can no
+ * longer be deleted, so only rows from before the cutover match. This runs
+ * on every boot to also fix databases that were cut over before it existed.
+ * Idempotent: a live assistant with an active session is untouched. */
+export async function reactivateRestoredAssistantSessions(db: PgDb): Promise<void> {
+  await db.query(
+    `UPDATE agent_sessions s SET status = 'active', updated_at = $1 FROM assistants a
+      WHERE s.id = a.session_id AND a.archived_at IS NULL AND s.status = 'deleted'`,
+    [Date.now()],
+  );
 }
 
 /** Stored workflow JSON that the current validator rejects: a `thread` step

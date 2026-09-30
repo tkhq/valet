@@ -7,7 +7,7 @@ import { prepareWorkflowPermissions, persistWorkflowPermissions } from "./permis
  */
 import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
-import type { RunHost } from "@valet/workflow";
+import { normalizeLegacyDefinition, type RunHost } from "@valet/workflow";
 import {
   resolveTriggerInput,
   triggerDataSchema,
@@ -186,7 +186,9 @@ function rowToDefinition(row: WorkflowRow, source?: { repoFullName: string; ref:
   const summary: WorkflowDefinitionSummary = {
     id: row.id,
     name: row.name,
-    definition: row.definition,
+    // The boot sweep normalizes stored rows, but an older pod can still write
+    // the legacy shape during a rolling deploy. Every read normalizes too.
+    definition: normalizeLegacyDefinition(row.definition),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ownerType: row.ownerType,
@@ -329,7 +331,7 @@ export async function ownedDefinitionRow(
   const rows = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
-  return (await isAuthorizedFor(db, owner, row)) ? row : null;
+  return (await isAuthorizedFor(db, owner, row)) ? { ...row, definition: normalizeLegacyDefinition(row.definition) } : null;
 }
 
 /**
@@ -737,7 +739,7 @@ export async function getWorkflowVersion(
     .limit(1);
   const v = rows[0];
   if (!v) return null;
-  return { version: v.version, name: v.name, createdAt: v.createdAt, definition: v.definition };
+  return { version: v.version, name: v.name, createdAt: v.createdAt, definition: normalizeLegacyDefinition(v.definition) };
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned). */
