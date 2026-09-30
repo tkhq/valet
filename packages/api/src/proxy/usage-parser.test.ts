@@ -30,12 +30,30 @@ describe("parseUsage", () => {
     expect(r!.model).toBe("gpt-5.6-sol");
     expect(r!.providerResponseId).toBe("resp_01XYZ");
     expect(r!.usage).toEqual({
-      input: 900,
+      // input_tokens 900 minus 30 cached and 20 written — categories are disjoint.
+      input: 850,
       output: 220,
       cacheRead: 30,
       cacheWrite: 20,
       total: 1120,
     });
+  });
+
+  it("normalizes OpenAI input so category totals match the provider total", () => {
+    const body = JSON.stringify({
+      object: "response",
+      id: "resp_cache",
+      model: "gpt-5",
+      usage: {
+        input_tokens: 15_000,
+        output_tokens: 1000,
+        total_tokens: 16_000,
+        input_tokens_details: { cached_tokens: 12_000, cache_write_tokens: 3000 },
+      },
+    });
+    const r = parseUsage("openai", body);
+    // Disjoint categories: 0 + 1000 + 12000 + 3000 equals the provider total.
+    expect(r!.usage).toEqual({ input: 0, output: 1000, cacheRead: 12_000, cacheWrite: 3000, total: 16_000 });
   });
   it("returns null when no usage is present", () => {
     expect(parseUsage("anthropic", "event: ping\ndata: {}\n")).toBeNull();
@@ -64,7 +82,7 @@ describe("parseUsage", () => {
     expect(r).not.toBeNull();
     expect(r!.model).toBe("gpt-4o-mini-2024-07-18");
     expect(r!.providerResponseId).toBe("resp_ns");
-    expect(r!.usage).toEqual({ input: 9, output: 11, cacheRead: 3, cacheWrite: 2, total: 20 });
+    expect(r!.usage).toEqual({ input: 4, output: 11, cacheRead: 3, cacheWrite: 2, total: 20 });
   });
 
   it("extracts usage from a NON-streaming Chat Completions body (prompt/completion tokens)", () => {
@@ -79,7 +97,7 @@ describe("parseUsage", () => {
     expect(r).not.toBeNull();
     expect(r!.model).toBe("gpt-4o-mini-2024-07-18");
     expect(r!.providerResponseId).toBe("chatcmpl-ns");
-    expect(r!.usage).toEqual({ input: 30, output: 12, cacheRead: 8, cacheWrite: 5, total: 42 });
+    expect(r!.usage).toEqual({ input: 17, output: 12, cacheRead: 8, cacheWrite: 5, total: 42 });
   });
 
   it("extracts usage from a STREAMING Chat Completions terminal chunk", () => {
@@ -90,7 +108,7 @@ describe("parseUsage", () => {
     const r = parseUsage("openai", body, "/v1/chat/completions");
     expect(r).not.toBeNull();
     expect(r!.model).toBe("gpt-5");
-    expect(r!.usage).toEqual({ input: 5, output: 7, cacheRead: 2, cacheWrite: 1, total: 12 });
+    expect(r!.usage).toEqual({ input: 2, output: 7, cacheRead: 2, cacheWrite: 1, total: 12 });
   });
 
   it("extracts usage from a legacy Completions body", () => {

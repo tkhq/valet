@@ -146,7 +146,7 @@ The model id is read from the request body (both APIs carry `model` in the reque
 - **OpenAI Responses (SSE):** the terminal `response.completed` event carries `response.usage` (`input_tokens`, `output_tokens`, `total_tokens`, `input_tokens_details.cached_tokens`, and `input_tokens_details.cache_write_tokens`). The model id is in `response.model`.
 - **Non-streaming JSON** (a harness may request `stream:false`): the same fields live on the single JSON body.
 
-OpenAI includes cache-read and cache-write tokens in its input count. Pricing subtracts both cache classes from ordinary input and prices each class with its catalog rate. Anthropic reports its cache classes separately, so its input count stays unchanged.
+OpenAI includes cache-read and cache-write tokens in its input count. The parser subtracts both cache classes and persists only uncached input, so every provider stores disjoint usage categories and dashboard category sums match provider totals. Pricing prices each class with its catalog rate. Anthropic reports its cache classes separately, so its input count stays unchanged.
 
 **Pricing — one function, not a second cost path (finding 3).** The engine does not expose a standalone `price(model, usage)`; it derives cost inside the agent loop (`thread.ts`) from pi-ai's `MessageUsage`. So this spec extracts a pure `priceUsage(model, usage): number | null` helper (in `packages/shared` or a small `packages/api/src/lib/pricing.ts`) that both the recorder and, ideally, the engine call — otherwise the gateway and the engine price the same tokens on two code paths that drift, and the "one cost definition" holds only at the view layer, not in the numbers. The helper reads the same model-catalog/pi-ai rate table.
 

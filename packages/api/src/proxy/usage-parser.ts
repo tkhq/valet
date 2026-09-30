@@ -153,5 +153,12 @@ export function parseUsage(
     usage.total = openaiReportedTotal || usage.input + usage.output;
   }
 
+  // OpenAI counts both cache classes inside input; Anthropic reports them
+  // separately. Persist only uncached input so every provider stores
+  // disjoint categories whose sum equals the total.
+  if (kind === "openai") {
+    usage.input = Math.max(0, usage.input - usage.cacheRead - usage.cacheWrite);
+  }
+
   return { usage, model, providerResponseId };
 }
