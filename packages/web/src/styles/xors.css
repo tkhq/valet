@@ -6,7 +6,8 @@
  *           Vivid Orange #E85328, Light Beige #F7EED7, Paper White #FAF8EA.
  *           Use them in a 60:30:10 ratio (paper : ink : orange). Orange is
  *           the highlight color only, never a background.
- *   Type:   Instrument Serif for headlines, Courier New for body copy.
+ *   Type:   Instrument Serif for headlines, Courier New for body copy. This
+ *           deployment sets body copy in Instrument Sans for readability.
  *
  * This file overrides the DEFAULT palette from `../theme.css`. It uses the
  * same selectors at the same specificity and loads after `theme.css`, so it
@@ -33,6 +34,25 @@
   font-display: swap;
   src: url(https://fonts.gstatic.com/s/instrumentserif/v5/jizBRFtNs2ka5fXjeivQ4LroWlx-6zsTjnTLgNuZ5w.woff2) format("woff2");
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* Instrument Sans (SIL Open Font License), served by Google Fonts. It pairs
+   with Instrument Serif and reads far better at UI sizes than Courier New. */
+@font-face {
+  font-family: "Instrument Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/instrumentsans/v4/pxiTypc9vsFDm051Uf6KVwgkfoSxQ0GsQv8ToedPibnr0She1ZuWi3hKpA.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Instrument Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/instrumentsans/v4/pxiTypc9vsFDm051Uf6KVwgkfoSxQ0GsQv8ToedPibnr0SZe1ZuWi3g.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 /* ── Light: Paper White ground, Ink Black type, Vivid Orange accent ───── */
@@ -117,10 +137,12 @@
 /* ── Type ──────────────────────────────────────────────────────────────
    Tailwind's `font-sans` and `font-display` utilities are one class each
    (0,1,0) and come later in the bundle, so these rules add `:root` to
-   outrank them. Code keeps its own monospace stack (`font-mono`). */
+   outrank them. Code keeps its own monospace stack (`font-mono`).
+   Body copy uses Instrument Sans, not the brand's Courier New: Courier's thin
+   strokes were hard to read at interface sizes, on dark ground most of all. */
 :root body,
 :root .font-sans {
-  font-family: "Courier New", Courier, ui-monospace, monospace;
+  font-family: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 :root .font-display {
