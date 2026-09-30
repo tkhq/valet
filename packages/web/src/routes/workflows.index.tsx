@@ -66,7 +66,7 @@ export function WorkflowsIndexPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
-              Workflows
+              Automation
             </h1>
             <WorkspaceClause />
           </div>

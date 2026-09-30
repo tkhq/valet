@@ -163,13 +163,13 @@ describe("TopNav", () => {
     expect(screen.queryByRole("link", { name: "Artifacts" })).toBeNull();
   });
 
-  it("renders a Skills link between Workflows and Integrations", async () => {
+  it("renders a Skills link between Automation and Integrations", async () => {
     renderNav();
     const link = await screen.findByRole("link", { name: "Skills" });
     expect(link.getAttribute("href")).toBe("/skills");
 
     const labels = screen.getAllByRole("link").map((el) => el.textContent);
-    expect(labels.indexOf("Skills")).toBeGreaterThan(labels.indexOf("Workflows"));
+    expect(labels.indexOf("Skills")).toBeGreaterThan(labels.indexOf("Automation"));
     expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
   });
 
@@ -187,7 +187,7 @@ describe("TopNav", () => {
     expect(labels).toEqual([
       "Threads",
       "Memory",
-      "Workflows",
+      "Automation",
       "Events",
       "Usage",
       "Skills",
