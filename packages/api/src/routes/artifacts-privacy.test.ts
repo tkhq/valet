@@ -134,6 +134,9 @@ describe("team artifact privacy", () => {
     const widened = await request(`/${row.id}`, "test-member", "PATCH", { audience: "organization" });
     expect(widened.status).toBe(200);
     expect(await widened.json()).toMatchObject({ audience: "organization", canChangeAudience: true });
+    const adminList = await request("", "test-admin");
+    const adminRow = (await adminList.json() as ListArtifactsResponse).artifacts.find((item) => item.id === row.id);
+    expect(adminRow).toMatchObject({ audience: "organization", canChangeAudience: false });
 
     const read = await request(`/${row.token}`, "org-viewer");
     expect(read.status).toBe(200);
@@ -198,6 +201,12 @@ describe("team artifact privacy", () => {
     const { db, row, request } = await setup();
     await db.update(artifacts).set({ teamAudience: "organization", revokedAt: Date.now() })
       .where(eq(artifacts.id, row.id));
+
+    const memberList = await request("", "local-user");
+    const memberRow = (await memberList.json() as ListArtifactsResponse).artifacts.find((item) => item.id === row.id);
+    expect(memberRow).toMatchObject({ revoked: true, canChangeAudience: false });
+    expect((await request(`/${row.id}`, "local-user", "PATCH", { audience: "team" })).status).toBe(404);
+    expect(await getArtifactById(db, row.id)).toMatchObject({ teamAudience: "organization" });
 
     for (const path of ["", "?ownerType=team&ownerId=private-team"]) {
       const response = await request(path, "org-viewer");
@@ -272,7 +281,8 @@ describe("team artifact privacy", () => {
   it("requires live org membership even when team membership and deployment identity remain", async () => {
     const { db, row, comment, request } = await setup();
     await db.update(orgs).set({ allowPublicArtifacts: true }).where(eq(orgs.id, "local-org"));
-    await db.update(artifacts).set({ visibility: "public" }).where(eq(artifacts.id, row.id));
+    await db.update(artifacts).set({ visibility: "public", teamAudience: "organization" })
+      .where(eq(artifacts.id, row.id));
     await db.delete(orgMembers).where(eq(orgMembers.userId, "local-user"));
     await db.delete(orgMembers).where(eq(orgMembers.userId, "test-member"));
     for (const user of ["local-user", "test-member"]) {

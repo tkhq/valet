@@ -191,7 +191,8 @@ share route can grow a decision gate later.
 ### Management (authed, session or API key)
 
 - `GET /api/artifacts` — list the caller's artifacts (org admins also see
-  the org's personal artifacts). All team rows require current membership.
+  the org's personal artifacts). Team-only rows require current team membership.
+  Active organization-audience rows appear to current organization members.
 - `POST /api/artifacts/share` (authed variant) `{ path }` — human-initiated
   share from the memory viewer.
 - `PATCH /api/artifacts/:id` `{ visibility }` — widen or narrow. Widening
@@ -390,9 +391,9 @@ The gallery offers Revoke only to the publishing user or an organization admin, 
 
 ## Team artifact privacy (2026-09-10)
 
-Team ownership takes precedence over stored visibility. Every human token read requires login and live rows in both `org_members` and `team_members` for the artifact's organization and team. The deployment organization on the user object does not prove membership. An org admin or the publishing actor has no membership exception. Existing team rows marked `public` follow this rule, even when public artifacts are enabled.
+Team ownership takes precedence over stored visibility. Team-only token reads require login and live rows in both `org_members` and `team_members`. Organization-audience token reads require live organization membership and a live owning team. The deployment organization on the user object does not prove membership. An org admin or the publishing actor has no exception for team-only reads. Existing team rows marked `public` follow these rules, even when public artifacts are enabled.
 
-The same gate protects source bytes, rendered pages, comments, replies, thread resolution, version history, pinning, revocation, and artifact lists. Downloads use the authorized token response; there is no separate download endpoint. Comment delivery also requires access to a source session in the same organization. Nonmembers and foreign-org callers receive 404. Signed-out token readers receive 401.
+The audience gate protects source bytes, rendered pages, comments, replies, and thread resolution. Team membership still protects version history, pinning, revocation, and explicit owner lists. Downloads use the authorized token response; there is no separate download endpoint. Comment delivery also requires access to a source session in the same organization. Unauthorized and foreign-org callers receive 404. Signed-out token readers receive 401.
 
 Publish, memory share, and revoke-by-path validate the team scope in the service. Human callers require both live memberships. Verified internal tools can act as their owning team. A team principal never inherits its actor's or key creator's user authority. Team API keys remain excluded from artifact management and private token reads.
 

@@ -156,7 +156,8 @@ async function toListItems(
       canManage: row.ownerType !== "team"
         ? row.actorUserId === user.id || orgAdmin
         : teamMember && (row.actorUserId === user.id || orgAdmin),
-      canChangeAudience: await canChangeTeamArtifactAudience(db, row, user.id),
+      canChangeAudience: row.revokedAt === null && teamMember &&
+        await canChangeTeamArtifactAudience(db, row, user.id),
     });
   }));
 }

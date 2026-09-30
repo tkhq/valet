@@ -517,6 +517,9 @@ export async function listArtifacts(
   db: AppDb,
   caller: { id: string; orgId: string; orgAdmin: boolean; mine?: boolean },
 ): Promise<ArtifactSummaryRow[]> {
+  const orgMember = exists(db.select({ userId: orgMembers.userId }).from(orgMembers).where(and(
+    eq(orgMembers.orgId, caller.orgId), eq(orgMembers.userId, caller.id),
+  )));
   const liveTeam = exists(db.select({ id: teams.id }).from(teams).where(and(
     eq(teams.id, artifacts.ownerId), eq(teams.orgId, caller.orgId),
   )));
@@ -539,7 +542,7 @@ export async function listArtifacts(
         caller.mine ? eq(artifacts.actorUserId, caller.id) : undefined,
         or(
           teamMember,
-          and(eq(artifacts.teamAudience, "organization"), isNull(artifacts.revokedAt), liveTeam),
+          and(eq(artifacts.teamAudience, "organization"), isNull(artifacts.revokedAt), orgMember, liveTeam),
         ),
       ),
     ),
@@ -613,7 +616,9 @@ export async function setTeamArtifactAudience(
 ): Promise<ArtifactRow> {
   return db.transaction(async (tx) => {
     const existing = await getArtifactById(tx, id);
-    if (!existing || existing.ownerType !== "team") throw new NotFoundError("artifact", id);
+    if (!existing || existing.ownerType !== "team" || existing.revokedAt !== null) {
+      throw new NotFoundError("artifact", id);
+    }
 
     await lockTeamForOwnership(tx, existing.ownerId);
     const [orgMembership] = await tx.select({ role: orgMembers.role }).from(orgMembers).where(and(
