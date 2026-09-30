@@ -20,6 +20,7 @@ Workspace lists and creation use the existing personal or team runtime. New work
 | Subscribe to thread | The existing automation form accepts a Slack thread link and sets exact channel and parent timestamp filters. It does not create an extra follow binding. |
 | Routing and authorization | Tests cover fanout, event deduplication, membership changes, org isolation, team keys, sibling decisions, workflow ownership, and personal delivery precedence. |
 | Restart and compatibility | On-disk database reopen preserves identity, history, follow bindings, and gate addresses. Engine child-process SIGKILL tests cover pending decisions and queues. Legacy and thread addresses expose compatible history and authority. |
+| Archive with a pending approval | Archiving a thread withdraws its pending approvals as cancelled, so the agent does not stay suspended on a hidden thread. A caller who cannot answer the approval gets 409 and is told to have it answered first. |
 | Child approvals | Connected tests route a child gate through its parent audience to a Slack-shaped transport, restore the callback after host restart, deny an outsider, and resolve only the child gate. |
 
 Configuration review is separate from human approval checkpoints and reusable action permissions. Workflow grants remain workflow-scoped. Proposals never grant access or enable routing. Repeated proposal keys return the existing record without changing it or creating duplicates.

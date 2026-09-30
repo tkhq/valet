@@ -515,6 +515,23 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     }
   }
 
+  // Archiving hides the thread, so an approval pending on it would suspend
+  // the agent with nobody left to answer (TKAI-260). Archive withdraws those
+  // approvals as cancelled, which only someone who may answer them can do.
+  if (body.archived === true) {
+    const pending = (await engineSession.pendingDecisionGates())
+      .filter((gate) => gate.threadId === thread.id && gate.status === "pending");
+    if (pending.length > 0) {
+      if (!(await canAnswerDecision(c, session))) {
+        return c.json(
+          { error: "This thread is waiting on an approval. Ask someone who can answer it to approve or deny it, then archive the thread." },
+          409,
+        );
+      }
+      for (const gate of pending) await engineSession.withdrawDecision(gate.id, "cancel");
+    }
+  }
+
   // The mirror row can be missing before auto-title runs.
   const wantsArchived = body.archived !== undefined;
   const wantsTitle = nextTitle !== undefined;

@@ -45,6 +45,26 @@ describe("thread addressing compatibility", () => {
     const archived = await fetch(`${api.baseUrl}/api/threads?archived=1`);
     expect(await archived.json()).toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
   });
+  it("withdraws a pending approval when its thread is archived (TKAI-260)", async () => {
+    api = await bootTestApi();
+    const thread = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json() as { id: string; sessionId: string };
+    const gate = {
+      id: "archive-gate", sessionId: thread.sessionId, threadId: thread.id,
+      queueItemId: "q-archive", resumeKey: "archive", ordinal: 0, type: "approval" as const,
+      title: "Approve action?", actions: [{ id: "approve", label: "Approve" }],
+      status: "pending" as const, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    await api.providers.engineStore.saveDecisionGate(thread.sessionId, thread.id, gate);
+    api.providers.engineHost.evictCache(thread.sessionId);
+    // Archive used to flip archivedAt only, and the agent stayed suspended
+    // on a gate nobody would see again.
+    const archived = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(thread.sessionId)}/threads/${thread.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ archived: true }),
+    });
+    expect(archived.status).toBe(200);
+    expect((await api.providers.engineStore.getDecisionGate(thread.sessionId, gate.id))?.status).toBe("withdrawn");
+  });
+
   it("keeps decisions inside their URL thread and denies team-key policy grants", async () => {
     api = await bootTestApi({ auth: true });
     const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "thread-key@nowhere.test", name: "Admin", password: "correct-horse-battery" }) });
