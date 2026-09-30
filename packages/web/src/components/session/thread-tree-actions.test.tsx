@@ -36,6 +36,7 @@ let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
 let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 
+const markThreadsReadMutate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
@@ -65,6 +66,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetThreadArchived: () => ({ mutateAsync: setArchivedMutateAsync, isPending: false }),
     useRenameThread: () => ({ mutateAsync: renameMutateAsync, isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: replaceMutateAsync, isPending: false }),
+    useMarkThreadsRead: () => ({ mutate: markThreadsReadMutate, isPending: false }),
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
     // effect never touches the store. Gates enter through `pendingGates`.
     useDecisions: () => ({ data: undefined, isLoading: false, error: null }),
@@ -598,6 +600,27 @@ describe("ThreadTree — origin", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
     expect(screen.getByText("Typed here")).toBeTruthy();
+  });
+});
+
+describe("ThreadTree — unread and pull requests", () => {
+  it("dots unread threads, shows pull request state, and marks all read", async () => {
+    const user = userEvent.setup();
+    markThreadsReadMutate.mockClear();
+    threads = [
+      thread({ id: "home", title: "Home", key: "default" }),
+      thread({ id: "replied", title: "Agent replied", lastUserActivityAt: 10, lastAgentActivityAt: 20,
+        pullRequests: [{ url: "https://github.com/acme/app/pull/7", repo: "acme/app", number: 7, state: "merged" }] }),
+      thread({ id: "read", title: "Already read", lastUserActivityAt: 10, lastAgentActivityAt: 20, readAt: 30,
+        pullRequests: [{ url: "https://github.com/acme/app/pull/8", repo: "acme/app", number: 8, state: "open" }] }),
+    ];
+    renderTree();
+    expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "Pull request merged: acme/app#7" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Pull request open: acme/app#8" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Sidebar options" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Mark all as read" }));
+    expect(markThreadsReadMutate).toHaveBeenCalledWith({});
   });
 });
 

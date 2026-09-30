@@ -6,6 +6,7 @@ export const qkCatchUp = {
   briefings: (owner: OwnerFilter) => ["workspace-briefings", owner.ownerType, owner.ownerId] as const,
   work: (owner: OwnerFilter) => ["workspace-work", owner.ownerType, owner.ownerId] as const,
   active: (owner: OwnerFilter) => ["workspace-active-work", owner.ownerType, owner.ownerId] as const,
+  waiting: (owner: OwnerFilter) => ["workspace-waiting", owner.ownerType, owner.ownerId] as const,
   outcomes: (owner: OwnerFilter) => ["workspace-outcomes", owner.ownerType, owner.ownerId] as const,
   workArtifacts: (owner: OwnerFilter, sessionId: string, threadId?: string) =>
     ["artifacts", "work", owner.ownerType, owner.ownerId, sessionId, threadId] as const,
@@ -37,6 +38,15 @@ export function useWorkspaceActiveWork(owner: OwnerFilter) {
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) => api.listWorkspaceActiveWork(owner, pageParam),
     getNextPageParam: page => page.nextCursor ?? undefined,
+    refetchInterval: 10_000,
+  });
+}
+
+/** Threads whose newest agent message came after the last human action. */
+export function useWaitingThreads(owner: OwnerFilter) {
+  return useQuery({
+    queryKey: qkCatchUp.waiting(owner),
+    queryFn: () => api.getWaitingThreads(owner),
     refetchInterval: 10_000,
   });
 }

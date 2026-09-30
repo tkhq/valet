@@ -19,6 +19,7 @@ const createThreadMutateAsync = vi.fn().mockResolvedValue({
   createdAt: Date.now(),
 });
 
+const markThreadsReadMutate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
@@ -46,6 +47,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetThreadArchived: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useRenameThread: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    useMarkThreadsRead: () => ({ mutate: markThreadsReadMutate, isPending: false }),
     // Session default model for the pin chip.
     useSession: () => ({ data: undefined, isLoading: false, error: null }),
     // Keeps the gate seed (usePendingGatesSeed) off the real query client.

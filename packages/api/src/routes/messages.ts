@@ -32,6 +32,7 @@ import type {
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
+  MarkThreadsReadRequest,
   Message,
   MessagePart,
   MessageAuthor,
@@ -62,6 +63,8 @@ import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { listThreadActivity, markThreadsRead, recheckOpenPullRequests } from "../services/thread-read-state.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -372,8 +375,29 @@ messagesRouter.get("/:id/threads", async (c) => {
         t.reasoning() ?? null,
       ),
     );
+  const activity = await listThreadActivity(db, c.var.user.id, session.id, summaries.map((t) => t.id));
+  for (const summary of summaries) Object.assign(summary, activity.get(summary.id));
+  const { engineCredentials, encryptionKey } = c.var.providers;
+  void recheckOpenPullRequests({ db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) }, db, session.id)
+    .catch((err) => console.error("[threads] pull request recheck failed", err));
   const body: ListThreadsResponse = { threads: summaries };
   return c.json(body);
+});
+
+/** Marks threads read for the caller. With no ids, marks every thread in the session. */
+messagesRouter.post("/:id/threads/read", async (c) => {
+  const result = await loadEngineSession(c);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+  const body = await c.req.json<MarkThreadsReadRequest>().catch((): MarkThreadsReadRequest => ({}));
+  const known = new Set(engineSession.listThreads().map((t) => t.id));
+  if (body.threadIds !== undefined && !Array.isArray(body.threadIds)) {
+    return c.json({ error: "threadIds must be an array of thread ids." }, 400);
+  }
+  const ids = body.threadIds === undefined ? [...known]
+    : body.threadIds.filter((id): id is string => typeof id === "string" && known.has(id));
+  await markThreadsRead(c.var.providers.db, c.var.user.id, session.id, ids);
+  return c.body(null, 204);
 });
 
 // ── Commands ────────────────────────────────────────────────────────────────

@@ -366,6 +366,26 @@ export function useSetThreadReasoning(sessionId: string) {
   });
 }
 
+/** Marks threads read for the viewer; with no ids, every thread in the session.
+ * The list shows them read at once; the server keeps the later timestamp. */
+export function useMarkThreadsRead(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { threadIds?: string[] }>({
+    mutationFn: ({ threadIds }) => api.markThreadsRead(sessionId, threadIds),
+    onMutate: ({ threadIds }) => {
+      const at = Date.now();
+      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+        ...current,
+        threads: current.threads.map((thread) =>
+          !threadIds || threadIds.includes(thread.id) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread),
+      }));
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["workspace-waiting"] });
+    },
+  });
+}
+
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({

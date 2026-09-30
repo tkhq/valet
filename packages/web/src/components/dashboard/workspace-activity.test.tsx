@@ -7,7 +7,7 @@ import { api, type OwnerFilter } from "~/api/client";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 let owner: OwnerFilter = { ownerType: "user", ownerId: "u" };
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
-vi.mock("~/api/client", () => ({ api: { listWork: vi.fn(), listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
+vi.mock("~/api/client", () => ({ api: { listWork: vi.fn(), listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
 beforeEach(() => {
   vi.clearAllMocks(); owner = { ownerType: "user", ownerId: "u" };
   vi.mocked(api.listWork).mockResolvedValue({ sessions: [{ id: "s", title: "TKAI-42 · Route events", workspace: "", status: "active", kind: "code", runState: "idle", createdAt: 1, updatedAt: 1, lastActivityAt: 1, owner: { type: "user", id: "u" } }], nextCursor: null });
@@ -86,4 +86,19 @@ it("only accepts explicit HTTP result links", () => {
   expect(safeResultUrl("data:text/html,test")).toBeUndefined();
   expect(safeResultUrl("/relative/path")).toBeUndefined();
   expect(safeResultUrl("https://example.com/report")).toBe("https://example.com/report");
+});
+it("lists threads waiting on a reply under Needs attention, once per thread", async () => {
+  vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads: [
+    { sessionId: "s", threadId: "ask", title: "Pick the first workflow", lastAgentActivityAt: 5, unread: true },
+    { sessionId: "s", threadId: "busy", title: "Also active", lastAgentActivityAt: 4, unread: false },
+  ] });
+  vi.mocked(api.listWorkspaceActiveWork).mockResolvedValue({ items: [
+    { id: "q", sessionId: "s", threadId: "busy", title: "Also active", state: "needs_you", updatedAt: 6 },
+  ], nextCursor: null });
+  setup();
+  const attention = await screen.findByRole("region", { name: "Needs attention" });
+  expect((await within(attention).findByRole("link", { name: "Pick the first workflow" })).getAttribute("href")).toBe("/threads/ask");
+  expect(within(attention).getByText("Waiting on you")).toBeTruthy();
+  expect(within(attention).getByRole("img", { name: "Unread" })).toBeTruthy();
+  expect(within(attention).getAllByRole("link", { name: "Also active" })).toHaveLength(1);
 });

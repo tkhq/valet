@@ -11,7 +11,7 @@ vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
 vi.mock("~/api/settings", () => ({ useMe: () => ({ error: null }) }));
 vi.mock("~/components/new-session-dialog", () => ({ NewSessionDialog: () => null }));
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: ReactNode }) => <a>{children}</a> }));
-vi.mock("~/api/client", () => ({ api: { getWorkspaceBriefings: vi.fn(), listWork: vi.fn(), listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
+vi.mock("~/api/client", () => ({ api: { getWorkspaceBriefings: vi.fn(), listWork: vi.fn(), listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
 function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{children}</QueryClientProvider>;
 }

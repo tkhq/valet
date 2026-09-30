@@ -17,7 +17,11 @@ import {
   PanelLeft,
   Bell,
   Check,
+  CheckCheck,
   ChevronDown,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
   MessageSquare,
   MoreHorizontal,
   Pencil,
@@ -33,6 +37,7 @@ import type {
   GetModelTiersResponse,
   ModelInfo,
   ChildWorkSummary,
+  ThreadPullRequest,
   ThreadSummary,
 } from "@valet/api/wire";
 import {
@@ -41,9 +46,11 @@ import {
   useRenameThread,
   useReplaceSandbox,
   useSession,
+  useMarkThreadsRead,
   useSetThreadArchived,
   useThreads,
 } from "~/api/queries";
+import { isThreadUnread, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { useThreadProjects } from "~/lib/thread-projects";
@@ -99,6 +106,25 @@ function loadStoredOriginFilter(): ThreadOriginBucket {
 
 /** Where a thread came from, as a small row icon: Slack, another channel,
  * web chat, an automation, or another agent. */
+const PR_ICONS = {
+  open: { Icon: GitPullRequest, label: "Pull request open", className: "text-emerald-600" },
+  merged: { Icon: GitMerge, label: "Pull request merged", className: "text-violet-500" },
+  closed: { Icon: GitPullRequestClosed, label: "Pull request closed", className: "text-muted" },
+} as const;
+
+/** The state of the pull request this thread created: open, merged, or closed. */
+export function ThreadPullRequestIcon({ pr, count }: { pr: ThreadPullRequest; count: number }) {
+  const { Icon, label, className } = PR_ICONS[pr.state];
+  const text = `${label}: ${pr.repo}#${pr.number}${count > 1 ? ` (${count} pull requests)` : ""}`;
+  return (
+    <Tooltip content={text}>
+      <span role="img" aria-label={text} className="ml-1 inline-flex h-5 w-5 shrink-0 items-center justify-center">
+        <Icon aria-hidden className={cn("h-3.5 w-3.5", className)} />
+      </span>
+    </Tooltip>
+  );
+}
+
 export function ThreadOriginIcon({ thread }: { thread: Pick<ThreadSummary, "key"> }) {
   const bucket = threadOriginBucket(thread);
   const channel = threadChannelType(thread);
@@ -261,6 +287,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setProjectName("");
   }
   const threadsQ = useThreads(sessionId);
+  const markRead = useMarkThreadsRead(sessionId);
   // Session default model, for the pin chip: a chip renders only on threads
   // whose pin DIVERGES from it (every new thread pins at creation, so an
   // always-on chip would just be noise).
@@ -512,6 +539,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                   <DropdownMenuSubTrigger><Filter className="h-4 w-4" />Show threads from</DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>{THREAD_ORIGIN_FILTERS.map((option) => <DropdownMenuItem key={option.id} role="menuitemradio" aria-checked={originFilter === option.id} onSelect={() => selectOriginFilter(option.id)}><Check className={cn("h-4 w-4", originFilter !== option.id && "invisible")} /><span className="flex-1">{option.label}</span><span className="text-xs text-muted">{originCounts[option.id]}</span></DropdownMenuItem>)}</DropdownMenuSubContent>
                 </DropdownMenuSub>
+                <DropdownMenuItem disabled={!threads.some((thread) => isThreadUnread(thread))} onSelect={() => markRead.mutate({})}><CheckCheck className="h-4 w-4" />Mark all as read</DropdownMenuItem>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger><ArrowDownUp className="h-4 w-4" />Sort chats by</DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>{THREAD_SORT_MODES.map((mode) => <DropdownMenuItem key={mode.id} role="menuitemradio" aria-checked={sortMode === mode.id} onSelect={() => selectThreadSort(mode.id)}><Check className={cn("h-4 w-4", sortMode !== mode.id && "invisible")} />{mode.label}</DropdownMenuItem>)}</DropdownMenuSubContent>
@@ -654,6 +682,15 @@ function ThreadNode({
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, isDefault);
   const liveStatus = useThreadLiveStatus(thread.sessionId, thread.id);
+  const markRead = useMarkThreadsRead(thread.sessionId);
+  // An open thread is read: mark it when it opens and when a new reply lands.
+  const unread = !active && isThreadUnread(thread);
+  const openUnread = active && isThreadUnread(thread);
+  const markReadMutate = markRead.mutate;
+  useEffect(() => {
+    if (openUnread) markReadMutate({ threadIds: [thread.id] });
+  }, [openUnread, markReadMutate, thread.id, thread.lastAgentActivityAt]);
+  const pullRequest = rowPullRequest(thread.pullRequests);
   const queueState = useQueueStateForThread(thread.sessionId, thread.id);
   const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id));
 
@@ -800,7 +837,9 @@ function ThreadNode({
               }}
             >
               <ThreadOriginIcon thread={thread} />
-              <span className="flex-1 truncate">{label}</span>
+              <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>{label}</span>
+              {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
+              {unread && <span role="img" aria-label="Unread" className="mx-1.5 h-2 w-2 shrink-0 rounded-full bg-blue-500" />}
               <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
               {pinnedModelLabel && (
                 <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>

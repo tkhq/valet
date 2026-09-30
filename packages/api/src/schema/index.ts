@@ -2685,6 +2685,30 @@ export const briefingDismissals = pgTable("briefing_dismissals", {
   dismissedAt: bigint("dismissed_at", { mode: "number" }).notNull(),
 }, t => [primaryKey({ columns: [t.userId, t.ownerType, t.ownerId, t.briefingId] })]);
 
+/** When each person last read each thread. A thread with a later agent message shows as unread. */
+export const threadReads = pgTable("thread_reads", {
+  userId: text("user_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  readAt: bigint("read_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.userId, t.threadId] })]);
+
+/** Pull requests a thread created, with their last known GitHub state. */
+export const threadPullRequests = pgTable("thread_pull_requests", {
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  url: text("url").notNull(),
+  repo: text("repo").notNull(),
+  number: bigint("number", { mode: "number" }).notNull(),
+  state: text("state", { enum: ["open", "merged", "closed"] }).notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  checkedAt: bigint("checked_at", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.sessionId, t.threadId, t.url] }),
+  index("thread_pull_requests_url").on(t.url),
+]);
+
 /** Durable permissions confined to a workflow and its current owner. */
 export const workflowActionGrants = pgTable("workflow_action_grants", {
   id: text("id").primaryKey(),

@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { decodePageCursor, readLimit } from "../lib/page-cursor.js";
 import { listWorkspaceActiveWork } from "../services/workspace-active-work.js";
+import { listWaitingThreads } from "../services/thread-read-state.js";
+import type { WaitingThreadsResponse } from "../wire/types.js";
 import type { OutcomeCursor } from "../services/workspace-outcomes.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 
@@ -23,4 +25,14 @@ workspaceActiveWorkRouter.get("/:workspace/active-work", async c => {
     cursor = { at: parsed.at, id: parsed.id };
   }
   return c.json(await listWorkspaceActiveWork(c.var.providers.db, c.var.user.orgId, owner, limit, cursor));
+});
+
+/** Threads that wait on a person's reply, newest first. */
+workspaceActiveWorkRouter.get("/:workspace/waiting", async c => {
+  const owner = await authorizedWorkspaceOwner(c);
+  if (!owner) return c.json({ error: "Workspace not found." }, 404);
+  const body: WaitingThreadsResponse = {
+    threads: await listWaitingThreads(c.var.providers.db, c.var.user.orgId, owner, c.var.user.id),
+  };
+  return c.json(body);
 });

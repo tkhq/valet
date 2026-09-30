@@ -13,6 +13,7 @@ import type {
   WorkspaceBriefingsResponse,
   DismissWorkspaceBriefingRequest,
   DismissWorkspaceBriefingResponse,
+  WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
   AbortThreadRequest,
   AddTeamMemberRequest,
@@ -569,6 +570,8 @@ export const api = {
     request<WorkspaceActiveWorkResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/active-work?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getWorkspaceBriefings: (owner: OwnerFilter) =>
     request<WorkspaceBriefingsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings`),
+  getWaitingThreads: (owner: OwnerFilter) =>
+    request<WaitingThreadsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/waiting`),
   dismissWorkspaceBriefing: (owner: OwnerFilter, briefingId: string, body: DismissWorkspaceBriefingRequest) =>
     request<DismissWorkspaceBriefingResponse>("POST", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings/${encodeURIComponent(briefingId)}/dismiss`, body),
   listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
@@ -833,6 +836,8 @@ export const api = {
       "GET",
       `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.archived ? "?archived=1" : ""}`,
     ),
+  markThreadsRead: (sessionId: string, threadIds?: string[]) =>
+    request<void>("POST", `/sessions/${encodeURIComponent(sessionId)}/threads/read`, threadIds ? { threadIds } : {}),
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>
     request<CreateThreadResponse>(
       "POST",

@@ -325,6 +325,17 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     "lease_token" text, "lease_until" bigint NOT NULL DEFAULT 0,
     PRIMARY KEY ("org_id", "owner_type", "owner_id")
   )` },
+  { describe: "thread reads", probe: { kind: "table", table: "thread_reads" }, sql: `CREATE TABLE IF NOT EXISTS "thread_reads" (
+  "user_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL, "read_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "thread_id")
+)` },
+  { describe: "thread pull requests", probe: { kind: "table", table: "thread_pull_requests" }, sql: `CREATE TABLE IF NOT EXISTS "thread_pull_requests" (
+  "session_id" text NOT NULL, "thread_id" text NOT NULL, "url" text NOT NULL, "repo" text NOT NULL,
+  "number" bigint NOT NULL, "state" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
+  "checked_at" bigint NOT NULL,
+  PRIMARY KEY ("session_id", "thread_id", "url")
+)` },
+  { describe: "thread_pull_requests_url", probe: { kind: "index", index: "thread_pull_requests_url" }, sql: 'CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url")' },
   { describe: "briefing dismissals", probe: { kind: "table", table: "briefing_dismissals" }, sql: `CREATE TABLE IF NOT EXISTS "briefing_dismissals" (
     "user_id" text NOT NULL, "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
     "briefing_id" text NOT NULL, "dismissed_at" bigint NOT NULL,

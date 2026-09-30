@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { FileText, GitPullRequest, MessageSquare, ArrowUpRight, CircleAlert, LoaderCircle, CheckCheck } from "lucide-react";
-import type { ArtifactListItem, GlobalWorkflowRunSummary, SessionSummary, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
+import type { ArtifactListItem, GlobalWorkflowRunSummary, SessionSummary, WaitingThread, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
-import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork } from "~/api/catch-up";
+import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads } from "~/api/catch-up";
 import { useArtifacts } from "~/api/artifacts";
 import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { relativeTime } from "~/lib/relative-time";
@@ -53,6 +53,7 @@ function artifactResult(row: ArtifactListItem): ResultItem {
 function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   const work = useCatchUpWork(owner);
   const activeWork = useWorkspaceActiveWork(owner);
+  const waitingQ = useWaitingThreads(owner);
   const outcomes = useWorkspaceOutcomes(owner);
   const [artifactCursor, setArtifactCursor] = useState<string>();
   const artifacts = useArtifacts(owner, { limit: 25, cursor: artifactCursor, refetchInterval: 10_000 });
@@ -70,6 +71,8 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   }
   const activeThreads = [...activeThreadMap.values()];
   const needsYou = activeThreads.filter(row => row.state === "needs_you" || row.state === "failed");
+  // Threads waiting on a reply, unless active work already lists the thread.
+  const waiting = (waitingQ.data?.threads ?? []).filter(row => !activeThreadMap.has(`${row.sessionId}:${row.threadId}`));
   const inProgress = activeThreads.filter(row => row.state === "working");
   const attentionRuns = runs.filter(row => runCategory(row) === "attention");
   const progressRuns = runs.filter(row => runCategory(row) === "progress");
@@ -81,7 +84,7 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   const otherWork = sessions.filter(row => !activeThreads.some(item => item.sessionId === row.id) && !resultItems.some(item => item.sessionId === row.id));
   const loading = activeWork.isPending || workflows.isPending || gates.isPending;
   const errors = [
-    { label: "work", query: work }, { label: "active work", query: activeWork }, { label: "results", query: outcomes }, { label: "artifacts", query: artifacts },
+    { label: "work", query: work }, { label: "active work", query: activeWork }, { label: "threads waiting on you", query: waitingQ }, { label: "results", query: outcomes }, { label: "artifacts", query: artifacts },
     { label: "workflows", query: workflows }, { label: "approval details", query: gates },
   ].filter(entry => entry.query.error);
   const incomplete = !activeWork.error && activeWork.hasNextPage;
@@ -89,8 +92,9 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
     {errors.map(({ label, query }) => <ErrorRow key={label}>Could not load {label}. <button className="underline" onClick={() => void query.refetch()}>Retry</button></ErrorRow>)}
     {loading && <LoadingRow label="Loading work…" />}
     {incomplete && <p className="text-xs text-muted">More active work is available. Use the paging controls below to see it.</p>}
-    {(needsYou.length + attentionRuns.length > 0) && <Section title="Needs attention" icon={<CircleAlert className="h-4 w-4 text-amber" />} count={needsYou.length + attentionRuns.length}>
+    {(needsYou.length + attentionRuns.length + waiting.length > 0) && <Section title="Needs attention" icon={<CircleAlert className="h-4 w-4 text-amber" />} count={needsYou.length + attentionRuns.length + waiting.length}>
       {needsYou.map(row => <ActiveRow key={row.id} row={row} />)}
+      {waiting.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} />)}
       {attentionRuns.map(row => <RunRow key={row.runId} row={row} prompt={gates.error ? undefined : gates.data?.items.find(item => item.runId === row.runId && item.owner.type === owner.ownerType && item.owner.id === owner.ownerId)?.gate.prompt} />)}
     </Section>}
     {(inProgress.length + progressRuns.length > 0) && <Section title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} count={inProgress.length + progressRuns.length}>
@@ -123,6 +127,14 @@ function Section({ title, count, icon, children }: { title: string; count: numbe
 }
 function ActiveRow({ row }: { row: WorkspaceActiveWorkItem }) {
   return <div className="flex flex-wrap items-center gap-3 px-4 py-3"><Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title || "Untitled thread"}</Link><RunStateBadge state={row.state} /><span className="text-xs text-muted">{relativeTime(row.updatedAt)}</span></div>;
+}
+function WaitingRow({ row }: { row: WaitingThread }) {
+  return <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+    {row.unread && <span role="img" aria-label="Unread" className="h-2 w-2 shrink-0 rounded-full bg-blue-500" />}
+    <Link to="/threads/$threadId" params={{ threadId: row.threadId }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title}</Link>
+    <Badge variant="warning">Waiting on you</Badge>
+    <span className="text-xs text-muted">{relativeTime(row.lastAgentActivityAt)}</span>
+  </div>;
 }
 function SessionRow({ row }: { row: SessionSummary }) {
   return <div className="flex flex-wrap items-center gap-3 px-4 py-3"><Link to="/sessions/$sessionId" params={{ sessionId: row.id }} className="min-w-0 flex-1 break-words text-sm font-medium hover:underline">{row.title || "Untitled work"}</Link><RunStateBadge state={row.runState} /><span className="text-xs text-muted">{relativeTime(row.lastActivityAt)}</span></div>;

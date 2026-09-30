@@ -54,6 +54,7 @@ let isWorkspaceRuntime: boolean | undefined = false;
 // can end up governing the module for OTHER files sharing the worker —
 // spreading the real module keeps every export present no matter whose
 // factory the shared registry ends up using.
+const markThreadsReadMutate = vi.fn();
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
@@ -66,6 +67,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
+    useMarkThreadsRead: () => ({ mutate: markThreadsReadMutate, isPending: false }),
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
     useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
     useSessionRatings: () => ({ data: { session: sessionRating, entries: {} }, isLoading: false, error: null }),

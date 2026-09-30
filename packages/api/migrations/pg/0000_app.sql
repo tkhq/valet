@@ -2490,3 +2490,17 @@ CREATE TABLE IF NOT EXISTS "briefing_dismissals" (
   "briefing_id" text NOT NULL, "dismissed_at" bigint NOT NULL,
   PRIMARY KEY ("user_id", "owner_type", "owner_id", "briefing_id")
 );
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "thread_reads" (
+  "user_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL, "read_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "thread_id")
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "thread_pull_requests" (
+  "session_id" text NOT NULL, "thread_id" text NOT NULL, "url" text NOT NULL, "repo" text NOT NULL,
+  "number" bigint NOT NULL, "state" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
+  "checked_at" bigint NOT NULL,
+  PRIMARY KEY ("session_id", "thread_id", "url")
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url");

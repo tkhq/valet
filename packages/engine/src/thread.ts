@@ -133,6 +133,7 @@ import type {
   ThreadData,
   ToolContext,
   ToolDef,
+  ToolResult,
   WriteFence,
 } from "./types.js";
 
@@ -5292,6 +5293,7 @@ export class Thread {
             result: resultText,
             ...(toolResultImages(event.result).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : event.result } : {}),
             isError: event.isError,
+            ...(event.isError ? {} : toolOutcome(event.result)),
           },
           { queueItemId: this.runningItem?.id },
         );
@@ -6251,4 +6253,16 @@ export function entriesToAgentMessages(
     }
   }
   return out;
+}
+
+/** The confirmed side effect a tool reported in its result details, if any. */
+function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] } {
+  if (typeof result !== "object" || result === null || !("details" in result)) return {};
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("outcome" in details)) return {};
+  const outcome = details.outcome;
+  if (typeof outcome !== "object" || outcome === null || !("kind" in outcome)) return {};
+  if (outcome.kind !== "pull_request_created" && outcome.kind !== "review_submitted") return {};
+  const url = "url" in outcome && typeof outcome.url === "string" ? outcome.url : undefined;
+  return { outcome: { kind: outcome.kind, ...(url ? { url } : {}) } };
 }

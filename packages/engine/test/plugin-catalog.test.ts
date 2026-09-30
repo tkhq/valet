@@ -1272,6 +1272,26 @@ describe("pluginCatalogTools: approval gate terminal outcomes", () => {
   });
 });
 
+describe("call_tool pull request outcome", () => {
+  function githubPlugin(): ActionPlugin {
+    const action = (id: string, data: unknown) => ({
+      id, name: id, description: id, riskLevel: "low" as const, parameters: Type.Object({}),
+      execute: async () => ({ success: true, data }),
+    });
+    return { service: "github", actions: [
+      action("github.create_pull_request", { number: 7, url: "https://github.com/acme/app/pull/7", state: "open" }),
+      action("github.get_pull_request", { number: 7, url: "https://github.com/acme/app/pull/7", state: "open" }),
+    ] };
+  }
+  it("reports a created pull request, but not one the action only read", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [githubPlugin()] });
+    const created = await callTool.execute({ tool_id: "github.create_pull_request", params: {}, summary: "open it" }, makeCtx({}));
+    expect(created.outcome).toEqual({ kind: "pull_request_created", url: "https://github.com/acme/app/pull/7" });
+    const read = await callTool.execute({ tool_id: "github.get_pull_request", params: {}, summary: "read it" }, makeCtx({}));
+    expect(read.outcome).toBeUndefined();
+  });
+});
+
 describe("prepareActionArgs", () => {
   it("does not mutate the caller's params object when applying defaults", () => {
     const schema = Type.Object({ n: Type.Optional(Type.Number({ default: 25 })) });

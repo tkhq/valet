@@ -38,6 +38,7 @@ import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
+import { wireThreadPullRequests } from "./services/thread-read-state.js";
 import { initTelemetry } from "./observability/otel.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -327,6 +328,7 @@ wireAttentionRouter({
 // A child stopped at a gate tells its parent thread (TKAI-564). Settlement
 // alone left the parent unaware of a blocked child until it finished.
 wireChildGateReports(providers.eventStream, providers.childWatcher);
+wireThreadPullRequests(providers.eventStream, providers.db);
 // A restored submission can settle during the first boot-chain step. Subscribe
 // before that work starts so automatic naming does not miss the completion.
 providers.autoTitleHost.start();

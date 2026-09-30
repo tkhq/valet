@@ -4,6 +4,8 @@ Status: implemented on 2026-09-30. This note records six changes from the briefs
 
 ## Briefs
 
+A brief covers a line of work: it combines at least two kinds of source, such as a conversation with its pull request, a workflow run, an artifact, or a sent message. A goal whose only evidence is conversations gets no brief, because the thread list and **Waiting on you** show those threads with exact state. The parser drops a single-kind group even when the model returns one.
+
 A brief card is compact: a small title, a short summary, and one line of links. The card links to its conversation with **Open thread**. When the work started in Slack, the card also links to that Slack thread with **Open in Slack**.
 
 A brief finds its conversation in this order:
@@ -23,7 +25,15 @@ A source carries `originUrl` for a Slack origin. A thread keyed `slack:{channel}
 
 Dismiss also archives the brief's threads that belong to the workspace. A thread waiting on an approval stays open, because archiving it would withdraw an approval that someone may still answer. The response reports how many threads were archived and how many stayed open.
 
+## Needs attention
+
+**Needs attention** also lists threads that wait on a reply (`GET /api/workspaces/:workspace/waiting`). A thread waits when a person acted in it, the newest agent message came after that action, and nobody replied or archived it since. A thread with queued, running, or gated work is left out, because active work lists it. The window is 14 days. An unread dot marks a waiting thread that the viewer has not opened since the agent wrote.
+
 ## Thread sidebar
+
+A blue dot marks an unread thread: its newest agent message is later than the viewer's last read and last action. The `thread_reads` table stores one read time per person and thread. Opening a thread marks it read, and so does a new reply while it is open. **Mark all as read** in the sidebar options menu marks every thread in the session.
+
+A thread that created a pull request shows its state: open, merged, or closed. The `thread_pull_requests` table stores each pull request with its thread. A `gh pr create` in the terminal and the GitHub `create_pull_request` action both put a `pull_request_created` outcome on the engine `tool_end` event, and the API records it. A GitHub `pull_request` webhook updates the state. If no webhook arrives, listing threads checks up to five open pull requests that were not checked in the last 10 minutes.
 
 Each thread row shows its origin: Slack, another channel, web chat, an automation, or another agent. The origin comes from the engine thread key (`packages/web/src/lib/thread-origin.ts`). The sidebar options menu has **Show threads from**, with a count for each origin. An active filter shows above the list with a **Clear** link. The browser remembers the choice.
 
@@ -43,6 +53,6 @@ Saving creates one team reply rule: `slack.app_mention`, a channel filter for th
 
 ## Not in this change
 
-1. A deterministic table of threads with no terminal action (open pull requests, unmerged branches) in place of written summaries.
+1. A deterministic table of unmerged branches. Open pull requests show on thread rows, and waiting threads show under **Needs attention**.
 2. One **Needs attention** notification type in place of approval, question, and escalation.
 3. A list view of workflow steps as an alternative to the node canvas.

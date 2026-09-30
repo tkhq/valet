@@ -884,6 +884,26 @@ export interface ThreadSummary {
    * threads by this (see packages/web `thread-origin.ts`).
    */
   key?: string;
+  /** When the viewer last read this thread. */
+  readAt?: number;
+  /** Time of the newest assistant message. Later than `readAt` means unread. */
+  lastAgentActivityAt?: number;
+  /** Pull requests this thread created, oldest first. */
+  pullRequests?: ThreadPullRequest[];
+}
+
+export interface ThreadPullRequest {
+  url: string;
+  /** `owner/name`. */
+  repo: string;
+  number: number;
+  state: "open" | "merged" | "closed";
+}
+
+/** `POST /api/sessions/:id/threads/read` — mark threads read for the caller. */
+export interface MarkThreadsReadRequest {
+  /** Thread ids. Omit to mark every listed thread in the session read. */
+  threadIds?: string[];
 }
 
 export interface ListThreadsResponse {
@@ -5318,6 +5338,20 @@ export interface WorkspaceActiveWorkItem {
 export interface WorkspaceActiveWorkResponse {
   items: WorkspaceActiveWorkItem[];
   nextCursor: string | null;
+}
+
+/** A thread whose newest agent message came after the last human action. */
+export interface WaitingThread {
+  sessionId: string;
+  threadId: string;
+  title: string;
+  lastAgentActivityAt: number;
+  /** The viewer has not opened the thread since that message. */
+  unread: boolean;
+}
+/** `GET /api/workspaces/:workspace/waiting` */
+export interface WaitingThreadsResponse {
+  threads: WaitingThread[];
 }
 
 export interface WorkspaceBriefingSource {

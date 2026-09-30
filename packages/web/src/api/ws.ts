@@ -135,6 +135,11 @@ export function useSessionWebSocket(sessionId: string) {
           if (wire.type === "title.updated") {
             invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
           }
+          // A finished turn can add an unread reply or a pull request to any thread
+          // in the session. The list query carries both, so refresh it.
+          if (wire.type === "turn_end") {
+            void qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+          }
           if (wire.type === "thread.activity") {
             qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
               ...current,

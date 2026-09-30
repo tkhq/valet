@@ -12,6 +12,7 @@ const evidence: BriefingEvidence[] = [
   { source: { id: "run", kind: "workflow", title: "Check TKAI-559", updatedAt: 25, runId: "run" }, content: "Sequential check passed. Concurrent deliveries remain untested.", state: "updated" },
   { source: { id: "artifact", kind: "artifact", title: "Notes", updatedAt: 30, sessionId: "work", threadId: "request", token: "token" }, content: "Published notes on TKAI-559.", state: "updated" },
 ];
+const pr: BriefingEvidence = { source: { id: "pr", kind: "pull_request", title: "Deduplicate intake", updatedAt: 26 }, content: "Pull request opened.", state: "updated" };
 const answer = JSON.stringify({ briefings: [{ title: "Intake deduplication",
   summary: "Sequential deliveries pass. Approve the concurrent check before release.", sourceIds: ["first","latest","run","artifact"] }] });
 
@@ -32,15 +33,24 @@ describe("workspace briefing synthesis", () => {
   it("rejects invented source IDs and prose links, and never invents a thread for run-only evidence", () => {
     expect(() => parseWorkspaceBriefings(answer.replace('"first"','"made-up"'),evidence)).toThrow("Unknown briefing source");
     expect(() => parseWorkspaceBriefings(answer.replace("Intake deduplication","https://evil.example"),evidence)).toThrow();
-    const runOnly = JSON.stringify({ briefings: [{ title: "Intake verification", summary: "Concurrent deliveries remain untested.", sourceIds: ["run"] }] });
-    expect(parseWorkspaceBriefings(runOnly,evidence)[0].latestThread).toBeNull();
+    const withPr = [...evidence, pr];
+    const runAndPr = JSON.stringify({ briefings: [{ title: "Intake verification", summary: "Concurrent deliveries remain untested.", sourceIds: ["run","pr"] }] });
+    expect(parseWorkspaceBriefings(runAndPr,withPr)[0].latestThread).toBeNull();
   });
-  it("links a run-only brief to the conversation and Slack thread the run names", () => {
+  it("keeps only lines of work that combine more than one kind of source", () => {
+    const reply = JSON.stringify({ briefings: [
+      { title: "Two conversations", summary: "Both conversations discuss intake.", sourceIds: ["first","latest"] },
+      { title: "Run only", summary: "The check ran.", sourceIds: ["run"] },
+      { title: "Conversation and run", summary: "The run checked the fix.", sourceIds: ["latest","run"] },
+    ] });
+    expect(parseWorkspaceBriefings(reply,evidence).map(brief => brief.title)).toEqual(["Conversation and run"]);
+  });
+  it("links a brief without a conversation source to the conversation and Slack thread its run names", () => {
     const run: BriefingEvidence = { source: { id: "slack-run", kind: "workflow", title: "Intake", updatedAt: 40, runId: "slack-run",
       sessionId: "runtime", threadId: "origin-thread", originUrl: "https://slack.com/archives/C1/p1700000000000100" },
       content: "Triaged the request.", state: "updated" };
-    const reply = JSON.stringify({ briefings: [{ title: "Intake triage", summary: "The request was triaged.", sourceIds: ["slack-run"] }] });
-    const [brief] = parseWorkspaceBriefings(reply,[run]);
+    const reply = JSON.stringify({ briefings: [{ title: "Intake triage", summary: "The request was triaged.", sourceIds: ["slack-run","pr"] }] });
+    const [brief] = parseWorkspaceBriefings(reply,[run,pr]);
     expect(brief.latestThread).toMatchObject({ sessionId: "runtime", threadId: "origin-thread" });
     expect(brief.originUrl).toBe("https://slack.com/archives/C1/p1700000000000100");
   });
