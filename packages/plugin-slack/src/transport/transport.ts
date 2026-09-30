@@ -922,7 +922,9 @@ export class SlackTransport implements ChannelTransport {
     for (let i = 0; i < fieldTexts.length; i += SLACK_SECTION_FIELD_LIMIT) {
       blocks.push({ type: "section", fields: fieldTexts.slice(i, i + SLACK_SECTION_FIELD_LIMIT) });
     }
-    blocks.push({
+    // An open question has no buttons, and Slack rejects an actions block
+    // with no elements. The host's body tells the reader where to answer.
+    if (gate.actions.length > 0) blocks.push({
       type: "actions",
       elements: gate.actions.map((action) => ({
         type: "button",

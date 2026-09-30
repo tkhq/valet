@@ -56,7 +56,7 @@ it("marks a thread unread after an agent message and read once the viewer opens 
   expect(before?.agentQuestion).toBe("Which one first?");
 
   const read = await fetch(`${api.baseUrl}/api/sessions/${thread.sessionId}/threads/read`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threadIds: [thread.id, "not-in-session"] }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threadIds: [thread.id, "not-in-session", thread.id] }),
   });
   expect(read.status).toBe(204);
   const [after] = (await listThreads(api, thread.sessionId)).filter(t => t.id === thread.id);

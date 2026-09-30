@@ -1359,6 +1359,14 @@ describe("ChannelHost outbound delivery", () => {
    */
   async function openChannelGate(
     owner: { type: "user" | "team"; id: string } = { type: "user", id: USER_ID },
+    shape: Pick<DecisionGate, "type" | "title" | "actions"> = {
+      type: "approval",
+      title: "Approve the thing?",
+      actions: [
+        { id: "approve", label: "Approve", style: "primary" },
+        { id: "deny", label: "Deny", style: "danger" },
+      ],
+    },
   ): Promise<{ sessionId: string; threadId: string; gateId: string; ref: GatePromptRef }> {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, owner, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
@@ -1378,12 +1386,7 @@ describe("ChannelHost outbound delivery", () => {
             queueItemId: `qi-${gateId}`,
             resumeKey: `rk-${gateId}`,
             ordinal: 1,
-            type: "approval",
-            title: "Approve the thing?",
-            actions: [
-              { id: "approve", label: "Approve", style: "primary" },
-              { id: "deny", label: "Deny", style: "danger" },
-            ],
+            ...shape,
             status: "pending",
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -1419,6 +1422,12 @@ describe("ChannelHost outbound delivery", () => {
     await testDb.appDb.insert(teams).values({ id: "team-ops", orgId: ORG_ID, name: "Ops", createdAt: 1 });
     await openChannelGate({ type: "team", id: "team-ops" });
     expect(fakeTransport.gatePrompts[0]?.prompt.body).toContain("Only members of Ops can approve.");
+  });
+
+  it("tells the channel to answer an open question in Valet", async () => {
+    await openChannelGate(undefined, { type: "question", title: "Which repo?", actions: [] });
+    expect(fakeTransport.gatePrompts[0]?.prompt.actions).toEqual([]);
+    expect(fakeTransport.gatePrompts[0]?.prompt.body).toContain("Answer this question in Valet.");
   });
 
   it("keeps a posted card usable when saving its callback reference fails", async () => {

@@ -75,9 +75,11 @@ export async function listThreadActivity(
 export async function markThreadsRead(
   db: AppDb, userId: string, sessionId: string, threadIds: string[], at = Date.now(),
 ): Promise<void> {
-  if (threadIds.length === 0) return;
+  // One upsert cannot touch a row twice, so a repeated id must not reach it.
+  const unique = [...new Set(threadIds)];
+  if (unique.length === 0) return;
   await db.insert(threadReads)
-    .values(threadIds.map(threadId => ({ userId, sessionId, threadId, readAt: at })))
+    .values(unique.map(threadId => ({ userId, sessionId, threadId, readAt: at })))
     .onConflictDoUpdate({
       target: [threadReads.userId, threadReads.threadId],
       set: { readAt: sql`GREATEST(${threadReads.readAt}, excluded.read_at)`, sessionId: sql`excluded.session_id` },

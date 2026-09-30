@@ -979,6 +979,14 @@ describe("gate prompts", () => {
     });
   });
 
+  it("sends an open question with no actions block, which Slack would reject empty", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-open", title: "Which repo?", actions: [] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    expect(blocks.map((b: { type: string }) => b.type)).toEqual(["header"]);
+  });
+
   it("posts the gate under the turn that raised it, with the gate id in the button", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000700");

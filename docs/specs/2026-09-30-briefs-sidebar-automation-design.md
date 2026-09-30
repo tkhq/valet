@@ -44,7 +44,7 @@ Each row has **Reply**, which opens the thread, and **Done**, which archives it.
 
 An amber dot marks a thread whose newest agent message asks a question that nobody has answered yet; its tooltip shows the question. It takes the place of the unread dot. A thread waiting on an `ask_question` or approval gate is amber through its status dot.
 
-`ask_question` is a built-in engine tool, the V2 port of V1's question tool. It opens a `question` decision gate: the question, optional detail, and up to six options. Each option becomes a button on the web card and on the Slack card, and the web card also takes a typed answer. The tool returns the answer to the model, or tells it to continue without asking again when the question expires.
+`ask_question` is a built-in engine tool, the V2 port of V1's question tool. It opens a `question` decision gate: the question, optional detail, and up to six options. Each option becomes a button on the web card and on the Slack card, and the web card also takes a typed answer. A channel reply cannot answer a question, so a Slack or Telegram card for a question with no options has no buttons and tells the reader to answer in Valet. The tool returns the answer to the model, or tells it to continue without asking again when the question expires.
 
 The threads sidebar no longer links to a Briefing view: the workspace home page shows the briefing.
 

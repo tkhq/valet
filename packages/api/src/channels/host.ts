@@ -132,6 +132,8 @@ const GATE_EXPIRED_LABEL = "⏳ Expired: no one answered in time. Start the run 
 const GATE_WITHDRAWN_LABEL =
   "🚫 Withdrawn: the run was stopped. Start it again in Valet if you still need it.";
 
+const OPEN_QUESTION_NOTE = "Answer this question in Valet. A reply here does not reach it.";
+
 const LOCALDEV_SUFFIX = ".localdev";
 
 /**
@@ -1092,8 +1094,13 @@ export class ChannelHost {
     // shared workspaces, the reader must see who asks for approval.
     // Resolution edits keep the posted identity.
     const sender = await this.workspaceSenderForSession(sessionId);
+    // A channel reply cannot answer an open question (one with no options),
+    // so the card says where the answer goes instead of showing no control.
+    const body = prompt.actions.length > 0 ? prompt.body
+      : [prompt.body, OPEN_QUESTION_NOTE].filter((part): part is string => part !== undefined).join("\n\n");
     const ref = await transport.sendGatePrompt(conversationKey, {
       ...prompt,
+      ...(body !== undefined ? { body } : {}),
       ...(sender !== undefined ? { sender } : {}),
     });
     // The card is live once sent, so this host records its callback address
