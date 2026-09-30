@@ -8,6 +8,15 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 const DEFAULT_NAME = "Untitled workflow";
 
+/** How a new workflow starts. A schedule or an event opens its trigger form
+ * next, so a trigger is created with the workflow it runs. */
+type StartKind = "manual" | "schedule" | "event";
+const START_OPTIONS: { value: StartKind; label: string; hint: string }[] = [
+  { value: "manual", label: "Manually", hint: "Run it with the Run button." },
+  { value: "schedule", label: "On a schedule", hint: "Set the time next." },
+  { value: "event", label: "When an event happens", hint: "Pick the event next, such as a Slack message or a pull request." },
+];
+
 export function NewWorkflowDialog({
   open,
   onOpenChange,
@@ -33,6 +42,7 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
     return () => { generation.current += 1; };
   }, [open]);
   const [name, setName] = useState(DEFAULT_NAME);
+  const [start, setStart] = useState<StartKind>("manual");
 
   async function submit() {
     const trimmed = name.trim();
@@ -49,7 +59,12 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
       if (generation.current !== requestGeneration) return;
       onOpenChange(false);
       setName(DEFAULT_NAME);
-      void navigate({ to: "/workflows/$workflowId", params: { workflowId: created.id } });
+      setStart("manual");
+      void navigate({
+        to: "/workflows/$workflowId",
+        params: { workflowId: created.id },
+        ...(start === "manual" ? {} : { search: { newTrigger: start } }),
+      });
     } catch {
       // useMutation surfaces the error in `create.error`; the dialog stays open.
     }
@@ -77,6 +92,26 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
             }}
           />
         </div>
+
+        <fieldset className="grid gap-2">
+          <legend className="mb-1 text-sm font-medium text-ink">How does it start?</legend>
+          {START_OPTIONS.map((option) => (
+            <label key={option.value} className="flex cursor-pointer items-start gap-2 rounded-md border border-line px-3 py-2 text-sm has-[:checked]:border-accent">
+              <input
+                type="radio"
+                name="workflow-start"
+                value={option.value}
+                checked={start === option.value}
+                onChange={() => setStart(option.value)}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="block text-ink">{option.label}</span>
+                <span className="block text-xs text-muted">{option.hint}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
 
         {create.error && (
           <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">

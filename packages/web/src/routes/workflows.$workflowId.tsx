@@ -40,6 +40,7 @@ import { WorkflowPreview } from "~/components/workflows/preview";
 import { RiskBadge } from "~/components/workflows/risk-badge";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
+import type { TriggerKind } from "~/components/workflows/trigger-dialog";
 import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
 import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import { blobUrl } from "~/lib/blob-url";
@@ -58,14 +59,20 @@ import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
  */
 export const Route = createFileRoute("/workflows/$workflowId")({
   component: WorkflowEditorRoute,
+  // `newTrigger` comes from the new-workflow dialog: the workflow was just
+  // created to run on a schedule or an event, so its trigger form opens next.
+  validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind } => ({
+    newTrigger: search.newTrigger === "schedule" || search.newTrigger === "event" ? search.newTrigger : undefined,
+  }),
 });
 
 function WorkflowEditorRoute() {
   const { workflowId } = Route.useParams();
-  return <WorkflowEditorPage workflowId={workflowId} />;
+  const { newTrigger } = Route.useSearch();
+  return <WorkflowEditorPage workflowId={workflowId} newTrigger={newTrigger} />;
 }
 
-export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
+export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: string; newTrigger?: TriggerKind }) {
   const { data, isLoading, error } = useWorkflow(workflowId);
   useAdoptWorkspaceScope(data ? { type: data.ownerType, id: data.ownerId } : undefined);
   const update = useUpdateWorkflow(workflowId);
@@ -114,6 +121,7 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
       permissionsError={permissionsQ.error}
       allowPermissions={allowPermissions}
       navigate={navigate}
+      newTrigger={newTrigger}
     />
   );
 }
@@ -138,7 +146,10 @@ function WorkflowEditorPane({
   permissionsError,
   allowPermissions,
   navigate,
+  newTrigger,
 }: {
+  /** Open the Triggers drawer on a new trigger of this kind (from the create dialog). */
+  newTrigger?: TriggerKind;
   workflowId: string;
   initialName: string;
   initialDefinition: WorkflowDefinition;
@@ -161,7 +172,7 @@ function WorkflowEditorPane({
   // Right-side drawer: runs list / version history / triggers. Header
   // buttons toggle it — the old bottom collapsible was invisible under a
   // full-height canvas ("no way to view the list of runs").
-  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(null);
+  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(newTrigger ? "triggers" : null);
   // The assistant is the editor's right-hand column, not one of the overlay
   // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
   // its own: describing a change is the primary way to edit a workflow, so
@@ -489,7 +500,7 @@ function WorkflowEditorPane({
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
         {drawer === "triggers" && (
           <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
-            <TriggersPanel workflowId={workflowId} />
+            <TriggersPanel workflowId={workflowId} startNew={newTrigger} />
           </DrawerShell>
         )}
         {drawer === "history" && (

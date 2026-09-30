@@ -12,7 +12,7 @@ import {
 } from "~/api/workflows";
 import type { OwnerFilter } from "~/api/client";
 import { Button, ConfirmDialog, Spinner, Switch } from "~/components/primitives";
-import { TriggerDialog } from "./trigger-dialog";
+import { TriggerDialog, type TriggerKind } from "./trigger-dialog";
 
 /** Relative "in 2h" formatting for next fire times. */
 function relativeTime(ms: number): string {
@@ -39,8 +39,11 @@ export function TriggerList({
   owner,
   schedulesOnly = false,
   reviewId, onReviewClose,
+  startNew,
 }: {
   workflowId?: string;
+  /** Open the new-trigger dialog on mount, as this kind. */
+  startNew?: TriggerKind;
   /** Scopes the flat hub list to one workspace. Unset per-workflow, where
    * `workflowId` already narrows the list. */
   owner?: OwnerFilter;
@@ -55,7 +58,7 @@ export function TriggerList({
   const deleteSchedule = useDeleteSchedule();
   const deleteEvent = useDeleteEventTrigger();
   const runNow = useRunScheduleNow();
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(startNew !== undefined);
   const [editing, setEditing] = useState<WorkflowTriggerItem | undefined>(undefined);
   const [actionError, setActionError] = useState<string | null>(null);
   // Delete asks first, and keeps its own error: the shared `actionError`
@@ -225,6 +228,7 @@ export function TriggerList({
         workflowId={workflowId}
         editing={editing}
         schedulesOnly={schedulesOnly}
+        initialKind={startNew}
       />
     </div>
   );

@@ -52,7 +52,7 @@ import {
   SLACK_APP_MENTION,
 } from "~/lib/slack-mention";
 
-type TriggerKind = "schedule" | "event";
+export type TriggerKind = "schedule" | "event";
 type TargetKind = "workflow" | "orchestrator";
 
 function defaultTimezone(): string {
@@ -66,6 +66,7 @@ export function TriggerDialog({
   editing,
   schedulesOnly = false,
   review = false,
+  initialKind,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -73,12 +74,14 @@ export function TriggerDialog({
   editing?: WorkflowTriggerItem;
   schedulesOnly?: boolean;
   review?: boolean;
+  /** The kind a new trigger starts as, when the caller already knows it. */
+  initialKind?: TriggerKind;
 }) {
   const isEditing = editing !== undefined;
   const lockedKind: TriggerKind | undefined = editing?.kind ?? (schedulesOnly ? "schedule" : undefined);
 
   // ── kind picker ────────────────────────────────────────────────────────
-  const [kind, setKind] = useState<TriggerKind>(lockedKind ?? "schedule");
+  const [kind, setKind] = useState<TriggerKind>(lockedKind ?? initialKind ?? "schedule");
 
   // ── shared fields ──────────────────────────────────────────────────────
   const [name, setName] = useState("");
@@ -146,7 +149,7 @@ export function TriggerDialog({
       }
     } else {
       // Reset for create.
-      setKind(lockedKind ?? "schedule");
+      setKind(lockedKind ?? initialKind ?? "schedule");
       setName("");
       setCron("");
       setTimezone(defaultTimezone());
@@ -161,7 +164,7 @@ export function TriggerDialog({
       setFormError(null);
       setServerError(null);
     }
-  }, [open, editing, workflowId, lockedKind]);
+  }, [open, editing, workflowId, lockedKind, initialKind]);
 
   /** Parse a JSON textarea. Empty input returns undefined (the caller picks
    * the default); a parse failure sets the field error and returns null. */

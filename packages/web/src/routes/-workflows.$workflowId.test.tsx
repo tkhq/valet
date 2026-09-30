@@ -337,6 +337,13 @@ describe("WorkflowEditorPage", () => {
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
   });
 
+  it("opens a new trigger of the chosen kind when created from the new-workflow dialog", async () => {
+    useWorkflowTriggersMock.mockClear();
+    render(<WorkflowEditorPage workflowId="wf_1" newTrigger="event" />);
+    expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
+    expect(await screen.findByRole("dialog", { name: "New trigger" })).toBeTruthy();
+  });
+
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     // "Version history" lives in the toolbar's overflow menu — Radix

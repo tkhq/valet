@@ -88,6 +88,17 @@ describe("NewWorkflowDialog", () => {
     });
   });
 
+  it("opens the trigger form next when the workflow starts on a schedule", async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole("radio", { name: /On a schedule/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({
+      to: "/workflows/$workflowId",
+      params: { workflowId: "wf_new" },
+      search: { newTrigger: "schedule" },
+    }));
+  });
+
   it("creates nothing when the name is only spaces", () => {
     renderDialog();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "   " } });
