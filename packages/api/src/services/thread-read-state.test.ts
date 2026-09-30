@@ -108,6 +108,18 @@ it("lists threads that wait on a reply until someone replies or archives them", 
   expect(body.threads.map(t => t.threadId)).toEqual([waiting.id]);
   expect(body.threads[0]).toMatchObject({ unread: true, question: "Which one first?" });
 
+  // A workflow editor conversation shows its workflow's name, and leaves once the workflow is gone.
+  const workflow = await (await fetch(`${api.baseUrl}/api/workflows`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Label new bug reports", definition: { version: "dag/v1", nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop" }], edges: [{ from: "start", to: "done" }] } }) })).json() as { id: string };
+  const editor = await (await fetch(`${api.baseUrl}/api/workflows/${workflow.id}/conversation`, { method: "POST" })).json() as { sessionId: string; threadId: string };
+  await api.providers.db.insert(sessionThreads).values({ id: editor.threadId, sessionId: editor.sessionId, createdAt: now - 60_000, lastUserActivityAt: now - 10_000 });
+  await agentMessage(api, { id: editor.threadId, sessionId: editor.sessionId }, now - 4_000);
+  const titled = await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user");
+  expect(titled.find(t => t.threadId === editor.threadId)?.title).toBe("Label new bug reports");
+  expect((await fetch(`${api.baseUrl}/api/workflows/${workflow.id}`, { method: "DELETE" })).ok).toBe(true);
+  const afterDelete = await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user");
+  expect(afterDelete.map(t => t.threadId)).toEqual([waiting.id]);
+
   await api.providers.db.update(sessionThreads).set({ archivedAt: now }).where(sql`id = ${waiting.id}`);
   expect(await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user")).toEqual([]);
 });

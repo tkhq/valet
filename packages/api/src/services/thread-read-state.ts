@@ -173,9 +173,13 @@ export async function listWaitingThreads(
   db: AppDb, orgId: string, owner: Principal, viewerId: string, now = Date.now(), limit = 50,
 ): Promise<WaitingThread[]> {
   const result = await db.execute(sql`
-    SELECT t.session_id, t.id AS thread_id, COALESCE(NULLIF(t.title,''),NULLIF(s.title,'')) AS title,
+    SELECT t.session_id, t.id AS thread_id,
+      COALESCE(NULLIF(t.title,''),w.name,NULLIF(s.title,'')) AS title,
       e.created_at AS agent_at, e.tail, r.read_at
     FROM session_threads t JOIN agent_sessions s ON s.id = t.session_id
+    LEFT JOIN engine_threads et ON et.session_id = t.session_id AND et.id = t.id
+    -- A workflow editor conversation takes its workflow's name.
+    LEFT JOIN workflow_definitions w ON et.key LIKE 'workflow:%' AND w.id = split_part(et.key, ':', 2)
     JOIN LATERAL (SELECT created_at, right(content, 2000) AS tail FROM engine_entries
       WHERE session_id = t.session_id AND thread_id = t.id AND entry_type = 'message' AND role = 'assistant'
       ORDER BY created_at DESC LIMIT 1) e ON true
@@ -183,6 +187,8 @@ export async function listWaitingThreads(
     WHERE s.status <> 'deleted' AND s.org_id = ${orgId} AND s.owner_type = ${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END) = ${owner.id}
       AND t.archived_at IS NULL AND t.last_user_activity_at IS NOT NULL
+      -- The editor conversation of a deleted workflow has nothing left to answer.
+      AND (et.key IS NULL OR et.key NOT LIKE 'workflow:%' OR w.id IS NOT NULL)
       AND e.created_at > t.last_user_activity_at AND e.created_at > ${now - WAITING_WINDOW_MS}
       AND NOT EXISTS (SELECT 1 FROM engine_queue_items q
         WHERE q.session_id = t.session_id AND q.thread_id = t.id AND q.status <> 'settled')
