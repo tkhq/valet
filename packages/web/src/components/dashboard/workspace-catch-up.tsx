@@ -101,6 +101,9 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
   const status = STATUS[briefing.status];
   const sources = [...briefing.sources].sort((a, b) => Number(b.kind === "pull_request") - Number(a.kind === "pull_request"));
   const originUrl = safeResultUrl(briefing.originUrl);
+  // A run a schedule or an event started has no conversation. Link the newest run instead.
+  const latestRun = briefing.latestThread ? undefined
+    : [...briefing.sources].filter(source => source.kind === "workflow" && source.runId).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.runId;
   return <article aria-labelledby={headingId} className="rounded-lg border border-line bg-paper px-4 py-3">
     <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <h2 id={headingId} className="min-w-0 flex-1 break-words text-sm font-medium text-ink">{briefing.title}</h2>
@@ -117,7 +120,11 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
         to="/threads/$threadId"
         params={{ threadId: briefing.latestThread.threadId }}
         className="inline-flex min-h-11 items-center gap-1 font-medium text-moss underline-offset-4 hover:underline sm:min-h-0"
-      >Open thread <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : <span className="text-muted">No linked conversation</span>}
+      >Open thread <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : latestRun ? <Link
+        to="/workflows/runs/$runId"
+        params={{ runId: latestRun }}
+        className="inline-flex min-h-11 items-center gap-1 font-medium text-moss underline-offset-4 hover:underline sm:min-h-0"
+      >Open run <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : <span className="text-muted">No linked conversation</span>}
       {originUrl && <a href={originUrl} target="_blank" rel="noopener noreferrer"
         className="inline-flex min-h-11 items-center gap-1 font-medium text-moss underline-offset-4 hover:underline sm:min-h-0"
       >Open in Slack <ArrowUpRight aria-hidden className="h-3.5 w-3.5" /></a>}

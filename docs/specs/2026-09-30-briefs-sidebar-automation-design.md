@@ -13,6 +13,10 @@ A brief finds its conversation in this order:
 
 A workflow source carries the conversation that started the run only when that conversation belongs to the same workspace. A team brief never links to a person's private thread.
 
+A brief with no conversation links its newest run with **Open run**. This covers runs that a schedule or an event started.
+
+The briefs cache keeps a snapshot per workspace. When the evidence changes, the API returns the old snapshot marked `refreshing` and regenerates it in the background. Each read still checks that the viewer can read every source. A snapshot younger than five minutes is kept, so an active conversation does not start a model call on every check. Only the first snapshot for a workspace makes the request wait.
+
 A source carries `originUrl` for a Slack origin. A thread keyed `slack:{channel}:{thread_ts}` links to `https://slack.com/archives/{channel}/p{ts}`. A run that a Slack event started links to that event's thread. The briefing cache version changed, so cached briefs regenerate with the new fields.
 
 **Dismiss** hides a brief for the person who dismissed it. The `briefing_dismissals` table stores one row per person, workspace, and brief. A brief's id is a hash of its sources, so new activity produces a new brief that shows again. Rows older than 30 days are removed when the same person dismisses again.

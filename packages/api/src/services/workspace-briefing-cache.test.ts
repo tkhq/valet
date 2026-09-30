@@ -41,24 +41,42 @@ describe("durable workspace briefing cache", () => {
     await restarted(db,"local-org",{ type: "team", id: "team" });
     expect(generate).toHaveBeenCalledTimes(4);
   });
-  it("coalesces replicas with an atomic lease and clears changed snapshots during refresh", async () => {
+  it("keeps showing the old snapshot while replicas coalesce on one background refresh", async () => {
     const db = await setup(); let clock = 1000;
     const pending = deferred<WorkspaceBriefingsResponse>();
     const collect = vi.fn(async () => evidence);
     const generate = vi.fn(async () => snapshot);
-    const options = { version: "v1", collect, generate, validate: valid, now: () => clock };
+    const options = { version: "v1", collect, generate, validate: valid, now: () => clock, minRegenerateMs: 0 };
     const first = createDurableBriefingCache(options); const second = createDurableBriefingCache(options);
     await first(db,"local-org",owner);
     clock += 60_001;
     collect.mockResolvedValue([{ ...evidence[0], content: "New conclusion." }]);
     generate.mockImplementation(() => pending.promise);
-    const refreshing = first(db,"local-org",owner);
+    expect(await first(db,"local-org",owner)).toMatchObject({ generatedAt: 1000, refreshing: true });
     await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
-    expect(await second(db,"local-org",owner)).toMatchObject({ briefings: [], refreshing: true, unavailable: true });
+    expect(await second(db,"local-org",owner)).toMatchObject({ briefings: snapshot.briefings, generatedAt: 1000, refreshing: true });
     expect(collect).toHaveBeenCalledTimes(2);
     pending.resolve({ ...snapshot, generatedAt: clock });
-    expect((await refreshing).generatedAt).toBe(clock);
+    await vi.waitFor(async () => expect((await second(db,"local-org",owner)).generatedAt).toBe(clock));
     expect((await second(db,"local-org",owner)).refreshing).toBeUndefined();
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
+  it("keeps a young snapshot, and keeps the shown snapshot when a refresh fails", async () => {
+    const db = await setup(); let clock = 1000;
+    const collect = vi.fn(async () => evidence);
+    const generate = vi.fn(async (): Promise<WorkspaceBriefingsResponse> => snapshot);
+    const cached = createDurableBriefingCache({ version: "v1", collect, generate, validate: valid, now: () => clock, minRegenerateMs: 300_000 });
+    await cached(db,"local-org",owner);
+    collect.mockResolvedValue([{ ...evidence[0], content: "New conclusion." }]);
+    clock += 60_001;
+    expect((await cached(db,"local-org",owner)).generatedAt).toBe(1000);
+    expect(generate).toHaveBeenCalledTimes(1);
+    clock = 1000 + 300_000;
+    generate.mockResolvedValue({ briefings: [], generatedAt: null, coverage: "recent", unavailable: true });
+    expect((await cached(db,"local-org",owner)).refreshing).toBe(true);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () => expect((await cached(db,"local-org",owner)).refreshing).toBeUndefined());
+    expect(await cached(db,"local-org",owner)).toMatchObject({ briefings: snapshot.briefings, generatedAt: 1000 });
     expect(generate).toHaveBeenCalledTimes(2);
   });
   it("backs off failed generations across instances without repeated source or model reads", async () => {

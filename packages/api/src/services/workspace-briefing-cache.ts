@@ -26,16 +26,25 @@ interface CacheOptions {
   checkIntervalMs?: number;
   failureBackoffMs?: number;
   leaseMs?: number;
+  /** Minimum age of a shown snapshot before changed evidence regenerates it. */
+  minRegenerateMs?: number;
 }
 
 /** Route authorization runs on every GET. Evidence checks run at most once per minute.
- * Atomic leases serialize those checks and generation across API replicas. */
+ * Atomic leases serialize those checks and generation across API replicas.
+ *
+ * When a snapshot of the current version exists, changed evidence regenerates it in
+ * the background and the GET returns the old snapshot marked `refreshing`. Showing it
+ * is safe because every read re-checks that the caller can still read each source.
+ * A snapshot younger than `minRegenerateMs` is kept, so an active conversation does
+ * not start one model call per check. Only the first snapshot blocks the request. */
 export function createDurableBriefingCache(options: CacheOptions) {
   const validate = options.validate ?? canReadCachedBriefingSources;
   const now = options.now ?? Date.now;
   const interval = options.checkIntervalMs ?? 60_000;
   const backoff = options.failureBackoffMs ?? 60_000;
   const leaseMs = options.leaseMs ?? 30_000;
+  const minRegenerate = options.minRegenerateMs ?? 5 * 60_000;
   const unavailable = (checkedAt: number | null, refreshing = false): WorkspaceBriefingsResponse => ({
     briefings: [], generatedAt: null, coverage: "recent", unavailable: true, checkedAt,
     ...(refreshing ? { refreshing: true } : {}),
@@ -74,21 +83,48 @@ export function createDurableBriefingCache(options: CacheOptions) {
           leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
         return visible(row ?? await read());
       }
-      // Changed evidence can revoke a source link. Clear the old snapshot before generation.
+      const shown = claimed.version === options.version ? claimed.response : null;
+      if (shown) {
+        const generatedAt = shown.generatedAt ?? 0;
+        if (checkedAt - generatedAt < minRegenerate) {
+          // Keep the old evidence hash, so the next check after the window regenerates.
+          const [row] = await db.update(cache).set({ checkedAt, nextCheckAt: generatedAt+minRegenerate,
+            leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
+          return visible(row ?? await read());
+        }
+        void regenerate(evidence, evidenceHash, checkedAt, true);
+        return visible(claimed);
+      }
+      // No snapshot to show yet: this request waits for the first one.
       const [invalidated] = await db.update(cache).set({ version: options.version, response: null,
         evidenceHash: null, checkedAt }).where(fence()).returning();
       if (!invalidated) return visible(await read());
-      let response = evidence.length ? await options.generate(orgId,owner,evidence)
-        : { briefings: [], generatedAt: null, coverage: "recent" as const };
-      if (!response.unavailable && !await validate(db,orgId,owner,response)) response = unavailable(checkedAt);
-      const [published] = await db.update(cache).set({ evidenceHash: response.unavailable ? null : evidenceHash,
-        response: response.unavailable ? null : response, nextCheckAt: response.unavailable ? now()+backoff : checkedAt+interval,
-        leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
-      return visible(published ?? await read());
+      return await regenerate(evidence, evidenceHash, checkedAt, false);
     } catch (err) {
+      return await fail(err, false);
+    }
+
+    async function regenerate(evidence: BriefingEvidence[], evidenceHash: string, checkedAt: number, keepShown: boolean) {
+      try {
+        let response = evidence.length ? await options.generate(orgId,owner,evidence)
+          : { briefings: [], generatedAt: null, coverage: "recent" as const };
+        if (!response.unavailable && !await validate(db,orgId,owner,response)) response = unavailable(checkedAt);
+        if (response.unavailable && keepShown) return await fail(new Error("Briefing generation was unavailable."), true);
+        const [published] = await db.update(cache).set({ evidenceHash: response.unavailable ? null : evidenceHash,
+          response: response.unavailable ? null : response, checkedAt, nextCheckAt: response.unavailable ? now()+backoff : checkedAt+interval,
+          leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
+        return visible(published ?? await read());
+      } catch (err) {
+        return await fail(err, keepShown);
+      }
+    }
+
+    async function fail(err: unknown, keepShown: boolean) {
       console.error("workspace briefing refresh failed:", err);
-      // Failed reads cannot prove old links are still authorized. Retry after the backoff.
-      const [failed] = await db.update(cache).set({ version: options.version, evidenceHash: null, response: null,
+      // A failed refresh keeps a snapshot that is still shown; each read re-checks its
+      // sources. A failed first generation shows nothing. Both retry after the backoff.
+      const [failed] = await db.update(cache).set({ version: options.version,
+        ...(keepShown ? {} : { evidenceHash: null, response: null }),
         nextCheckAt: now()+backoff, leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
       return visible(failed ?? await read());
     }
