@@ -2511,7 +2511,7 @@ CREATE TABLE IF NOT EXISTS "channel_messages" (
   "direction" text NOT NULL, "author" text, "text" text, "url" text, "created_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_provider_message" ON "channel_messages" ("org_id", "channel_key", "provider_message_id", "direction");
+CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel_messages" ("org_id", "session_id", "channel_key", "provider_message_id", "direction");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at");
 --> statement-breakpoint

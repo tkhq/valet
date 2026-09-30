@@ -24,6 +24,12 @@ describe("slackChannelListeners", () => {
     expect(listenerFor(listeners, "C5")).toBeUndefined();
   });
 
+  it("reads a prefix channel filter as broad, not as a channel named by its pattern", () => {
+    const listeners = slackChannelListeners([rule({ ownerId: "t2", filters: [{ field: "channel", op: "prefix", value: "C" }] })], "t1", () => "Design");
+    expect(listeners.has("C")).toBe(false);
+    expect(listenerFor(listeners, "C-any")).toEqual({ kind: "other", owner: "Design's Valet" });
+  });
+
   it("treats a rule with no channel filter as listening everywhere", () => {
     const listeners = slackChannelListeners([rule({ ownerId: "t2", filters: [] })], "t1", () => "Design");
     expect(listenerFor(listeners, "C-any")).toEqual({ kind: "other", owner: "Design's Valet" });

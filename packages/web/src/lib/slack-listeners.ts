@@ -11,6 +11,11 @@ export type ChannelListener =
   | { kind: "this-team" }
   | { kind: "other"; owner: string };
 
+/** Only an exact match names channels; a prefix or pattern reaches channels no id list shows. */
+function isChannelIdFilter(filter: EventSubscriptionWire["filters"][number]): boolean {
+  return filter.field === "channel" && (filter.op === "eq" || filter.op === "in");
+}
+
 /** `ALL_CHANNELS` marks a rule with no channel filter: it listens everywhere. */
 export const ALL_CHANNELS = "*";
 
@@ -29,7 +34,7 @@ export function slackChannelListeners(
     const ownTeam = rule.ownerType === "team" && rule.ownerId === teamId;
     const listener: ChannelListener = ownTeam ? { kind: "this-team" }
       : { kind: "other", owner: rule.ownerType === "team" ? `${teamName(rule.ownerId) ?? "Another team"}'s Valet` : "A personal Valet" };
-    const channels = rule.filters.filter((filter) => filter.field === "channel")
+    const channels = rule.filters.filter(isChannelIdFilter)
       .flatMap((filter) => (Array.isArray(filter.value) ? filter.value : [filter.value]));
     for (const channel of channels.length > 0 ? channels : [ALL_CHANNELS]) {
       // This team's own listener wins the label: it is the one it can edit.
@@ -63,19 +68,19 @@ export function teamListening(subscriptions: readonly EventSubscriptionWire[], t
   const own = subscriptions.filter((rule) => rule.enabled && selectsSlackMention(rule.eventKeys)
     && rule.target.kind === "orchestrator" && rule.ownerType === "team" && rule.ownerId === teamId);
   const channelsOf = (rule: EventSubscriptionWire): ListeningChannel[] => rule.filters
-    .filter((filter) => filter.field === "channel")
+    .filter(isChannelIdFilter)
     .flatMap((filter) => {
       const ids = Array.isArray(filter.value) ? filter.value : [filter.value];
       const labels = Array.isArray(filter.labels) ? filter.labels : filter.label ? [filter.label] : [];
       return ids.map((id, index) => ({ id, label: labels[index] ?? id }));
     });
-  const editable = own.find((rule) => rule.filters.length > 0 && rule.filters.every((filter) => filter.field === "channel"));
+  const editable = own.find((rule) => rule.filters.length > 0 && rule.filters.every(isChannelIdFilter));
   const seen = new Map<string, ListeningChannel>();
   for (const rule of own) for (const channel of channelsOf(rule)) if (!seen.has(channel.id)) seen.set(channel.id, channel);
   return {
     ...(editable ? { editable } : {}),
     editableChannels: editable ? channelsOf(editable) : [],
     channels: [...seen.values()],
-    everywhere: own.some((rule) => !rule.filters.some((filter) => filter.field === "channel")),
+    everywhere: own.some((rule) => !rule.filters.some(isChannelIdFilter)),
   };
 }

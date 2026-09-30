@@ -2710,7 +2710,7 @@ export const channelMessages = pgTable("channel_messages", {
   url: text("url"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, t => [
-  uniqueIndex("channel_messages_provider_message").on(t.orgId, t.channelKey, t.providerMessageId, t.direction),
+  uniqueIndex("channel_messages_session_message").on(t.orgId, t.sessionId, t.channelKey, t.providerMessageId, t.direction),
   index("channel_messages_channel").on(t.orgId, t.channelKey, t.createdAt),
   index("channel_messages_thread").on(t.sessionId, t.threadId, t.createdAt),
 ]);

@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
-import { eventSubscriptions, threadPullRequests } from "../schema/index.js";
+import { channelMessages, eventSubscriptions, threadPullRequests } from "../schema/index.js";
 import { recordActionChannelMessage, recordChannelMessage, threadKeyForPullRequest } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ListThreadChannelMessagesResponse, ListThreadsResponse } from "../wire/types.js";
 
@@ -53,6 +53,29 @@ it("lists a workspace's Slack channel with its listener, thread, and messages, a
 
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("slack:COTHER")}`)).status).toBe(404);
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/channel`)).status).toBe(400);
+});
+
+it("records one message for each workspace it reached, and reads a pattern filter as broad", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await runtime(api);
+  const thread = await session.createThread("slack:CENG:1700.1");
+  const message = {
+    orgId: "local-org", threadId: thread.id, channelKey: "slack:CENG", conversationKey: "slack:CENG:1700.1",
+    providerMessageId: "1700.2", direction: "in" as const, text: "hello",
+  };
+  await recordChannelMessage(api.providers.db, { ...message, sessionId });
+  await recordChannelMessage(api.providers.db, { ...message, sessionId: "another-runtime" });
+  const rows = await api.providers.db.select().from(channelMessages);
+  expect(rows.map((row) => row.sessionId).sort()).toEqual(["another-runtime", sessionId].sort());
+
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "listen-prefix", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Prefix",
+    eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "prefix", value: "C" }],
+    target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  const list = await (await fetch(`${api.baseUrl}/api/workspaces/user/channels`)).json() as ListChannelsResponse;
+  expect(list.channels.map((channel) => channel.key)).toEqual(["slack:CENG"]);
+  expect(list.channels[0]?.listeners).toEqual([expect.objectContaining({ subscriptionId: "listen-prefix", everywhere: true })]);
 });
 
 it("finds the thread that opened a pull request, and records the comment Valet posts there", async () => {

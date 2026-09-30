@@ -40,7 +40,7 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import {
   ArchivedAssistantError,
@@ -411,7 +411,7 @@ export class ChannelHost {
       transportFor: (channelType) => this.transportFor(channelType),
       markDelivered: (dedupeKey) => this.markDelivered(dedupeKey),
       onMessageClosed: (turn, providerMessageId, engineMessageId) =>
-        this.recordSentReply(turn.channelType, turn.conversationKey, turn.sessionId, turn.threadId, providerMessageId, engineMessageId),
+        this.recordSentReply(turn.channelType, turn.conversationKey, turn.sessionId, turn.threadId, providerMessageId, { entryId: engineMessageId }),
       abortTurn: async (sessionId, threadId) => {
         // Streams only ever run on a channel thread, and channel threads only
         // exist on an assistant's session (`handleMessage` always threads
@@ -849,7 +849,7 @@ export class ChannelHost {
     }
     // Outside the send's error handling: the reply is already posted, so a
     // failed record must never tell the agent to post it again.
-    await this.recordSentReply(target.channelType, target.conversationKey, sessionId, threadId, sent.messageId, first.id);
+    await this.recordSentReply(target.channelType, target.conversationKey, sessionId, threadId, sent.messageId, { text: first.content });
   }
 
   /**
@@ -859,10 +859,10 @@ export class ChannelHost {
    */
   private async recordSentReply(
     channelType: string, conversationKey: string, sessionId: string, threadId: string,
-    providerMessageId: string, engineMessageId: string,
+    providerMessageId: string, body: { text: string } | { entryId: string },
   ): Promise<void> {
     try {
-      await this.recordSentReplyOrThrow(channelType, conversationKey, sessionId, threadId, providerMessageId, engineMessageId);
+      await this.recordSentReplyOrThrow(channelType, conversationKey, sessionId, threadId, providerMessageId, body);
     } catch (err) {
       console.error("[channels] could not record a sent reply", err);
     }
@@ -870,14 +870,14 @@ export class ChannelHost {
 
   private async recordSentReplyOrThrow(
     channelType: string, conversationKey: string, sessionId: string, threadId: string,
-    providerMessageId: string, engineMessageId: string,
+    providerMessageId: string, body: { text: string } | { entryId: string },
   ): Promise<void> {
     const threadKey = this.transports.get(channelType)?.threadKeyFromConversationKey?.(conversationKey);
     const conversation = slackConversationFromThreadKey(threadKey);
     if (!threadKey || !conversation || providerMessageId === "") return;
-    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
-    const entry = entries.find((candidate) => candidate.id === engineMessageId);
-    const text = entry?.type === "message" ? entry.content : undefined;
+    // One row by id, not the thread's whole transcript: this runs on every reply.
+    const text = "text" in body ? body.text : ((await this.deps.db.execute(sql`SELECT content FROM engine_entries
+      WHERE session_id = ${sessionId} AND id = ${body.entryId}`)) as { rows: Array<{ content: string | null }> }).rows[0]?.content ?? undefined;
     await recordChannelMessage(this.deps.db, {
       orgId: this.orgId ?? (await this.deps.resolveOrgId()),
       sessionId, threadId,

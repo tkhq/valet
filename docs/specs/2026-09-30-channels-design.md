@@ -29,7 +29,7 @@ A channel is derived, not stored. The channel list is the union of four sources 
 | `org_id`, `session_id`, `thread_id` | The engine thread the message belongs to. |
 | `channel_key` | `slack:C123` or `github:acme/app#12`. |
 | `conversation_key` | The Slack thread (`slack:C123:<ts>`), or the channel key for a pull request. |
-| `provider_message_id` | Slack `ts` or GitHub comment id. Unique per org and provider with `channel_key`. |
+| `provider_message_id` | Slack `ts` or GitHub comment id. Unique with the org, session, `channel_key`, and direction, so a message that reached two workspaces is recorded once for each. |
 | `direction` | `in` or `out`. |
 | `author` | Display name of the sender. Null for Valet's own messages. |
 | `text` | The first 500 characters. |

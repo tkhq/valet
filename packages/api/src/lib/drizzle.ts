@@ -375,7 +375,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   "channel_key" text NOT NULL, "conversation_key" text NOT NULL, "provider_message_id" text NOT NULL,
   "direction" text NOT NULL, "author" text, "text" text, "url" text, "created_at" bigint NOT NULL
 )` },
-  { describe: "channel_messages_provider_message", probe: { kind: "index", index: "channel_messages_provider_message" }, sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_provider_message" ON "channel_messages" ("org_id", "channel_key", "provider_message_id", "direction")' },
+  {
+    // One message delivered to two workspaces is recorded once for each, so
+    // the key names the session. The first key (without it) is dropped.
+    describe: "channel_messages_session_message",
+    probe: { kind: "index", index: "channel_messages_session_message" },
+    prepare: async (db) => { await db.query('DROP INDEX IF EXISTS "channel_messages_provider_message"'); },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel_messages" ("org_id", "session_id", "channel_key", "provider_message_id", "direction")',
+  },
   { describe: "channel_messages_channel", probe: { kind: "index", index: "channel_messages_channel" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at")' },
   { describe: "channel_messages_thread", probe: { kind: "index", index: "channel_messages_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at")' },
   { describe: "briefing dismissals", probe: { kind: "table", table: "briefing_dismissals" }, sql: `CREATE TABLE IF NOT EXISTS "briefing_dismissals" (

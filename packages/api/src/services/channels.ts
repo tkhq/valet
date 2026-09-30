@@ -46,8 +46,10 @@ function channelFilterIds(filters: unknown): { ids: string[]; labels: Map<string
   if (!Array.isArray(filters)) return { ids, labels };
   for (const filter of filters) {
     if (!filter || typeof filter !== "object") continue;
-    const f = filter as { field?: unknown; value?: unknown; label?: unknown; labels?: unknown };
-    if (f.field !== "channel") continue;
+    const f = filter as { field?: unknown; op?: unknown; value?: unknown; label?: unknown; labels?: unknown };
+    // Only an exact match names channels. A prefix, contains, or regex filter
+    // reaches channels no id list can show, so the rule reads as broad.
+    if (f.field !== "channel" || (f.op !== "eq" && f.op !== "in")) continue;
     const values = (Array.isArray(f.value) ? f.value : [f.value]).filter((v): v is string => typeof v === "string");
     const names = Array.isArray(f.labels) ? f.labels : typeof f.label === "string" ? [f.label] : [];
     values.forEach((id, index) => {
