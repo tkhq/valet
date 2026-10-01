@@ -8,6 +8,7 @@ import { AlertCircle, Clock, Trash2, Zap, MoreHorizontal } from "lucide-react";
 import { useState } from "react";
 import {
   useDeleteWorkflow,
+  useSetWorkflowEnabled,
   useStartRun,
   useWorkflows,
   useWorkflowTriggers,
@@ -15,7 +16,7 @@ import {
 import { WorkflowCreation } from "~/components/workflows/workflow-creation";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "~/components/primitives/dropdown-menu";
 import { OwnerBadge } from "~/components/owner-badge";
-import { Button, ConfirmDialog, Spinner, TabBar } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner, Switch, TabBar } from "~/components/primitives";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
@@ -69,6 +70,8 @@ export function WorkflowsIndexPage() {
               <h1 className="font-display text-2xl text-ink">Automation</h1>
               <WorkspaceClause />
             </div>
+            <div className="flex items-center gap-2">
+            <Button size="sm" onClick={() => { setCreating(true); void navigate({ to: "/workflows", search: {} }); }}>New workflow</Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="Workflow options"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -76,6 +79,7 @@ export function WorkflowsIndexPage() {
                 <DropdownMenuItem onSelect={() => setNewOpen(true)}>Manual setup</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            </div>
           </div>
           <div className="mt-6">
             <TabBar
@@ -155,6 +159,10 @@ function DefinitionRow({
   triggers: WorkflowTriggerItem[];
 }) {
   const startRun = useStartRun(workflow.id);
+  // On while any trigger can start it. The switch flips them all, and its
+  // label reads the saved state the server returns.
+  const setEnabled = useSetWorkflowEnabled();
+  const on = triggers.some((trigger) => trigger.enabled);
   const del = useDeleteWorkflow();
   const navigate = useNavigate();
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -270,6 +278,13 @@ function DefinitionRow({
           >
             <Zap className="h-3 w-3" /> {eventCount}
           </span>
+        )}
+        {triggers.length > 0 && (
+          <label className="inline-flex items-center gap-2 text-xs text-muted">
+            <Switch checked={on} onCheckedChange={(enabled) => setEnabled.mutate({ triggers, enabled })} disabled={setEnabled.isPending}
+              aria-label={`${workflow.name} ${on ? "on" : "off"}`} />
+            {setEnabled.isPending ? "Saving…" : setEnabled.isError ? <span role="alert" className="text-danger-500">Not saved. Try again.</span> : on ? "On" : "Off"}
+          </label>
         )}
         {workflow.latestFailedRun && (
           <Link

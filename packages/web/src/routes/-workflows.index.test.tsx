@@ -140,6 +140,7 @@ const navigate = vi.fn();
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_new" });
 const deleteMutateAsync = vi.fn().mockResolvedValue(undefined);
 const resolveMutate = vi.fn();
+const setEnabledMutate = vi.fn();
 const createMutateAsync = vi.fn().mockResolvedValue({
   id: "wf_new",
   name: "My new workflow",
@@ -209,6 +210,7 @@ vi.mock("~/api/workflows", () => ({
   }),
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  useSetWorkflowEnabled: () => ({ mutate: setEnabledMutate, isPending: false, isError: false }),
   useCreateWorkflow: () => ({
     mutateAsync: createMutateAsync,
     isPending: false,
@@ -235,12 +237,6 @@ vi.mock("~/api/workflows", () => ({
   }),
   useCreateSchedule: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useCreateEventTrigger: () => ({ mutateAsync: vi.fn(), isPending: false }),
-}));
-
-// The gallery has its own suite; here it only has to be identifiable, so the
-// page's placement rule can be asserted without a second templates fixture.
-vi.mock("~/components/workflows/template-gallery", () => ({
-  TemplateGallery: () => <div data-testid="template-gallery" />,
 }));
 
 import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
@@ -389,6 +385,19 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.getByLabelText(/1 schedule/)).toBeTruthy();
   });
 
+  it("turns a workflow off from its row by disabling all of its triggers", () => {
+    renderPage();
+    const toggle = screen.getByRole("switch", { name: "Deploy pipeline on" });
+    expect(screen.getByText("On")).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(setEnabledMutate).toHaveBeenCalledWith({ triggers: triggersData.triggers, enabled: false });
+  });
+
+  it("offers New workflow in the page header", () => {
+    renderPage();
+    expect(screen.getByRole("button", { name: "New workflow" })).toBeTruthy();
+  });
+
   it("removes the separate approval tab", () => {
     renderPage();
     expect(screen.queryByRole("tab", { name: /Needs your approval/ })).toBeNull();
@@ -457,14 +466,12 @@ describe("WorkflowsIndexPage", () => {
   it("shows only Workflows and Scheduled tabs", () => {
     renderPage();
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent?.trim())).toEqual(["Workflows", "Scheduled"]);
-    expect(screen.queryByTestId("template-gallery")).toBeNull();
   });
 
   it("offers the workflow composer without templates when the list is empty", async () => {
     vi.spyOn(api, "ensureWorkspaceRuntime").mockResolvedValue({ sessionId: "workspace-runtime" });
     workflowsData.workflows = [];
     renderPage();
-    expect(screen.queryByTestId("template-gallery")).toBeNull();
     expect(await screen.findByText("What would you like to automate?")).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "Workflow request" })).toBeTruthy();
     expect(api.ensureWorkspaceRuntime).toHaveBeenCalledWith("user");

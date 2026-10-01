@@ -36,6 +36,7 @@ import type {
   ListWorkflowVersionsResponse,
   WorkflowEventTriggerResponse,
   WorkflowScheduleResponse,
+  WorkflowTriggerItem,
 } from "@valet/api/wire";
 import { api, ApiError, type OwnerFilter, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
 
@@ -456,6 +457,17 @@ export function useDeleteWorkflowWebhook(id: string) {
 function useInvalidateTriggers() {
   const qc = useQueryClient();
   return () => qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+}
+
+/** Turns a workflow on or off: every schedule and event trigger it has at once. */
+export function useSetWorkflowEnabled() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<unknown, Error, { triggers: WorkflowTriggerItem[]; enabled: boolean }>({
+    mutationFn: ({ triggers, enabled }) => Promise.all(triggers.map((trigger) => trigger.kind === "schedule"
+      ? api.updateWorkflowSchedule(trigger.id, { enabled })
+      : api.updateWorkflowEventTrigger(trigger.id, { enabled }))),
+    onSettled: invalidate,
+  });
 }
 
 export function useCreateSchedule() {
