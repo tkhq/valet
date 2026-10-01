@@ -26,6 +26,11 @@ import type {
   ToolDef,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { createSkill } from "../services/skills.js";
+import { createTeam } from "../services/teams.js";
+import { skills } from "../schema/index.js";
+import { eq } from "drizzle-orm";
 
 const stubCredentials: CredentialProvider = {
   get: async (): Promise<Credential | null> => null,
@@ -135,6 +140,20 @@ describe("the `skill` tool on a real session", () => {
 
     expect(result.text).toContain("not-a-skill");
     expect(result.text).toContain("github");
+  });
+
+  it("finds a team skill saved after the team's session was built", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Topology", creatorUserId: "local-user" });
+    const { session } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
+    const tool = findSkillTool(session.options.tools);
+    // A repo sync stores team skills; it is the same row with a team owner.
+    await createSkill(api.providers.db, { userId: "local-user", orgId: "local-org" }, {
+      name: "generate-topology", description: "Draw the service topology.", content: "# Topology\nDraw it.",
+    });
+    await api.providers.db.update(skills).set({ ownerType: "team", ownerId: team.id }).where(eq(skills.name, "generate-topology"));
+    const result = await tool.execute({ name: "generate-topology" }, makeCtx());
+    expect(result.text).toContain("Draw it.");
   });
 
   it("is absent from a session whose plugins ship no skills", async () => {

@@ -104,9 +104,9 @@ function renderSkillResult(
  * quietly keep the last one — serving one skill's body under another's
  * name. It throws instead.
  */
-export function buildSkillTool(skills: SkillSource[]): ToolDef | null {
+export function buildSkillTool(skills: SkillSource[], reload?: () => Promise<SkillSource[]>): ToolDef | null {
   if (skills.length === 0) return null;
-  const byName = new Map<string, SkillSource>();
+  let byName = new Map<string, SkillSource>();
   for (const skill of skills) {
     if (byName.has(skill.name)) {
       throw new Error(
@@ -123,6 +123,14 @@ export function buildSkillTool(skills: SkillSource[]): ToolDef | null {
     riskLevel: "low",
     protectedFromPruning: true,
     execute: async (args, ctx): Promise<ToolResult> => {
+      // A long-lived session (a workspace runtime) was built before a skill
+      // synced or saved later. Re-read the owner's skills once before
+      // answering that a name does not exist.
+      if (!byName.has(args.name) && reload) {
+        const fresh = new Map<string, SkillSource>();
+        for (const skill of await reload()) if (!fresh.has(skill.name)) fresh.set(skill.name, skill);
+        byName = fresh;
+      }
       const rendered = renderSkillResult(byName, args.name, args.args ?? {});
       if (rendered.skill && ctx.recordSkillInvocation) {
         await ctx.recordSkillInvocation(rendered.skill, "model_tool", rendered.text);

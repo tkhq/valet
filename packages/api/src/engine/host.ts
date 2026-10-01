@@ -1445,6 +1445,7 @@ export class EngineHost {
       await listSkillSourcesFor(this.opts.db, owner, orgId),
       effectivePins,
       catalogOptions,
+      this.skillsProviderFor(owner, orgId, extraPlugins),
     );
   }
 
@@ -2848,9 +2849,8 @@ export class EngineHost {
    * Drop a session's in-process cache entry WITHOUT tearing down engine
    * state — unlike `destroy()`, this never calls `session.destroy()` (which
    * deletes the underlying engine session row via
-   * `SessionStore.deleteSession`). Used when an identity/persona change
-   * needs picking up on the next wake (PATCH /api/orchestrator/info,
-   * decision 4/5): the next `assistantSessionFor` call misses the cache
+   * `SessionStore.deleteSession`). Used when a configuration change needs
+   * picking up on the next wake: the next `assistantSessionFor` call misses the cache
    * and rebuilds `systemPrompt`/`systemContext` from current configuration,
    * restoring the same durable session (same transcript) rather than
    * creating a new one. Safe to call on an id that isn't cached — no-op.
