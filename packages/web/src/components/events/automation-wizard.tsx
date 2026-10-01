@@ -711,7 +711,7 @@ function ReplyStep({
     <div className="space-y-4">
       <p className="text-xs text-muted">
         {target.orchestrator === "team"
-          ? "This rule uses the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A sender with no linked Slack account is always denied."
+          ? "This rule uses the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A full member of your Slack workspace with no linked account runs as the person who set the rule up. Guests and people from other organizations are denied."
           : <>This rule fires only when <span className="text-ink">you</span> @-mention the app.
             Mentions by other people do not reach {reach}.</>}
       </p>

@@ -265,7 +265,7 @@ describe("AutomationWizard", () => {
     expect(screen.getByText(/This rule uses the organization/)).toBeTruthy();
     expect(screen.getByText(/Choose below who may invoke it by mention/)).toBeTruthy();
     expect((screen.getByRole("radio", { name: "Platform" }) as HTMLInputElement).disabled).toBe(false);
-    expect(screen.getByText(/no linked Slack account is always denied/)).toBeTruthy();
+    expect(screen.getByText(/no linked account runs as the person who set the rule up/)).toBeTruthy();
     // The review describes the selected team's member scope.
     addReplyChannel("C123");
     clickNext();
