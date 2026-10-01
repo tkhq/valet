@@ -21,6 +21,7 @@ import type {
 } from "@valet/api/wire";
 
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
+vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
 
 const pluginsData = {
   plugins: [
