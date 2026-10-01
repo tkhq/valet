@@ -1,4 +1,5 @@
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
+import { uid } from "./ids.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
@@ -67,10 +68,6 @@ import type {
 } from "./types.js";
 import { credentialSecret } from "./types.js";
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 function submissionsByThread(items: readonly QueueItem[]): Map<string, QueueItem[]> {
   const grouped = new Map<string, QueueItem[]>();

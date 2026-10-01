@@ -1,4 +1,5 @@
 import { Agent } from "@earendil-works/pi-agent-core";
+import { uid } from "./ids.js";
 import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
@@ -338,10 +339,6 @@ export function formatTransientRetryMessage(args: {
   return primary + detail;
 }
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
 function delay(ms: number): Promise<void> {
