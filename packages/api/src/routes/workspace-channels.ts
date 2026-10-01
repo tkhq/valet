@@ -18,6 +18,17 @@ export const workspaceChannelsRouter = new Hono<AppEnv>();
 const NAMES_TTL_MS = 5 * 60_000;
 const namesCache = new Map<string, { names: Map<string, string>; expiresAt: number }>();
 
+/** Caps a TTL cache: past `max` entries it drops the expired ones, then the
+ * oldest, so a long-lived process does not keep every key it has seen. */
+function setCapped<V extends { expiresAt: number }>(cache: Map<string, V>, key: string, value: V, max = 5000): void {
+  if (cache.size >= max) {
+    const now = Date.now();
+    for (const [old, entry] of cache) if (entry.expiresAt <= now) cache.delete(old);
+    if (cache.size >= max) cache.delete(cache.keys().next().value!);
+  }
+  cache.set(key, value);
+}
+
 /** The organization's Slack bot credential, or null when none is connected. */
 async function orgSlackCredential(c: Context<AppEnv>): Promise<StoredCredential | null> {
   const { engineCredentials, onePassword } = c.var.providers;
@@ -45,7 +56,7 @@ function slackChannelNames(c: Context<AppEnv>): ChannelNames {
     if (!credential) return new Map();
     const options = await resolver({ orgId, deps: {}, credential });
     const names = new Map(options.map((option) => [option.id, option.label]));
-    namesCache.set(orgId, { names, expiresAt: Date.now() + NAMES_TTL_MS });
+    setCapped(namesCache, orgId, { names, expiresAt: Date.now() + NAMES_TTL_MS });
     return names;
   };
 }
@@ -77,7 +88,7 @@ function channelVisibility(c: Context<AppEnv>): ChannelVisibility {
     const access = await checkPrivateChannelAccess(botToken, parsed.channelId, await slackUserId).catch(() => null);
     const allowed = access?.allowed === true;
     // A Slack error is not cached, so the next request asks again.
-    if (access && !access.error) accessCache.set(cacheKey, { allowed, expiresAt: Date.now() + ACCESS_TTL_MS });
+    if (access && !access.error) setCapped(accessCache, cacheKey, { allowed, expiresAt: Date.now() + ACCESS_TTL_MS });
     return allowed;
   };
 }
