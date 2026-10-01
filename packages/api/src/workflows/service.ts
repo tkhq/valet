@@ -761,10 +761,11 @@ export async function updateWorkflowDefinition(
   const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
   // A grant approves the steps as they were. When someone who could not have
   // granted it changes them, an approver must look again. Revoke before the
-  // write, so no run can start on the new steps under the old grant.
-  if (stepsChange && !(await canGrantWorkflowPermissions(deps, owner, row))) {
-    await revokeWorkflowGrants(deps.db, row.orgId, id);
-  }
+  // write, so no run can start on the new steps under the old grant, and
+  // again after it: an approval that read the old steps can land between the
+  // two, and its grant must not outlive them.
+  const revokeGrants = stepsChange && !(await canGrantWorkflowPermissions(deps, owner, row));
+  if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
   // definition at run-start time (plan decision 17), so updating the
   // definitions row here never reaches back into a running/parked run.
@@ -776,6 +777,7 @@ export async function updateWorkflowDefinition(
       updatedAt: now,
     })
     .where(eq(workflowDefinitions.id, id));
+  if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
 
   // Version history: snapshot only when the definition actually changed —
   // a rename alone shouldn't mint a version.
