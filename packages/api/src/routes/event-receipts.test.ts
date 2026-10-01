@@ -49,7 +49,7 @@ describe("event receipts", () => {
     expect((await (await fetch(`${url}?q=secret`)).json() as ListEventReceiptsResponse).receipts).toEqual([]);
     expect((await (await fetch(`${url}?q=excluded`)).json() as ListEventReceiptsResponse).receipts).toHaveLength(3);
   });
-  it("cleans stale and excess receipts in bounded batches, at most once a minute, without touching other organizations", async () => {
+  it("removes all stale and excess receipts at most once a minute, without touching other organizations", async () => {
     api = await bootTestApi(); const db = api.providers.db;
     // Each retention pass needs a fresh minute; the clock moves past the interval between passes.
     let clock = Date.now() + 365 * 86_400_000;
@@ -59,14 +59,15 @@ describe("event receipts", () => {
       await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) SELECT 'old-' || i, 'local-org', 'slack', 1, 1 FROM generate_series(1,1100) i`);
       await db.insert(eventReceipts).values({ id: "other", orgId: "other-org", service: "slack", createdAt: 1, updatedAt: 1 });
       await createEventReceipt(db, { orgId: "local-org", service: "slack" });
-      expect((await db.select({ id: eventReceipts.id }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org")))).toHaveLength(101);
+      expect((await db.select({ id: eventReceipts.id }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org")))).toHaveLength(1);
       // A second receipt inside the interval does not run retention again.
+      await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) VALUES ('stale-again','local-org','slack',1,1)`);
       await createEventReceipt(db, { orgId: "local-org", service: "slack" });
-      expect((await db.select({ id: eventReceipts.id }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org")))).toHaveLength(102);
+      expect((await db.select({ id: eventReceipts.id }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org")))).toHaveLength(3);
       nextPass();
       await createEventReceipt(db, { orgId: "local-org", service: "slack" });
       expect(await db.select().from(eventReceipts).where(eq(eventReceipts.id, "other"))).toHaveLength(1);
-      await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) SELECT 'new-' || i, 'local-org', 'slack', ${clock}, ${clock} FROM generate_series(1,10005) i`);
+      await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) SELECT 'new-' || i, 'local-org', 'slack', ${clock}, ${clock} FROM generate_series(1,15000) i`);
       nextPass();
       await createEventReceipt(db, { orgId: "local-org", service: "slack" });
       const count = await db.select({ count: sql<number>`count(*)::int` }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org"));

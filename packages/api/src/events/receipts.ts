@@ -40,16 +40,11 @@ export async function createEventReceipt(db: AppDb, input: { orgId: string; serv
   try {
     const id = randomUUID(), now = Date.now();
     await db.insert(eventReceipts).values({ id, orgId: input.orgId, service: bounded(input.service), externalId: input.externalId === undefined ? null : bounded(input.externalId), metadata: sanitizeReceiptMetadata(input.metadata), stages: [], subscriptions: [], createdAt: now, updatedAt: now });
-    // Both scans are index-bounded: excess records are drained in batches of at most
-    // 1000 per pass. The API also enforces the age window during cleanup backlogs.
+    // Each pass removes everything past the age window and the row cap, so
+    // the table stays bounded however fast receipts arrive between passes.
     if (receiptCleanupDue(input.orgId, now)) try {
-      await db.execute(sql`DELETE FROM event_receipts WHERE org_id = ${input.orgId} AND id IN (
-        SELECT id FROM (
-          (SELECT id FROM event_receipts WHERE org_id = ${input.orgId} AND created_at < ${now - 7 * 86400000} ORDER BY created_at, id LIMIT 1000)
-          UNION
-          (SELECT id FROM event_receipts WHERE org_id = ${input.orgId} ORDER BY created_at DESC, id DESC OFFSET 10000 LIMIT 1000)
-        ) candidates LIMIT 1000
-      )`);
+      await db.execute(sql`DELETE FROM event_receipts WHERE org_id = ${input.orgId} AND (created_at < ${now - RECEIPT_RETENTION_DAYS * 86_400_000}
+        OR id IN (SELECT id FROM event_receipts WHERE org_id = ${input.orgId} ORDER BY created_at DESC, id DESC OFFSET 10000))`);
     } catch { console.warn("[event-receipts] cleanup unavailable"); }
     return id;
   } catch { console.warn("[event-receipts] write unavailable"); return undefined; }
