@@ -72,7 +72,7 @@ export function TeamCredentials({
 
   return (
     <div>
-      <h4 className="text-xs font-medium uppercase tracking-wide text-muted">{cards ? "Team connections" : "Credentials"}</h4>
+      {cards && <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Team connections</h4>}
       {credsQ.isLoading && <LoadingRow label="Loading credentials…" className="py-2 text-xs" />}
       {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
       {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
@@ -92,31 +92,32 @@ export function TeamCredentials({
             <li key={row.service}>
               <div className={cards ? cn(cardClass, "flex h-full flex-col p-5") : "flex items-center justify-between gap-4 py-2"}>
               <div className="min-w-0">
-                {cards ? <CardHeading title={row.service === "linear" ? "Linear MCP" : displayName(row.service)} slug={row.service} /> : <p className="truncate text-sm text-ink">{row.service === "linear" ? "Linear MCP" : displayName(row.service)}</p>}
-                <p className="text-xs text-muted">
-                  {row.delegatedFrom
-                    ? `Shared by ${nameFor(row.delegatedFrom)}`
-                    : "Stored on the team"}
-                  {row.referenceBroken ? " · broken" : ""}
-                </p>
-                <p className="text-xs text-muted">
-                  {row.delegatedFrom
-                    ? `Team actions use ${nameFor(row.delegatedFrom)}’s account. Access ends if they stop sharing or leave the team.`
-                    : "Used by team runtimes and workflows."}
-                </p>
-                {row.referenceBroken && (
-                  <p className="text-xs text-danger-500">
-                    The source credential is gone or the member left. Re-share it, or store a
-                    direct team credential.
+                <CardHeading
+                  title={row.service === "linear" ? "Linear MCP" : displayName(row.service)}
+                  slug={row.service}
+                  state={row.referenceBroken && <Badge variant="danger">Broken</Badge>}
+                  description={row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Stored on the team"}
+                />
+                {/* pl-12 starts these lines under the title, past the 36px icon and its gap. */}
+                <div className="mt-1 pl-12 text-xs">
+                  <p className="text-muted">
+                    {row.delegatedFrom
+                      ? `Team actions use ${nameFor(row.delegatedFrom)}’s account. Access ends if they stop sharing or leave the team.`
+                      : "Used by team runtimes and workflows."}
                   </p>
-                )}
+                  {row.referenceBroken && (
+                    <p className="text-danger-500">
+                      The source credential is gone or the member left. Re-share it, or store a
+                      direct team credential.
+                    </p>
+                  )}
+                </div>
               </div>
               <div className={cards ? "mt-auto flex items-center justify-end gap-2 pt-4" : "flex shrink-0 items-center gap-2 whitespace-nowrap"}>
-                {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
                 {canMutate && (
                   <Button
                     size="sm"
-                    variant="ghost"
+                    variant="secondary"
                     disabled={disconnect.isPending}
                     aria-label={`${removal.action} ${removal.target}`}
                     onClick={() => {

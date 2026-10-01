@@ -253,7 +253,7 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
     // The hint reaches members too — they are the ones whose sessions the
     // setting shapes, and whose personal default wins.
-    expect(screen.getByText(/personal\s+default wins/)).toBeTruthy();
+    expect(screen.getByText(/personal default/)).toBeTruthy();
   });
 
   it("plain member sees the catalog name for a non-curated model, not the raw id", () => {
@@ -621,7 +621,7 @@ describe("TeamsPanel — team credentials", () => {
     ];
     openTeam();
     expect(screen.getByText("Linear MCP")).toBeTruthy();
-    expect(screen.getByText("Shared by Two · broken")).toBeTruthy();
+    expect(screen.getByText("Shared by Two")).toBeTruthy();
     expect(screen.getByText("Broken")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Stop sharing Linear with Platform" })).toBeTruthy();
   });

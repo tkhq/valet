@@ -3,6 +3,7 @@ import type { PluginServiceSummary } from "@valet/api/wire";
 import { useConnectCredential, useCredentials, usePlugins } from "~/api/integrations";
 import { Button, Dialog, DialogContent, ErrorRow, Textarea } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
+import { SubSection } from "~/components/settings/section";
 import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
 import { errorText } from "~/lib/error-text";
 import { displayName } from "./display-name";
@@ -40,15 +41,11 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
 
   const available = choices.filter((s) => displayName(s.service).toLowerCase().includes(query.toLowerCase()));
   return <div className="space-y-6">
-    <section aria-label="Dedicated team connection">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h3 className="text-sm font-medium text-ink">Connect a service</h3>
-          <p className="mt-1 text-sm text-muted">Connect an account intended for this team.</p></div>
-        <div className="w-full sm:w-56"><SearchInput value={query} onSettled={setQuery} placeholder="Search integrations…" /></div>
-      </div>
+    <SubSection title="Connect a service" description="Connect an account intended for this team."
+      actions={<div className="w-56"><SearchInput value={query} onSettled={setQuery} placeholder="Search integrations…" /></div>}>
       {credentials.error && <ErrorRow>Could not check team connections. Reload the page.</ErrorRow>}
-      {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="mt-4 text-sm text-muted">No available integrations match.</p>}
-      <div className="grid gap-3 pt-4 sm:grid-cols-2">
+      {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="text-sm text-muted">No available integrations match.</p>}
+      <div className="grid gap-3 sm:grid-cols-2">
         {children}
         {available.map((service) => {
           const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
@@ -61,7 +58,7 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
         })}
       </div>
       {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
-    </section>
+    </SubSection>
   </div>;
 }
 

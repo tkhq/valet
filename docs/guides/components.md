@@ -26,8 +26,12 @@ and a reader then sees two small inconsistencies instead of one pattern.
   shared folder) in that change, and switch both callers to it.
 - **One layout for one kind of list.** Rows in one list share one row
   component. Work lists render through `WorkRow` inside `WorkList` or
-  `WorkSection`: a title link, an optional badge and status mark, optional
-  detail, and a right-hand column with actions and then the time.
+  `WorkSection`: a title link and an optional badge on the first line, the
+  time and then the detail on the second, and actions on the right.
+- **One heading for one part of a settings item.** A titled part inside a
+  settings item, such as a section of an expanded team, uses `SubSection` from
+  `settings/section.tsx`: a small title, an optional one-line description, and
+  the part's actions on the right.
 - **One box, one inset, one column.** A boxed surface uses `cardClass` (or
   `Card`) and starts its content 20px in (`px-5`), the line `WorkRow` titles
   use. A page uses `pageClass` for its width and gutters, so page titles and
