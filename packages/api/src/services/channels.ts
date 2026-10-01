@@ -1,8 +1,7 @@
 /**
  * Channels as a workspace sees them: every Slack channel and pull request its
  * runtime talks in, who listens there, and the conversations and messages that
- * link Valet threads to the channel. A channel is derived, never stored. See
- * docs/specs/2026-09-30-channels-design.md.
+ * link Valet threads to the channel. A channel is derived, never stored.
  */
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";

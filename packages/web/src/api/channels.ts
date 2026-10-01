@@ -1,4 +1,4 @@
-/** Channels a workspace talks and listens in (docs/specs/2026-09-30-channels-design.md). */
+/** Channels a workspace talks and listens in. */
 import { useQuery } from "@tanstack/react-query";
 import { api, type OwnerFilter } from "./client";
 

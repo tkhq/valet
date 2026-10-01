@@ -142,8 +142,7 @@ delivery boundary.
 One record is kept for every verified delivery: the diagnostic receipt. It holds
 routing metadata, such as the channel, actor, and message ids, and the stage
 outcomes. It never holds the message text. Receipts are kept for 7 days, and
-only organization admins can read them
-(`docs/specs/2026-09-27-threads-events-local-design.md`).
+only organization admins can read them.
 
 This changed the prior behavior, where only the `ephemeral` `slack.message` key
 was gated and every other event (GitHub, Linear, and the rest of Slack)

@@ -1,7 +1,6 @@
 /**
  * `GET /api/workspaces/:workspace/channels` and `.../channel?key=` — the
- * channels a workspace talks and listens in. See
- * docs/specs/2026-09-30-channels-design.md.
+ * channels a workspace talks and listens in.
  */
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";

@@ -1,7 +1,7 @@
 /**
  * Channel keys and the `channel_messages` record: what Valet sent to, or
  * received from, a Slack channel or a pull request, and the engine thread
- * each message belongs to. See docs/specs/2026-09-30-channels-design.md.
+ * each message belongs to.
  */
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";

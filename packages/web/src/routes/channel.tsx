@@ -16,7 +16,7 @@ import { cn } from "~/lib/cn";
 /**
  * `/channel?key=slack:C123` — one channel: who listens there, the Valet
  * threads that talk in it, and the messages sent and received, each linking
- * to both Valet and the provider (docs/specs/2026-09-30-channels-design.md).
+ * to both Valet and the provider.
  */
 export const Route = createFileRoute("/channel")({
   component: ChannelPage,
