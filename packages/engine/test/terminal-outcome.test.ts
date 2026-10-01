@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { terminalOutcome } from "../src/builtin-tools/terminal-outcome.js";
+import { toolOutcome } from "../src/thread.js";
 
 describe("terminalOutcome", () => {
   it("confirms a created PR from a successful gh create result", () => {
@@ -28,5 +29,23 @@ describe("terminalOutcome", () => {
     expect(terminalOutcome("gh pr review 42", "", 0)).toBeUndefined();
     expect(terminalOutcome("gh pr review 42 --comment", "", 1)).toBeUndefined();
     expect(terminalOutcome("gh pr review 42 --approve || true", "", 0)).toBeUndefined();
+  });
+});
+
+describe("toolOutcome", () => {
+  it("forwards every outcome kind the terminal reports to tool_end", () => {
+    const commands = [
+      ["gh pr create --fill", "https://github.com/acme/repo/pull/42\n"],
+      ["gh pr review 42 --approve", ""],
+      ['gh pr comment 42 --body "Fixed"', "https://github.com/acme/repo/pull/42#issuecomment-901\n"],
+    ] as const;
+    const kinds = commands.map(([command, output]) => {
+      const outcome = terminalOutcome(command, output, 0);
+      expect(outcome).toBeDefined();
+      expect(toolOutcome({ details: { outcome } })).toEqual({ outcome });
+      return outcome?.kind;
+    });
+    expect(kinds).toEqual(["pull_request_created", "review_submitted", "pull_request_comment"]);
+    expect(toolOutcome({ details: { outcome: { kind: "unknown" } } })).toEqual({});
   });
 });

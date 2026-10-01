@@ -6256,13 +6256,17 @@ export function entriesToAgentMessages(
 }
 
 /** The confirmed side effect a tool reported in its result details, if any. */
-function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] } {
+const TOOL_OUTCOME_KINDS: ReadonlyArray<NonNullable<ToolResult["outcome"]>["kind"]> = ["pull_request_created", "review_submitted", "pull_request_comment"];
+
+/** The outcome a tool's result reports, for `tool_end`. Exported for tests. */
+export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] } {
   if (typeof result !== "object" || result === null || !("details" in result)) return {};
   const details = result.details;
   if (typeof details !== "object" || details === null || !("outcome" in details)) return {};
   const outcome = details.outcome;
   if (typeof outcome !== "object" || outcome === null || !("kind" in outcome)) return {};
-  if (outcome.kind !== "pull_request_created" && outcome.kind !== "review_submitted") return {};
+  const kind = TOOL_OUTCOME_KINDS.find((known) => known === outcome.kind);
+  if (!kind) return {};
   const url = "url" in outcome && typeof outcome.url === "string" ? outcome.url : undefined;
-  return { outcome: { kind: outcome.kind, ...(url ? { url } : {}) } };
+  return { outcome: { kind, ...(url ? { url } : {}) } };
 }
