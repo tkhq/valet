@@ -158,6 +158,7 @@ export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INT
  * A new plugin gaining tests must be added here (guarded by lib.test.ts). */
 const TESTED_PLUGINS = [
   "@valet/plugin-browser",
+  "@valet/plugin-docs-analytics",
   "@valet/plugin-github",
   "@valet/plugin-gmail",
   "@valet/plugin-google-calendar",
