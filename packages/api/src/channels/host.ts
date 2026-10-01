@@ -336,13 +336,15 @@ function chatIdFromKey(conversationKey: string): string {
  * deliver-by-binding behavior. The failure mode of this classifier is
  * silent muting, so every branch defaults to "not web".
  */
-function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string): boolean {
+function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string, personOnly = false): boolean {
   const prompts = entries.filter(
     (e): e is Extract<SessionEntry, { type: "message" }> =>
       e.type === "message" && e.role === "user" && e.queueItemId === queueItemId,
   );
   if (prompts.length === 0) return false;
-  return prompts.every((e) => e.channel === undefined && e.signal === undefined);
+  // `personOnly`: a child's prompt from its parent agent has no author, and
+  // only a person typing in the web app makes a child submission web-origin.
+  return prompts.every((e) => e.channel === undefined && e.signal === undefined && (!personOnly || e.author !== undefined));
 }
 
 /** Feature-detects a transport that opens a direct conversation with one of
@@ -1089,10 +1091,11 @@ export class ChannelHost {
     // channel, its card would be a live approve/deny button with zero
     // surrounding context — an invitation to approve an action the channel
     // reader never saw described.
-    // A child's prompt comes from its parent, not from a web user, and the
-    // stored origin already proves the work started in this conversation.
-    const entries = direct ? await this.deps.engineStore.getEntries(sessionId, gate.threadId) : [];
-    if (direct && submissionIsWebPrompt(entries, gate.queueItemId)) {
+    // A child's prompt from its parent agent is not a web prompt, and the
+    // stored origin proves the work started in this conversation. A person
+    // can still prompt the child in the web app; that gate stays in the web.
+    const entries = await this.deps.engineStore.getEntries(sessionId, gate.threadId);
+    if (submissionIsWebPrompt(entries, gate.queueItemId, !direct)) {
       console.debug(
         `[channels] web-origin gate stays off ${mapped.channelType} (session=${sessionId} gate=${gate.id})`,
       );

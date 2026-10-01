@@ -1667,6 +1667,39 @@ describe("ChannelHost outbound delivery", () => {
     expect(host.gateForRef(prompt)).toMatchObject({ sessionId: child.id, gateId: prompt.prompt.gateId });
   });
 
+  it.each([
+    ["stays in the web app when a person prompted the child there", { id: USER_ID, name: "Ada" }, 0],
+    ["goes to the spawning channel when the parent agent prompted the child", undefined, 1],
+  ] as const)("a child's gate %s", async (_label, author, posted) => {
+    const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const childId = `child-web-${randomUUID()}`;
+    await testDb.appDb.insert(agentSessions).values({
+      id: childId, userId: USER_ID, orgId: ORG_ID, workspace: "/tmp/child-web",
+      ownerType: "user", ownerId: USER_ID, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: parent.id, parentThreadId: parent.thread().id,
+      actorUserId: USER_ID, orgId: ORG_ID, owner: parent.owner, workspace: "/tmp/child-web",
+    });
+    await testDb.appDb.insert(childWatches).values({
+      childSessionId: childId, queueItemId: "qi-child", parentSessionId: parent.id,
+      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled: false,
+      originJson: JSON.stringify({ channelType: "fake", threadKey: "fake:C-web", reply: "auto" }), createdAt: Date.now(),
+    });
+    const threadId = child.thread().id;
+    await engineStore.appendEntries(child.id, threadId, [
+      { ...webUserEntry({ sessionId: child.id, threadId, queueItemId: "qi-child-gate" }), ...(author ? { author } : {}) },
+    ]);
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`, sessionId: child.id, threadId, queueItemId: "qi-child-gate", resumeKey: "rk-child",
+      ordinal: 1, type: "approval", title: "Approve the child action?", body: "do it",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }], status: "pending", createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    await eventStream.append({ sessionId: child.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } }, `childgate-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.gatePrompts).toHaveLength(posted);
+  });
+
   it("routes a child gate through its parent audience to Slack and resolves only the child after host restart", async () => {
     await host.stop();
     class SlackContractTransport extends FakeTransport {
