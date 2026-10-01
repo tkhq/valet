@@ -463,10 +463,9 @@ describe("IntegrationsPage", () => {
     render(<IntegrationsPage />);
 
     expect(screen.queryByRole("link", { name: "Connect Linear" })).toBeNull();
-    screen.getByText("Optional MCP tools").closest("details")!.open = true;
-    fireEvent.click(screen.getByRole("button", { name: "Connect via MCP" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
 
-    expect(screen.getByText("Set up your Linear via MCP connection")).toBeTruthy();
+    expect(screen.getByText("Set up your Linear connection")).toBeTruthy();
     expect(screen.getByLabelText("What your assistant can do")).toBeTruthy();
     expect(screen.getByLabelText("Who can reach it")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
@@ -475,8 +474,7 @@ describe("IntegrationsPage", () => {
   it("oauth services still offer manual token entry, behind the disclosure", () => {
     currentPluginsData = oauthPluginsData;
     render(<IntegrationsPage />);
-    screen.getByText("Optional MCP tools").closest("details")!.open = true;
-    fireEvent.click(screen.getByRole("button", { name: "Connect via MCP" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
     fireEvent.click(screen.getByRole("button", { name: "Enter a token instead" }));
     expect(screen.getByLabelText("Access token")).toBeTruthy();
   });

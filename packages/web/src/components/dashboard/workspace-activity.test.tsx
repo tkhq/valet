@@ -44,7 +44,7 @@ it("separates approval from timer waits and shows the requested action", async (
   ] });
   vi.mocked(api.listWorkflowActionRequired).mockResolvedValue({ items: [{ id: "g", runId: "approval", workflowId: "wf", workflowName: "Review rollout", runCreatedAt: 1, owner: { type: "user", id: "u" }, trigger: { type: "manual" }, gate: { nodeId: "review", kind: "approval", prompt: "Check the routing report before rollout." } }], count: 1 });
   setup();
-  expect(await screen.findByText("Check the routing report before rollout.")).toBeTruthy();
+  expect(await screen.findByText(/Check the routing report before rollout\./)).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "Needs attention" })).getByText("Review rollout")).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "In progress" })).getByText("Wait for intake")).toBeTruthy();
   expect(api.listWorkflows).toHaveBeenCalledWith(expect.objectContaining(owner));
@@ -98,12 +98,12 @@ it("puts Valet's questions under Needs attention and plain replies in their own 
   ], nextCursor: null });
   setup();
   const attention = await screen.findByRole("region", { name: "Needs attention" });
-  expect(await within(attention).findByText("Should I merge it once CI passes?")).toBeTruthy();
+  expect(await within(attention).findByText(/Should I merge it once CI passes\?/)).toBeTruthy();
   expect(within(attention).getByRole("img", { name: "Unread" })).toBeTruthy();
   expect(within(attention).queryByText("Lockfile fix")).toBeNull();
   expect(within(attention).getAllByRole("link", { name: "Also active" })).toHaveLength(1);
   const replies = screen.getByRole("region", { name: "Unanswered replies" });
-  expect(within(replies).getByText("The lockfile pins typebox again.")).toBeTruthy();
+  expect(within(replies).getByText(/The lockfile pins typebox again\./)).toBeTruthy();
   // The server stops listing an archived thread.
   vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads: [
     { sessionId: "s", threadId: "ask", title: "Dependency bump", lastAgentActivityAt: 5, unread: true, question: "Should I merge it once CI passes?" },

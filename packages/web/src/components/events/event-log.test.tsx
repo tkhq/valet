@@ -82,7 +82,7 @@ describe("EventLog", () => {
     items = [event, problem];
     renderLog();
     expect(screen.getByRole("link", { name: "PR #7 opened" }).getAttribute("href")).toBe("/events/$eventId");
-    expect(screen.getByText("The text did not match.")).toBeTruthy();
+    expect(screen.getByText(/The text did not match\./)).toBeTruthy();
     expect(screen.getByText("Failed")).toBeTruthy();
     expect(screen.getByText(/2 deliveries/)).toBeTruthy();
   });

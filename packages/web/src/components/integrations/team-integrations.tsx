@@ -45,7 +45,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                   canMutate={canMutate}
                 />
-                <TeamConnectionSetup teamId={teamId} canManage={canMutate} orgAdmin={meQ.data?.orgRole === "admin"} />
+                <TeamConnectionSetup teamId={teamId} canManage={canMutate} />
 
                 {/* The team's own 1Password service account. It is what makes
                     every op:// reference and valet-secrets work for this

@@ -2,10 +2,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { CredentialSummary, GetGithubOrgStatusResponse, ListCredentialsResponse, ListPluginsResponse, TeamSummary } from "@valet/api/wire";
+import type { CredentialSummary, ListCredentialsResponse, ListPluginsResponse, TeamSummary } from "@valet/api/wire";
 import { api, ApiError } from "~/api/client";
 import { qkIntegrations } from "~/api/integrations";
-import { qkRepos } from "~/api/repos";
 import { qkSettings } from "~/api/settings";
 
 let teamId: string | undefined;
@@ -59,10 +58,6 @@ const PERSONAL_PLUGINS: ListPluginsResponse = { plugins: [{
 }] };
 const A: CredentialSummary = { service: "linear", type: "oauth2", connectedAt: "2026-09-10", delegatedFrom: "u1" };
 const B: CredentialSummary = { service: "sentry", type: "api_key", connectedAt: "2026-09-10" };
-const ORG_PLUGINS: ListPluginsResponse = { plugins: [{ name: "org-apps", version: "1", actionCount: 0, services: [
-  { service: "slack", type: "bot_token", configKeys: ["accessToken"], connected: false, connect: "org", actions: [] },
-  { service: "github", type: "oauth2", configKeys: ["accessToken"], connected: true, connect: "manual", actions: [] },
-] }] };
 
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
@@ -300,8 +295,7 @@ describe("Team account connection", () => {
       services: [{ service: "linear", type: "oauth2", configKeys: ["accessToken"], connected: false, connect: "oauth", dynamic: true, actions: [] }],
     }] });
     mount();
-    fireEvent.click(await screen.findByText("Optional MCP tools"));
-    fireEvent.click(screen.getByRole("button", { name: "Connect via MCP" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Linear" }));
     const submit = screen.getByRole("button", { name: "Continue to Linear" });
     expect(submit.hasAttribute("disabled")).toBe(true);
     expect(screen.queryByLabelText("Team account token")).toBeNull();
@@ -357,7 +351,6 @@ describe("Team account connection", () => {
     expect((await screen.findByRole("button", { name: "Connect Gmail" })).hasAttribute("disabled")).toBe(true);
     expect(screen.getByText("Ask an organization admin to configure OAuth for this service.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
-    expect(screen.getByText("Slack")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   });
 
@@ -366,70 +359,5 @@ describe("Team account connection", () => {
     teams = [team("a", "Team A", "member")];
     mount();
     expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(true);
-  });
-});
-
-describe("Organization access status", () => {
-  it.each([
-    { configured: false, installationCount: 0, suspendedCount: 0, label: "" },
-    { configured: true, installationCount: 0, suspendedCount: 0, label: "" },
-    { configured: true, installationCount: 2, suspendedCount: 1, label: "Installed" },
-    { configured: true, installationCount: 2, suspendedCount: 2, label: "Suspended" },
-  ])("shows $label for the org GitHub state ($installationCount installations, $suspendedCount suspended)", async ({ label, ...status }) => {
-    teamId = "a";
-    orgRole = "admin";
-    vi.mocked(api.listPlugins).mockResolvedValue(ORG_PLUGINS);
-    vi.mocked(api.getGithubOrgStatus).mockResolvedValue(status);
-    mount();
-    expect(await screen.findByText(`GitHub App${label ? ` · ${label}` : ""}`)).toBeTruthy();
-    expect(screen.getByText("Slack · Organization connection")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Organization settings" }).getAttribute("href")).toBe("/settings/organization");
-    expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
-  });
-
-  it("keeps pending org status unknown despite a personally connected GitHub account", async () => {
-    teamId = "a";
-    vi.mocked(api.listPlugins).mockResolvedValue(ORG_PLUGINS);
-    let resolveStatus: (status: GetGithubOrgStatusResponse) => void = () => {};
-    vi.mocked(api.getGithubOrgStatus).mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
-    mount();
-    await screen.findByText("Slack · Organization connection");
-    expect(screen.getByText("Loading organization access…")).toBeTruthy();
-    expect(screen.queryByText(/GitHub App ·/)).toBeNull();
-    expect(screen.queryByRole("link", { name: "Organization settings" })).toBeNull();
-    await act(async () => resolveStatus({ configured: false, installationCount: 0, suspendedCount: 0 }));
-    expect(await screen.findByText("GitHub App")).toBeTruthy();
-  });
-
-  it("suppresses stale org status during refetch and after failure", async () => {
-    teamId = "a";
-    vi.mocked(api.listPlugins).mockResolvedValue(ORG_PLUGINS);
-    vi.mocked(api.getGithubOrgStatus).mockResolvedValue({ configured: true, installationCount: 1, suspendedCount: 0 });
-    const view = mount();
-    await screen.findByText("GitHub App · Installed");
-    let rejectStatus: (error: Error) => void = () => {};
-    vi.mocked(api.getGithubOrgStatus).mockReturnValue(new Promise((_resolve, reject) => { rejectStatus = reject; }));
-    vi.mocked(api.listPlugins).mockRejectedValue(new Error("Personal catalog unavailable"));
-    await act(async () => {
-      void view.client.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      await view.client.invalidateQueries({ queryKey: qkIntegrations.plugins("a") });
-    });
-    await waitFor(() => expect(screen.queryByText("GitHub App · Installed")).toBeNull());
-    await waitFor(() => expect(screen.queryByText("Slack · Organization connection")).toBeNull());
-    await act(async () => rejectStatus(new Error("Unavailable")));
-    expect(await screen.findByText("Could not load GitHub App status. Reload the page.")).toBeTruthy();
-    expect(screen.getByText("Could not load organization access. Reload the page.")).toBeTruthy();
-    expect(screen.queryByText(/· (Installed|Organization connection|Setup required)/)).toBeNull();
-  });
-
-  it("does not turn a personal Slack connection into organization access", async () => {
-    teamId = "a";
-    vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "slack", version: "1", actionCount: 0, services: [
-      { service: "slack", type: "bot_token", configKeys: ["accessToken"], connected: true, connect: "unconfigured", connectBlockedBy: "org", actions: [] },
-    ] }] });
-    mount();
-    expect(await screen.findByText("Slack")).toBeTruthy();
-    expect(screen.queryByText("Slack · Organization connection")).toBeNull();
   });
 });

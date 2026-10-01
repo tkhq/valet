@@ -40,7 +40,6 @@ import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
-import { LinearOrgConnection } from "./linear-org-connection";
 import { GithubOrgAppLine } from "./github-org-app-line";
 import { IdentityLinkBlock, useServiceIdentityLink } from "./identity-link-block";
 import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
@@ -201,8 +200,7 @@ function ServiceBlock({
   // A broken connection keeps its row in the credential store, so the card
   // offers the repair beside the disconnect instead of only "Disconnect".
   const repair = needsReauth(health);
-  const linear = service.service === "linear";
-  const connectLabel = linear ? (repair ? "Reconnect via MCP" : "Connect via MCP") : repair ? "Reconnect" : "Connect";
+  const connectLabel = repair ? "Reconnect" : "Connect";
   // No connect affordance for an unconfigured service — its tile exists only
   // so a leftover credential can be disconnected, or so an org admin can read
   // what to set (integration-availability design). The note below names where
@@ -226,7 +224,7 @@ function ServiceBlock({
   // The visible label stays one word, but the grid holds a dozen identical
   // "Connect" buttons — so each one names its service to a screen reader.
   const connectControl = (
-    <Button variant={linear ? "secondary" : "primary"} size="sm" aria-label={linear ? connectLabel : `${connectLabel} ${title}`} onClick={() => setConnecting(true)}>
+    <Button variant="primary" size="sm" aria-label={`${connectLabel} ${title}`} onClick={() => setConnecting(true)}>
       {connectLabel}
     </Button>
   );
@@ -235,7 +233,7 @@ function ServiceBlock({
     <Button
       variant="ghost"
       size="sm"
-      aria-label={linear ? "Disconnect Linear MCP" : `Disconnect ${title}`}
+      aria-label={`Disconnect ${title}`}
       onClick={() => {
         // Radix fires no `onOpenChange(true)` here, so the stale refusal is cleared on open.
         disconnect.reset();
@@ -243,7 +241,7 @@ function ServiceBlock({
       }}
       disabled={disconnect.isPending}
     >
-      {disconnect.isPending ? "Disconnecting…" : linear ? "Disconnect MCP" : "Disconnect"}
+      {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
     </Button>
   );
 
@@ -335,24 +333,14 @@ function ServiceBlock({
       <CardHeading
         title={title}
         slug={slug}
-        description={linear ? undefined : description}
-        state={!linear && badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
+        description={description}
+        state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
       />
-      {linear ? <>
-        <div className="mt-4"><LinearOrgConnection /></div>
-        <details className="mt-4 border-t border-line pt-3">
-          <summary className="cursor-pointer text-xs text-muted">Optional MCP tools</summary>
-          <div className="mt-3 space-y-2">
-            <p className="text-xs text-muted">Tool access only. Workflow events come from your organization’s Linear connection.</p>
-            {badge && <Badge variant={badge.variant}>{badge.label}</Badge>}
-            {connectionDetails}
-            <CardFooter meta={meta} right={controls} />
-          </div>
-        </details>
-      </> : <>{connectionDetails}<CardFooter meta={meta} right={controls} /></>}
+      {connectionDetails}
+      <CardFooter meta={meta} right={controls} />
       <ConnectDialog
         service={service}
-        title={linear ? `${title} via MCP` : title}
+        title={title}
         slug={slug}
         open={connecting}
         onOpenChange={setConnecting}
@@ -363,8 +351,8 @@ function ServiceBlock({
       <ConfirmDialog
         open={disconnecting}
         onOpenChange={setDisconnecting}
-        title={`Disconnect ${title}${linear ? " MCP" : ""}?`}
-        description={linear ? "This removes MCP tool access and its team shares. Your organization’s Linear connection stays connected." : `This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
+        title={`Disconnect ${title}?`}
+        description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"
         pending={disconnect.isPending}

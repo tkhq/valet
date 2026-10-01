@@ -9,7 +9,7 @@ import { Link } from "@tanstack/react-router";
 import type { EventLogItem, EventLogStatus } from "@valet/api/wire";
 import { useEventLog } from "~/api/events";
 import { useMe } from "~/api/settings";
-import { Badge, Button, EmptyRow, ErrorRow, FilterChips, LoadingRow, StatusDot, WorkRow, WorkList } from "~/components/primitives";
+import { Badge, Button, EmptyRow, ErrorRow, FilterChips, LoadingRow, WorkRow, WorkList } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
@@ -18,13 +18,13 @@ import { ReceiptsPanel } from "./receipts-panel";
 
 export type LogFilter = "all" | "problems" | "receipts";
 
-const STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "warning" | "danger" | "neutral" | "accent"; tone: "success" | "warning" | "danger" | "neutral" | "info" }> = {
-  delivered: { label: "Delivered", badge: "success", tone: "success" },
-  pending: { label: "In progress", badge: "accent", tone: "info" },
-  failed: { label: "Failed", badge: "danger", tone: "danger" },
-  filtered: { label: "Filtered out", badge: "neutral", tone: "neutral" },
-  no_match: { label: "No match", badge: "neutral", tone: "neutral" },
-  rejected: { label: "Rejected", badge: "warning", tone: "warning" },
+const STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "warning" | "danger" | "neutral" | "accent" }> = {
+  delivered: { label: "Delivered", badge: "success" },
+  pending: { label: "In progress", badge: "accent" },
+  failed: { label: "Failed", badge: "danger" },
+  filtered: { label: "Filtered out", badge: "neutral" },
+  no_match: { label: "No match", badge: "neutral" },
+  rejected: { label: "Rejected", badge: "warning" },
 };
 
 const FILTERS: readonly { value: LogFilter; label: string }[] = [
@@ -76,7 +76,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
         )}
         {items.length > 0 && (
           <WorkList>
-            {items.map((item) => <LogRow key={`${item.kind}:${item.id}`} item={item} />)}
+            {groupLogItems(items).map(({ item, count }) => <LogRow key={`${item.kind}:${item.id}`} item={item} count={count} />)}
           </WorkList>
         )}
         {log.hasNextPage && (
@@ -89,37 +89,40 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
   );
 }
 
-function LogRow({ item }: { item: EventLogItem }) {
+/** Consecutive problems with the same reason and detail read as one row with a count. */
+export function groupLogItems(items: readonly EventLogItem[]): Array<{ item: EventLogItem; count: number }> {
+  const groups: Array<{ item: EventLogItem; count: number }> = [];
+  for (const item of items) {
+    const last = groups.at(-1);
+    if (last && item.kind === "problem" && last.item.kind === "problem"
+      && last.item.reason === item.reason && last.item.detail === item.detail) last.count += 1;
+    else groups.push({ item, count: 1 });
+  }
+  return groups;
+}
+
+/** The badge carries the status, so a row has no separate status mark. */
+function LogRow({ item, count }: { item: EventLogItem; count: number }) {
   const meta = STATUS_META[item.status];
   const source = [item.service, item.eventKey && item.eventKey !== item.service ? item.eventKey : null].filter(Boolean).join(" · ");
   if (item.kind === "event") {
     return (
       <WorkRow
-        leading={<StatusDot tone={meta.tone} label={meta.label} />}
         title={<Link to="/events/$eventId" params={{ eventId: item.id }}>{item.summary || item.eventKey || "Event"}</Link>}
         badge={<Badge variant={meta.badge}>{meta.label}</Badge>}
         time={item.at}
-        detail={<span className="text-xs">
-          {source && <span className="font-mono">{source}</span>}
-          {item.actor && ` · ${item.actor}`}
-          {` · ${item.deliveryCount} ${item.deliveryCount === 1 ? "delivery" : "deliveries"}`}
-        </span>}
+        detail={[source, item.actor, `${item.deliveryCount} ${item.deliveryCount === 1 ? "delivery" : "deliveries"}`].filter(Boolean).join(" · ")}
       />
     );
   }
   const reason = item.reason ?? "";
+  const label = reasonLabel(reason);
   return (
     <WorkRow
-      leading={<StatusDot tone={meta.tone} label={meta.label} />}
-      title={reasonLabel(reason)}
-      badge={reasonLabel(reason) === meta.label ? undefined : <Badge variant={meta.badge}>{meta.label}</Badge>}
+      title={<span title={`${problemStage(reason)} · Reference: ${item.id}`}>{label}{count > 1 && <span className="ml-1.5 font-normal text-muted">×{count}</span>}</span>}
+      badge={label === meta.label ? undefined : <Badge variant={meta.badge}>{meta.label}</Badge>}
       time={item.at}
-      detail={<>
-        {item.detail && <span className="block">{item.detail}</span>}
-        <span className="mt-1 block text-xs">
-          {problemStage(reason)}{source && <> · <span className="font-mono">{source}</span></>} · Reference: {item.id}
-        </span>
-      </>}
+      detail={[source, item.detail].filter(Boolean).join(" · ")}
     />
   );
 }

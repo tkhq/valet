@@ -485,11 +485,10 @@ imports keep workflow definitions but leave missing-ingress triggers unarmed wit
 a setup warning. Existing rules can still be disabled. Non-admins get
 an instruction to ask an organization admin; credentials remain admin-only.
 
-Linear's Integrations entry presents the organization's native Linear connection
-first, labeled "Organization connection". The status says “Connected by your
-organization” when ready, including for members. Optional MCP tools are collapsed in personal and team views; expanding
-them reveals the separate Connect via MCP button. MCP connection state and disconnect controls name MCP explicitly.
-Removing MCP credentials does not disconnect the organization's native webhook.
+Linear's Integrations entry is an ordinary integration card: Connect Linear adds a
+personal or team credential for its tools. The organization's native Linear
+connection lives only in Organization settings, as Slack's and GitHub's do.
+Removing the personal or team credential does not disconnect the organization's native webhook.
 Native event authorization does not currently replace MCP-backed action tools.
 
 ## Organization Linear application setup (2026-09-29)

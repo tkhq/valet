@@ -4,7 +4,7 @@ import { Ear } from "lucide-react";
 import type { ChannelDetailResponse, ChannelListener, ChannelMessage, EventSubscriptionWire } from "@valet/api/wire";
 import { useWorkspaceChannel } from "~/api/channels";
 import { useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
-import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, StatusDot, WorkRow, WorkSection, textLinkClass, cardClass, pageClass } from "~/components/primitives";
+import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection, textLinkClass, cardClass, pageClass } from "~/components/primitives";
 import { ChannelIcon, ProviderLink } from "~/components/channels/channel-parts";
 import { EditSubscriptionDialog } from "~/components/events/edit-subscription-dialog";
 import { AutomationWizard } from "~/components/events/automation-wizard";
@@ -114,7 +114,6 @@ function Listening({ listeners }: { listeners: ChannelListener[] }) {
   return (
     <section aria-label="Listening" className={cn(cardClass)}>
       <WorkRow
-        leading={<StatusDot tone={own ? "success" : "neutral"} label={own ? "Listening" : "Not listening"} />}
         title={own ? "Valet is listening here" : "Valet is not listening here"}
         detail={own
           ? own.everywhere ? "It answers mentions in every channel the Valet bot is in." : "It answers mentions here and follows each thread it joins."

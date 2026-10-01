@@ -1,24 +1,20 @@
 import { useEffect, useState } from "react";
 import type { PluginServiceSummary } from "@valet/api/wire";
 import { useConnectCredential, useCredentials, usePlugins } from "~/api/integrations";
-import { useGithubOrgStatus } from "~/api/repos";
-import { Button, Dialog, DialogContent, ErrorRow, LoadingRow, Textarea } from "~/components/primitives";
+import { Button, Dialog, DialogContent, ErrorRow, Textarea } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
 import { errorText } from "~/lib/error-text";
-import { LinearOrgConnection } from "./linear-org-connection";
 import { displayName } from "./display-name";
-import { githubOrgAppState } from "./github-org-app";
 
-/** Only explicit org-provided services qualify; personal connected flags do not. */
-export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
-  teamId: string; canManage: boolean; orgAdmin: boolean;
+/** Connect an account intended for one team. Organization connections live in Organization settings. */
+export function TeamConnectionSetup({ teamId, canManage }: {
+  teamId: string; canManage: boolean;
 }) {
   // The team catalog reports effective credentials for this team. In
   // particular, an org-managed Slack bot is connected for team workflows
   // even though the team has no Slack credential row of its own.
   const plugins = usePlugins(teamId);
-  const github = useGithubOrgStatus();
   const credentials = useCredentials("team", { teamId });
   const [selected, setSelected] = useState<PluginServiceSummary | null>(null);
   const [query, setQuery] = useState("");
@@ -26,10 +22,8 @@ export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
   useEffect(() => {
     if (!canConnect) setSelected(null);
   }, [canConnect]);
-  const githubState = github.data ? githubOrgAppState(github.data) : undefined;
   const services = [...new Map((plugins.error ? [] : plugins.data?.plugins ?? [])
     .flatMap((p) => p.services).map((s) => [s.service, s])).values()];
-  const provided = services.filter((s) => s.connect === "org" || s.service === "slack");
   const occupied = new Set(credentials.data?.credentials.map((c) => c.service));
   const choices = services.filter((s) => s.configKeys.length > 0 &&
     s.service !== "slack-user" && s.service !== "slack" && s.service !== "github" &&
@@ -44,22 +38,6 @@ export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
 
   const available = choices.filter((s) => displayName(s.service).toLowerCase().includes(query.toLowerCase()));
   return <div className="space-y-6">
-    <section aria-label="Organization connections">
-      <h3 className="text-sm font-medium text-ink">Organization access</h3>
-      <p className="mt-1 text-sm text-muted">
-        Native event connections are managed in Organization settings.
-      </p>
-      {plugins.error && <ErrorRow>Could not load organization access. Reload the page.</ErrorRow>}
-      {github.error && <ErrorRow>Could not load GitHub App status. Reload the page.</ErrorRow>}
-      {(plugins.isFetching || github.isFetching) && <LoadingRow label="Loading organization access…" />}
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted">
-        {!plugins.isFetching && provided.filter((s) => s.service !== "github").map((s) =>
-          <span key={s.service}>{displayName(s.service)}{s.connect === "org" ? " · Organization connection" : ""}</span>)}
-        {!github.error && !github.isFetching && githubState && <span>GitHub App{githubState === "installed" ? " · Installed" : githubState === "suspended" ? " · Suspended" : ""}</span>}
-        {orgAdmin && <a className="text-ink underline" href="/settings/organization">Organization settings</a>}
-      </div>
-      {services.some(s => s.service === "linear") && <div className="mt-4"><LinearOrgConnection /></div>}
-    </section>
     <section aria-label="Dedicated team connection">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div><h3 className="text-sm font-medium text-ink">Connect a service</h3>
@@ -71,16 +49,12 @@ export function TeamConnectionSetup({ teamId, canManage, orgAdmin }: {
       <div className="grid gap-3 pt-4 sm:grid-cols-2">
         {available.map((service) => {
           const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
-          const card = <IntegrationCard key={service.service}>
-            <CardHeading title={service.service === "linear" ? "Linear MCP" : displayName(service.service)} slug={service.iconSlug ?? service.service}
-              description={blocked ? "Ask an organization admin to configure OAuth for this service." : service.service === "linear" ? "Optional tools for this team. Native events use the organization connection." : "Connect an account this team can use."} />
+          return <IntegrationCard key={service.service}>
+            <CardHeading title={displayName(service.service)} slug={service.iconSlug ?? service.service}
+              description={blocked ? "Ask an organization admin to configure OAuth for this service." : "Connect an account this team can use."} />
             <CardFooter meta={blocked ? undefined : canManage ? "Team connection" : "Team admin required"}
-              right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} onClick={() => setSelected(service)}>{service.service === "linear" ? "Connect via MCP" : `Connect ${displayName(service.service)}`}</Button>} />
+              right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} onClick={() => setSelected(service)}>{`Connect ${displayName(service.service)}`}</Button>} />
           </IntegrationCard>;
-          return service.service === "linear" ? <details key={service.service} className="text-sm text-muted">
-            <summary className="cursor-pointer">Optional MCP tools</summary>
-            <div className="mt-3">{card}</div>
-          </details> : card;
         })}
       </div>
       {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
@@ -96,7 +70,7 @@ function TeamConnectionDialog({ teamId, service, onClose }: {
   const [confirmed, setConfirmed] = useState(false);
   const oauth = service.connect === "oauth" && service.service !== "github";
   return <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
-    <DialogContent title={`Connect ${displayName(service.service)}${service.service === "linear" ? " via MCP" : ""} to this team`}
+    <DialogContent title={`Connect ${displayName(service.service)} to this team`}
       description={oauth ? "Sign in to the account intended for this team. Everyone on the team can use the permissions you grant." : "Paste a token for the account intended for this team. Everyone on this team can use its permissions."}>
       {!oauth && <label className="text-sm">Team account token
         <Textarea value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" spellCheck={false} />
