@@ -14,6 +14,7 @@ const MAX_TRANSCRIPT_CHARS = 6000;
 
 interface RawReply {
   user?: unknown;
+  bot_id?: unknown;
   username?: unknown;
   bot_profile?: unknown;
   text?: unknown;
@@ -81,6 +82,9 @@ export async function fetchThreadTranscript(
     channelId: string;
     threadTs: string;
     selfUserId?: string;
+    /** The app's bot id. A post under a custom name (a team's Valet) carries
+     * only this, with no `user`, so it is the bot's own post too. */
+    selfBotId?: string;
     limit?: number;
     /** With `beforeTs`: keep only messages STRICTLY BETWEEN the two ts values
      * (the follow-router's gap window), and drop the bot's own posts — the
@@ -90,6 +94,8 @@ export async function fetchThreadTranscript(
   },
 ): Promise<string | null> {
   const windowed = opts.afterTs !== undefined && opts.beforeTs !== undefined;
+  const isSelf = (raw: RawReply) => (opts.selfUserId !== undefined && str(raw.user) === opts.selfUserId)
+    || (opts.selfBotId !== undefined && str(raw.bot_id) === opts.selfBotId);
   const limit = opts.limit ?? 100;
   let messages: Record<string, unknown>[];
   try {
@@ -112,7 +118,7 @@ export async function fetchThreadTranscript(
       const raw = m as RawReply;
       const ts = Number.parseFloat(str(raw.ts) ?? "");
       if (!Number.isFinite(ts) || ts <= after || ts >= before) return false;
-      return !(opts.selfUserId !== undefined && str(raw.user) === opts.selfUserId);
+      return !isSelf(raw);
     });
     if (messages.length === 0) return null;
   }
@@ -140,11 +146,12 @@ export async function fetchThreadTranscript(
       const content = body && marker ? `${body} ${marker}` : body || marker;
       if (!content) return null; // a join notice carries neither words nor files.
       const userId = str(raw.user);
-      const who = userId
-        ? userId === opts.selfUserId
-          ? "You" // the assistant's own earlier reply — so it does not answer itself.
-          : authors.get(userId) ?? `@${userId}`
-        : str(raw.username) ?? str((raw.bot_profile as Record<string, unknown> | undefined)?.name) ?? "app";
+      // The assistant's own earlier reply reads as "You", so it does not answer itself.
+      const who = isSelf(raw)
+        ? "You"
+        : userId
+          ? authors.get(userId) ?? `@${userId}`
+          : str(raw.username) ?? str((raw.bot_profile as Record<string, unknown> | undefined)?.name) ?? "app";
       // Both halves are flattened, so one message is always exactly one line.
       return `${formatTranscriptText(who)}: ${formatTranscriptText(content)}`;
     }),

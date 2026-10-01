@@ -306,6 +306,7 @@ export class SlackTransport implements ChannelTransport {
     private readonly signingSecret?: string,
     private readonly botUserId?: string,
     appToken?: string,
+    private readonly botId?: string,
   ) {
     if (appToken !== undefined) {
       this.poll = (signal) => this.socketModePoll(appToken, signal);
@@ -1072,13 +1073,13 @@ export class SlackTransport implements ChannelTransport {
   /** Prior thread messages as an attributed transcript — see `ChannelTransport`.
    *  `selfUserId` strips the bot's own mention from the seeded trigger line. */
   async fetchThreadContext(channelId: string, threadTs: string): Promise<string | null> {
-    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId });
+    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId });
   }
 
   /** The thread's messages strictly between two ts values, minus the bot's own
    *  posts — the follow-router's gap re-hydration. See `ChannelTransport`. */
   async fetchThreadWindow(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null> {
-    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, afterTs, beforeTs });
+    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId, afterTs, beforeTs });
   }
 
   /** Normalize an inbound message for an agent — see `ChannelTransport`. Resolves
@@ -1437,6 +1438,7 @@ export const slackTransportFactory: ChannelTransportFactory = {
       signingSecret,
       botUserId,
       appToken,
+      typeof metadata.botId === "string" ? metadata.botId : undefined,
     );
   },
 };
