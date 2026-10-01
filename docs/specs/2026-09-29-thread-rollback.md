@@ -16,6 +16,8 @@ Accepted limits during a rolling update or after a rollback:
   owner's default assistant, and the next delivery or orchestrator open then
   fails with "no default assistant ... after an insert conflict" until the
   current build runs again and restores the row. Keep the rollback window short.
+  On the current build, any `/api/threads` read or write restores the archived
+  assistant, so a list-only client does not get a 409 first.
 - An open tab running the previous web bundle must reload. `GET` and `POST
   /api/orchestrator` and `POST /api/teams/:id/orchestrator` still answer, so older
   CLI builds keep working. The other routes that bundle calls, such as

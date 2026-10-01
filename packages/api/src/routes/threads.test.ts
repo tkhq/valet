@@ -1,6 +1,6 @@
 import type { CreateTeamResponse, CreateTeamApiKeyResponse } from "../wire/types.js";
 import { eq } from "drizzle-orm";
-import { agentSessions, teams, teamMembers } from "../schema/index.js";
+import { agentSessions, assistants, teams, teamMembers } from "../schema/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 
@@ -101,4 +101,21 @@ describe("thread addressing compatibility", () => {
     expect((await api.providers.engineStore.getDecisionGate(first.sessionId, gate.id))?.status).toBe("resolved");
   });
 
+});
+
+describe("reads after an older build archived the workspace assistant", () => {
+  it("restore it instead of answering 409", async () => {
+    api = await bootTestApi();
+    const created = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json() as { id: string; sessionId: string };
+    // What a dev-v2 delete leaves behind: the assistant archived, its session deleted.
+    await api.providers.db.update(assistants).set({ archivedAt: 1 }).where(eq(assistants.sessionId, created.sessionId));
+    await api.providers.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, created.sessionId));
+
+    const list = await fetch(`${api.baseUrl}/api/threads`);
+    expect(list.status).toBe(200);
+    const messages = await fetch(`${api.baseUrl}/api/threads/${created.id}/messages`);
+    expect(messages.status).toBe(200);
+    const [row] = await api.providers.db.select({ archivedAt: assistants.archivedAt }).from(assistants).where(eq(assistants.sessionId, created.sessionId));
+    expect(row?.archivedAt).toBeNull();
+  });
 });

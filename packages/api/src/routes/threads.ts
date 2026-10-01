@@ -5,7 +5,7 @@ import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
-import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
+import { ensureDefaultAssistantSession, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
 
 /** Compatibility adapter: execution and authorization remain in the existing handlers. */
 export function createThreadsRouter(forward: (request: Request) => Promise<Response>) {
@@ -48,7 +48,11 @@ export function createThreadsRouter(forward: (request: Request) => Promise<Respo
         .where(and(eq(agentSessions.id, existing.sessionId), eq(agentSessions.orgId, c.var.user.orgId))).limit(1);
       if (!runtime) return c.json({ threads: [] });
     }
-    const sessionId = c.req.method === "POST"
+    // A write materializes the runtime. A read restores an archived one too
+    // (an older build's delete archives it), so a list-only client sees what
+    // the web sees instead of a 409 until some write happens.
+    const restore = c.req.method === "POST" || existing?.archivedAt != null;
+    const sessionId = restore
       ? (await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId })).sessionId
       : existing!.sessionId;
     return relay(c, `/api/sessions/${encodeURIComponent(sessionId)}/threads`);
@@ -65,6 +69,14 @@ export function createThreadsRouter(forward: (request: Request) => Promise<Respo
     let sessionId = appSession?.id;
     if (appSession) {
       if (!await canViewSession(db, appSession, c.var.principal)) return c.json({ error: "Thread not found." }, 404);
+      // An older build's delete archives the workspace assistant. Restore it
+      // here, as the list route does, so a read is not a 409 until some write.
+      // A retired row whose owner is gone still answers 409.
+      const assistant = await loadAssistantBySessionId(db, appSession.id);
+      if (assistant && assistant.archivedAt !== null) {
+        await ensureDefaultAssistantSession(c.var.providers, { type: assistant.ownerType, id: assistant.ownerId },
+          { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
+      }
     } else {
       // Workflow agents have no app runtime row. Their existing decision route
       // checks run ownership; never give this fallback prompt/sandbox access.
