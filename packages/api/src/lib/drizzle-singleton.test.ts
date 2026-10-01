@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { pgDbFromPglite } from "@valet/store-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, stripRetiredAssistantTargets } from "./drizzle.js";
+import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
 
 describe("workspace singleton repair on an already migrated database", () => {
   const pglite = new PGlite();
@@ -13,6 +13,31 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DROP INDEX assistants_workspace");
     await db.query("ALTER TABLE assistants ALTER COLUMN is_default SET DEFAULT false");
   }
+
+  it("names each workspace whose retired assistant settings stop applying, and flags a lifted allow-list", async () => {
+    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, created_at, behavior, model)
+      VALUES ('limited', 'org-r', 'team', 'team-limited', 'limited-session', 1, '{"integrations":["github"]}', NULL),
+             ('modelled', 'org-r', 'user', 'user-modelled', 'modelled-session', 1, NULL, 'anthropic:claude-opus')`);
+    const message = await reportRetiredAssistantSettings(db);
+    expect(message).toContain("team:team-limited (integration allow-list)");
+    expect(message).toContain("user:user-modelled");
+    expect(message).not.toContain("user:user-modelled (");
+    await db.query("DELETE FROM assistants WHERE id IN ('limited', 'modelled')");
+  });
+
+  it("keeps the oldest team on a shared home channel before it enforces one team per channel", async () => {
+    await db.query("DROP INDEX teams_org_slack_home");
+    await db.query(`INSERT INTO teams(id, org_id, name, created_at, slack_home_channel_id)
+      VALUES ('home-old', 'org', 'Old', 1, 'C0SHARED'), ('home-new', 'org', 'New', 2, 'C0SHARED'), ('home-other-org', 'org-2', 'Elsewhere', 3, 'C0SHARED')`);
+    await expect(applyAppMigrations(db)).resolves.toBeUndefined();
+    const homes = await db.query("SELECT id, slack_home_channel_id FROM teams WHERE id LIKE 'home-%' ORDER BY id");
+    expect(homes.rows).toEqual([
+      { id: "home-new", slack_home_channel_id: null },
+      { id: "home-old", slack_home_channel_id: "C0SHARED" },
+      { id: "home-other-org", slack_home_channel_id: "C0SHARED" },
+    ]);
+    await expect(db.query("UPDATE teams SET slack_home_channel_id = 'C0SHARED' WHERE id = 'home-new'")).rejects.toThrow(/unique/i);
+  });
 
   it("repairs the previous columns with one executable statement and reserves retired owners", async () => {
     await restorePreviousSchema();
