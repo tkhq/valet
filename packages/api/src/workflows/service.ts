@@ -35,6 +35,7 @@ import {
 import {
   actionInvocations,
   assistants,
+  briefingDismissals,
   contentSources,
   eventSubscriptions,
   sessionThreads,
@@ -566,7 +567,14 @@ export async function listWorkflowDefinitions(
       eq(workflowRuns.ownerId, workflowDefinitions.ownerId),
     ))
     .orderBy(workflowRuns.workflowId, desc(workflowRuns.createdAt), desc(workflowRuns.id));
-  const latestByWorkflow = new Map(latestRuns.map((run) => [run.workflowId, { runId: run.runId, workflowId: run.workflowId, status: run.status, outcome: run.outcome ?? undefined, createdAt: run.createdAt, updatedAt: run.updatedAt }]));
+  const failedIds = latestRuns.filter((run) => run.outcome === "failed").map((run) => dismissedRunKey(run.runId));
+  const dismissed = new Set(failedIds.length === 0 ? [] : (await deps.db.select({ id: briefingDismissals.briefingId })
+    .from(briefingDismissals)
+    .where(and(eq(briefingDismissals.userId, owner.userId), inArray(briefingDismissals.briefingId, failedIds)))).map((row) => row.id));
+  const latestByWorkflow = new Map(latestRuns.map((run) => [run.workflowId, {
+    runId: run.runId, workflowId: run.workflowId, status: run.status, outcome: run.outcome ?? undefined, createdAt: run.createdAt, updatedAt: run.updatedAt,
+    ...(dismissed.has(dismissedRunKey(run.runId)) ? { dismissed: true } : {}),
+  }]));
   const failureByWorkflow = new Map(
     latestRuns.filter((run) => run.outcome === "failed").map((run) => [
       run.workflowId, { runId: run.runId, failedAt: run.failedAt },
@@ -1665,6 +1673,30 @@ async function definitionOrgId(db: AppDb, workflowId: string): Promise<string | 
 }
 
 /** Terminates a run. `not_found` covers unknown AND un-owned run ids. */
+/** A failed run one person dismissed is kept with dismissed briefs: both are
+ * that person's "seen it" on an item of a workspace. */
+export const dismissedRunKey = (runId: string) => `run:${runId}`;
+
+/**
+ * Takes a failed run out of one person's Needs attention list. The run, its
+ * failure, and the workflow's state are unchanged, and a later failed run
+ * needs attention again.
+ */
+export async function dismissWorkflowRun(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  runId: string,
+): Promise<"ok" | "not_found" | "not_failed"> {
+  const run = await ownedRun(deps, owner, runId);
+  if (!run?.owner) return "not_found";
+  if (run.outcome !== "failed") return "not_failed";
+  await deps.db.insert(briefingDismissals).values({
+    userId: owner.userId, orgId: owner.orgId, ownerType: run.owner.ownerType, ownerId: run.owner.ownerId,
+    briefingId: dismissedRunKey(runId), dismissedAt: Date.now(),
+  }).onConflictDoNothing();
+  return "ok";
+}
+
 export async function cancelWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,

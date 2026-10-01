@@ -7,7 +7,7 @@ import { api, type OwnerFilter } from "~/api/client";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 let owner: OwnerFilter = { ownerType: "user", ownerId: "u" };
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
-vi.mock("~/api/client", () => ({ api: { listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
+vi.mock("~/api/client", () => ({ api: { listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn(), dismissWorkflowRun: vi.fn(async () => ({ ok: true })) } }));
 beforeEach(() => {
   vi.clearAllMocks(); owner = { ownerType: "user", ownerId: "u" };
   vi.mocked(api.listArtifacts).mockResolvedValue({ artifacts: [], nextCursor: null });
@@ -33,6 +33,16 @@ it("groups PRs and published files under their work with real source links", asy
   expect(within(results).getAllByRole("link", { name: "Open thread" })[0]?.getAttribute("href")).toBe("/threads/thread-a");
   expect(screen.queryByRole("link", { name: "Unsafe link" })).toBeNull();
   expect(screen.queryByText("Completed")).toBeNull();
+});
+it("dismisses a failed run from Needs attention", async () => {
+  const failed = { runId: "failed-run", workflowId: "wf", status: "settled" as const, outcome: "failed" as const, createdAt: 1, updatedAt: 2 };
+  vi.mocked(api.listWorkflows).mockResolvedValue({ workflows: [{ id: "wf", name: "Bug triage", definition: {}, ownerType: "user", ownerId: "u", createdAt: 1, updatedAt: 1, latestRun: failed }] });
+  setup();
+  const attention = await screen.findByRole("region", { name: "Needs attention" });
+  vi.mocked(api.listWorkflows).mockResolvedValue({ workflows: [{ id: "wf", name: "Bug triage", definition: {}, ownerType: "user", ownerId: "u", createdAt: 1, updatedAt: 1, latestRun: { ...failed, dismissed: true } }] });
+  fireEvent.click(within(attention).getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Needs attention" })).toBeNull());
+  expect(api.dismissWorkflowRun).toHaveBeenCalledWith("failed-run");
 });
 it("separates approval from timer waits and shows the requested action", async () => {
   vi.mocked(api.listWorkflows).mockResolvedValue({ workflows: [

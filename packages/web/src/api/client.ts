@@ -1039,6 +1039,8 @@ export const api = {
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
     ),
+  dismissWorkflowRun: (runId: string) =>
+    request<{ ok: true }>("POST", `/workflows/runs/${encodeURIComponent(runId)}/dismiss`),
   retryWorkflowRun: (runId: string) =>
     request<RetryWorkflowRunResponse>(
       "POST",

@@ -37,6 +37,7 @@ import {
   listRunsForOwner,
   listWorkflowActionRequired,
   listWorkflowDefinitions,
+  dismissWorkflowRun,
   listWorkflowRuns,
   listWorkflowVersions,
   parseWorkflowOwnerFilter,
@@ -914,6 +915,14 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
 
   const resp: ResolveWorkflowApprovalResponse = { ok: true };
   return c.json(resp);
+});
+
+workflowsRouter.post("/runs/:runId/dismiss", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await dismissWorkflowRun(deps, owner, c.req.param("runId"));
+  if (result === "not_found") return c.json({ error: "run not found" }, 404);
+  if (result === "not_failed") return c.json({ error: "Only a failed run can be dismissed." }, 409);
+  return c.json({ ok: true });
 });
 
 workflowsRouter.post("/runs/:runId/cancel", async (c) => {

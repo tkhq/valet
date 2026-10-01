@@ -1,4 +1,4 @@
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, inArray, lt, notLike } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, briefingDismissals, sessionThreads, workspaceBriefingCache } from "../schema/index.js";
@@ -66,7 +66,10 @@ workspaceBriefingsRouter.post("/:workspace/briefings/:briefingId/dismiss", async
   const now = Date.now();
   await db.insert(briefingDismissals).values({ userId: c.var.user.id, orgId: c.var.user.orgId, ownerType: owner.type, ownerId: owner.id, briefingId, dismissedAt: now })
     .onConflictDoNothing();
-  await db.delete(briefingDismissals).where(and(eq(briefingDismissals.userId,c.var.user.id), lt(briefingDismissals.dismissedAt,now - DISMISSAL_RETENTION_MS)));
+  // A dismissed failed run (`dismissWorkflowRun`) stays dismissed while it is
+  // its workflow's latest run, so only brief dismissals expire.
+  await db.delete(briefingDismissals).where(and(eq(briefingDismissals.userId,c.var.user.id), lt(briefingDismissals.dismissedAt,now - DISMISSAL_RETENTION_MS),
+    notLike(briefingDismissals.briefingId, "run:%")));
 
   let archived = 0;
   let keptWaiting = 0;

@@ -5,7 +5,7 @@ import type { ArtifactListItem, GlobalWorkflowRunSummary, WaitingThread, Workspa
 import type { OwnerFilter } from "~/api/client";
 import { useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads, useFinishWaitingThread } from "~/api/catch-up";
 import { useArtifacts } from "~/api/artifacts";
-import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
+import { useDismissRun, useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { relativeTime } from "~/lib/relative-time";
 import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
@@ -23,7 +23,7 @@ export function safeResultUrl(value?: string): string | undefined {
 }
 
 export function runCategory(run: GlobalWorkflowRunSummary): "attention" | "progress" | "result" {
-  if (run.needsApproval || run.outcome === "failed") return "attention";
+  if (run.needsApproval || (run.outcome === "failed" && !run.dismissed)) return "attention";
   return run.status === "settled" ? "result" : "progress";
 }
 
@@ -137,9 +137,12 @@ function WaitingRow({ row, onDone }: { row: WaitingThread; onDone: () => void })
     </>} />;
 }
 function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: string }) {
-  const label = row.needsApproval ? "Approval needed" : row.outcome === "failed" ? "Failed" : row.status === "parked" ? "Waiting" : row.status === "pending" ? "Queued" : row.status === "terminalizing" ? "Finishing" : "Running";
+  const dismiss = useDismissRun();
+  const failed = !row.needsApproval && row.outcome === "failed";
+  const label = row.needsApproval ? "Approval needed" : failed ? "Failed" : row.status === "parked" ? "Waiting" : row.status === "pending" ? "Queued" : row.status === "terminalizing" ? "Finishing" : "Running";
   return <WorkRow title={<Link to="/workflows/runs/$runId" params={{ runId: row.runId }}>{row.workflowName}</Link>}
-    badge={<Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt} />;
+    badge={<Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
+    actions={failed ? <Button variant="ghost" size="sm" disabled={dismiss.isPending} onClick={() => dismiss.mutate(row.runId)}>Dismiss</Button> : undefined} />;
 }
 function ResultRow({ item }: { item: ResultItem }) {
   const Icon = item.kind === "pull_request" ? GitPullRequest : item.kind === "message" ? MessageSquare : FileText;
