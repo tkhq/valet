@@ -34,7 +34,7 @@ import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js"
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries } from "./ingest.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
-import { inboundSlackMessage, pullRequestComment, threadKeyForPullRequest, wasSentByValet, type InboundChannelMessage } from "../services/channel-messages.js";
+import { inboundSlackMessage, pullRequestComment, recentTerminalReview, threadKeyForPullRequest, wasSentByValet, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
@@ -306,7 +306,11 @@ export class EventDispatcher {
         // Valet posts with a person's GitHub token, so its own comment arrives
         // as that person. A comment it recorded as sent is its own: it never
         // wakes the thread that posted it.
-        const prComment = parsedComment && !(await wasSentByValet(db, event.orgId, parsedComment.message, parsedComment.reviewId ? [parsedComment.reviewId] : [])) ? parsedComment : null;
+        const ownWrite = parsedComment !== null && (
+          await wasSentByValet(db, event.orgId, parsedComment.message, parsedComment.reviewId ? [parsedComment.reviewId] : [])
+          // A terminal review has no id to match: a review right after one is treated as Valet's.
+          || (event.eventKey.startsWith("github.pull_request_review") && await recentTerminalReview(db, event.orgId, parsedComment.channelKey)));
+        const prComment = parsedComment && !ownWrite ? parsedComment : null;
         const prThreadKey = prComment && sub.ownerType !== "org"
           ? await threadKeyForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, prComment.pullRequestUrl)
           : null;

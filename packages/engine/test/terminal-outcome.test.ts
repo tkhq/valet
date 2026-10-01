@@ -9,6 +9,13 @@ describe("terminalOutcome", () => {
     expect(terminalOutcome("cd /repo && gh pr create --fill", "https://github.com/acme/repo/pull/43\n", 0)?.kind).toBe("pull_request_created");
   });
 
+  it("records a terminal PR comment by the comment URL gh prints", () => {
+    expect(terminalOutcome('gh pr comment 42 --body "Fixed"', "https://github.com/acme/repo/pull/42#issuecomment-901\n", 0)).toEqual({
+      kind: "pull_request_comment", url: "https://github.com/acme/repo/pull/42#issuecomment-901",
+    });
+    expect(terminalOutcome('gh pr comment 42 --body "Fixed"', "no URL", 0)).toBeUndefined();
+  });
+
   it("requires command success and a PR URL", () => {
     expect(terminalOutcome("gh pr create --fill", "https://github.com/acme/repo/pull/42", 1)).toBeUndefined();
     expect(terminalOutcome("gh pr create --fill", "no URL", 0)).toBeUndefined();

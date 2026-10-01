@@ -182,5 +182,3 @@ describe("IntegrationRow disconnect", () => {
     expect(control.textContent).toContain("Disconnecting…");
   });
 });
-
-

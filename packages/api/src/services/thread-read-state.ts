@@ -5,6 +5,7 @@ import { agentSessions, threadPullRequests, threadReads } from "../schema/index.
 import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { resolveGitHubToken, type GitHubTokenDeps } from "./github-tokens.js";
+import { recordTerminalPullRequestWrite } from "./channel-messages.js";
 
 /** An open pull request is checked against GitHub at most this often. */
 export const PULL_REQUEST_RECHECK_MS = 10 * 60_000;
@@ -126,9 +127,21 @@ export function pullRequestWebhookState(payload: unknown): { url: string; state:
 export function wireThreadPullRequests(eventStream: EventStream, db: AppDb): () => void {
   return eventStream.subscribe({ eventTypes: ["tool_end"] }, (delivered) => {
     const { event, sessionId } = delivered;
-    if (event.type !== "tool_end" || event.outcome?.kind !== "pull_request_created" || !event.outcome.url) return;
-    void recordThreadPullRequest(db, { sessionId, threadId: event.threadId, url: event.outcome.url })
-      .catch(err => console.error("[thread-activity] could not record a pull request", err));
+    if (event.type !== "tool_end" || !event.outcome) return;
+    const { kind, url } = event.outcome;
+    if (kind === "pull_request_created" && url) {
+      void recordThreadPullRequest(db, { sessionId, threadId: event.threadId, url })
+        .catch(err => console.error("[thread-activity] could not record a pull request", err));
+      return;
+    }
+    // A comment or review posted from the terminal is Valet's own: record it,
+    // so its webhook does not wake the thread that posted it.
+    if (kind === "pull_request_comment" || kind === "review_submitted") {
+      void (async () => {
+        const [session] = await db.select({ orgId: agentSessions.orgId }).from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+        if (session) await recordTerminalPullRequestWrite(db, { orgId: session.orgId, sessionId, threadId: event.threadId, kind, ...(url ? { url } : {}) });
+      })().catch(err => console.error("[thread-activity] could not record a terminal pull request write", err));
+    }
   });
 }
 

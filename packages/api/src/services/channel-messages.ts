@@ -25,9 +25,9 @@ export function slackChannelKey(channelId: string): string {
   return `slack:${channelId}`;
 }
 
-/** `github:acme/app#12`. */
+/** `github:acme/app#12`. GitHub names are case-insensitive, so the key is lowercase. */
 export function githubPullRequestKey(owner: string, repo: string, number: number): string {
-  return `github:${owner}/${repo}#${number}`;
+  return `github:${owner.toLowerCase()}/${repo.toLowerCase()}#${number}`;
 }
 
 export function parseChannelKey(key: string): ParsedChannelKey | null {
@@ -301,6 +301,52 @@ export async function wasSentByValet(
     inArray(channelMessages.providerMessageId, [message.providerMessageId, ...alsoIds]), eq(channelMessages.direction, "out"),
   )).limit(1);
   return row !== undefined;
+}
+
+/** How long a review Valet posted from the terminal (no id to match) keeps
+ * review events on its pull request off the thread that posted it. */
+export const TERMINAL_REVIEW_WINDOW_MS = 2 * 60_000;
+
+/**
+ * Whether Valet posted a review on this pull request from the terminal within
+ * the window. `gh pr review` prints no review id, so the record names the time.
+ */
+export async function recentTerminalReview(db: AppDb, orgId: string, channelKey: string, now = Date.now()): Promise<boolean> {
+  const result = await db.execute(sql`SELECT 1 FROM channel_messages
+    WHERE org_id = ${orgId} AND channel_key = ${channelKey} AND direction = 'out'
+      AND provider_message_id LIKE 'terminal-review:%' AND created_at >= ${now - TERMINAL_REVIEW_WINDOW_MS}
+    LIMIT 1`) as { rows: unknown[] };
+  return result.rows.length > 0;
+}
+
+/**
+ * Records what Valet posted to a pull request from the sandbox terminal: a
+ * `gh pr comment` by its comment id, and a `gh pr review` (which prints no
+ * id) as a timed mark on each pull request the thread opened.
+ */
+export async function recordTerminalPullRequestWrite(
+  db: AppDb, input: { orgId: string; sessionId: string; threadId: string; kind: "pull_request_comment" | "review_submitted"; url?: string },
+  now = Date.now(),
+): Promise<void> {
+  const base = { orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, direction: "out" as const, createdAt: now };
+  if (input.kind === "pull_request_comment") {
+    const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)#issuecomment-(\d+)$/.exec(input.url ?? "");
+    if (!match) return;
+    const channelKey = githubPullRequestKey(match[1]!, match[2]!, Number(match[3]));
+    await recordChannelMessage(db, { ...base, channelKey, conversationKey: channelKey, providerMessageId: match[4]!, url: input.url! });
+    return;
+  }
+  const opened = await db.execute(sql`SELECT url FROM thread_pull_requests
+    WHERE session_id = ${input.sessionId} AND thread_id = ${input.threadId}`) as { rows: Array<{ url: string }> };
+  for (const { url } of opened.rows) {
+    const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)$/.exec(url);
+    if (!match) continue;
+    const channelKey = githubPullRequestKey(match[1]!, match[2]!, Number(match[3]));
+    await recordChannelMessage(db, {
+      ...base, channelKey, conversationKey: channelKey, providerMessageId: `terminal-review:${now}`, url,
+      text: "Posted a review from the terminal.",
+    });
+  }
 }
 
 /**

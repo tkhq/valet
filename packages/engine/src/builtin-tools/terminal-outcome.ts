@@ -7,9 +7,14 @@ export function terminalOutcome(
   exitCode: number | undefined,
 ): ToolResult["outcome"] {
   if (exitCode !== 0) return undefined;
-  const direct = command.match(/^\s*(?:cd\s+[^;&|\n]+\s*&&\s*)?((?:gh|valet-gh|\/usr\/local\/bin\/gh)\s+pr\s+(create|review)\b[^\n]*)$/);
+  const direct = command.match(/^\s*(?:cd\s+[^;&|\n]+\s*&&\s*)?((?:gh|valet-gh|\/usr\/local\/bin\/gh)\s+pr\s+(create|review|comment)\b[^\n]*)$/);
   if (!direct) return undefined;
   if (/[;&|`]|\$\(/.test(direct[1])) return undefined;
+  if (direct[2] === "comment") {
+    // gh prints the new comment's URL, which carries its id.
+    const url = output.match(/https:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+#issuecomment-\d+/)?.[0];
+    return url ? { kind: "pull_request_comment", url } : undefined;
+  }
   if (direct[2] === "create") {
     const url = output.match(/https:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/)?.[0];
     return url ? { kind: "pull_request_created", url } : undefined;

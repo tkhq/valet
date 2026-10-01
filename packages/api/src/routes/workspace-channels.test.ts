@@ -3,7 +3,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { eq } from "drizzle-orm";
 import { channelMessages, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
-import { recordActionChannelMessage, recordChannelMessage, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
+import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -105,7 +105,18 @@ it("finds the thread that opened a pull request, and records the comment Valet p
   expect(await wasSentByValet(api.providers.db, "local-org", { channelKey: "github:acme/app#12", providerMessageId: "89" })).toBe(false);
   // An inline comment of a review Valet sent counts as Valet's own.
   expect(await wasSentByValet(api.providers.db, "local-org", { channelKey: "github:acme/app#12", providerMessageId: "90" }, ["88"])).toBe(true);
+  // From the terminal: a comment by the id gh prints, a review (no id) as a timed mark.
+  await recordTerminalPullRequestWrite(api.providers.db, { orgId: "local-org", sessionId, threadId: thread.id, kind: "pull_request_comment",
+    url: "https://github.com/ACME/App/pull/12#issuecomment-901" });
+  expect(await wasSentByValet(api.providers.db, "local-org", { channelKey: "github:acme/app#12", providerMessageId: "901" })).toBe(true);
+  expect(await recentTerminalReview(api.providers.db, "local-org", "github:acme/app#12")).toBe(false);
+  await recordTerminalPullRequestWrite(api.providers.db, { orgId: "local-org", sessionId, threadId: thread.id, kind: "review_submitted" });
+  expect(await recentTerminalReview(api.providers.db, "local-org", "github:acme/app#12")).toBe(true);
+  expect(await recentTerminalReview(api.providers.db, "local-org", "github:acme/app#12", Date.now() + 3 * 60_000)).toBe(false);
   const detail = await (await fetch(`${api.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("github:acme/app#12")}`)).json() as ChannelDetailResponse;
   expect(detail.channel).toMatchObject({ provider: "github", name: "app #12", state: "open", url });
-  expect(detail.messages).toEqual([expect.objectContaining({ direction: "out", text: "Pinned it.", url: `${url}#issuecomment-88` })]);
+  expect(detail.messages).toEqual(expect.arrayContaining([
+    expect.objectContaining({ direction: "out", text: "Pinned it.", url: `${url}#issuecomment-88` }),
+    expect.objectContaining({ direction: "out", text: "Posted a review from the terminal." }),
+  ]));
 });
