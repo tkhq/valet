@@ -34,7 +34,7 @@ import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js"
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries } from "./ingest.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
-import { inboundSlackMessage, pullRequestComment, threadKeyForPullRequest, type InboundChannelMessage } from "../services/channel-messages.js";
+import { inboundSlackMessage, pullRequestComment, threadKeyForPullRequest, wasSentByValet, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
@@ -302,7 +302,11 @@ export class EventDispatcher {
         }
         // A pull request comment continues in the thread that opened the
         // pull request, when that thread is in this owner's runtime.
-        const prComment = origin ? null : pullRequestComment(event.eventKey, event.payload);
+        const parsedComment = origin ? null : pullRequestComment(event.eventKey, event.payload);
+        // Valet posts with a person's GitHub token, so its own comment arrives
+        // as that person. A comment it recorded as sent is its own: it never
+        // wakes the thread that posted it.
+        const prComment = parsedComment && !(await wasSentByValet(db, event.orgId, parsedComment.message)) ? parsedComment : null;
         const prThreadKey = prComment && sub.ownerType !== "org"
           ? await threadKeyForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, prComment.pullRequestUrl)
           : null;

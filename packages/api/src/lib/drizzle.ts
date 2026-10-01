@@ -257,7 +257,6 @@ interface SchemaRepair {
   describe: string;
   probe:
     | { kind: "column"; table: string; column: string }
-    | { kind: "removed-column"; table: string; column: string }
     | { kind: "table"; table: string }
     | { kind: "index"; index: string };
   sql: string;
@@ -1666,7 +1665,7 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   const tableNames: string[] = [];
   const indexNames: string[] = [];
   for (const { probe } of SCHEMA_REPAIRS) {
-    if (probe.kind === "column" || probe.kind === "removed-column") columnTables.add(probe.table);
+    if (probe.kind === "column") columnTables.add(probe.table);
     else if (probe.kind === "table") tableNames.push(probe.table);
     else indexNames.push(probe.index);
   }
@@ -1700,7 +1699,6 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   );
 
   const pending = SCHEMA_REPAIRS.filter(({ probe: p }) => {
-    if (p.kind === "removed-column") return present.has(`column:${p.table}.${p.column}`);
     const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
     return !present.has(key);
   });

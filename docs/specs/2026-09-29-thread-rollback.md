@@ -12,6 +12,10 @@ Accepted limits during a rolling update or after a rollback:
 - The workspace uniqueness index stays in place. A dev-v2 pod still reads and uses
   each owner's default assistant, but it cannot create a second assistant profile
   for that owner. One assistant per workspace is the point of this change.
+- Do not delete an assistant while a dev-v2 build runs. Its delete archives the
+  owner's default assistant, and the next delivery or orchestrator open then
+  fails with "no default assistant ... after an insert conflict" until the
+  current build runs again and restores the row. Keep the rollback window short.
 - An open tab running the previous web bundle must reload. `GET` and `POST
   /api/orchestrator` and `POST /api/teams/:id/orchestrator` still answer, so older
   CLI builds keep working. The other routes that bundle calls, such as

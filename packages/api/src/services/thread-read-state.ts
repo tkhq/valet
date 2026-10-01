@@ -170,10 +170,13 @@ export async function recheckOpenPullRequests(
 }
 
 /**
- * True for a thread every member of a workspace may see in a shared list. Each
- * person's app-assistant helper thread is private, as the sidebar treats it. A
- * workflow editor conversation (`workflow:<id>:<viewer>`) belongs to its viewer;
- * without a viewer, as in workspace briefs, every editor conversation is left out.
+ * True for a thread every member of a workspace sees in a shared list. Each
+ * person's app-assistant helper thread is left out of shared lists, as the
+ * sidebar leaves it out. A workflow editor conversation
+ * (`workflow:<id>:<viewer>`) is listed only for its viewer; without a viewer,
+ * as in workspace briefs, every editor conversation is left out. This is a
+ * display rule, not access control: team members share one runtime, and the
+ * thread API still reaches these threads.
  */
 export function isSharedThreadKey(key: string | null | undefined, viewerId?: string): boolean {
   if (!key) return true;

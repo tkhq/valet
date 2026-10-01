@@ -270,6 +270,17 @@ export async function threadChannelActivity(db: AppDb, sessionId: string, thread
   };
 }
 
+/** Whether Valet recorded this provider message as one it sent. */
+export async function wasSentByValet(
+  db: AppDb, orgId: string, message: Pick<InboundChannelMessage, "channelKey" | "providerMessageId">,
+): Promise<boolean> {
+  const [row] = await db.select({ id: channelMessages.id }).from(channelMessages).where(and(
+    eq(channelMessages.orgId, orgId), eq(channelMessages.channelKey, message.channelKey),
+    eq(channelMessages.providerMessageId, message.providerMessageId), eq(channelMessages.direction, "out"),
+  )).limit(1);
+  return row !== undefined;
+}
+
 /**
  * The key of the thread in `owner`'s workspace runtime that opened the pull
  * request at `url`, or null. A pull request comment for that owner goes to this

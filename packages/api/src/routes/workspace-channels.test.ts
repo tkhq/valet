@@ -3,7 +3,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { eq } from "drizzle-orm";
 import { channelMessages, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
-import { recordActionChannelMessage, recordChannelMessage, threadKeyForPullRequest } from "../services/channel-messages.js";
+import { recordActionChannelMessage, recordChannelMessage, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -100,6 +100,9 @@ it("finds the thread that opened a pull request, and records the comment Valet p
     params: { owner: "acme", repo: "app", issueNumber: 12, body: "Pinned it." },
     result: { success: true, data: { id: 88, body: "Pinned it.", html_url: `${url}#issuecomment-88` } },
   });
+  // Valet's own comment arrives as the person whose token posted it; the record marks it as Valet's.
+  expect(await wasSentByValet(api.providers.db, "local-org", { channelKey: "github:acme/app#12", providerMessageId: "88" })).toBe(true);
+  expect(await wasSentByValet(api.providers.db, "local-org", { channelKey: "github:acme/app#12", providerMessageId: "89" })).toBe(false);
   const detail = await (await fetch(`${api.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("github:acme/app#12")}`)).json() as ChannelDetailResponse;
   expect(detail.channel).toMatchObject({ provider: "github", name: "app #12", state: "open", url });
   expect(detail.messages).toEqual([expect.objectContaining({ direction: "out", text: "Pinned it.", url: `${url}#issuecomment-88` })]);
