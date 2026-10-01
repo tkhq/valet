@@ -70,7 +70,7 @@ import type {
   WorkflowRunStatus,
   WorkflowRunSummary,
 } from "../wire/types.js";
-import { definitionVersionId } from "./definition-version.js";
+import { definitionVersionId, sameWorkflowSteps } from "./definition-version.js";
 
 export interface WorkflowServiceDeps {
   db: AppDb;
@@ -1800,7 +1800,7 @@ export async function resolveWorkflowApproval(
     // not grant the new steps nobody reviewed. Approving this run still works.
     const [current] = await deps.db.select({ definition: workflowDefinitions.definition }).from(workflowDefinitions)
       .where(eq(workflowDefinitions.id, run.params.workflowId)).limit(1);
-    if (!current || definitionVersionId(current.definition) !== definitionVersionId(run.definition)) return "stale_workflow";
+    if (!current || !sameWorkflowSteps(current.definition, run.definition)) return "stale_workflow";
     const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
     workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
     if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";

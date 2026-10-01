@@ -7,7 +7,15 @@
  * against," not a cache/dedupe key.
  */
 import { createHash } from "node:crypto";
+import { normalizeLegacyDefinition } from "@valet/workflow";
 
 export function definitionVersionId(definition: unknown): string {
   return createHash("sha256").update(JSON.stringify(definition)).digest("hex");
+}
+
+/** Whether two definitions hold the same steps. An older binary can save a
+ * legacy shape after the boot sweep, so both are normalized first and a shape
+ * change alone does not read as an edit. */
+export function sameWorkflowSteps(a: unknown, b: unknown): boolean {
+  return definitionVersionId(normalizeLegacyDefinition(a)) === definitionVersionId(normalizeLegacyDefinition(b));
 }
