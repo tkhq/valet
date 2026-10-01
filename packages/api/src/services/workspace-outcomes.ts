@@ -49,6 +49,8 @@ export async function listWorkspaceOutcomes(
     -- sees this feed, and the message may sit in a private channel.
     LEFT JOIN channel_messages cm ON f.outcome_kind='slack_message_sent' AND cm.session_id=f.session_id
       AND cm.direction='out' AND cm.provider_message_id=a.result->'data'->>'ts'
+      -- A Slack message is its channel and its ts; two channels can share a ts.
+      AND cm.channel_key='slack:' || (a.result->'data'->>'channel')
     LEFT JOIN session_threads st ON st.session_id=cm.session_id AND st.id=cm.thread_id
     LEFT JOIN agent_sessions s ON s.id=f.session_id
     LEFT JOIN workflow_runs r ON r.id=COALESCE(f.workflow_execution_id,

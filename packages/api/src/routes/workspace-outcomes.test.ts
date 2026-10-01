@@ -48,6 +48,12 @@ describe("workspace confirmed outcomes", () => {
       orgId: "local-org", sessionId: "own", threadId: "thread-1", channelKey: "slack:C1", conversationKey: "slack:C1:1700.5",
       providerMessageId: "1700.5", direction: "out", text: "private message", url: "https://slack.com/archives/C1/p17005",
     });
+    // Another channel's message with the same ts is not this send.
+    await db.insert(sessionThreads).values({ id: "thread-2", sessionId: "own", title: "Other channel", createdAt: 1 });
+    await recordChannelMessage(db, {
+      orgId: "local-org", sessionId: "own", threadId: "thread-2", channelKey: "slack:C2", conversationKey: "slack:C2:1700.5",
+      providerMessageId: "1700.5", direction: "out", url: "https://slack.com/archives/C2/p17005",
+    });
     const body = await list(target);
     expect(body.items).toEqual([expect.objectContaining({
       id: "action:slack-reply", kind: "message", title: "Say hello", threadId: "thread-1", url: "https://slack.com/archives/C1/p17005",
