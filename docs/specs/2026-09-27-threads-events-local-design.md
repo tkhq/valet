@@ -301,6 +301,10 @@ unsettled submissions includes workspace runtime threads and older child work.
 Newer idle sessions cannot hide them. In progress includes active work and waiting workflows. A timer wait does not imply that a person must act.
 Idle sessions do not imply completed tasks. Recent results group confirmed PRs,
 reviews, messages, and published artifacts with their originating work when known.
+A Slack message is titled by the Valet thread that sent it and links to the message
+in Slack and to that thread. Its text is never shown, because every workspace member
+sees the list and the message may sit in a private channel. A briefing folds a
+thread's messages into that thread's source, so the same conversation appears once.
 Workflow completion remains separate from evidence of an external change.
 
 The outcome API reuses usage facts to locate confirmed action invocations and
@@ -402,7 +406,7 @@ The desktop sidebar has a fixed width of 18rem (288px at the default font size).
 
 ### Homepage briefing
 
-Personal and team home pages show the full narrative briefing, current attention items, completed work, and next steps. The team Slack setup CTA appears above the briefing. Briefing is also accessible from Threads. Activity is visible without expanding Activity details. Empty sections are hidden. Recent results contain published artifacts and recorded outcomes, not generic successful-run rows.
+Personal and team home pages show the full narrative briefing, current attention items, completed work, and next steps. The team Slack setup CTA appears above the briefing until the team listens in a channel. Briefing is also accessible from Threads. Activity is visible without expanding Activity details. Empty sections are hidden. Recent results contain published artifacts and recorded outcomes, not generic successful-run rows.
 
 Workflow definitions expose their latest run, selected by creation time within the current owner and organization. Activity uses that single run per workflow rather than paging through historical failures. Briefing evidence applies the same latest-run rule. The Bell remains the approval action surface.
 

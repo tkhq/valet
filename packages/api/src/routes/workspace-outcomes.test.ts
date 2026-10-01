@@ -8,6 +8,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionInvocations, agentSessions, teams, teamMembers, workflowDefinitions, workflowRuns, assistants, sessionThreads } from "../schema/index.js";
 import { encodePageCursor } from "../lib/page-cursor.js";
 import { safeOutcomeUrl } from "../services/workspace-outcomes.js";
+import { recordChannelMessage } from "../services/channel-messages.js";
 import type { WorkspaceOutcomesResponse, WorkspaceActiveWorkResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -35,6 +36,25 @@ async function list(target: TestApi, workspace = "user", query = "") {
 }
 
 describe("workspace confirmed outcomes", () => {
+  it("titles a Slack message by the thread that sent it, and links the thread and the message", async () => {
+    const target = await setup(); const db = target.providers.db;
+    await db.insert(actionInvocations).values({
+      invocationId: "slack-reply", createdAt: 100, orgId: "local-org", sessionId: "own", service: "slack", status: "completed", durationMs: 5,
+      actionId: "slack.send_message", params: { channel: "C1", text: "private message" },
+      result: { success: true, data: { channel: "C1", ts: "1700.5" } },
+    });
+    await db.insert(sessionThreads).values({ id: "thread-1", sessionId: "own", title: "Say hello", createdAt: 1 });
+    await recordChannelMessage(db, {
+      orgId: "local-org", sessionId: "own", threadId: "thread-1", channelKey: "slack:C1", conversationKey: "slack:C1:1700.5",
+      providerMessageId: "1700.5", direction: "out", text: "private message", url: "https://slack.com/archives/C1/p17005",
+    });
+    const body = await list(target);
+    expect(body.items).toEqual([expect.objectContaining({
+      id: "action:slack-reply", kind: "message", title: "Say hello", threadId: "thread-1", url: "https://slack.com/archives/C1/p17005",
+    })]);
+    expect(JSON.stringify(body)).not.toContain("private message");
+  });
+
   it("returns only confirmed writes and safe source fields, with stable pagination", async () => {
     const target = await setup(); const db = target.providers.db;
     const base = { createdAt: 100, orgId: "local-org", sessionId: "own", service: "github", status: "completed" as const, durationMs: 5 };

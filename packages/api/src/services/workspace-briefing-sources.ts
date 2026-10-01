@@ -140,12 +140,24 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
       ...(row.session_id ? { sessionId: row.session_id } : {}), ...(row.thread_id ? { threadId: row.thread_id } : {}) },
     content: row.content, state: "updated",
   });
-  for (const outcome of outcomes.items) candidates.push({
-    source: { id: outcome.id, kind: outcome.kind, title: outcome.title, updatedAt: outcome.occurredAt,
-      ...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}), ...(outcome.threadId ? { threadId: outcome.threadId } : {}),
-      ...(outcome.workflowRunId ? { runId: outcome.workflowRunId } : {}), ...(outcome.url ? { url: outcome.url } : {}) },
-    content: `Confirmed effect: ${outcome.title}`, state: "updated",
-  });
+  // A Slack message joins the thread that sent it: one source per thread, so a
+  // briefing never lists the same conversation twice.
+  const messageThreads = new Set<string>();
+  for (const outcome of outcomes.items) {
+    const threadSource = outcome.kind === "message" && outcome.sessionId && outcome.threadId ? `thread:${outcome.sessionId}:${outcome.threadId}` : null;
+    if (threadSource) {
+      const thread = threads.get(threadSource);
+      if (thread) { thread.content += `Confirmed effect: sent a Slack message\n`; continue; }
+      if (messageThreads.has(threadSource)) continue;
+      messageThreads.add(threadSource);
+    }
+    candidates.push({
+      source: { id: outcome.id, kind: outcome.kind, title: outcome.title, updatedAt: outcome.occurredAt,
+        ...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}), ...(outcome.threadId ? { threadId: outcome.threadId } : {}),
+        ...(outcome.workflowRunId ? { runId: outcome.workflowRunId } : {}), ...(outcome.url ? { url: outcome.url } : {}) },
+      content: `Confirmed effect: ${outcome.title}`, state: "updated",
+    });
+  }
   return budgetBriefingEvidence(candidates);
 }
 

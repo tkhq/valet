@@ -38,10 +38,18 @@ export async function listWorkspaceOutcomes(
     SELECT 'action:' || a.invocation_id AS id,
       CASE f.outcome_kind WHEN 'pull_request_created' THEN 'pull_request'
         WHEN 'review_submitted' THEN 'review' ELSE 'message' END AS kind,
-      f.created_at AS occurred_at,s.id AS session_id,NULL::text AS thread_id,r.id AS workflow_run_id,
-      CASE WHEN f.outcome_kind='pull_request_created' THEN a.result->'data'->>'title' END AS title,
-      COALESCE(a.result->'data'->>'html_url',a.result->'data'->>'permalink',a.result->'data'->>'url',a.result->>'url') AS url
+      f.created_at AS occurred_at,s.id AS session_id,cm.thread_id AS thread_id,r.id AS workflow_run_id,
+      CASE WHEN f.outcome_kind='pull_request_created' THEN a.result->'data'->>'title'
+        WHEN f.outcome_kind='slack_dm_sent' THEN 'Direct message sent'
+        WHEN f.outcome_kind='slack_message_sent' THEN st.title END AS title,
+      COALESCE(a.result->'data'->>'html_url',a.result->'data'->>'permalink',cm.url,a.result->'data'->>'url',a.result->>'url') AS url
     FROM usage_action_facts f JOIN action_invocations a ON a.invocation_id=f.invocation_id
+    -- A Slack send's channel record names its thread and the message's link. The
+    -- row is titled by that thread, never by the message: every workspace member
+    -- sees this feed, and the message may sit in a private channel.
+    LEFT JOIN channel_messages cm ON f.outcome_kind='slack_message_sent' AND cm.session_id=f.session_id
+      AND cm.direction='out' AND cm.provider_message_id=a.result->'data'->>'ts'
+    LEFT JOIN session_threads st ON st.session_id=cm.session_id AND st.id=cm.thread_id
     LEFT JOIN agent_sessions s ON s.id=f.session_id
     LEFT JOIN workflow_runs r ON r.id=COALESCE(f.workflow_execution_id,
       CASE WHEN f.session_id LIKE 'wf:%' THEN split_part(f.session_id,':',2) END)

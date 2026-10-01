@@ -1,9 +1,9 @@
 import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { actionInvocations, agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { budgetBriefingEvidence, collectWorkspaceBriefingSources, type BriefingEvidence } from "./workspace-briefing-sources.js";
-import { slackThreadUrl } from "./channel-messages.js";
+import { recordChannelMessage, slackThreadUrl } from "./channel-messages.js";
 import { briefingModelSpec, defaultBriefingSummarizer, createBriefingGenerator, withoutInternalIds, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
 
 const user = { type: "user" as const, id: "local-user" };
@@ -178,6 +178,25 @@ describe("workspace briefing evidence", () => {
     expect(sources.reduce((n,item) => n+item.content.length,0)).toBeLessThanOrEqual(24_000);
     const team = await collectWorkspaceBriefingSources(db,"local-org",{ type: "team", id: "team" });
     expect(team.map(item => item.source.sessionId)).toEqual(["team"]);
+  });
+  it("folds a thread's Slack messages into that thread, so the briefing lists it once", async () => {
+    api = await bootTestApi(); const db = api.providers.db;
+    await db.execute(sql`INSERT INTO agent_sessions (id,org_id,user_id,owner_type,owner_id,workspace,created_at,updated_at)
+      VALUES ('owned','local-org','local-user','user','local-user','w',1,1)`);
+    await db.insert(sessionThreads).values({ id: "hello-thread", sessionId: "owned", title: "Say hello", createdAt: 1 });
+    await db.execute(sql`INSERT INTO engine_entries(id,session_id,thread_id,entry_type,role,content,created_at)
+      VALUES ('ask','owned','hello-thread','message','user','Say hello to the team',1)`);
+    for (const ts of ["1700.1", "1700.2"]) {
+      await db.insert(actionInvocations).values({
+        invocationId: `send-${ts}`, createdAt: 5, orgId: "local-org", sessionId: "owned", service: "slack", status: "completed", durationMs: 1,
+        actionId: "slack.send_message", result: { success: true, data: { channel: "C1", ts } },
+      });
+      await recordChannelMessage(db, { orgId: "local-org", sessionId: "owned", threadId: "hello-thread", channelKey: "slack:C1",
+        conversationKey: `slack:C1:${ts}`, providerMessageId: ts, direction: "out", url: `https://slack.com/archives/C1/p${ts.replace(".", "")}` });
+    }
+    const sources = await collectWorkspaceBriefingSources(db,"local-org",user);
+    expect(sources.map(item => item.source.kind)).toEqual(["thread"]);
+    expect(sources[0]?.content).toContain("Confirmed effect: sent a Slack message");
   });
   it("links a Slack-triggered run to its Slack thread and a same-workspace origin to its thread", async () => {
     api = await bootTestApi(); const db = api.providers.db;
