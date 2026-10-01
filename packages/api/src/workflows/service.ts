@@ -1754,6 +1754,9 @@ function triggerData(input: unknown): Record<string, unknown> | undefined {
 /** Resolves an approval gate: validates the run is parked on the right signal,
  * writes any policy grants requested, inserts the resolution signal, and wakes
  * the run. Returns a rich outcome so callers can map to appropriate HTTP codes. */
+/** The workflow's steps changed while an approval was being granted. */
+class StaleWorkflowError extends Error {}
+
 export async function resolveWorkflowApproval(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
@@ -1837,7 +1840,18 @@ export async function resolveWorkflowApproval(
   // The app and workflow store share Postgres. Commit the permanent grant,
   // resolution, audit, and durable wake flag together so crash recovery cannot
   // consume the approval without the permission it promised.
-  const stored = prepared?.ok ? await deps.db.transaction(async (tx) => {
+  let stored;
+  try {
+    stored = prepared?.ok ? await deps.db.transaction(async (tx) => {
+    // Lock the definition and compare the steps again here: an edit that
+    // landed after the check above must not keep a grant for steps nobody
+    // reviewed. An edit that comes after waits on this lock, and its
+    // revoke-after-write then removes the grant.
+    if (input.scope === "workflow") {
+      const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions
+        WHERE id = ${run.params.workflowId} FOR UPDATE`) as { rows: Array<{ definition: unknown }> };
+      if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, run.definition)) throw new StaleWorkflowError();
+    }
     const [inserted] = await tx.insert(workflowSignals).values(signal)
       .onConflictDoNothing({ target: [workflowSignals.runId, workflowSignals.signalId] }).returning();
     if (!inserted) {
@@ -1853,6 +1867,10 @@ export async function resolveWorkflowApproval(
     await tx.update(workflowRuns).set({ wakeRequested: true }).where(eq(workflowRuns.id, input.runId));
     return inserted;
   }) : await deps.workflowStore.insertSignal(signal);
+  } catch (err) {
+    if (err instanceof StaleWorkflowError) return "stale_workflow";
+    throw err;
+  }
   // Compare the returned row's payload to what we submitted. If another caller
   // won the race the stored payload will differ — do not stamp audit for the loser.
   const storedPayload = stored.payload as { approved?: boolean; resolvedBy?: string; scope?: string } | undefined;
