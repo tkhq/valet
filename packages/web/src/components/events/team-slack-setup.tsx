@@ -1,27 +1,26 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Ear, Hash } from "lucide-react";
 import { useMe, useTeams } from "~/api/settings";
 import { usePlugins } from "~/api/integrations";
 import { useCreateEventSubscription, useDeleteEventSubscription, useEventSubscriptions, useFilterOptions, usePatchEventSubscription } from "~/api/events";
-import { Button, Dialog, DialogContent, DialogFooter, Input } from "~/components/primitives";
+import { Button, type ButtonProps, Dialog, DialogContent, DialogFooter, Input } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { listenerFor, slackChannelListeners, teamListening } from "~/lib/slack-listeners";
 import { SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { AutomationWizard } from "./automation-wizard";
 
-/** Mount by team ID so changing workspace closes setup and discards selections. */
+/**
+ * The dashboard's setup prompt, shown only until the team listens somewhere.
+ * Once it does, the Events page's Channels tab carries the listening state and
+ * the button to change it. Mount by team ID so a workspace change discards
+ * selections.
+ */
 export function TeamSlackSetupCard({ teamId }: { teamId: string }) {
-  const [open, setOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const closing = useRef(false);
   const subscriptionsQ = useEventSubscriptions();
-  const listening = subscriptionsQ.data ? teamListening(subscriptionsQ.data.subscriptions, teamId) : undefined;
-  const active = listening !== undefined && (listening.everywhere || listening.channels.length > 0);
-  function changeOpen(value: boolean) {
-    closing.current = !value;
-    setOpen(value);
-  }
+  if (!subscriptionsQ.data) return null;
+  const listening = teamListening(subscriptionsQ.data.subscriptions, teamId);
+  if (listening.everywhere || listening.channels.length > 0) return null;
   return (
     <section className="flex min-w-0 flex-col gap-4 rounded-lg border border-moss/30 bg-moss/5 p-5 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex min-w-0 items-start gap-3">
@@ -29,28 +28,35 @@ export function TeamSlackSetupCard({ teamId }: { teamId: string }) {
           <Ear aria-hidden className="h-4 w-4" />
         </span>
         <div className="min-w-0 space-y-1">
-          <h2 className="font-display text-lg text-ink">
-            {active ? "Valet is listening" : "Where should Valet listen?"}
-          </h2>
-          {active ? (
-            <p className="text-sm text-muted">
-              {listening.everywhere ? "In every channel the Valet bot is in. " : null}
-              {listening.channels.length > 0 && <>In {listening.channels.map((channel) => `#${channel.label.replace(/^#/, "")}`).join(", ")}. </>}
-              People mention Valet there and it replies in the thread.
-            </p>
-          ) : (
-            <p className="text-sm text-muted">
-              Pick the Slack channels where people can mention this team's Valet. It replies in the thread and follows it.
-            </p>
-          )}
+          <h2 className="font-display text-lg text-ink">Where should Valet listen?</h2>
+          <p className="text-sm text-muted">
+            Pick the Slack channels where people can mention this team's Valet. It replies in the thread and follows it.
+          </p>
         </div>
       </div>
-      <Button ref={trigger} className="shrink-0" onClick={() => changeOpen(true)}>
+      <ListenButton teamId={teamId} className="shrink-0">Choose channels</ListenButton>
+    </section>
+  );
+}
+
+/** Opens the team's channel picker, and returns focus to itself when the picker closes. */
+export function ListenButton({ teamId, children, ...props }: { teamId: string; children: ReactNode } & Omit<ButtonProps, "onClick">) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const closing = useRef(false);
+  function changeOpen(value: boolean) {
+    closing.current = !value;
+    setOpen(value);
+  }
+  return (
+    <>
+      <Button ref={trigger} {...props} onClick={() => changeOpen(true)}>
         <Ear aria-hidden className="h-4 w-4" />
-        {active ? "Edit channels" : "Choose channels"}
+        {children}
       </Button>
       {open && (
         <TeamSlackSetupModal
+          key={teamId}
           teamId={teamId}
           onOpenChange={changeOpen}
           onCloseAutoFocus={(event) => {
@@ -61,7 +67,7 @@ export function TeamSlackSetupCard({ teamId }: { teamId: string }) {
           }}
         />
       )}
-    </section>
+    </>
   );
 }
 

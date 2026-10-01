@@ -83,7 +83,7 @@ vi.mock("./automation-wizard", () => ({
     </div>
   ),
 }));
-import { TeamSlackSetupCard } from "./team-slack-setup";
+import { ListenButton, TeamSlackSetupCard } from "./team-slack-setup";
 
 beforeEach(() =>
   Object.assign(state, {
@@ -96,17 +96,19 @@ beforeEach(() =>
   }),
 );
 function open() {
-  render(<TeamSlackSetupCard teamId="a" />);
-  fireEvent.click(screen.getByRole("button", { name: state.existing ? "Edit channels" : "Choose channels" }));
+  if (state.existing) render(<ListenButton teamId="a">Listen in channels</ListenButton>);
+  else render(<TeamSlackSetupCard teamId="a" />);
+  fireEvent.click(screen.getByRole("button", { name: state.existing ? "Listen in channels" : "Choose channels" }));
 }
 describe("team homepage Slack setup", () => {
-  it("shows where the team listens, and adds channels to its one rule", () => {
+  it("hides the homepage prompt once the team listens, and adds channels to its one rule", () => {
     state.existing = true;
     patchMutate.mockClear(); createMutate.mockClear();
-    render(<TeamSlackSetupCard teamId="a" />);
-    expect(screen.getByRole("heading", { name: "Valet is listening" })).toBeTruthy();
-    expect(screen.getByText(/In #general\./)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Edit channels" }));
+    // Once the team listens, the homepage prompt steps aside for the Events page.
+    const card = render(<TeamSlackSetupCard teamId="a" />);
+    expect(card.container.textContent).toBe("");
+    card.unmount();
+    open();
     expect(screen.getByRole("dialog", { name: "Where should Valet listen?" })).toBeTruthy();
     const general = screen.getByRole("checkbox", { name: /general/ });
     expect(general).toHaveProperty("checked", true);

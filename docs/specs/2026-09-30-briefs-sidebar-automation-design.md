@@ -66,7 +66,7 @@ Workflow run history names each run by what started it and when: Manual run, Aut
 
 ## Team Slack setup
 
-The team card shows where the team's Valet listens, with an ear icon. Before any channel is set, it asks where Valet should listen. After that, it lists the channels and offers **Edit channels**.
+Before the team's Valet listens in any channel, the team home page asks where it should listen, with an ear icon and **Choose channels**. After that the card leaves the home page. The Events page's Channels tab marks each channel Valet listens in, and its header carries **Listen in channels** and **New subscription**.
 
 The channel list edits one rule per team: a `slack.app_mention` rule whose only filter is the channel, with a team orchestrator target that follows the thread and the organization audience. The team's channels start checked. Checking more adds them to that rule, and unchecking every channel removes the rule. A team can listen in any number of channels.
 
