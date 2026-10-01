@@ -30,7 +30,7 @@
  * are inherently one-shot, so there's nothing to dedupe against.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, like } from "drizzle-orm";
+import { and, eq, isNull, like, sql } from "drizzle-orm";
 import type { DecisionAction, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { notifications, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
@@ -212,11 +212,16 @@ export async function markAttentionNotificationsRead(db: AppDb, kind: AttentionK
  */
 export async function routeAttention(deps: AttentionDeps, event: AttentionEvent): Promise<void> {
   const membership = await fetchMembership(deps.db, event.owner);
-  const audience = resolveAudience(event.owner, event.kind, membership);
+  // A person's own helper or workflow-editor thread in a team runtime is
+  // theirs alone in the app, so its attention reaches only that person:
+  // no team channel post, and no other member's inbox or DM.
+  const privateTo = await privateThreadOwner(deps.db, event);
+  const audience = resolveAudience(event.owner, event.kind, membership)
+    .filter((userId) => privateTo === undefined || userId === privateTo);
   if (audience.length === 0) return;
 
   for (const ch of deps.channels ?? []) {
-    if (event.owner.type === "team" && ch.deliverTeam) {
+    if (event.owner.type === "team" && ch.deliverTeam && privateTo === undefined) {
       await ch.deliverTeam(event).catch(err => console.error("attention router: team delivery failed:", err));
     }
   }
@@ -253,3 +258,16 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
     }
   }
 }
+
+/** The member a private thread belongs to (`app-assistant:<user>`, or
+ * `workflow:<id>:<user>`), or undefined for a thread the team shares. */
+async function privateThreadOwner(db: AppDb, event: AttentionEvent): Promise<string | undefined> {
+  if (event.owner.type !== "team" || !event.sessionId || !event.threadId) return undefined;
+  const result = await db.execute(sql`SELECT key FROM engine_threads
+    WHERE session_id = ${event.sessionId} AND id = ${event.threadId}`) as { rows: Array<{ key: string | null }> };
+  const key = result.rows[0]?.key ?? "";
+  if (key.startsWith("app-assistant:")) return key.slice("app-assistant:".length) || undefined;
+  if (key.startsWith("workflow:")) return key.split(":")[2] || undefined;
+  return undefined;
+}
+

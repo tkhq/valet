@@ -4,8 +4,8 @@
  * behavior (preference gating, idempotent insert) over a real
  * `bootTestApi()` stack.
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   principalFromOwner,
@@ -107,6 +107,26 @@ describe("routeAttention (DB-backed)", () => {
     await routeAttention({ db }, { kind: "notification", owner: { type: "team", id: "team-1" }, title: "fyi" });
     const fyiRecipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
     expect(fyiRecipients.map((r) => r.userId).sort()).toEqual(["local-user", "test-member"]);
+  });
+
+  it("keeps a member's private helper thread to that member, with no team channel post", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const now = Date.now();
+    await db.insert(teams).values({ id: "team-p", orgId: "local-org", name: "Private", createdAt: now });
+    await db.insert(teamMembers).values([
+      { teamId: "team-p", userId: "local-user", role: "admin" },
+      { teamId: "team-p", userId: "test-member", role: "member" },
+    ]);
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('thr-helper', 'sess-team', 'app-assistant:test-member', 'idle', 'steer', 1, 1)`);
+    const deliverTeam = vi.fn(async () => {});
+    await routeAttention({ db, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+      kind: "notification", owner: { type: "team", id: "team-p" }, title: "approve?", sessionId: "sess-team", threadId: "thr-helper",
+    });
+    const recipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
+    expect(recipients.map((r) => r.userId)).toEqual(["test-member"]);
+    expect(deliverTeam).not.toHaveBeenCalled();
   });
 
   it("routes to org admins for an org owner", async () => {
