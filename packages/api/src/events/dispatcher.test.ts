@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -23,7 +23,10 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowSignals,
+  assistants,
+  threadPullRequests,
 } from "../schema/index.js";
+import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
 import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 
 const ORG = "org-1";
@@ -260,6 +263,42 @@ describe("EventDispatcher", () => {
     expect(runHost.start).not.toHaveBeenCalled();
     const row = await getDelivery(deliveryId);
     expect(row.status).toBe("delivered");
+  });
+
+  it("holds a fresh pull request comment until Valet's own write is recorded, then keeps it off the thread that posted it", async () => {
+    const db = tdb.appDb;
+    const url = "https://github.com/acme/app/pull/12";
+    await db.insert(assistants).values({ id: "asst-1", orgId: ORG, ownerType: "user", ownerId: "user-1", sessionId: "sess-1", createdAt: 1 });
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('thr-1', 'sess-1', 'web:pr-thread', 'idle', 'steer', 1, 1)`);
+    await db.insert(threadPullRequests).values({
+      sessionId: "sess-1", threadId: "thr-1", url, repo: "acme/app", number: 12, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1,
+    });
+    const postedAt = Date.now();
+    const { deliveryId } = await seedDelivery({
+      target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
+      payload: { issue: { pull_request: { html_url: url } }, comment: { id: 501, body: "Done.", created_at: new Date(postedAt).toISOString(), user: { login: "me", type: "User" } } },
+    });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({
+      db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver,
+    });
+
+    // The webhook beat the write record: the delivery waits, uncounted.
+    await dispatcher.pollOnce();
+    expect(deliver).not.toHaveBeenCalled();
+    const held = await getDelivery(deliveryId);
+    expect(held).toMatchObject({ status: "pending", attempts: 0, nextAttemptAt: postedAt + OWN_WRITE_SETTLE_MS });
+
+    // The record lands, so the comment is Valet's own and stays on the events thread.
+    await recordChannelMessage(db, {
+      orgId: ORG, sessionId: "sess-1", threadId: "thr-1", channelKey: "github:acme/app#12", conversationKey: "github:acme/app#12",
+      providerMessageId: "501", direction: "out", text: "Done.",
+    });
+    await db.update(eventDeliveries).set({ nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+    await dispatcher.pollOnce();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver.mock.calls[0]![0]).not.toHaveProperty("threadKey");
   });
 
   it("delivers an orchestrator-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {

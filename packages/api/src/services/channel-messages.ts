@@ -148,8 +148,8 @@ export const PULL_REQUEST_CONVERSATION_EVENTS: ReadonlySet<string> = new Set([
 interface GithubPayload {
   issue?: { pull_request?: { html_url?: string } };
   pull_request?: { html_url?: string };
-  comment?: { id?: number; html_url?: string; body?: string; pull_request_review_id?: number; user?: { login?: string; type?: string } };
-  review?: { id?: number; html_url?: string; body?: string | null; state?: string; user?: { login?: string; type?: string } };
+  comment?: { id?: number; html_url?: string; body?: string; pull_request_review_id?: number; created_at?: string; user?: { login?: string; type?: string } };
+  review?: { id?: number; html_url?: string; body?: string | null; state?: string; submitted_at?: string; user?: { login?: string; type?: string } };
 }
 
 /**
@@ -160,6 +160,8 @@ export function pullRequestComment(eventKey: string, payload: unknown): {
   pullRequestUrl: string; message: InboundChannelMessage; channelKey: string;
   /** The review an inline comment belongs to, so a review Valet sent covers its comments. */
   reviewId?: string;
+  /** When GitHub says the comment or review was posted, in ms. */
+  postedAt?: number;
 } | null {
   if (!PULL_REQUEST_CONVERSATION_EVENTS.has(eventKey) || !payload || typeof payload !== "object") return null;
   const body = payload as GithubPayload;
@@ -176,10 +178,12 @@ export function pullRequestComment(eventKey: string, payload: unknown): {
   const reviewState = body.review?.state ? `Review: ${body.review.state.toLowerCase().replace(/_/g, " ")}` : undefined;
   const text = item.body || reviewState || "";
   const reviewId = body.comment?.pull_request_review_id;
+  const postedAt = Date.parse(body.comment?.created_at ?? body.review?.submitted_at ?? "");
   return {
     pullRequestUrl,
     channelKey,
     ...(reviewId !== undefined ? { reviewId: String(reviewId) } : {}),
+    ...(Number.isFinite(postedAt) ? { postedAt } : {}),
     message: {
       channelKey,
       conversationKey: channelKey,
@@ -301,6 +305,25 @@ export async function wasSentByValet(
     inArray(channelMessages.providerMessageId, [message.providerMessageId, ...alsoIds]), eq(channelMessages.direction, "out"),
   )).limit(1);
   return row !== undefined;
+}
+
+/**
+ * How long after posting a pull request comment can still turn out to be
+ * Valet's own. GitHub can deliver the webhook before Valet records the write,
+ * so a comment younger than this waits before it wakes a thread.
+ */
+export const OWN_WRITE_SETTLE_MS = 10_000;
+
+/**
+ * Whether a pull request comment or review is one Valet posted: by its id, by
+ * the review an inline comment belongs to, or, for a review event, by a
+ * terminal review on the same pull request within the window.
+ */
+export async function isOwnPullRequestWrite(
+  db: AppDb, orgId: string, eventKey: string, comment: NonNullable<ReturnType<typeof pullRequestComment>>,
+): Promise<boolean> {
+  return await wasSentByValet(db, orgId, comment.message, comment.reviewId ? [comment.reviewId] : [])
+    || (eventKey.startsWith("github.pull_request_review") && await recentTerminalReview(db, orgId, comment.channelKey));
 }
 
 /** How long a review Valet posted from the terminal (no id to match) keeps

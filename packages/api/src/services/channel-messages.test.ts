@@ -109,6 +109,16 @@ describe("pullRequestComment", () => {
     expect(pullRequestComment("github.issue_comment.created", payload({ login: "rev", type: "User" }))).not.toBeNull();
   });
 
+  it("reads when GitHub says the comment or review was posted", () => {
+    const url = "https://github.com/acme/app/pull/12";
+    expect(pullRequestComment("github.issue_comment.created", {
+      issue: { pull_request: { html_url: url } }, comment: { id: 1, created_at: "2026-10-01T12:00:00Z", user: { type: "User" } },
+    })?.postedAt).toBe(Date.parse("2026-10-01T12:00:00Z"));
+    expect(pullRequestComment("github.pull_request_review.submitted", {
+      pull_request: { html_url: url }, review: { id: 2, state: "approved", submitted_at: "2026-10-01T12:00:05Z", user: { type: "User" } },
+    })?.postedAt).toBe(Date.parse("2026-10-01T12:00:05Z"));
+  });
+
   it("describes a review with no body by its state", () => {
     const review = pullRequestComment("github.pull_request_review.submitted", {
       pull_request: { html_url: "https://github.com/acme/app/pull/12" },

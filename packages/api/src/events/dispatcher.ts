@@ -34,7 +34,7 @@ import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js"
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries } from "./ingest.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
-import { inboundSlackMessage, pullRequestComment, recentTerminalReview, threadKeyForPullRequest, wasSentByValet, type InboundChannelMessage } from "../services/channel-messages.js";
+import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, threadKeyForPullRequest, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
@@ -303,17 +303,24 @@ export class EventDispatcher {
         // A pull request comment continues in the thread that opened the
         // pull request, when that thread is in this owner's runtime.
         const parsedComment = origin ? null : pullRequestComment(event.eventKey, event.payload);
+        const commentThreadKey = parsedComment && sub.ownerType !== "org"
+          ? await threadKeyForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, parsedComment.pullRequestUrl)
+          : null;
         // Valet posts with a person's GitHub token, so its own comment arrives
         // as that person. A comment it recorded as sent is its own: it never
         // wakes the thread that posted it.
-        const ownWrite = parsedComment !== null && (
-          await wasSentByValet(db, event.orgId, parsedComment.message, parsedComment.reviewId ? [parsedComment.reviewId] : [])
-          // A terminal review has no id to match: a review right after one is treated as Valet's.
-          || (event.eventKey.startsWith("github.pull_request_review") && await recentTerminalReview(db, event.orgId, parsedComment.channelKey)));
+        const ownWrite = parsedComment !== null && commentThreadKey !== null
+          && await isOwnPullRequestWrite(db, event.orgId, event.eventKey, parsedComment);
+        // The webhook can arrive before Valet records its write. A fresh
+        // comment that would wake a thread waits for the record, then this
+        // delivery runs again. It stays pending, so the attempt is not counted.
+        const settledAt = (parsedComment?.postedAt ?? 0) + OWN_WRITE_SETTLE_MS;
+        if (commentThreadKey !== null && !ownWrite && settledAt > Date.now()) {
+          await db.update(eventDeliveries).set({ nextAttemptAt: settledAt }).where(eq(eventDeliveries.id, deliveryId));
+          return;
+        }
         const prComment = parsedComment && !ownWrite ? parsedComment : null;
-        const prThreadKey = prComment && sub.ownerType !== "org"
-          ? await threadKeyForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, prComment.pullRequestUrl)
-          : null;
+        const prThreadKey = prComment ? commentThreadKey : null;
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
           : prThreadKey && prComment ? prComment.message : undefined;
