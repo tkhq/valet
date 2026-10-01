@@ -174,8 +174,9 @@ describe("Integrations workspace isolation", () => {
     teams = [team("a", "Team A", "admin")];
     orgRole = "admin";
     mount();
-    expect(await screen.findByRole("region", { name: "1Password for Team A" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
+    expect(await screen.findByText("A service account for this team. Valet finds credentials in the vaults it can access.")).toBeTruthy();
+    // One 1Password card, the team token; the service picker does not list it again.
+    expect(screen.getAllByText("1Password")).toHaveLength(1);
   });
 
   it("lets an org admin manage a team they are not on and reports delete errors", async () => {

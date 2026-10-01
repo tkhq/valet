@@ -419,20 +419,12 @@ describe("TeamsPanel — deleting a team", () => {
 });
 
 describe("TeamsPanel — 1Password connection", () => {
-  it("removes reference preferences and shows team token controls", () => {
+  it("leaves the team token to the team's Integrations page", () => {
     callerRole = "admin";
     orgRole = "member";
     openTeam();
-    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
-    expect(screen.queryByText("1Password references")).toBeNull();
-    expect(screen.getByLabelText("1Password service account token for Platform")).toBeTruthy();
-  });
-  it("does not expose token controls to a member", () => {
-    callerRole = "member";
-    orgRole = "member";
-    openTeam();
+    expect(screen.queryByText("1Password")).toBeNull();
     expect(screen.queryByRole("button", { name: "Connect token" })).toBeNull();
-    expect(screen.getByText("No team token connected. Team runtimes use the organization token when available.")).toBeTruthy();
   });
 });
 

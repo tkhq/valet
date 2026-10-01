@@ -44,7 +44,6 @@ import { curatedForCatalogId } from "~/lib/models";
 import { reasoningLabelFor } from "~/lib/reasoning";
 import { matchesNeedle } from "~/lib/text-match";
 import { TeamDeletionRequests } from "./team-deletion-requests";
-import { TeamOnePasswordToken } from "./team-onepassword-token";
 
 /**
  * Says what a declared team's controls do and do not survive.
@@ -290,7 +289,6 @@ function TeamRow({
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamHomeChannel key={team.id} team={team} canMutate={canMutate} />
           <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
-          <TeamOnePasswordToken key={team.id} teamId={team.id} teamName={team.name} canMutate={canMutate} />
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />
         </div>
       )}

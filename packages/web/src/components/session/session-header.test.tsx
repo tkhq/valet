@@ -346,33 +346,31 @@ describe("SessionHeader — reasoning persistence", () => {
 });
 
 describe("SessionHeader — pause control", () => {
-  it("disables the pause button while the sandbox is not ready", () => {
+  const PAUSE = { name: "Pause sandbox until the next message" };
+  async function openMenu() {
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+  }
+
+  it("keeps pause in the thread menu, not as a header icon", async () => {
+    renderHeader({ state: "ready", epoch: 1 });
+    expect(screen.queryByRole("button", { name: /pause/i })).toBeNull();
+    await openMenu();
+    expect(screen.getByRole("menuitem", PAUSE)).toBeTruthy();
+  });
+
+  it("disables pause while the sandbox is not ready", async () => {
     renderHeader({ state: "provisioning", epoch: 1 });
-    const button = screen.getByRole("button", { name: /pause/i }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
+    await openMenu();
+    expect(screen.getByRole("menuitem", PAUSE).getAttribute("data-disabled")).not.toBeNull();
   });
 
-  it("enables the pause button once the sandbox is ready and posts on click", async () => {
-    const user = userEvent.setup();
-    renderHeader({ state: "ready", epoch: 1 });
-
-    const button = screen.getByRole("button", { name: /pause/i }) as HTMLButtonElement;
-    expect(button.disabled).toBe(false);
-
-    await user.click(button);
-    expect(pauseMutateAsync).toHaveBeenCalledTimes(1);
-  });
-
-  it("surfaces the mutation's error text verbatim on a 409", async () => {
+  it("posts once the sandbox is ready, and surfaces the error text verbatim", async () => {
     pauseMutateAsync = vi.fn().mockRejectedValue(new Error("a turn is running"));
-    const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
-
-    await user.click(screen.getByRole("button", { name: /pause/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText("a turn is running")).toBeTruthy();
-    });
+    await openMenu();
+    await userEvent.click(screen.getByRole("menuitem", PAUSE));
+    expect(pauseMutateAsync).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByText("a turn is running")).toBeTruthy());
   });
 });
 
@@ -384,18 +382,6 @@ describe("SessionHeader — overflow menu", () => {
     await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
     expect(screen.queryByRole("menuitemcheckbox", { name: "Good session" })).toBeNull();
     expect(screen.queryByRole("menuitemcheckbox", { name: "Bad session" })).toBeNull();
-  });
-
-  it("keeps phone pause readiness and failure reporting", async () => {
-    pauseMutateAsync = vi.fn().mockRejectedValue(new Error("Wait for the current turn to finish."));
-    const view = renderHeader({ state: "suspended", epoch: 1 });
-    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
-    expect(screen.getByRole("menuitem", { name: "Pause runtime" }).getAttribute("data-disabled")).not.toBeNull();
-    view.unmount();
-    renderHeader({ state: "ready", epoch: 1 });
-    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Pause runtime" }));
-    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Wait for the current turn to finish.");
   });
 
   it("has no direct trash button; the ⋯ menu holds Replace sandbox and Delete runtime", async () => {
@@ -888,11 +874,11 @@ describe("SessionHeader — team assistant", () => {
     expect(screen.getByRole("menuitem", { name: "Copy transcript" })).toBeTruthy();
   });
 
-  it("shows pause and the session menu to a team admin", () => {
+  it("shows the session menu, with pause, to a team admin", async () => {
     withTeam("admin");
     renderTeamHeader();
-    expect(screen.getByRole("button", { name: /pause/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Thread menu" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    expect(screen.getByRole("menuitem", { name: "Pause sandbox until the next message" })).toBeTruthy();
   });
 
   it("never offers move or delete for a team workspace runtime, including to admins", async () => {
@@ -905,10 +891,10 @@ describe("SessionHeader — team assistant", () => {
     expect(deleteMutateAsync).not.toHaveBeenCalled();
   });
 
-  it("keeps the controls on a personal session", () => {
+  it("keeps the controls on a personal session", async () => {
     renderHeader({ state: "ready", epoch: 1 });
-    expect(screen.getByRole("button", { name: /pause/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Thread menu" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    expect(screen.getByRole("menuitem", { name: "Pause sandbox until the next message" })).toBeTruthy();
   });
 
   // An assistant's header shows the ASSISTANT's name, not `session.title`.

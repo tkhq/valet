@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { PluginServiceSummary } from "@valet/api/wire";
 import { useConnectCredential, useCredentials, usePlugins } from "~/api/integrations";
 import { Button, Dialog, DialogContent, ErrorRow, Textarea } from "~/components/primitives";
@@ -8,8 +8,10 @@ import { errorText } from "~/lib/error-text";
 import { displayName } from "./display-name";
 
 /** Connect an account intended for one team. Organization connections live in Organization settings. */
-export function TeamConnectionSetup({ teamId, canManage }: {
+export function TeamConnectionSetup({ teamId, canManage, children }: {
   teamId: string; canManage: boolean;
+  /** Team connections with their own card, such as 1Password, shown first in the grid. */
+  children?: ReactNode;
 }) {
   // The team catalog reports effective credentials for this team. In
   // particular, an org-managed Slack bot is connected for team workflows
@@ -47,6 +49,7 @@ export function TeamConnectionSetup({ teamId, canManage }: {
       {credentials.error && <ErrorRow>Could not check team connections. Reload the page.</ErrorRow>}
       {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="mt-4 text-sm text-muted">No available integrations match.</p>}
       <div className="grid gap-3 pt-4 sm:grid-cols-2">
+        {children}
         {available.map((service) => {
           const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
           return <IntegrationCard key={service.service}>

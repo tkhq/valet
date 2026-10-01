@@ -45,13 +45,12 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                   canMutate={canMutate}
                 />
-                <TeamConnectionSetup teamId={teamId} canManage={canMutate} />
-
-                {/* The team's own 1Password service account. It is what makes
-                    every op:// reference and valet-secrets work for this
-                    team's sessions, so it belongs on the page a person opens
-                    when they want the team to have 1Password. */}
-                <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />
+                {/* The team's own 1Password service account sits with the other
+                    connections: it is what makes op:// references and
+                    valet-secrets work for this team's sessions. */}
+                <TeamConnectionSetup teamId={teamId} canManage={canMutate}>
+                  <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />
+                </TeamConnectionSetup>
 
                 <div className="flex flex-wrap items-center gap-3">
                   <PullFromPersonal teamId={teamId} teamName={team.name} />

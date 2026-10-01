@@ -433,20 +433,6 @@ export function SessionHeader({
             </Button>
           </Tooltip>
         </div>
-        {canAdminister && (
-          <Tooltip content="Pause runtime — sandbox sleeps until the next message">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={pauseSession}
-              disabled={sandbox?.state !== "ready" || pause.isPending}
-              className="hidden sm:inline-flex"
-              aria-label="Pause runtime"
-            >
-              {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
-            </Button>
-          </Tooltip>
-        )}
         <DropdownMenu open={sessionMenu.open} onOpenChange={sessionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "sm:hidden")} aria-label="Thread menu">
@@ -473,19 +459,19 @@ export function SessionHeader({
               >
                 <ClipboardCopy className="h-4 w-4" aria-hidden />{copied ? "Transcript copied" : "Copy transcript"}
               </DropdownMenuItem>
-              {canAdminister && (
+              <DropdownMenuSeparator />
+            </div>
+            {canAdminister && (
+              <>
+                {/* Sleeps the sandbox until the next message. A menu item with a
+                    label, not a header icon nobody could read. */}
                 <DropdownMenuItem
                   disabled={sandbox?.state !== "ready" || pause.isPending}
                   onSelect={() => void pauseSession()}
                 >
                   <Moon className="h-4 w-4" aria-hidden />
-                  {pause.isPending ? "Pausing…" : "Pause runtime"}
+                  {pause.isPending ? "Pausing…" : "Pause sandbox until the next message"}
                 </DropdownMenuItem>
-              )}
-              <DropdownMenuSeparator />
-            </div>
-            {canAdminister && (
-              <>
                 <DropdownMenuItem
                   disabled={setProfile.isPending}
                   onSelect={() => setConfirmServices(true)}
