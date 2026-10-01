@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { FileText, GitPullRequest, MessageSquare, ArrowUpRight, CircleAlert, LoaderCircle, CheckCheck } from "lucide-react";
-import type { ArtifactListItem, GlobalWorkflowRunSummary, SessionSummary, WaitingThread, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
+import type { ArtifactListItem, GlobalWorkflowRunSummary, WaitingThread, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
-import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads, useFinishWaitingThread } from "~/api/catch-up";
+import { useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads, useFinishWaitingThread } from "~/api/catch-up";
 import { useArtifacts } from "~/api/artifacts";
 import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { relativeTime } from "~/lib/relative-time";
@@ -51,7 +51,6 @@ function artifactResult(row: ArtifactListItem): ResultItem {
 }
 
 function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
-  const work = useCatchUpWork(owner);
   const activeWork = useWorkspaceActiveWork(owner);
   const waitingQ = useWaitingThreads(owner);
   const outcomes = useWorkspaceOutcomes(owner);
@@ -59,7 +58,6 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   const artifacts = useArtifacts(owner, { limit: 25, cursor: artifactCursor, refetchInterval: 10_000 });
   const workflows = useWorkflows(owner, { refetchInterval: 10_000 });
   const gates = useWorkflowActionRequired();
-  const sessions = work.error ? [] : work.data?.pages.flatMap(page => page.sessions) ?? [];
   const runs: GlobalWorkflowRunSummary[] = workflows.error ? [] : (workflows.data?.workflows ?? []).flatMap((workflow) => workflow.latestRun ? [{ ...workflow.latestRun, workflowName: workflow.name, needsApproval: !gates.error && Boolean(gates.data?.items.some((gate) => gate.runId === workflow.latestRun?.runId && gate.owner.type === owner.ownerType && gate.owner.id === owner.ownerId)) }] : []);
   const queueItems = activeWork.error ? [] : activeWork.data?.pages.flatMap(page => page.items) ?? [];
   const statePriority = { needs_you: 3, working: 2, failed: 1 };
@@ -83,12 +81,10 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   const resultItems: ResultItem[] = [
     ...(outcomes.error ? [] : outcomes.data?.pages.flatMap(page => page.items).map(outcomeResult) ?? []),
     ...(artifacts.error ? [] : artifacts.data?.artifacts.filter(row => !row.revoked).map(artifactResult) ?? []),
-
   ];
-  const otherWork = sessions.filter(row => !activeThreads.some(item => item.sessionId === row.id) && !resultItems.some(item => item.sessionId === row.id));
   const loading = activeWork.isPending || workflows.isPending || gates.isPending;
   const errors = [
-    { label: "work", query: work }, { label: "active work", query: activeWork }, { label: "threads waiting on you", query: waitingQ }, { label: "results", query: outcomes }, { label: "artifacts", query: artifacts },
+    { label: "active work", query: activeWork }, { label: "threads waiting on you", query: waitingQ }, { label: "results", query: outcomes }, { label: "artifacts", query: artifacts },
     { label: "workflows", query: workflows }, { label: "approval details", query: gates },
   ].filter(entry => entry.query.error);
   const incomplete = !activeWork.error && activeWork.hasNextPage;
@@ -113,9 +109,7 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
       {(outcomes.isPending || artifacts.isPending) && <LoadingRow label="Loading results…" />}
       {groupResults(resultItems).map(group => {
         const first = group[0]!;
-        const session = sessions.find(row => row.id === first.sessionId);
         return <div key={first.id} className="px-4 py-4">
-          {session && <div className="mb-3 flex flex-wrap items-center gap-2"><Link to="/sessions/$sessionId" params={{ sessionId: session.id }} className="text-sm font-medium hover:underline">{session.title || "Untitled work"}</Link><RunStateBadge state={session.runState} /></div>}
           <ul className="space-y-3">{group.map(item => <ResultRow key={item.id} item={item} />)}</ul>
         </div>;
       })}
@@ -124,8 +118,6 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
       {!outcomes.error && outcomes.hasNextPage && <Button size="sm" variant="secondary" disabled={outcomes.isFetchingNextPage} onClick={() => void outcomes.fetchNextPage()}>Load more results</Button>}
       {!artifacts.error && <PageControls cursor={artifactCursor} next={artifacts.data?.nextCursor} onPage={setArtifactCursor} label="artifacts" />}
     </div>
-    {(otherWork.length > 0 || work.hasNextPage) && <details><summary className="cursor-pointer text-sm text-muted">Recent work · {otherWork.length} loaded</summary><div className="mt-3"><WorkSection title="Recent work" count={otherWork.length}><p className="px-4 py-3 text-xs text-muted">Idle and sleeping work may still have unfinished tasks. Open the conversation to check.</p>{otherWork.map(row => <SessionRow key={row.id} row={row} />)}</WorkSection>    {!work.error && work.hasNextPage && <Button variant="secondary" size="sm" disabled={work.isFetchingNextPage} onClick={() => void work.fetchNextPage()}>Load more work</Button>}
-</div></details>}
   </div>;
 }
 
@@ -143,10 +135,6 @@ function WaitingRow({ row, onDone }: { row: WaitingThread; onDone: () => void })
       <Button asChild variant="secondary" size="sm"><Link to="/threads/$threadId" params={{ threadId: row.threadId }}>Reply</Link></Button>
       <Button variant="ghost" size="sm" onClick={onDone} title="Archive this thread. It leaves this list and the sidebar." aria-label={`Done with ${row.title}`}>Done</Button>
     </>} />;
-}
-function SessionRow({ row }: { row: SessionSummary }) {
-  return <WorkRow title={<Link to="/sessions/$sessionId" params={{ sessionId: row.id }}>{row.title || "Untitled work"}</Link>}
-    badge={<RunStateBadge state={row.runState} />} time={row.lastActivityAt} />;
 }
 function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: string }) {
   const label = row.needsApproval ? "Approval needed" : row.outcome === "failed" ? "Failed" : row.status === "parked" ? "Waiting" : row.status === "pending" ? "Queued" : row.status === "terminalizing" ? "Finishing" : "Running";

@@ -176,7 +176,7 @@ export function SessionHeader({
       setConfirmDelete(false);
       navigate({ to: "/" });
     } catch (err) {
-      setDeleteError(extractActionError(err, "Failed to delete the runtime. Try again."));
+      setDeleteError(extractActionError(err, "Failed to delete the session. Try again."));
     }
   }
 
@@ -185,7 +185,7 @@ export function SessionHeader({
     try {
       await pause.mutateAsync();
     } catch (err) {
-      setActionError(extractActionError(err, "Failed to pause the runtime. Try again."));
+      setActionError(extractActionError(err, "Failed to pause the sandbox. Try again."));
     }
   }
 
@@ -211,7 +211,7 @@ export function SessionHeader({
       setConfirmServices(false);
     } catch (err) {
       setServicesError(
-        extractActionError(err, "Failed to change the runtime's services. Try again."),
+        extractActionError(err, "Failed to change the sandbox services. Try again."),
       );
     }
   }
@@ -240,7 +240,7 @@ export function SessionHeader({
     try {
       await rename.mutateAsync(next);
     } catch (err) {
-      setActionError(extractActionError(err, "Failed to rename the runtime. Try again."));
+      setActionError(extractActionError(err, "Failed to rename the session. Try again."));
     }
   }
 
@@ -292,8 +292,8 @@ export function SessionHeader({
       : modelScopeHint;
   // Runtime titles belong to threads. Standalone titles belong to the session.
   const canRename = canAdminister && session.isWorkspaceRuntime === false;
-  const deleteTitle = "Delete this runtime permanently?";
-  const deleteDescription = `${teamId !== null ? `Everyone on ${team?.name ?? "the team"} loses it. ` : ""}This deletes all threads, history, and child runtimes, and tears down the sandbox.`;
+  const deleteTitle = "Delete this session permanently?";
+  const deleteDescription = `${teamId !== null ? `Everyone on ${team?.name ?? "the team"} loses it. ` : ""}This deletes all threads, history, and child sessions, and tears down the sandbox.`;
   // Fail closed until the detail response identifies the runtime boundary.
   const canDelete = canAdminister && session.isWorkspaceRuntime === false;
 
@@ -314,7 +314,7 @@ export function SessionHeader({
         >
           <Input
             autoFocus
-            aria-label="Runtime title"
+            aria-label="Session title"
             className="w-full sm:h-7 sm:w-64 sm:max-w-full font-semibold"
             value={titleDraft}
             onChange={(e) => setTitleDraft(e.target.value)}
@@ -346,7 +346,7 @@ export function SessionHeader({
             <button
               type="button"
               onClick={beginRename}
-              aria-label={`Rename runtime: ${title}`}
+              aria-label={`Rename session: ${title}`}
               className="max-sm:min-h-11 max-sm:text-left text-sm font-semibold tracking-tight truncate text-ink font-display rounded px-0.5 -mx-0.5 hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
             >
               {rename.isPending ? <Spinner size={14} /> : title}
@@ -488,8 +488,9 @@ export function SessionHeader({
                   <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
                   Replace sandbox
                 </DropdownMenuItem>
-                {/* Workspace runtime ownership is structural. */}
-                {session.isWorkspaceRuntime === false && (
+                {/* Workspace runtime ownership is structural, and a child
+                    session follows its parent, so the API refuses both. */}
+                {session.isWorkspaceRuntime === false && session.parentWork === undefined && (
                   <DropdownMenuItem onSelect={() => setMoving(true)}>
                     <FolderInput className="h-3.5 w-3.5 mr-2" aria-hidden />
                     Move to workspace…
@@ -502,7 +503,7 @@ export function SessionHeader({
                     onSelect={() => setConfirmDelete(true)}
                   >
                     <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
-                    Delete runtime…
+                    Delete session…
                   </DropdownMenuItem>
                 )}
               </>
@@ -547,7 +548,7 @@ export function SessionHeader({
         }}
         title={deleteTitle}
         description={deleteDescription}
-        confirmLabel="Delete runtime"
+        confirmLabel="Delete session"
         pendingLabel="Deleting…"
         pending={del.isPending}
         error={deleteError ?? undefined}

@@ -39,7 +39,7 @@ import { workspaceBriefingsRouter } from "./routes/workspace-briefings.js";
 import { workspaceChannelsRouter } from "./routes/workspace-channels.js";
 import { workspaceActiveWorkRouter } from "./routes/workspace-active-work.js";
 import { workspaceOutcomesRouter } from "./routes/workspace-outcomes.js";
-import { legacyOrchestratorRouter, workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
+import { workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
 import { childWorkRouter } from "./routes/child-work.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { changelogRouter } from "./routes/changelog.js";
@@ -70,7 +70,7 @@ import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js"
 import { githubConnectRouter } from "./routes/github-connect.js";
 import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
-import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
+import { sourcesRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { browserRouter } from "./routes/browser.js";
@@ -323,7 +323,6 @@ export function createApp(
   app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
   // Before the teams router, so the legacy team runtime path is not read as a team route.
-  app.route("/api", legacyOrchestratorRouter);
   app.route("/api/teams", teamDeletionRequestsRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/teams", teamApiKeysRouter);
@@ -387,7 +386,6 @@ export function createApp(
   app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/slack", slackAppRouter);
   app.route("/api/org/sources", sourcesRouter);
-  app.route("/api/sources", sourcesPublicRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
   // Mounted at /api (not /api/events) because the router carries both the

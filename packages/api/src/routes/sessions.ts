@@ -1,6 +1,6 @@
 import { visibleWorkOrigin } from "../services/work-origin.js";
 import { Hono } from "hono";
-import { and, count, desc, eq, inArray, lt, notExists, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal } from "@valet/engine";
@@ -8,7 +8,6 @@ import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
-import { autoTitle } from "../sessions/auto-title.js";
 import {
   deriveRunFields,
   groupSubmissionsBySession,
@@ -28,7 +27,7 @@ import { seedSecurityReview, seededConfigContext } from "../services/security-se
 import { planCellInputToCell, PlanCellInputError } from "./security.js";
 import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { checkRepoExistence } from "../services/repo-existence.js";
-import { getTeamInOrg, isTeamMember, listTeamsForUser } from "../services/teams.js";
+import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
 import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
@@ -68,7 +67,6 @@ import type {
   SessionSummary,
 } from "../wire/types.js";
 
-import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 
 export const sessionsRouter = new Hono<AppEnv>();
 
@@ -227,42 +225,6 @@ sessionsRouter.get("/", async (c) => {
     // 404, not 403: the same existence-hiding every cross-owner read here uses.
     if (!reachable) return c.json({ error: "owner not found" }, 404);
     owner = { type: ownerType, id: ownerId };
-  }
-
-  // Discovery preserves each execution's runtime and authorization boundary.
-  if (c.req.query("discovery") === "true") {
-    if (!owner) return c.json({ error: "Choose a workspace to browse work." }, 400);
-    if (owner.type === "team" && !await getTeamInOrg(db, c.var.user.orgId, owner.id)) {
-      return c.json({ error: "Workspace not found. Choose a workspace you can access." }, 404);
-    }
-    const limit = readLimit(c.req.query("limit"), 25, 100);
-    if (limit === undefined) return c.json({ error: "Send a positive whole number for limit." }, 400);
-    const rawCursor = c.req.query("cursor");
-    const cursor = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
-    if (rawCursor !== undefined && (!cursor || typeof cursor.createdAt !== "number" ||
-        !Number.isSafeInteger(cursor.createdAt) || typeof cursor.id !== "string" || !cursor.id ||
-        cursor.ownerType !== owner.type || cursor.ownerId !== owner.id)) {
-      return c.json({ error: "Invalid work cursor. Remove it to start at the first page." }, 400);
-    }
-    const rows = await db.select().from(agentSessions).where(and(
-      eq(agentSessions.orgId, c.var.user.orgId),
-      eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id),
-      inArray(agentSessions.status, ["active", "hibernated", "archived"]),
-      sql`${agentSessions.id} NOT LIKE 'assistant:%'`,
-      notExists(db.select({ id: assistants.sessionId }).from(assistants)
-        .where(eq(assistants.sessionId, agentSessions.id))),
-      cursor ? or(lt(agentSessions.createdAt, Number(cursor.createdAt)),
-        and(eq(agentSessions.createdAt, Number(cursor.createdAt)), lt(agentSessions.id, String(cursor.id)))) : undefined,
-    )).orderBy(desc(agentSessions.createdAt), desc(agentSessions.id)).limit(limit + 1);
-    const visible = rows.slice(0, limit);
-    const bySession = groupSubmissionsBySession(await engineStore.listAllUnsettledSubmissions(visible.map(row => row.id)));
-    const last = visible.at(-1);
-    const body: ListSessionsResponse = {
-      sessions: visible.map(row => rowToSummary(row, deriveRunFields(runStateRow(row), bySession.get(row.id) ?? []))),
-      nextCursor: rows.length > limit && last
-        ? encodePageCursor({ createdAt: last.createdAt, id: last.id, ownerType: owner.type, ownerId: owner.id }) : null,
-    };
-    return c.json(body);
   }
 
   // Optional kind filter, the shape the security hub reads
@@ -1257,67 +1219,6 @@ sessionsRouter.patch("/:id", async (c) => {
     docker: effectiveRow.docker,
   };
   return c.json(detail);
-});
-
-// ── Auto-title ────────────────────────────────────────────────────────────
-
-/**
- * Generate + persist a title for this session (and optionally a thread)
- * from the opening messages. The server normally starts naming from the
- * completed-submission event; this route remains an idempotent retry seam.
- * Returns 200 with `{ sessionTitle, threadTitle }` even in the "nothing to
- * do" cases (`already_titled`, `no_messages`) — the client just treats
- * null title fields as "leave the row alone".
- */
-sessionsRouter.post("/:id/auto-title", async (c) => {
-  const { db, engineHost } = c.var.providers;
-  const id = c.req.param("id");
-  const userId = c.var.user.id;
-
-  const url = new URL(c.req.url);
-  const threadId = url.searchParams.get("threadId") ?? undefined;
-
-  // The persistent `messages` table isn't the source of truth today — the
-  // engine owns entries. Route the loader through the same engine session
-  // the messages GET endpoint uses so we see what the UI sees.
-  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
-  const sessionRow = rows[0];
-  // Session-not-found is handled inside `autoTitle` too, but bail early
-  // here so we don't pay the cost of a sessionFor call on a bad id.
-  if (!sessionRow) return c.json({ error: "session not found" }, 404);
-  // Titling a thread is part of prompting, not administering — anyone who
-  // can read and reply may title what they said. Gating this on ownership
-  // left a team member's threads permanently untitled.
-  if (!(await canViewSession(db, sessionRow, c.var.principal))) {
-    return c.json({ error: "session not found" }, 404);
-  }
-
-  const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, sessionRow));
-  const defaultThread = await engineSession.ensureDefaultThread();
-
-  const result = await autoTitle(
-    {
-      db,
-      loadMessages: async (_sid, tid) => {
-        const thread = tid ? engineSession.threadById(tid) ?? defaultThread : defaultThread;
-        const entries = await thread.readEntries({ limit: 4 });
-        const out: { role: string; content: string }[] = [];
-        for (const e of entries) {
-          if (e.type !== "message") continue;
-          if (e.role !== "user" && e.role !== "assistant") continue;
-          out.push({ role: e.role, content: e.content ?? "" });
-        }
-        return out;
-      },
-    },
-    { sessionId: id, threadId },
-  );
-  if (!result.ok) {
-    if (result.reason === "session_not_found") return c.json({ error: "session not found" }, 404);
-    // already_titled / no_messages → 200 with nulls; client no-ops.
-    return c.json({ sessionTitle: null, threadTitle: null });
-  }
-  return c.json({ sessionTitle: result.sessionTitle, threadTitle: result.threadTitle });
 });
 
 // ── Sandbox JWT ───────────────────────────────────────────────────────────

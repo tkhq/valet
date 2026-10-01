@@ -73,7 +73,6 @@ import type {
   OrgSettingsResponse,
   PatchOrgSettingsRequest,
   ChildWorkResponse,
-  GetPrebuildForRepoResponse,
   GetReposResponse,
   GetSlackAppResponse,
   GetWorkflowImportFileResponse,
@@ -153,9 +152,6 @@ import type {
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
-  ListWorkflowTemplatesResponse,
-  InstallWorkflowTemplateRequest,
-  InstallWorkflowTemplateResponse,
   MeResponse,
   OnePasswordSettingsResponse,
   TeamOnePasswordStatusResponse,
@@ -564,8 +560,6 @@ export const api = {
       "GET",
       kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
     ),
-  listWork: (owner: OwnerFilter, cursor?: string) =>
-    request<ListSessionsResponse>("GET", `/sessions?discovery=true&limit=25${ownerSuffix(owner)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   listWorkspaceActiveWork: (owner: OwnerFilter, cursor?: string) =>
     request<WorkspaceActiveWorkResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/active-work?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getWorkspaceBriefings: (owner: OwnerFilter) =>
@@ -737,8 +731,8 @@ export const api = {
     request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
   replaceSandbox: (id: string) =>
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
-  // orchestrator (session ids contain colons — always encoded above too, but
-  // this entry point never touches a raw id itself, only ensures one exists)
+  // workspace runtime: these entry points take a workspace key, never a raw
+  // session id, and only ensure the runtime exists
   ensureWorkspaceConversation: (workspace: string) =>
     request<{ sessionId: string; threadId: string }>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`),
   ensureWorkspaceRuntime: (workspace: string) =>
@@ -1100,21 +1094,6 @@ export const api = {
   deleteWorkflowWebhook: (id: string) =>
     request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
 
-  // workflow templates — the starting points the gallery on /workflows offers.
-  // `teamId` scopes the requirements to a team workspace: the server stamps
-  // each template against the principal the install would act as.
-  listWorkflowTemplates: (teamId?: string) =>
-    request<ListWorkflowTemplatesResponse>(
-      "GET",
-      teamId === undefined ? "/templates" : `/templates?teamId=${encodeURIComponent(teamId)}`,
-    ),
-  installWorkflowTemplate: (id: string, body: InstallWorkflowTemplateRequest = {}) =>
-    request<InstallWorkflowTemplateResponse>(
-      "POST",
-      `/templates/${encodeURIComponent(id)}/install`,
-      body,
-    ),
-
   // workflow triggers (spec 2026-08-15). `owner` scopes the flat hub list to
   // one workspace; the per-workflow editor passes `workflowId` and no owner.
   listWorkflowTriggers: (owner?: OwnerFilter, workflowId?: string) =>
@@ -1411,12 +1390,6 @@ export const api = {
   // repos (GitHub/repo integration plan, Task 7): union of every RepoHost
   // the caller has access to — only `github` today.
   getRepos: () => request<GetReposResponse>("GET", "/repos"),
-
-  getPrebuildForRepo: (fullName: string) =>
-    request<GetPrebuildForRepoResponse>(
-      "GET",
-      `/sources/for-repo?fullName=${encodeURIComponent(fullName)}`,
-    ),
 
   // sandbox image sources (sandbox-reconciliation plan, Task 18): org-admin
   // CRUD for all source kinds (external/base/repo) and bake history.

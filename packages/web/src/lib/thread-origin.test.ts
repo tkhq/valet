@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bucketCounts, filterThreads, threadChannelType, threadMatchesSearch, threadOriginBucket } from "./thread-origin";
+import { bucketCounts, threadChannelType, threadOriginBucket } from "./thread-origin";
 
 describe("threadOriginBucket", () => {
   it("buckets web + default + keyless threads as chat", () => {
@@ -31,29 +31,6 @@ describe("bucketCounts", () => {
       { key: undefined },
     ]);
     expect(counts).toEqual({ all: 5, chat: 2, auto: 1, channel: 1, other: 1 });
-  });
-});
-
-describe("threadMatchesSearch + filterThreads", () => {
-  const threads = [
-    { id: "t1", title: "Building CI Triage", key: "web:a" },
-    { id: "t2", title: "Casual Vibes", key: "web:b" },
-    { id: "t3", title: undefined, key: "events" },
-  ];
-  it("matches title case-insensitively and empty query matches everything", () => {
-    expect(threadMatchesSearch(threads[0]!, "ci triage")).toBe(true);
-    expect(threadMatchesSearch(threads[1]!, "")).toBe(true);
-    expect(threadMatchesSearch(threads[1]!, "triage")).toBe(false);
-    expect(threadMatchesSearch({ id: "t4", title: "Fix export", key: "web:d" }, "fix login")).toBe(false);
-  });
-  it("matches key and id for untitled threads", () => {
-    expect(threadMatchesSearch(threads[2]!, "events")).toBe(true);
-    expect(threadMatchesSearch(threads[2]!, "t3")).toBe(true);
-  });
-  it("combines bucket and query, preserving order", () => {
-    expect(filterThreads(threads, "chat", "").map((t) => t.id)).toEqual(["t1", "t2"]);
-    expect(filterThreads(threads, "all", "triage").map((t) => t.id)).toEqual(["t1"]);
-    expect(filterThreads(threads, "auto", "vibes")).toEqual([]);
   });
 });
 

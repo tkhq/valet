@@ -7,10 +7,9 @@ import { api, type OwnerFilter } from "~/api/client";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 let owner: OwnerFilter = { ownerType: "user", ownerId: "u" };
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
-vi.mock("~/api/client", () => ({ api: { listWork: vi.fn(), listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
+vi.mock("~/api/client", () => ({ api: { listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn() } }));
 beforeEach(() => {
   vi.clearAllMocks(); owner = { ownerType: "user", ownerId: "u" };
-  vi.mocked(api.listWork).mockResolvedValue({ sessions: [{ id: "s", title: "TKAI-42 · Route events", workspace: "", status: "active", kind: "code", runState: "idle", createdAt: 1, updatedAt: 1, lastActivityAt: 1, owner: { type: "user", id: "u" } }], nextCursor: null });
   vi.mocked(api.listArtifacts).mockResolvedValue({ artifacts: [], nextCursor: null });
   vi.mocked(api.listWorkspaceOutcomes).mockResolvedValue({ items: [], nextCursor: null });
   vi.mocked(api.listWorkspaceActiveWork).mockResolvedValue({ items: [], nextCursor: null });
@@ -31,11 +30,9 @@ it("groups PRs and published files under their work with real source links", asy
   const results = screen.getByRole("region", { name: "Recent results" });
   expect(pr.getAttribute("href")).toBe("https://github.com/acme/app/pull/42");
   expect(within(results).getByRole("link", { name: "Routing report" }).getAttribute("href")).toBe("/a/report-token");
-  expect(within(results).getByText("TKAI-42 · Route events")).toBeTruthy();
   expect(within(results).getAllByRole("link", { name: "Open thread" })[0]?.getAttribute("href")).toBe("/threads/thread-a");
   expect(screen.queryByRole("link", { name: "Unsafe link" })).toBeNull();
   expect(screen.queryByText("Completed")).toBeNull();
-  expect(screen.queryByRole("link", { name: "TKAI-42" })).toBeNull();
 });
 it("separates approval from timer waits and shows the requested action", async () => {
   vi.mocked(api.listWorkflows).mockResolvedValue({ workflows: [

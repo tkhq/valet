@@ -1,4 +1,3 @@
-import { qkTemplates } from "./templates";
 /**
  * TanStack Query hooks for the settings shell's data surface (split-settings
  * design, Task 5). Mirrors the factory idiom in `src/api/queries.ts`:
@@ -624,7 +623,6 @@ export function useSaveGithubAppCredential() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -636,7 +634,6 @@ export function useRefreshGithubApp() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -648,7 +645,6 @@ export function useDeleteGithubApp() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }

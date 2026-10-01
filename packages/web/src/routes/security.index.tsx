@@ -19,9 +19,8 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 /**
  * `/security` — the security review hub (valet-security design, §Web
- * Surfaces). Top: a "New review" card — repo picker (the same combobox the
- * new-session dialog uses), the sweep preset, an optional path scope, and the
- * model. Configure navigates to `/security/new`, where the user reviews the
+ * Surfaces). Top: a "New review" card — repo picker, the sweep preset, an
+ * optional path scope, and the model. Configure navigates to `/security/new`, where the user reviews the
  * seeded config + plan, edits them, then starts the review. Below: past
  * engagements from `GET /api/sessions?kind=security`, each row badged with
  * its engagement status from `GET /api/sessions/:id/security`.
@@ -164,8 +163,8 @@ function splitPaths(input: string): string[] {
 function NewReviewCard() {
   const navigate = useNavigate();
   const reposQ = useRepos();
-  // The nav's switcher answers "whose review is this" — same pass-through
-  // the new-session dialog uses (`CreateScopeLine` states it).
+  // The nav's switcher answers "whose review is this" (`CreateScopeLine`
+  // states it).
   const scope = useWorkspaceScope();
   const orgQ = useOrg({ enabled: scope.teamId !== undefined });
   const [repo, setRepo] = useState<SelectedRepo | null>(null);

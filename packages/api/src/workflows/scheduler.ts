@@ -98,7 +98,7 @@ export class WorkflowScheduler {
 
     if (schedule.targetKind === "orchestrator") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
-        return { error: "orchestrator target without a prompt. Edit the schedule and set a prompt." };
+        return { error: "assistant-prompt schedule without a prompt. Edit the schedule and set a prompt." };
       }
       await this.deps.deliverToOrchestrator({
         orgId: schedule.orgId,

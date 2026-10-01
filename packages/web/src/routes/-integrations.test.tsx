@@ -234,8 +234,8 @@ vi.mock("~/api/onepassword", () => ({
 }));
 
 // The org-provided tile's pairing block (identity-link-block.tsx) reads
-// these three hooks. importOriginal: see -new-session-dialog.test.tsx for
-// why a bare replacement is unsafe under vitest.config.ts's isolate:false.
+// these three hooks. importOriginal keeps the module's other exports real
+// (see vitest.config.ts).
 let identityLinksData: { links: IdentityLinkStatus[] } | undefined;
 let identityLinksLoading = false;
 let linkMembersData: { members: Array<{ externalId: string; displayName: string; handle: string }> } | undefined;

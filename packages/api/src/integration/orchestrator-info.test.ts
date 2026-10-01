@@ -1,9 +1,6 @@
 /** Workspace runtime info, child presence, and retired identity-write coverage. */
 import { afterEach, describe, expect, it } from "vitest";
 import { agentSessions, assistants, childWatches } from "../schema/index.js";
-import { writeFile } from "../services/memory.js";
-import { addMember, createTeam } from "../services/teams.js";
-import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import type {
   ChildWorkResponse,
   WorkspaceRuntimeInfoResponse

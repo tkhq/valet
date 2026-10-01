@@ -442,9 +442,9 @@ export function TriggerDialog({
                         value="orchestrator"
                         checked={targetKind === "orchestrator"}
                         onChange={() => setTargetKind("orchestrator")}
-                        aria-label="orchestrator"
+                        aria-label="assistant"
                       />
-                      Orchestrator
+                      Assistant
                     </label>
                   </div>
                 </fieldset>

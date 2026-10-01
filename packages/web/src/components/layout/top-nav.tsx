@@ -173,10 +173,8 @@ export function TopNav() {
     </span>
   );
 
-  // The logo is the PRODUCT (Valet), not the orchestrator — the
-  // orchestrator's chosen name shows up in its own title card (session
-  // header) instead. The presence dot stays: it still reflects the
-  // orchestrator's live state at a glance from anywhere in the app.
+  // The logo is the PRODUCT (Valet). The presence dot reflects the
+  // workspace runtime's live state at a glance from anywhere in the app.
   return (
     <header className="max-sm:[--nav-height:3rem] h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-1 px-2 md:gap-4 md:px-3">
       <SidebarToggle />

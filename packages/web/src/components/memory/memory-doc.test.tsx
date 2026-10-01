@@ -25,10 +25,6 @@ vi.mock("~/api/memory", async (importOriginal) => {
   };
 });
 
-vi.mock("~/api/workspace-runtime", () => ({
-  useOrchestratorInfo: () => ({ data: { name: "Nova" } }),
-}));
-
 const downloadMock = vi.fn();
 vi.mock("~/lib/download", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/lib/download")>();

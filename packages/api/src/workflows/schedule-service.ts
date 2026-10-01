@@ -125,7 +125,7 @@ export async function createWorkflowSchedule(
   if (hasWorkflow === hasPrompt) {
     return {
       ok: false,
-      error: "provide exactly one of workflow_id (start a workflow run) or prompt (prompt the orchestrator)",
+      error: "provide exactly one of workflow_id (start a workflow run) or prompt (prompt the workspace assistant)",
     };
   }
 
@@ -325,7 +325,7 @@ export async function updateWorkflowSchedule(
     return {
       ok: false,
       status: 400,
-      error: "prompt only applies to orchestrator-target schedules. Delete this schedule and create an orchestrator one to switch.",
+      error: "prompt only applies to assistant-prompt schedules. Delete this schedule and create an assistant-prompt one to switch.",
     };
   }
   if (patch.input !== undefined && row.targetKind !== "workflow") {
@@ -336,7 +336,7 @@ export async function updateWorkflowSchedule(
     };
   }
   if (patch.prompt !== undefined && patch.prompt.trim() === "") {
-    return { ok: false, status: 400, error: "prompt must not be empty. Provide the text to send to the orchestrator." };
+    return { ok: false, status: 400, error: "prompt must not be empty. Provide the text to send to the workspace assistant." };
   }
 
   const cron = patch.cron ?? row.cron;

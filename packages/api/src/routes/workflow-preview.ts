@@ -111,7 +111,7 @@ function refusingEngine(): WorkflowEngineDeps {
     abort: async () => refuse("abort sessions"),
     isSettled: async () => refuse("read session state"),
     llmComplete: async () => refuse("call models"),
-    promptOrchestrator: async () => refuse("prompt the orchestrator"),
+    promptOrchestrator: async () => refuse("prompt the workspace assistant"),
     invokeAction: async () => refuse("call integration actions"),
     resolveWorkflow: async () => refuse("resolve other workflows"),
   };

@@ -59,13 +59,13 @@ vi.mock("~/api/workflows", () => ({
 import { TriggerDialog } from "./trigger-dialog";
 
 describe("TriggerDialog", () => {
-  it("creates an orchestrator schedule from the form", async () => {
+  it("creates an assistant schedule from the form", async () => {
     createScheduleMutateAsync.mockClear().mockResolvedValue({});
     render(<TriggerDialog open onOpenChange={() => {}} />);
     fireEvent.click(screen.getByText(/^Schedule$/));
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "digest" } });
     fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "0 9 * * *" } });
-    fireEvent.click(screen.getByLabelText(/orchestrator/i));
+    fireEvent.click(screen.getByLabelText(/^assistant$/i));
     fireEvent.change(screen.getByLabelText(/prompt/i), { target: { value: "summarize" } });
     fireEvent.click(screen.getByText(/^Create$/));
     await waitFor(() =>

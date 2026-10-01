@@ -28,7 +28,7 @@ function relativeTime(ms: number): string {
 function triggerSummary(t: WorkflowTriggerItem): string {
   if (t.kind === "schedule") {
     const next = t.enabled ? ` · next ${relativeTime(t.detail.nextFireAt)}` : "";
-    const target = t.detail.targetKind === "orchestrator" ? " · orchestrator" : "";
+    const target = t.detail.targetKind === "orchestrator" ? " · assistant" : "";
     return `${t.detail.cron} (${t.detail.timezone})${target}${next}`;
   }
   return t.detail.eventKeys.join(", ");

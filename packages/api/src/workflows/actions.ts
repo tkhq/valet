@@ -943,9 +943,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       prompt: Type.Optional(
         Type.String({
           description:
-            "Target the orchestrator instead: this prompt is delivered to you (the " +
-            "orchestrator) each fire, on a dedicated thread. Provide exactly one of " +
-            "workflow_id or prompt.",
+            "Target the workspace assistant instead: this prompt is delivered to you " +
+            "each fire, on a dedicated thread. Provide exactly one of workflow_id or prompt.",
         }),
       ),
       name: Type.String(),
@@ -966,7 +965,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Create schedule",
     description:
       "Run something on a cron schedule: a WORKFLOW (workflow_id → a run starts each fire) " +
-      "or the ORCHESTRATOR (prompt → you receive the prompt each fire, e.g. 'check my PRs " +
+      "or the ASSISTANT (prompt → you receive the prompt each fire, e.g. 'check my PRs " +
       "every morning'). Fires are accurate to ~30s; missed fires during downtime collapse " +
       "into one catch-up. Returns { scheduleId, nextFireAt }.",
     riskLevel: "medium",
@@ -1086,7 +1085,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       enabled: Type.Optional(
         Type.Boolean({ description: "false pauses the schedule; re-enabling recomputes next fire time." }),
       ),
-      prompt: Type.Optional(Type.String({ description: "Orchestrator-target schedules only." })),
+      prompt: Type.Optional(Type.String({ description: "Assistant-prompt schedules only." })),
       input: Type.Optional(
         Type.Record(Type.String(), Type.Unknown(), {
           description: "Workflow-target schedules only. Pass null to clear a previously set input.",

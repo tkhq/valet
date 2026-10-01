@@ -382,10 +382,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
-  // Assistant-profile actions (the tool mirror of routes/assistants.ts).
-  // A persona write must evict the cached session, and the EngineHost does
-  // not exist yet — same one-slot indirection as the workflows deps above.
-  const evictRef: { current: ((sessionId: string) => void) | null } = { current: null };
   const eventsActions: ValetPlugin = {
     name: "events-actions",
     version: "0.1.0",
@@ -520,7 +516,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Arm the capacity gate now that the host exists — creates admitted
   // before this line (none happen during construction) pass ungated.
   gateHostRef.current = engineHost;
-  evictRef.current = (sessionId) => engineHost.evictCache(sessionId);
 
   // Naming listens to the engine's origin-neutral settlement event. Start it
   // in main before boot restore, because restored work can settle there.

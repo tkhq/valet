@@ -464,7 +464,7 @@ describe("UsagePage — tool work", () => {
     render(<UsagePage />);
     expect(screen.getByText("Tool work per model token")).toBeTruthy();
     const rows = screen.getAllByRole("row");
-    const session = rows.find((row) => row.textContent?.includes("Runtimes") && row.textContent?.includes("80"));
+    const session = rows.find((row) => row.textContent?.includes("Sessions") && row.textContent?.includes("80"));
     const workflow = rows.find((row) => row.textContent?.includes("Workflows") && row.textContent?.includes("20"));
     expect(session?.textContent).toContain("10,000");
     expect(session?.textContent).toContain("8,000");
@@ -674,16 +674,16 @@ describe("UsagePage — By-member table (org scope)", () => {
 describe("UsagePage — by-use-case table", () => {
   it("renders all four use-case labels", () => {
     render(<UsagePage />);
-    expect(screen.getByText("Orchestrator")).toBeTruthy();
-    expect(screen.getAllByText("Runtimes").length).toBeGreaterThan(0);
+    expect(screen.getByText("Assistant")).toBeTruthy();
+    expect(screen.getAllByText("Sessions").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Workflows").length).toBeGreaterThan(0);
     expect(screen.getByText("Proxy (external tools)")).toBeTruthy();
   });
 
-  it("expanding Orchestrator row shows orchestrator items", async () => {
+  it("expanding Assistant row shows runtime items", async () => {
     render(<UsagePage />);
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand items/,
+      name: /Assistant — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
@@ -691,10 +691,10 @@ describe("UsagePage — by-use-case table", () => {
     });
   });
 
-  it("orchestrator item does not render as a link (orch: prefix)", async () => {
+  it("runtime item does not render as a link (orchestrator: prefix)", async () => {
     render(<UsagePage />);
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand items/,
+      name: /Assistant — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
@@ -709,7 +709,7 @@ describe("UsagePage — by-use-case table", () => {
   it("expanding Sessions row shows parent and child items", async () => {
     render(<UsagePage />);
     const sessRow = screen.getByRole("button", {
-      name: /Runtimes — expand items/,
+      name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
@@ -721,7 +721,7 @@ describe("UsagePage — by-use-case table", () => {
   it("child session row is indented with pl-8 class", async () => {
     const { container } = render(<UsagePage />);
     const sessRow = screen.getByRole("button", {
-      name: /Runtimes — expand items/,
+      name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
@@ -738,7 +738,7 @@ describe("UsagePage — by-use-case table", () => {
   it("regular session item renders as an anchor (links to sessions route)", async () => {
     render(<UsagePage />);
     const sessRow = screen.getByRole("button", {
-      name: /Runtimes — expand items/,
+      name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
@@ -972,7 +972,7 @@ describe("UsagePage — expanded drill rows across the me/org toggle", () => {
       isLoading: false,
     };
     render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: /Runtimes — expand items/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Sessions — expand items/ }));
     await waitFor(() => {
       expect(screen.getByText("Parent session")).toBeTruthy();
     });

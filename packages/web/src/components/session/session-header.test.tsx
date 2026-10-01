@@ -384,15 +384,15 @@ describe("SessionHeader — overflow menu", () => {
     expect(screen.queryByRole("menuitemcheckbox", { name: "Bad session" })).toBeNull();
   });
 
-  it("has no direct trash button; the ⋯ menu holds Replace sandbox and Delete runtime", async () => {
+  it("has no direct trash button; the ⋯ menu holds Replace sandbox and Delete session", async () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
-    expect(screen.queryByRole("button", { name: "Delete runtime" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete session" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Thread menu" }));
     expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /delete runtime/i })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /delete session/i })).toBeTruthy();
   });
 
   it("Replace sandbox posts the replace mutation without any confirm", async () => {
@@ -427,20 +427,20 @@ describe("SessionHeader — overflow menu", () => {
    * native prompt before a person ever sees the question — so the menu item
    * must OPEN the dialog and delete nothing on its own.
    */
-  it("Delete runtime opens a confirm dialog and deletes nothing yet", async () => {
+  it("Delete session opens a confirm dialog and deletes nothing yet", async () => {
     const confirmSpy = vi.spyOn(window, "confirm");
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Thread menu" }));
-    await user.click(screen.getByRole("menuitem", { name: /delete runtime/i }));
+    await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Delete this runtime permanently?")).toBeTruthy();
+    expect(within(dialog).getByText("Delete this session permanently?")).toBeTruthy();
     // The one string the old prompt carried, still carried: what is lost.
     expect(
       within(dialog).getByText(
-        "This deletes all threads, history, and child runtimes, and tears down the sandbox.",
+        "This deletes all threads, history, and child sessions, and tears down the sandbox.",
       ),
     ).toBeTruthy();
     expect(deleteMutateAsync).not.toHaveBeenCalled();
@@ -453,9 +453,9 @@ describe("SessionHeader — overflow menu", () => {
     renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Thread menu" }));
-    await user.click(screen.getByRole("menuitem", { name: /delete runtime/i }));
+    await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
     const dialog = await screen.findByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "Delete runtime" }));
+    await user.click(within(dialog).getByRole("button", { name: "Delete session" }));
 
     expect(deleteMutateAsync).toHaveBeenCalledWith("sess-1");
   });
@@ -465,7 +465,7 @@ describe("SessionHeader — overflow menu", () => {
     renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Thread menu" }));
-    await user.click(screen.getByRole("menuitem", { name: /delete runtime/i }));
+    await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
@@ -475,7 +475,7 @@ describe("SessionHeader — overflow menu", () => {
 });
 
 /**
- * TKAI-253 — the user's own assistant page must not offer Delete runtime.
+ * TKAI-253 — the user's own assistant page must not offer Delete session.
  * The v1 holdover deleted the orchestrator and all of its threads; Replace
  * sandbox covers the reset. The item also FAILS CLOSED while the assistants
  * list or the orchestrator probe is still loading — in that window every
@@ -484,7 +484,7 @@ describe("SessionHeader — overflow menu", () => {
  * working; see the team assistant describe below.
  */
 describe("SessionHeader — no delete on the user's own assistant", () => {
-  it("hides Delete runtime on the orchestrator page, keeps Replace sandbox", async () => {
+  it("hides Delete session on the orchestrator page, keeps Replace sandbox", async () => {
     isWorkspaceRuntime = true;
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
@@ -530,9 +530,9 @@ describe("SessionHeader — no delete on the user's own assistant", () => {
     renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Thread menu" }));
-    await user.click(screen.getByRole("menuitem", { name: /delete runtime/i }));
+    await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
     const dialog = await screen.findByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "Delete runtime" }));
+    await user.click(within(dialog).getByRole("button", { name: "Delete session" }));
 
     // Inside the dialog, not behind it: the modal covers the header's own
     // error slot, and `window.confirm` could not have shown this at all.
@@ -689,8 +689,8 @@ describe("SessionHeader — rename", () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
-    await user.click(screen.getByRole("button", { name: "Rename runtime: Fix the bug" }));
-    const box = screen.getByLabelText("Runtime title");
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    const box = screen.getByLabelText("Session title");
     expect(box).toBeInstanceOf(HTMLInputElement);
     expect((box as HTMLInputElement).value).toBe("Fix the bug");
   });
@@ -699,9 +699,9 @@ describe("SessionHeader — rename", () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
-    await user.click(screen.getByRole("button", { name: "Rename runtime: Fix the bug" }));
-    await user.clear(screen.getByLabelText("Runtime title"));
-    await user.type(screen.getByLabelText("Runtime title"), "  Ship the parser  {Enter}");
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "  Ship the parser  {Enter}");
 
     await waitFor(() => expect(renameMutateAsync).toHaveBeenCalledTimes(1));
     // Enter unmounts the input, which fires blur straight after. One edit
@@ -713,9 +713,9 @@ describe("SessionHeader — rename", () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
-    await user.click(screen.getByRole("button", { name: "Rename runtime: Fix the bug" }));
-    await user.clear(screen.getByLabelText("Runtime title"));
-    await user.type(screen.getByLabelText("Runtime title"), "Renamed by blur");
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Renamed by blur");
     await user.tab();
 
     await waitFor(() => expect(renameMutateAsync).toHaveBeenCalledWith("Renamed by blur"));
@@ -725,25 +725,25 @@ describe("SessionHeader — rename", () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
-    await user.click(screen.getByRole("button", { name: "Rename runtime: Fix the bug" }));
-    await user.clear(screen.getByLabelText("Runtime title"));
-    await user.type(screen.getByLabelText("Runtime title"), "Never saved{Escape}");
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Never saved{Escape}");
 
     expect(renameMutateAsync).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Rename runtime: Fix the bug" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rename session: Fix the bug" })).toBeTruthy();
   });
 
   it("sends nothing when the title is unchanged or emptied", async () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
-    await user.click(screen.getByRole("button", { name: "Rename runtime: Fix the bug" }));
-    await user.type(screen.getByLabelText("Runtime title"), "{Enter}");
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.type(screen.getByLabelText("Session title"), "{Enter}");
     expect(renameMutateAsync).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Rename runtime: Fix the bug" }));
-    await user.clear(screen.getByLabelText("Runtime title"));
-    await user.type(screen.getByLabelText("Runtime title"), "{Enter}");
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "{Enter}");
     // The server rejects an empty title, so an emptied box means "cancel".
     expect(renameMutateAsync).not.toHaveBeenCalled();
   });
@@ -755,9 +755,9 @@ describe("SessionHeader — rename", () => {
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });
 
-    await user.click(screen.getByRole("button", { name: "Rename runtime: Fix the bug" }));
-    await user.clear(screen.getByLabelText("Runtime title"));
-    await user.type(screen.getByLabelText("Runtime title"), "Too long{Enter}");
+    await user.click(screen.getByRole("button", { name: "Rename session: Fix the bug" }));
+    await user.clear(screen.getByLabelText("Session title"));
+    await user.type(screen.getByLabelText("Session title"), "Too long{Enter}");
 
     await waitFor(() =>
       expect(screen.getByText("title is too long. Use 200 characters or fewer.")).toBeTruthy(),
@@ -889,6 +889,17 @@ describe("SessionHeader — team assistant", () => {
     expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: /move to workspace/i })).toBeNull();
     expect(deleteMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("offers move for a standalone session but not for a child session", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderHeader();
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    expect(screen.getByRole("menuitem", { name: /move to workspace/i })).toBeTruthy();
+    unmount();
+    renderHeader(undefined, undefined, { ...baseSession(), parentWork: { sessionId: "parent", threadId: "t" } });
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    expect(screen.queryByRole("menuitem", { name: /move to workspace/i })).toBeNull();
   });
 
   it("keeps the controls on a personal session", async () => {

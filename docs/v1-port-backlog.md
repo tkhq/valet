@@ -38,7 +38,7 @@ rebuild what already exists.
 - **Thread search and origin filtering.** New in V2; V1 had neither.
 - **Thread archive / un-archive.** Ported. V1's dismiss/reactivate maps to `useSetThreadArchived` plus the `?archived=1` list.
 - **Stick-to-bottom auto-scroll.** Ported, same threshold. Only the manual button is missing (#12).
-- **Automatic thread titling.** Present (`POST /sessions/:id/auto-title`). Only manual rename is missing (#10).
+- **Automatic thread titling.** Present (the server names a thread when its first submission completes). Only manual rename is missing (#10).
 - **Per-thread model override.** Present and richer than V1 (`ThreadSummary.model`, `PatchThreadRequest.model`).
 - **Thread rename.** Never existed on either side — V1's thread PATCH accepted only `status`. #10 is sessions only.
 

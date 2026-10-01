@@ -583,11 +583,7 @@ export const assistants = pgTable(
 // re-arms every unsettled row on boot — this table is the restart-survival
 // mechanism for `child.settled` reporting. `settled` is a plain 0/1 flag
 // with no arithmetic on it (only `eq(childWatches.settled, 0)` equality
-// filters) — boolean per decision 7's "boolean-as-integer" rule. NOTE for
-// Task 7 (cutover): every `eq(childWatches.settled, 0)` call site
-// (`routes/orchestrator.ts`, `orchestrator/children.ts`) must flip to
-// `eq(childWatches.settled, false)`, and `r.settled === 1` (`routes/
-// orchestrator.ts`) to `r.settled`.
+// filters) — boolean per decision 7's "boolean-as-integer" rule.
 
 export const childWatches = pgTable(
   "child_watches",

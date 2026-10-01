@@ -212,7 +212,6 @@ export interface CreateSessionRequest {
 }
 
 export interface ListSessionsResponse {
-  nextCursor?: string | null;
   sessions: SessionSummary[];
 }
 
@@ -3243,7 +3242,7 @@ export interface MeResponse {
  * `GET /api/me` for a team `vlt_` key: the team the key acts as, not the
  * creating admin. No email and no profile settings — a team has neither.
  * `role: "team"` is the discriminator; a CLI holding a team key reads the
- * team id from `id` to reach `POST /api/teams/:id/orchestrator`.
+ * team id from `id` to reach `POST /api/workspaces/:id/runtime`.
  */
 export interface TeamMeResponse {
   id: string;
@@ -4327,8 +4326,6 @@ export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGit
 // `/api/org/sources` — org-admin CRUD for all image source kinds
 // (external/base/repo) and their bake history. Replaces the split
 // `/api/org/image-catalog` + `/api/org/prebuilds/*` surfaces.
-// `/api/sources/for-repo` is the one member-accessible (non-admin-gated)
-// read — deliberately narrow (see `GetPrebuildForRepoResponse`).
 //
 // SourceSummary mirrors the `image_sources` row; BakeSummary mirrors `bakes`.
 
@@ -4393,14 +4390,6 @@ export interface ListBakesResponse {
 
 export interface TriggerBakeResponse {
   bake: BakeSummary;
-}
-
-/** `GET /api/sources/for-repo?fullName=owner/repo` — any authed org
- * member. The newest `pushed` build for the caller's org + repo, or
- * `null`. Deliberately narrow (no `imageRef`/`error`/`logTail`) — this is
- * the one prebuild read a non-admin member can hit. */
-export interface GetPrebuildForRepoResponse {
-  prebuild: { commitSha: string; finishedAt: number } | null;
 }
 
 // ── REST: events + subscriptions (event-system plan, Task 7) ─────────────

@@ -69,8 +69,6 @@ export function teamApiKeyPathAllowed(path: string, method: string, teamId: stri
   if (path === `/api/workspaces/${teamId}/active-work` && method === "GET") return true;
   if (path === `/api/workspaces/${teamId}/outcomes` && method === "GET") return true;
   if (path === `/api/workspaces/${teamId}/runtime/info` && method === "GET") return true;
-  // Older CLI builds ensure their team runtime here; see legacyOrchestratorRouter.
-  if (path === `/api/teams/${teamId}/orchestrator` && method === "POST") return true;
   return false;
 }
 

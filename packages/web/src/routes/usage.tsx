@@ -87,8 +87,8 @@ function StatCard({
 }
 
 const USE_CASE_LABELS: Record<UsageUseCase, string> = {
-  orchestrator: "Orchestrator",
-  session: "Runtimes",
+  orchestrator: "Assistant",
+  session: "Sessions",
   workflow: "Workflows",
   proxy: "Proxy (external tools)",
 };
@@ -148,8 +148,9 @@ function ItemList({
   return (
     <div className="border-t border-line divide-y divide-line">
       {items.map((item) => {
-        const isOrchId = item.sessionId?.startsWith("orchestrator:") ?? false;
-        const canLink = item.sessionId !== null && !isOrchId;
+        // A workspace runtime has no session page; its threads open from chat.
+        const isRuntimeId = /^(orchestrator|assistant):/.test(item.sessionId ?? "");
+        const canLink = item.sessionId !== null && !isRuntimeId;
         const labelEl = canLink ? (
           <Link
             to="/sessions/$sessionId"

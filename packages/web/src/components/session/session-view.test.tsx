@@ -26,8 +26,7 @@ beforeEach(() => { fullProfile = false; });
 
 vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined }));
 
-// importOriginal: see -new-session-dialog.test.tsx for why a bare
-// replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
