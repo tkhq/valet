@@ -1,7 +1,8 @@
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
-import { channelMessages, eventSubscriptions, threadPullRequests } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { channelMessages, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
 import { recordActionChannelMessage, recordChannelMessage, threadKeyForPullRequest } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ListThreadChannelMessagesResponse, ListThreadsResponse } from "../wire/types.js";
 
@@ -87,6 +88,11 @@ it("finds the thread that opened a pull request, and records the comment Valet p
     sessionId, threadId: thread.id, url, repo: "acme/app", number: 12, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1,
   });
   expect(await threadKeyForPullRequest(api.providers.db, "local-org", owner, url)).toBe("web:pr-thread");
+  // An archived thread no list shows does not take the comment; it goes to the events thread.
+  await api.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, archivedAt: 2 })
+    .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: 2 } });
+  expect(await threadKeyForPullRequest(api.providers.db, "local-org", owner, url)).toBeNull();
+  await api.providers.db.update(sessionThreads).set({ archivedAt: null }).where(eq(sessionThreads.id, thread.id));
   expect(await threadKeyForPullRequest(api.providers.db, "local-org", { type: "team", id: "other" }, url)).toBeNull();
 
   await recordActionChannelMessage(api.providers.db, {

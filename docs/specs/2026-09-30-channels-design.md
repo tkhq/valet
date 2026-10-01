@@ -45,7 +45,7 @@ A write failure logs and never fails the delivery, and it never makes Valet repo
 
 ## Pull request routing
 
-A GitHub pull request event for an orchestrator subscription goes to the thread that opened the pull request when one exists in the subscriber's runtime session (a `thread_pull_requests` row with the same URL). Otherwise it goes to the `events` thread as before. The events are `github.issue_comment.created` on a pull request, `github.pull_request_review.submitted`, and `github.pull_request_review_comment.created`. The agent answers with `github.create_comment`; there is no automatic reply to GitHub. A comment or review by a bot, including Valet's own GitHub App, stays on the `events` thread, so the agent never wakes on the comment it just posted.
+A GitHub pull request event for an orchestrator subscription goes to the thread that opened the pull request when one exists in the subscriber's runtime session (a `thread_pull_requests` row with the same URL). An archived thread does not count, because work there would run where no list shows it. Otherwise it goes to the `events` thread as before. The events are `github.issue_comment.created` on a pull request, `github.pull_request_review.submitted`, and `github.pull_request_review_comment.created`. The agent answers with `github.create_comment`; there is no automatic reply to GitHub. A comment or review by a bot, including Valet's own GitHub App, stays on the `events` thread, so the agent never wakes on the comment it just posted.
 
 ## API
 
