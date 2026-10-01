@@ -500,7 +500,7 @@ export const childReadTool = defineTool({
 
     const entries = await reader(
       { childSessionId: args.child_session_id, limit: args.limit },
-      { parentSessionId: ctx.sessionId },
+      { parentSessionId: ctx.sessionId, readerThreadId: ctx.threadId },
     );
     if (entries === null) {
       return {

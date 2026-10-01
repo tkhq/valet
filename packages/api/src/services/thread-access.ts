@@ -102,6 +102,38 @@ export function resetThreadAccessCache(): void {
   membershipCache.clear();
 }
 
+/**
+ * SQL: the key of the thread that decides who may see a thread. A child
+ * session's threads take the access of the thread that started the child,
+ * followed up to the workspace runtime, so work spawned from a private thread
+ * stays private. Any other thread decides by its own key.
+ */
+export function governingThreadKeySql(sessionId: SQL, threadId: SQL): SQL {
+  return sql`(WITH RECURSIVE up(sid, tid, depth) AS (
+      SELECT ${sessionId}::text, ${threadId}::text, 0
+      UNION ALL
+      SELECT es.parent_session_id, es.parent_thread_id, up.depth + 1 FROM up
+      JOIN engine_sessions es ON es.id = up.sid
+      WHERE es.parent_session_id IS NOT NULL AND es.parent_thread_id IS NOT NULL AND up.depth < 8
+    ) SELECT et.key FROM up JOIN engine_threads et ON et.session_id = up.sid AND et.id = up.tid
+    ORDER BY up.depth DESC LIMIT 1)`;
+}
+
+/** `governingThreadKeySql` for one thread. */
+export async function governingThreadKey(db: Providers["db"], sessionId: string, threadId: string): Promise<string | null> {
+  const result = await db.execute(sql`SELECT ${governingThreadKeySql(sql`${sessionId}`, sql`${threadId}`)} AS key`) as { rows: Array<{ key: string | null }> };
+  return result.rows[0]?.key ?? null;
+}
+
+/** The thread that started a child session, or null for any other session. */
+async function spawningThread(db: Providers["db"], sessionId: string): Promise<{ sessionId: string; threadId: string } | null> {
+  const result = await db.execute(sql`SELECT parent_session_id, parent_thread_id FROM engine_sessions WHERE id = ${sessionId}`) as {
+    rows: Array<{ parent_session_id: string | null; parent_thread_id: string | null }>;
+  };
+  const row = result.rows[0];
+  return row?.parent_session_id && row.parent_thread_id ? { sessionId: row.parent_session_id, threadId: row.parent_thread_id } : null;
+}
+
 /** Whether a key names one person's thread: a helper or a workflow editor
  * conversation. Such a thread is never shared, even when the key names no
  * person, as an editor key from before per-person keys (`workflow:<id>`) does. */
@@ -171,11 +203,19 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): Chann
 /**
  * Whether the viewer may see a thread, by its key, in a session they may
  * already view. A personal session's threads are all visible to its owner.
+ * With the session's id, a child session's threads are judged by the thread
+ * that started the child (`governingThreadKeySql`).
  */
-export function threadVisibility(deps: AccessDeps, session: { ownerType: string }, viewer: ThreadViewer): ThreadVisibility {
+export function threadVisibility(deps: AccessDeps, session: { ownerType: string; id?: string }, viewer: ThreadViewer): ThreadVisibility {
   if (session.ownerType !== "team") return async () => true;
   const canSee = channelVisibility(deps, viewer);
-  return async (key) => {
+  let inherited: Promise<string | null | undefined> | undefined;
+  const governing = () => (inherited ??= session.id
+    ? spawningThread(deps.db, session.id).then((parent) => parent ? governingThreadKey(deps.db, parent.sessionId, parent.threadId) : undefined)
+    : Promise.resolve(undefined));
+  return async (ownKey) => {
+    const parentKey = await governing();
+    const key = parentKey === undefined ? ownKey : parentKey;
     if (isPersonalThreadKey(key)) {
       const owner = privateThreadOwner(key);
       return owner !== undefined && owner === viewer.userId;
@@ -205,11 +245,11 @@ export async function visibleThreadIds(
 ): Promise<Set<string>> {
   const pairs = new Map(threads.map((t) => [`${t.sessionId}:${t.threadId}`, t]));
   if (session.ownerType !== "team" || pairs.size === 0) return new Set(pairs.keys());
-  const result = await deps.db.execute(sql`SELECT session_id, id, key FROM engine_threads
-    WHERE (session_id, id) IN (${sql.join([...pairs.values()].map((t) => sql`(${t.sessionId}, ${t.threadId})`), sql`, `)})`) as {
-    rows: Array<{ session_id: string; id: string; key: string | null }>;
+  const result = await deps.db.execute(sql`SELECT t.session_id, t.thread_id, ${governingThreadKeySql(sql`t.session_id`, sql`t.thread_id`)} AS key
+    FROM (VALUES ${sql.join([...pairs.values()].map((t) => sql`(${t.sessionId}::text, ${t.threadId}::text)`), sql`, `)}) AS t(session_id, thread_id)`) as {
+    rows: Array<{ session_id: string; thread_id: string; key: string | null }>;
   };
-  const keys = new Map(result.rows.map((row) => [`${row.session_id}:${row.id}`, row.key]));
+  const keys = new Map(result.rows.map((row) => [`${row.session_id}:${row.thread_id}`, row.key]));
   const visible = threadVisibility(deps, session, viewer);
   const shown = new Set<string>();
   // A thread with no engine row has no key that narrows it.

@@ -18,6 +18,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
+import { governingThreadKeySql, sharedWithWholeTeamSql } from "../services/thread-access.js";
 import {
   PendingCapError,
   recordSandboxDestroyed,
@@ -1008,7 +1009,7 @@ export function wireChildGateReports(eventStream: EventStream, watcher: ChildWat
 export function buildChildReader(deps: ChildrenDeps): ChildReader {
   return async (req, ctx) => {
     const rows = await deps.db
-      .select({ childSessionId: childWatches.childSessionId })
+      .select({ childSessionId: childWatches.childSessionId, parentThreadId: childWatches.parentThreadId, orgId: childWatches.orgId })
       .from(childWatches)
       .where(
         and(
@@ -1020,7 +1021,18 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
     // No row means the caller does not own this child, or it does not
     // exist. Both answer `null`: telling them apart would confirm that
     // somebody else's session id is real.
-    if (rows.length === 0) return null;
+    const watch = rows[0];
+    if (!watch) return null;
+    // In a team runtime, a child started from a private thread (a person's
+    // helper, or a private Slack channel's) is read only from that thread,
+    // so another thread cannot repeat its work to the whole team.
+    if (ctx.readerThreadId !== undefined && ctx.readerThreadId !== watch.parentThreadId) {
+      const result = await deps.db.execute(sql`SELECT s.owner_type, ${sharedWithWholeTeamSql(watch.orgId,
+        governingThreadKeySql(sql`${ctx.parentSessionId}`, sql`${watch.parentThreadId}`))} AS shared
+        FROM engine_sessions s WHERE s.id = ${ctx.parentSessionId}`) as { rows: Array<{ owner_type: string; shared: boolean }> };
+      const parent = result.rows[0];
+      if (parent?.owner_type === "team" && parent.shared !== true) return null;
+    }
 
     const childRows = await deps.db
       .select({ status: agentSessions.status })

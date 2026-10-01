@@ -111,3 +111,23 @@ it("shows a person's helper and editor threads only to that person, and a legacy
   // A personal runtime has one person, who sees every thread.
   expect(await threadVisibility(api.providers, { ownerType: "user" }, { orgId: "local-org", userId: "member" })("workflow:wf_legacy")).toBe(true);
 });
+
+it("judges a child session's threads by the thread that started it", async () => {
+  api = await bootTestApi();
+  const { db } = api.providers;
+  await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+    ('thr-p', 'sess-p', 'app-assistant:member', 'idle', 'steer', 1, 1),
+    ('thr-c', 'sess-c', 'web:default', 'idle', 'steer', 1, 1),
+    ('thr-g', 'sess-g', 'web:default', 'idle', 'steer', 1, 1)`);
+  await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at) VALUES
+    ('sess-c', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'sess-p', 'thr-p', 1, 1),
+    ('sess-g', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'sess-c', 'thr-c', 1, 1)`);
+  for (const session of ["sess-c", "sess-g"]) {
+    const asMember = threadVisibility(api.providers, { ownerType: "team", id: session }, { orgId: "local-org", userId: "member" });
+    const asOther = threadVisibility(api.providers, { ownerType: "team", id: session }, { orgId: "local-org", userId: "other" });
+    expect(await asMember("web:default")).toBe(true);
+    expect(await asOther("web:default")).toBe(false);
+  }
+  // A thread of the runtime itself decides by its own key.
+  expect(await threadVisibility(api.providers, { ownerType: "team", id: "sess-p" }, { orgId: "local-org", userId: "other" })("web:default")).toBe(true);
+});

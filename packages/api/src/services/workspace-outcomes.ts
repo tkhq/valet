@@ -2,6 +2,7 @@ import type { Principal } from "@valet/engine";
 import { sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { encodePageCursor } from "../lib/page-cursor.js";
+import { governingThreadKeySql } from "./thread-access.js";
 import type { WorkspaceOutcome, WorkspaceOutcomesResponse } from "../wire/types.js";
 
 export interface OutcomeCursor { at: number; id: string; }
@@ -35,7 +36,7 @@ export async function listWorkspaceOutcomes(
     AND COALESCE(NULLIF(s.owner_id,''), CASE WHEN s.owner_type='user' THEN s.user_id END,r.owner_id) = ${owner.id}`;
   const conditions = [
     ...(cursor ? [sql`(occurred_at,id) < (${cursor.at},${cursor.id})`] : []),
-    ...(shared ? [shared(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=outcomes.session_id AND et.id=outcomes.thread_id)`)] : []),
+    ...(shared ? [shared(governingThreadKeySql(sql`outcomes.session_id`, sql`outcomes.thread_id`))] : []),
   ];
   const after = conditions.length ? sql`WHERE ${sql.join(conditions, sql` AND `)}` : sql``;
   // Compact usage facts identify confirmed writes before touching source results.

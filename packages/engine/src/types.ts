@@ -2740,7 +2740,9 @@ export type ChildSpawner = (
  */
 export type ChildReader = (
   req: { childSessionId: string; limit?: number },
-  ctx: { parentSessionId: string },
+  /** `readerThreadId` is the parent thread asking, so a host can keep a
+   * child of a private thread to the people that thread belongs to. */
+  ctx: { parentSessionId: string; readerThreadId?: string },
 ) => Promise<SessionEntry[] | null>;
 
 /**

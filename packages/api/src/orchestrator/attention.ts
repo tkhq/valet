@@ -34,7 +34,7 @@ import { and, eq, isNull, like, sql } from "drizzle-orm";
 import type { DecisionAction, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
-import { privateThreadOwner, sharedWithWholeTeamSql, threadVisibility } from "../services/thread-access.js";
+import { governingThreadKey, privateThreadOwner, sharedWithWholeTeamSql, threadVisibility } from "../services/thread-access.js";
 import { notifications, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
 export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
@@ -272,12 +272,11 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
   }
 }
 
-/** A team event's thread key, or undefined for any other event. */
+/** The key that decides who may see a team event's thread, or undefined for
+ * any other event. A child's gate is judged by the thread that started it. */
 async function teamThreadKey(db: AppDb, event: AttentionEvent): Promise<string | null | undefined> {
   if (event.owner.type !== "team" || !event.sessionId || !event.threadId) return undefined;
-  const result = await db.execute(sql`SELECT key FROM engine_threads
-    WHERE session_id = ${event.sessionId} AND id = ${event.threadId}`) as { rows: Array<{ key: string | null }> };
-  return result.rows[0]?.key ?? null;
+  return governingThreadKey(db, event.sessionId, event.threadId);
 }
 
 /** Whether every member may see a team thread, from stored channel privacy. */

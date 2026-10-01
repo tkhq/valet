@@ -3,7 +3,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkspaceBriefingSource } from "../wire/types.js";
 import { sharedThreadKey } from "./thread-read-state.js";
-import { sharedWithWholeTeamSql } from "./thread-access.js";
+import { governingThreadKeySql, sharedWithWholeTeamSql } from "./thread-access.js";
 import { listWorkspaceOutcomes } from "./workspace-outcomes.js";
 import { slackThreadUrl } from "./channel-messages.js";
 
@@ -36,7 +36,7 @@ interface ArtifactRow {
 export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, owner: Principal): Promise<BriefingEvidence[]> {
   const teamShared = owner.type === "team" ? (key: SQL) => sharedWithWholeTeamSql(orgId, key) : undefined;
   const shared = (key: SQL) => teamShared ? teamShared(key) : sql`true`;
-  const threadKey = (sessionId: SQL, threadId: SQL) => sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=${sessionId} AND et.id=${threadId})`;
+  const threadKey = governingThreadKeySql;
   const scopedSession = sql`s.status<>'deleted' AND s.org_id=${orgId} AND s.owner_type=${owner.type}
     AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id}`;
   const hasNarrative = sql`(NULLIF(e.content,'') IS NOT NULL OR EXISTS(

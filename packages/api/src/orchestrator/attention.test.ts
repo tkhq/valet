@@ -163,6 +163,28 @@ describe("routeAttention (DB-backed)", () => {
     resetThreadAccessCache();
   });
 
+  it("keeps a gate from a child of a private helper thread to that member", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(teams).values({ id: "team-c", orgId: "local-org", name: "Children", createdAt: Date.now() });
+    await db.insert(teamMembers).values([
+      { teamId: "team-c", userId: "local-user", role: "admin" },
+      { teamId: "team-c", userId: "test-member", role: "member" },
+    ]);
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+      ('thr-parent', 'sess-team-c', 'app-assistant:test-member', 'idle', 'steer', 1, 1),
+      ('thr-child', 'sess-child', 'web:default', 'idle', 'steer', 1, 1)`);
+    await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at)
+      VALUES ('sess-child', 'team', 'team-c', 'test-member', 'local-org', '/', 'child', 'running', 'sess-team-c', 'thr-parent', 1, 1)`);
+    const deliverTeam = vi.fn(async () => {});
+    await routeAttention({ db, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+      kind: "approval", owner: { type: "team", id: "team-c" }, title: "approve?", sessionId: "sess-child", threadId: "thr-child",
+    });
+    const recipients = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
+    expect(recipients.map((r) => r.userId)).toEqual(["test-member"]);
+    expect(deliverTeam).not.toHaveBeenCalled();
+  });
+
   it("routes to org admins for an org owner", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
