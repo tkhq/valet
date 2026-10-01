@@ -225,7 +225,9 @@ function DefinitionRow({
           link, not inside it. Anything interactive here must sit ABOVE the
           stretched area — nesting it inside the anchor would be invalid and
           would swallow its own click. */}
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+      {/* At least 16rem wide, so on a narrow screen the actions wrap below the
+          name instead of squeezing it to an ellipsis. */}
+      <div className="flex min-w-0 flex-1 basis-64 flex-wrap items-center gap-2">
         <Link
           to="/workflows/$workflowId"
           params={{ workflowId: workflow.id }}
