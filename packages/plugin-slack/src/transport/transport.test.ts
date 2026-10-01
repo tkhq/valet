@@ -979,6 +979,16 @@ describe("gate prompts", () => {
     });
   });
 
+  it("shortens a button label to Slack's 75-character limit, keeping the action id", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-long", title: "Pick one", actions: [{ id: "long", label: "x".repeat(80) }] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    const button = blocks.find((b: { type: string }) => b.type === "actions").elements[0];
+    expect(button.text.text.length).toBeLessThanOrEqual(75);
+    expect(button.action_id).toBe("long");
+  });
+
   it("sends an open question with no actions block, which Slack would reject empty", async () => {
     const transport = makeTransport();
     await transport.sendGatePrompt(KEY, { gateId: "gate-open", title: "Which repo?", actions: [] });

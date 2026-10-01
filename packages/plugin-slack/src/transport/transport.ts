@@ -43,6 +43,7 @@ import {
 import {
   buildContentBlocks,
   needsContentBlocks,
+  SLACK_BUTTON_LABEL_LIMIT,
   SLACK_HEADER_LIMIT,
   SLACK_MAX_BLOCKS,
   SLACK_SECTION_FIELD_LIMIT,
@@ -928,7 +929,7 @@ export class SlackTransport implements ChannelTransport {
       type: "actions",
       elements: gate.actions.map((action) => ({
         type: "button",
-        text: { type: "plain_text", text: action.label },
+        text: { type: "plain_text", text: truncatePlain(action.label, SLACK_BUTTON_LABEL_LIMIT) },
         action_id: action.id,
         // Slack allows 2,000-char values, so the real gate id rides along
         // instead of being looked up by message reference (Telegram's
