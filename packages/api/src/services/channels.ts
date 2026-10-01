@@ -217,19 +217,26 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
   return { sessionId, channels };
 }
 
+/** Whether the viewer may see a channel. A private Slack channel takes membership. */
+export type ChannelVisibility = (key: string) => Promise<boolean>;
+
 /** The channels a workspace talks or listens in, most recent first. */
-export async function listChannels(db: AppDb, orgId: string, owner: Principal, names: ChannelNames): Promise<ListChannelsResponse> {
+export async function listChannels(
+  db: AppDb, orgId: string, owner: Principal, names: ChannelNames, canSee: ChannelVisibility,
+): Promise<ListChannelsResponse> {
   const { channels } = await loadChannels(db, orgId, owner, names);
-  const rows = [...channels.values()].map((state) => state.summary);
+  const all = [...channels.values()].map((state) => state.summary);
+  const visible = await Promise.all(all.map((row) => canSee(row.key)));
+  const rows = all.filter((_, index) => visible[index]);
   rows.sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.name.localeCompare(b.name));
   return { channels: rows };
 }
 
 /** One channel: its summary, conversations, and newest messages. Null when unknown. */
 export async function getChannel(
-  db: AppDb, orgId: string, owner: Principal, key: string, names: ChannelNames, limit = 50,
+  db: AppDb, orgId: string, owner: Principal, key: string, names: ChannelNames, canSee: ChannelVisibility, limit = 50,
 ): Promise<ChannelDetailResponse | null> {
-  if (!parseChannelKey(key)) return null;
+  if (!parseChannelKey(key) || !(await canSee(key))) return null;
   const { sessionId, channels } = await loadChannels(db, orgId, owner, names);
   const state = channels.get(key);
   if (!state) return null;

@@ -1,13 +1,31 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { eq } from "drizzle-orm";
 import { channelMessages, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
+import { linkIdentity } from "../channels/identity-links.js";
 import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
-afterEach(async () => { await api?.cleanup(); api = undefined; });
+afterEach(async () => { vi.restoreAllMocks(); await api?.cleanup(); api = undefined; });
+
+/** Connects the org Slack bot and answers Slack's channel checks: `members`
+ * lists each private channel's members; any other channel is public. */
+async function connectSlack(a: TestApi, members: Record<string, string[]> = {}) {
+  await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname !== "slack.com") return realFetch(input, init);
+    const channel = url.searchParams.get("channel") ?? "";
+    const privateMembers = members[channel];
+    const body = url.pathname.endsWith("conversations.members")
+      ? { ok: true, members: privateMembers ?? [] }
+      : { ok: true, channel: { name: channel.toLowerCase(), is_private: privateMembers !== undefined } };
+    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  });
+}
 
 const owner = { type: "user" as const, id: "local-user" };
 
@@ -17,6 +35,7 @@ async function runtime(a: TestApi) {
 
 it("lists a workspace's Slack channel with its listener, thread, and messages, and links the thread back", async () => {
   api = await bootTestApi();
+  await connectSlack(api);
   const { session, sessionId } = await runtime(api);
   const thread = await session.createThread("slack:CENG:1700.1");
   await api.providers.db.insert(eventSubscriptions).values({
@@ -58,6 +77,7 @@ it("lists a workspace's Slack channel with its listener, thread, and messages, a
 
 it("records one message for each workspace it reached, and reads a pattern filter as broad", async () => {
   api = await bootTestApi();
+  await connectSlack(api);
   const { session, sessionId } = await runtime(api);
   const thread = await session.createThread("slack:CENG:1700.1");
   const message = {
@@ -77,6 +97,26 @@ it("records one message for each workspace it reached, and reads a pattern filte
   const list = await (await fetch(`${api.baseUrl}/api/workspaces/user/channels`)).json() as ListChannelsResponse;
   expect(list.channels.map((channel) => channel.key)).toEqual(["slack:CENG"]);
   expect(list.channels[0]?.listeners).toEqual([expect.objectContaining({ subscriptionId: "listen-prefix", everywhere: true })]);
+});
+
+it("shows a private Slack channel only to a viewer whose linked Slack account is a member", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await runtime(api);
+  const thread = await session.createThread("slack:CSECRET:1700.1");
+  await recordChannelMessage(api.providers.db, {
+    orgId: "local-org", sessionId, threadId: thread.id, channelKey: "slack:CSECRET", conversationKey: "slack:CSECRET:1700.1",
+    providerMessageId: "1700.1", direction: "in", author: "Alice", text: "secret plans",
+  });
+  await connectSlack(api, { CSECRET: ["UALICE"] });
+  const list = async () => (await (await fetch(`${api!.baseUrl}/api/workspaces/user/channels`)).json() as ListChannelsResponse).channels;
+  const detail = () => fetch(`${api!.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("slack:CSECRET")}`);
+  // No linked Slack account: the channel is hidden.
+  expect(await list()).toEqual([]);
+  expect((await detail()).status).toBe(404);
+  // A linked member sees it. The unlinked answer above was not cached.
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UALICE", userId: "local-user" });
+  expect((await list()).map((channel) => channel.key)).toEqual(["slack:CSECRET"]);
+  expect((await detail()).status).toBe(200);
 });
 
 it("finds the thread that opened a pull request, and records the comment Valet posts there", async () => {
