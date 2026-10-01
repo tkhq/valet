@@ -176,7 +176,7 @@ const AUTO_CONTINUE_PROMPT =
  * instruction does not claim to provide it. */
 const SLACK_OVERHEARD_REPLY_GUIDANCE = `## Slack overheard delivery
 
-This Slack turn has manual delivery. Manual delivery prevents automatic posting. It does not by itself mean the message is unaddressed. Default to silence for overheard content. Never reply merely because the content is relevant, general, or solicits an update. Reply only to an explicit @mention, a direct request, or a follow-up from the only other participant in the thread. When the conversation context shows you are the only other participant, treat that person's follow-up as addressed and use reply_to_origin. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
+This Slack turn has manual delivery. Manual delivery prevents automatic posting. Decide whether the message is meant for you: a follow-up without an @mention often is. Reply with reply_to_origin when it asks you something, asks you to do something, names you, or follows up on your last reply. Stay silent when people are talking to each other, when it needs nothing from you, or when someone already answered it. Do not reply only because the content is relevant to you. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
 
 /** Proactive compaction stops retrying after this many consecutive failures (TKAI-306). */
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
