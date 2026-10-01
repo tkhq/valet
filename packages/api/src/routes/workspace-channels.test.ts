@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { channelMessages, childWatches, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { recordDelegatedPullRequest } from "../services/thread-read-state.js";
+import { createTeam } from "../services/teams.js";
 import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
@@ -118,6 +119,21 @@ it("shows a private Slack channel only to a viewer whose linked Slack account is
   await linkIdentity(api.providers.db, { provider: "slack", externalId: "UALICE", userId: "local-user" });
   expect((await list()).map((channel) => channel.key)).toEqual(["slack:CSECRET"]);
   expect((await detail()).status).toBe(200);
+});
+
+it("hides a team runtime's private Slack thread from members outside that channel", async () => {
+  api = await bootTestApi();
+  const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Secret", creatorUserId: "local-user" });
+  const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
+  const thread = await session.createThread("slack:CTEAMSECRET:1700.1");
+  await connectSlack(api, { CTEAMSECRET: ["UTEAMMATE"] });
+  const threads = async () => ((await (await fetch(`${api!.baseUrl}/api/sessions/${sessionId}/threads`)).json()) as ListThreadsResponse).threads.map((t) => t.id);
+  const messages = () => fetch(`${api!.baseUrl}/api/sessions/${sessionId}/messages?threadId=${thread.id}`);
+  expect(await threads()).not.toContain(thread.id);
+  expect((await messages()).status).toBe(404);
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UTEAMMATE", userId: "local-user" });
+  expect(await threads()).toContain(thread.id);
+  expect((await messages()).status).toBe(200);
 });
 
 it("routes a delegated child's pull request back to the thread that delegated it", async () => {

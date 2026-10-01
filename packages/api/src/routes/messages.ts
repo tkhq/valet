@@ -55,6 +55,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { canResolveSessionGate, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
+import { threadVisibility } from "./_slack-channel-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -364,7 +365,13 @@ messagesRouter.get("/:id/threads", async (c) => {
 
   // Default list excludes archived threads; `?archived=1` lists only them.
   const wantArchived = c.req.query("archived") === "1";
+  // A team runtime's thread from a private Slack channel shows only to that
+  // channel's members (`_slack-channel-access.ts`).
+  const visible = session.ownerType === "team" ? threadVisibility(c) : async () => true;
+  const shown = new Set<string>();
+  for (const t of threads) if (await visible(t.key)) shown.add(t.id);
   const summaries = threads
+    .filter((t) => shown.has(t.id))
     .filter((t) => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map((t) =>
       threadToSummary(
@@ -733,7 +740,9 @@ messagesRouter.get("/:id/messages", async (c) => {
   await engineSession.ensureDefaultThread();
   const requested = c.req.query("threadId") || undefined;
   const thread = resolveThread(engineSession, requested);
-  if (!thread) return c.json({ error: "thread not found" }, 404);
+  if (!thread || (session.ownerType === "team" && !(await threadVisibility(c)(thread.key)))) {
+    return c.json({ error: "thread not found" }, 404);
+  }
 
   const parsedLimit = Number.parseInt(c.req.query("limit") ?? "100", 10);
   const limit = Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit);
