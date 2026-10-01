@@ -109,10 +109,16 @@ it("finds the thread that opened a pull request, and records the comment Valet p
   await recordTerminalPullRequestWrite(api.providers.db, { orgId: "local-org", sessionId, threadId: thread.id, kind: "pull_request_comment",
     url: "https://github.com/ACME/App/pull/12#issuecomment-901" });
   expect(await wasSentByValet(api.providers.db, "local-org", { channelKey: "github:acme/app#12", providerMessageId: "901" })).toBe(true);
-  expect(await recentTerminalReview(api.providers.db, "local-org", "github:acme/app#12")).toBe(false);
+  const key = "github:acme/app#12";
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, Date.now())).toBe(false);
+  const submitted = Date.now();
   await recordTerminalPullRequestWrite(api.providers.db, { orgId: "local-org", sessionId, threadId: thread.id, kind: "review_submitted" });
-  expect(await recentTerminalReview(api.providers.db, "local-org", "github:acme/app#12")).toBe(true);
-  expect(await recentTerminalReview(api.providers.db, "local-org", "github:acme/app#12", Date.now() + 3 * 60_000)).toBe(false);
+  // Valet's own review was submitted just before its record.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, submitted)).toBe(true);
+  // A person's review submitted after the record is not Valet's.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, Date.now() + 10_000)).toBe(false);
+  // Without a submission time, a record in the last window counts.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, undefined)).toBe(true);
   const detail = await (await fetch(`${api.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("github:acme/app#12")}`)).json() as ChannelDetailResponse;
   expect(detail.channel).toMatchObject({ provider: "github", name: "app #12", state: "open", url });
   expect(detail.messages).toEqual(expect.arrayContaining([

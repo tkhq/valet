@@ -323,21 +323,30 @@ export async function isOwnPullRequestWrite(
   db: AppDb, orgId: string, eventKey: string, comment: NonNullable<ReturnType<typeof pullRequestComment>>,
 ): Promise<boolean> {
   return await wasSentByValet(db, orgId, comment.message, comment.reviewId ? [comment.reviewId] : [])
-    || (eventKey.startsWith("github.pull_request_review") && await recentTerminalReview(db, orgId, comment.channelKey));
+    || (eventKey.startsWith("github.pull_request_review") && await recentTerminalReview(db, orgId, comment.channelKey, comment.postedAt));
 }
 
 /** How long a review Valet posted from the terminal (no id to match) keeps
  * review events on its pull request off the thread that posted it. */
-export const TERMINAL_REVIEW_WINDOW_MS = 2 * 60_000;
+/** How long after GitHub accepts a terminal review Valet records it: the
+ * command returns, then the tool result is stored. */
+export const TERMINAL_REVIEW_WINDOW_MS = 60_000;
+/** Clock difference allowed between GitHub's timestamp and this server's. */
+const TERMINAL_REVIEW_SKEW_MS = 5_000;
 
 /**
- * Whether Valet posted a review on this pull request from the terminal within
- * the window. `gh pr review` prints no review id, so the record names the time.
+ * Whether a review is one Valet posted from the terminal. `gh pr review`
+ * prints no review id, so Valet records the time its command finished. A
+ * review counts as Valet's only when GitHub says it was submitted just before
+ * that record, so a person's review after it still reaches the thread.
+ * Without a submission time, any record in the last window counts.
  */
-export async function recentTerminalReview(db: AppDb, orgId: string, channelKey: string, now = Date.now()): Promise<boolean> {
+export async function recentTerminalReview(db: AppDb, orgId: string, channelKey: string, submittedAt: number | undefined, now = Date.now()): Promise<boolean> {
+  const from = submittedAt === undefined ? now - TERMINAL_REVIEW_WINDOW_MS : submittedAt - TERMINAL_REVIEW_SKEW_MS;
+  const to = submittedAt === undefined ? now : submittedAt + TERMINAL_REVIEW_WINDOW_MS;
   const result = await db.execute(sql`SELECT 1 FROM channel_messages
     WHERE org_id = ${orgId} AND channel_key = ${channelKey} AND direction = 'out'
-      AND provider_message_id LIKE 'terminal-review:%' AND created_at >= ${now - TERMINAL_REVIEW_WINDOW_MS}
+      AND provider_message_id LIKE 'terminal-review:%' AND created_at BETWEEN ${from} AND ${to}
     LIMIT 1`) as { rows: unknown[] };
   return result.rows.length > 0;
 }
