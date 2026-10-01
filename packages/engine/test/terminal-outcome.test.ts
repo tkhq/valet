@@ -29,6 +29,9 @@ describe("terminalOutcome", () => {
     expect(terminalOutcome("gh pr comment 42 --body done; false", url, 1)).toEqual({ kind: "pull_request_comment", url });
     // Not a CLI call in command position.
     expect(terminalOutcome("echo gh pr comment 42", url, 0)).toBeUndefined();
+    // A read lists other people's comments; it is not a write.
+    expect(terminalOutcome("gh api repos/acme/repo/issues/42/comments", `[{"html_url":"${url}"}]`, 0)).toBeUndefined();
+    expect(terminalOutcome("gh api -X POST repos/acme/repo/issues/42/comments --input body.json", url, 0)).toEqual({ kind: "pull_request_comment", url });
   });
 
   it("requires command success and a PR URL", () => {

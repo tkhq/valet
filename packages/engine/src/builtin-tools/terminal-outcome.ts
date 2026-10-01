@@ -3,7 +3,10 @@ import type { ToolResult } from "../types.js";
 /** A GitHub CLI call in command position: the start, or after `;`, `&&`,
  * `||`, `|`, `(`, or `$(`, so `echo gh pr create` is not one. */
 const GH = String.raw`(?:^|[;&|(\n]|\$\()\s*(?:gh|valet-gh|\/usr\/local\/bin\/gh)\s+`;
-const COMMENT_WRITE = new RegExp(`${GH}(?:pr\\s+comment\\b|api\\b[^\\n]*\\/comments\\b)`);
+const COMMENT_WRITE = new RegExp(`${GH}pr\\s+comment\\b`);
+/** `gh api …/comments` writes only with a body field or an explicit POST; a
+ * plain `gh api` call is a read, and its output lists other people's comments. */
+const API_COMMENT_WRITE = new RegExp(`${GH}api\\b[^\\n]*\\/comments\\b[^\\n]*(?:\\s(?:-f|-F|--field|--raw-field|--input)\\s|\\s(?:-X|--method)\\s*POST\\b)`);
 const PR_CREATE = new RegExp(`${GH}pr\\s+create\\b`);
 const COMMENT_URL = /https:\/\/[^\s/"]+\/[^\s/"]+\/[^\s/"]+\/pull\/\d+#issuecomment-\d+/;
 const PR_URL = /https:\/\/[^\s/"]+\/[^\s/"]+\/[^\s/"]+\/pull\/\d+\b/;
@@ -22,7 +25,7 @@ export function terminalOutcome(
   output: string,
   exitCode: number | undefined,
 ): ToolResult["outcome"] {
-  if (COMMENT_WRITE.test(command)) {
+  if (COMMENT_WRITE.test(command) || API_COMMENT_WRITE.test(command)) {
     const url = output.match(COMMENT_URL)?.[0];
     if (url) return { kind: "pull_request_comment", url };
   }
