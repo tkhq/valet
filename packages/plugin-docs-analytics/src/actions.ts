@@ -43,18 +43,43 @@ function isSafeBearerToken(token: string): boolean {
   return /^[\x21-\x7e]+$/.test(token);
 }
 
-async function errorDetail(response: Response): Promise<string | undefined> {
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function redactCredential(value: string, token: string): string {
+  const escapedToken = escapeRegExp(token);
+  return value
+    .replace(new RegExp(`Bearer\\s+${escapedToken}`, "gi"), "Bearer [redacted]")
+    .replace(new RegExp(escapedToken, "g"), "[redacted]");
+}
+
+function jsonErrorDetail(body: string): string | undefined {
   try {
-    const detail = (await response.text()).replace(/\s+/g, " ").trim();
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== "object" || parsed === null || !("error" in parsed)) return undefined;
+    const error = parsed.error;
+    return typeof error === "string" ? error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function errorDetail(response: Response, token: string): Promise<string | undefined> {
+  try {
+    const body = await response.text();
+    const detail = redactCredential(jsonErrorDetail(body) ?? body, token)
+      .replace(/\s+/g, " ")
+      .trim();
     return detail === "" ? undefined : detail.slice(0, 1_000);
   } catch {
     return undefined;
   }
 }
 
-async function reportError(response: Response): Promise<PluginActionResult> {
+async function reportError(response: Response, token: string): Promise<PluginActionResult> {
   if (response.status === 400) {
-    const detail = await errorDetail(response);
+    const detail = await errorDetail(response, token);
     return {
       success: false,
       error: detail
@@ -119,7 +144,7 @@ async function executeReport(args: ReportArgs, ctx: PluginActionContext): Promis
       error: "Docs Analytics could not be reached. Check the service status and try again later.",
     };
   }
-  if (!response.ok) return reportError(response);
+  if (!response.ok) return reportError(response, token);
 
   try {
     if (args.format === "md") return { success: true, data: await response.text() };

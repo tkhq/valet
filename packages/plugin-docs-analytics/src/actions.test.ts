@@ -99,6 +99,25 @@ describe("docs_analytics.report", () => {
     });
   });
 
+  it("redacts the credential from a JSON 400 error while keeping its context", async () => {
+    const token = "test-token";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({
+        ok: false,
+        error: `Range error. Authorization: bearer \t${token}`,
+      }), { status: 400 })),
+    );
+
+    const result = await action.execute({ format: "json" }, context({ accessToken: token }));
+    expect(result).toEqual({
+      success: false,
+      error: "Docs Analytics rejected the report parameters: Range error. Authorization: Bearer [redacted]",
+    });
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(JSON.stringify(result)).not.toContain(`Bearer ${token}`);
+  });
+
   it.each([
     [401, "Docs Analytics rejected the organization credential"],
     [403, "Docs Analytics denied access to this report"],
