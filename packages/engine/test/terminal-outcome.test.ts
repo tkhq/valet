@@ -17,6 +17,20 @@ describe("terminalOutcome", () => {
     expect(terminalOutcome('gh pr comment 42 --body "Fixed"', "no URL", 0)).toBeUndefined();
   });
 
+  it("records a comment by its URL whatever shell syntax surrounds it", () => {
+    const url = "https://github.com/acme/repo/pull/42#issuecomment-902";
+    for (const command of [
+      "gh pr comment 42 --body 'a | b'",
+      "gh pr comment 42 --body 'CI & lint pass'",
+      "git push && gh pr comment 42 --body done",
+      "gh api repos/acme/repo/issues/42/comments -f body=done",
+    ]) expect(terminalOutcome(command, `{"html_url":"${url}"}`, 0)).toEqual({ kind: "pull_request_comment", url });
+    // Recorded even when a later command in the chain failed: the comment exists.
+    expect(terminalOutcome("gh pr comment 42 --body done; false", url, 1)).toEqual({ kind: "pull_request_comment", url });
+    // Not a CLI call in command position.
+    expect(terminalOutcome("echo gh pr comment 42", url, 0)).toBeUndefined();
+  });
+
   it("requires command success and a PR URL", () => {
     expect(terminalOutcome("gh pr create --fill", "https://github.com/acme/repo/pull/42", 1)).toBeUndefined();
     expect(terminalOutcome("gh pr create --fill", "no URL", 0)).toBeUndefined();
