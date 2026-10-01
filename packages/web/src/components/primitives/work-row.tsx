@@ -4,20 +4,18 @@ import { relativeTime } from "~/lib/relative-time";
 import { cn } from "~/lib/cn";
 
 /**
- * One row of a work list: a status mark, a title with its badge, a second
- * line that starts with the time and continues with the detail, and the row's
- * actions on the right. Every list of threads, runs, or channel activity
- * renders through it, so the lists line up: titles start at the same inset
- * whether or not a row has a mark, and the time is always the second line's
- * first word, at any width.
+ * One row of a work list: a title with its badge, a second line that starts
+ * with the time and continues with the detail, and the row's actions on the
+ * right. Every list of threads, runs, or channel activity renders through it,
+ * so the lists line up, and the time is always the second line's first word,
+ * at any width. A row has no status dot: a badge carries status, and every
+ * row in an attention list already needs the reader.
  */
-export function WorkRow({ title, badge, time, detail, leading, actions }: {
-  title: ReactNode; badge?: ReactNode; time?: number; detail?: ReactNode; leading?: ReactNode; actions?: ReactNode;
+export function WorkRow({ title, badge, time, detail, actions }: {
+  title: ReactNode; badge?: ReactNode; time?: number; detail?: ReactNode; actions?: ReactNode;
 }) {
-  // Content starts 20px in, the same line as a card's body (`cardClass`). The
-  // status mark sits centered in that gutter, on the title's line.
-  return <div className="relative flex items-center gap-4 py-3 pl-5 pr-3">
-    {leading && <span className="absolute left-[7px] top-[1.2rem] flex">{leading}</span>}
+  // Content starts 20px in, the same line as a card's body (`cardClass`).
+  return <div className="flex items-center gap-4 py-3 pl-5 pr-3">
     <div className="min-w-0 flex-1">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <span className="min-w-0 break-words text-sm font-medium [&_a:hover]:underline">{title}</span>

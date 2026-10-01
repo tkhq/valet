@@ -7,7 +7,7 @@ import { useCatchUpWork, useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitin
 import { useArtifacts } from "~/api/artifacts";
 import { useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { relativeTime } from "~/lib/relative-time";
-import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, StatusDot, WorkRow, WorkSection } from "~/components/primitives";
+import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
 
 export function WorkspaceActivity({ owner }: { owner: OwnerFilter }) {
@@ -136,7 +136,6 @@ function ActiveRow({ row }: { row: WorkspaceActiveWorkItem }) {
 function WaitingRow({ row, onDone }: { row: WaitingThread; onDone: () => void }) {
   const detail = row.question ?? row.preview;
   return <WorkRow
-    leading={row.unread ? <StatusDot tone="info" label="Unread" /> : null}
     title={<Link to="/threads/$threadId" params={{ threadId: row.threadId }}>{row.title}</Link>}
     time={row.lastAgentActivityAt}
     detail={detail && <>{row.question ? <span className="font-medium text-ink">Valet asks: </span> : null}{detail}</>}

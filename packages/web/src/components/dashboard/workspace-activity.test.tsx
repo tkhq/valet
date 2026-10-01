@@ -99,7 +99,8 @@ it("puts Valet's questions under Needs attention and plain replies in their own 
   setup();
   const attention = await screen.findByRole("region", { name: "Needs attention" });
   expect(await within(attention).findByText(/Should I merge it once CI passes\?/)).toBeTruthy();
-  expect(within(attention).getByRole("img", { name: "Unread" })).toBeTruthy();
+  // Every row here already needs the reader, so none carries an unread dot.
+  expect(within(attention).queryByRole("img", { name: "Unread" })).toBeNull();
   expect(within(attention).queryByText("Lockfile fix")).toBeNull();
   expect(within(attention).getAllByRole("link", { name: "Also active" })).toHaveLength(1);
   const replies = screen.getByRole("region", { name: "Unanswered replies" });

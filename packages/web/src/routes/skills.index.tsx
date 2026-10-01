@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { useCatalogOwner } from "~/lib/use-list-owner";
+import { useCatalogOwner, useListOwner } from "~/lib/use-list-owner";
 import { useSkills } from "~/api/skills";
 import { Button, Spinner, pageClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
@@ -98,6 +98,7 @@ export function SkillsIndexPage() {
   // owner and would hide every ORG-owned skill, which is most of a catalog
   // built from an org-wide repository. See `useCatalogOwner`.
   const owner = useCatalogOwner();
+  const listOwner = useListOwner();
   const { data, isLoading, error, isPlaceholderData } = useSkills({
     ...skillFilterQuery(filters),
     ...(owner ? { ownerType: owner.ownerType, ownerId: owner.ownerId } : {}),
@@ -123,7 +124,10 @@ export function SkillsIndexPage() {
         </div>
 
         <div className="mt-6">
+          {/* The repositories of the workspace in view, matching the skills below:
+              a personal repository's skills are personal, so a team page must not list it. */}
           <RepoSourcesPanel
+            {...(listOwner ? { owner: { type: listOwner.ownerType, id: listOwner.ownerId } } : {})}
             cursors={sourceCursors}
             onCursorsChange={(next) => go({ sourcePage: formatCursorStack(next) })}
           />

@@ -67,6 +67,7 @@ let sourcesData: ListSkillSourcesResponse = { sources: [], nextCursor: null };
 let searchParams: Record<string, string> = {};
 const navigate = vi.fn();
 const skillsQuery = vi.fn();
+const sourcesQuery = vi.fn();
 const addSource = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
@@ -86,7 +87,7 @@ vi.mock("~/api/skills", () => ({
 }));
 
 vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: sourcesData, isLoading: false, error: null }),
+  useSkillSources: (query: unknown) => { sourcesQuery(query); return { data: sourcesData, isLoading: false, error: null }; },
   useAddSkillSource: () => ({ mutate: addSource, isPending: false, error: null }),
   useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
   useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
@@ -154,6 +155,12 @@ describe("SkillsIndexPage", () => {
     // Router `Link`s render `to`, not `href`, so they carry no link role.
     // Counted inside the grid: the header carries links of its own.
     expect(container.querySelectorAll(".grid a").length).toBe(5);
+  });
+
+  it("lists the repositories of the workspace in view, as the skills below do", () => {
+    sourcesQuery.mockClear();
+    render(<SkillsIndexPage />);
+    expect(sourcesQuery).toHaveBeenLastCalledWith(expect.objectContaining({ ownerType: "user", ownerId: "u-1" }));
   });
 
   it("offers a New skill action", () => {
