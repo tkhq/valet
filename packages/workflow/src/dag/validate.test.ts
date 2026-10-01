@@ -352,7 +352,7 @@ describe('validateWorkflowDefinition', () => {
   });
 
   describe('llm node', () => {
-    function llmDefinition(overrides: Partial<{ model: string; prompt: string }>): WorkflowDefinition {
+    function llmDefinition(overrides: Partial<{ model: string; prompt: string; reasoning: string }>): WorkflowDefinition {
       return definition({
         nodes: [
           { id: 'trigger', type: 'trigger' },
@@ -368,6 +368,13 @@ describe('validateWorkflowDefinition', () => {
 
     it('accepts a valid llm node', () => {
       expect(validateWorkflowDefinition(llmDefinition({}))).toEqual({ ok: true });
+    });
+
+    it('accepts a known reasoning level and rejects an unknown one', () => {
+      expect(validateWorkflowDefinition(llmDefinition({ reasoning: 'high' }))).toEqual({ ok: true });
+      const result = validateWorkflowDefinition(llmDefinition({ reasoning: 'extreme' }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.some((e) => e.includes('llm.reasoning must be one of'))).toBe(true);
     });
 
     it('rejects an empty model', () => {
