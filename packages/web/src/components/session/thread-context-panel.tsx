@@ -29,12 +29,13 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
   });
   const outputs = artifacts.error ? [] : artifacts.data?.pages.flatMap((page) => page.artifacts) ?? [];
   const threadMessages = messages.filter((message) => message.threadId === threadId);
-  const sources = new Map<string, { title: string; href?: string; messageId: string }>();
+  // Uploads download under their original name; links open in a new tab.
+  const sources = new Map<string, { title: string; href: string; download?: string }>();
   for (const message of threadMessages) {
     if (message.role !== "user") continue;
     for (const attachment of message.attachments ?? []) {
-      const key = attachment.kind === "file" ? attachment.path : attachment.url;
-      sources.set(key, { title: attachment.name, messageId: message.id });
+      const href = attachment.kind === "file" ? api.threadFileUrl(sessionId, threadId, attachment.path) : attachment.url;
+      sources.set(href, { title: attachment.name, href, download: attachment.name });
     }
     const text = message.content;
     for (const match of text.matchAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>\]\)]+)/g)) {
@@ -42,7 +43,7 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
       try {
         const url = new URL(href);
         if (url.protocol !== "http:" && url.protocol !== "https:") continue;
-        sources.set(href, { title: match[1] ?? `${url.hostname}${url.pathname === "/" ? "" : url.pathname}`, href, messageId: message.id });
+        sources.set(href, { title: match[1] ?? `${url.hostname}${url.pathname === "/" ? "" : url.pathname}`, href });
       } catch { /* Incomplete streamed URL. */ }
     }
   }
@@ -97,9 +98,10 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
           <button type="button" onClick={onAttach} aria-label="Add a source" className="rounded p-1 hover:bg-ink-wash-strong hover:text-ink"><Plus className="h-4 w-4" /></button>
         </div>
         {sourceRows.length === 0 && <p className="text-xs text-muted">Files and links you share appear here.</p>}
-        {(showAll ? sourceRows : sourceRows.slice(0, 3)).map(([key, source]) => source.href
-          ? <a key={key} href={source.href} target="_blank" rel="noopener noreferrer" className={rowClass} title={source.title}><Link2 className="h-4 w-4 shrink-0" /><span className="truncate">{source.title}</span></a>
-          : <button key={key} onClick={() => onReveal(source.messageId)} className={rowClass} title={source.title}><FileText className="h-4 w-4 shrink-0" /><span className="truncate">{source.title}</span></button>)}
+        {(showAll ? sourceRows : sourceRows.slice(0, 3)).map(([key, source]) => {
+          const Icon = source.download ? FileText : Link2;
+          return <a key={key} href={source.href} {...(source.download ? { download: source.download } : { target: "_blank", rel: "noopener noreferrer" })} className={rowClass} title={source.title}><Icon className="h-4 w-4 shrink-0" /><span className="truncate">{source.title}</span></a>;
+        })}
         {sourceRows.length > 3 && <button onClick={() => setShowAll(!showAll)} className="mt-2 text-xs text-muted hover:text-ink">{showAll ? "Show less" : `View all (${sourceRows.length})`}</button>}
       </section>
     </aside>

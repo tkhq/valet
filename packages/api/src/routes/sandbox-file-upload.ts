@@ -480,3 +480,45 @@ fileUploadRouter.post("/:id/files", async (c) => {
 
   return c.json(response, 200);
 });
+
+/**
+ * `GET /api/sessions/:id/threads/:threadId/files?path=` downloads a file that
+ * a person attached to a message in the thread. A caller who can read the
+ * thread's messages can read its attachments. The path must match a file
+ * attachment of that thread, so the route never serves other sandbox files.
+ */
+fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
+  const row = await loadOwnedSession(c);
+  if (!row) return c.json({ error: "session not found" }, 404);
+  const { engineHost, db } = c.var.providers;
+  const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
+  await engineSession.ensureDefaultThread();
+  const thread = engineSession.threadById(c.req.param("threadId"));
+  const path = c.req.query("path");
+  const entries = thread && path ? await thread.readEntries() : [];
+  const file = entries
+    .flatMap((entry) => (entry.type === "message" ? entry.attachments ?? [] : []))
+    .find((att) => att.type === "file" && att.path === path);
+  if (!file || file.type !== "file") {
+    return c.json({ error: "file not found", corrective: "Attach the file to the thread again." }, 404);
+  }
+
+  let bytes: Uint8Array;
+  try {
+    const { sandbox } = await engineSession.attachment.ensureReady({ timeoutMs: SANDBOX_READY_TIMEOUT_MS, signal: c.req.raw.signal });
+    bytes = await sandbox.readBinary(file.path);
+  } catch (err) {
+    if (isNotFoundError(err)) {
+      return c.json({ error: "file is no longer in the sandbox", corrective: "Attach the file to the thread again." }, 404);
+    }
+    return c.json({ error: "could not read the file from the sandbox", corrective: "Try the download again in a few seconds." }, 409);
+  }
+  const encoded = encodeURIComponent(file.name).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return c.body(new Uint8Array(bytes), 200, {
+    "content-type": file.mimeType ?? "application/octet-stream",
+    "content-disposition": `attachment; filename="${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"; filename*=UTF-8''${encoded}`,
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "sandbox; default-src 'none'",
+  });
+});

@@ -10,6 +10,8 @@ metadata on the user message and renders a note the agent can act on.
 ## Surfaces
 
 - **API**: `POST /api/sessions/:id/files` (multipart form-data).
+- **API**: `GET /api/sessions/:id/threads/:threadId/files?path=` downloads a
+  file attachment of that thread (see [Download route](#download-route)).
 - **Web**: composer file chips (`packages/web/src/components/session/composer-files.ts`).
 - **CLI**: `valet upload <session-id> <path...>` (`packages/api/src/cli/commands/upload.ts`).
 - **Engine**: `type:"file"` attachments on `MessageEntry.attachments`, rendered
@@ -146,6 +148,17 @@ dropped with a warning — it must never fall through to the image branch,
 where it would persist as a phantom image and silently vanish from the REST
 projection on reload. The transcript note renders from the persisted
 attachments on both the hot turn and reload (`entriesToAgentMessages`).
+
+## Download route
+
+The thread context panel's Sources list links each uploaded file to
+`GET /api/sessions/:id/threads/:threadId/files?path=<path>`. The route uses
+the same access check as the thread's messages. The `path` must equal the
+`path` of a `type:"file"` attachment on a message of that thread, so the
+route cannot read other sandbox files. The route wakes the sandbox and
+streams the file as `Content-Disposition: attachment` with the attachment's
+name and mime type. A path that no attachment names, or a file that is gone
+from the sandbox, returns 404.
 
 ## Web composer
 

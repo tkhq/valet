@@ -455,6 +455,38 @@ describe("POST /api/sessions/:id/files", () => {
   // runs keyless, so no turn ever starts and no user entry persists here.
 });
 
+describe("GET /api/sessions/:id/threads/:threadId/files", () => {
+  it("downloads a file attached to the thread and nothing else", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl, "");
+    const form = new FormData();
+    form.append("file", new Blob(["quarterly numbers"], { type: "text/plain" }), "Q3 report.txt");
+    const uploaded = (await (await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form })).json()) as PostSessionFileUploadResponse;
+    // A stray sandbox file that no message attaches.
+    const stray = new FormData();
+    stray.append("file", new Blob(["secret"]), "stray.txt");
+    expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: stray })).status).toBe(200);
+
+    // This harness runs keyless, so seed the user entry the send would write.
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const thread = await engineSession.ensureDefaultThread();
+    await api.providers.engineStore.appendEntries(sessionId, thread.id, [{
+      id: "m1", sessionId, threadId: thread.id, parentId: null, type: "message", role: "user", content: "read this", createdAt: 1,
+      attachments: [{ type: "file", path: uploaded.path, bytes: uploaded.bytes, sha256: uploaded.sha256, mimeType: "text/plain", name: "Q3 report.txt" }],
+    }]);
+    const download = (path: string, threadId = thread.id) =>
+      fetch(`${api!.baseUrl}/api/sessions/${sessionId}/threads/${threadId}/files?path=${encodeURIComponent(path)}`);
+
+    const res = await download(uploaded.path);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("quarterly numbers");
+    expect(res.headers.get("content-type")).toBe("text/plain");
+    expect(res.headers.get("content-disposition")).toBe(`attachment; filename="Q3_report.txt"; filename*=UTF-8''Q3%20report.txt`);
+    expect((await download("/workspace/uploads/stray.txt")).status).toBe(404);
+    expect((await download(uploaded.path, "no-such-thread")).status).toBe(404);
+  });
+});
+
 describe("sandboxReadyError", () => {
   it.each([
     [new WorkspaceProvisioningError(60_000), "provisioning", false, 409, true],

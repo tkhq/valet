@@ -576,6 +576,9 @@ export const api = {
     request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
   getThreadChannelActivity: (sessionId: string, threadId: string) =>
     request<ThreadChannelActivity>("GET", `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/channel-activity`),
+  /** Download URL for a file attached to the thread; an `<a download>` target. */
+  threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
+    `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,
   dismissWorkspaceBriefing: (owner: OwnerFilter, briefingId: string) =>
     request<DismissWorkspaceBriefingResponse>("POST", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings/${encodeURIComponent(briefingId)}/dismiss`),
   listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
