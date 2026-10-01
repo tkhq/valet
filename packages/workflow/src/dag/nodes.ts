@@ -115,6 +115,9 @@ export interface LlmNode {
   outputSchema?: Record<string, unknown>;
   temperature?: number;
   maxOutputTokens?: number;
+  /** Reasoning level, such as `medium`. Omit for the owner's default, the
+   * same default a chat thread uses. */
+  reasoning?: string;
   /** Omit for `fail`. See `NodeErrorPolicy`. */
   onError?: NodeErrorPolicy;
 }

@@ -45,6 +45,8 @@ export interface WorkflowLlmCompleteRequest {
   prompt: string;
   temperature?: number;
   maxOutputTokens?: number;
+  /** The node's reasoning level; omitted means the run owner's default. */
+  reasoning?: string;
 }
 
 /**

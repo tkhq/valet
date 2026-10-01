@@ -76,6 +76,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
+import { workflowReasoningLevel } from "../services/reasoning.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { isTeamMember } from "../services/teams.js";
 import { definitionVersionId } from "./definition-version.js";
@@ -429,6 +430,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       if (!resolved) {
         throw new Error(`workflow engine-deps: unknown or unavailable model "${req.model}"`);
       }
+      // Without a level, a reasoning model runs with reasoning off, so a review
+      // step reasoned less than the same model does in a chat thread.
+      const reasoning = await workflowReasoningLevel(opts.db, ctx.orgId, ctx.owner, req.reasoning);
       const result = await completeSimple(
         resolved.model,
         {
@@ -439,6 +443,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           apiKey: resolved.apiKey,
           temperature: req.temperature,
           maxTokens: req.maxOutputTokens,
+          ...(reasoning ? { reasoning } : {}),
         },
       );
       if (result.stopReason === "error" || result.stopReason === "aborted") {
@@ -507,7 +512,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
       if (!assistant || assistant.orgId !== ctx.orgId ||
           (!assistantOwnsRun && !(origin && assistantOwnsActor))) {
-        throw new Error("Workflow orchestrator is unavailable. Open the workflow from its owning workspace and retry.");
+        throw new Error("The workspace assistant is unavailable. Open the workflow from its owning workspace and retry.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
       if (origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&

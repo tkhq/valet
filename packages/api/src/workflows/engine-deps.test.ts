@@ -17,7 +17,8 @@ import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
-import { assistants, workflowDefinitions } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -747,6 +748,29 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
     } finally {
       piAi.registerApiProvider(original);
     }
+  });
+
+  it("sends the owner's default reasoning level, and a step's own level wins", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("OpenAI transport is required");
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      events.end(fauxAssistantMessage("ok"));
+      return events;
+    });
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      await db.update(orgs).set({ reasoningSettings: { default: "medium" } }).where(eq(orgs.id, LOCAL_ORG.id));
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+      await seedRun(api, "wfrun_reasoning", "wf_reasoning");
+      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6-astra", prompt: "hi" });
+      expect(stream.mock.calls[0]![2]).toMatchObject({ reasoning: "medium" });
+      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6-astra", prompt: "hi", reasoning: "high" });
+      expect(stream.mock.calls[1]![2]).toMatchObject({ reasoning: "high" });
+    } finally { piAi.registerApiProvider(original); }
   });
 
   it.each(["error", "aborted"] as const)("rejects a provider %s response instead of returning empty success", async (stopReason) => {
