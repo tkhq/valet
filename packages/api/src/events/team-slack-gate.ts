@@ -130,12 +130,14 @@ export async function teamMentionActor(
     reason = "not_team_member";
   }
   // An unlinked sender who is a Valet org member is judged as that member.
-  // A full Slack workspace member with no Valet account runs as the person
-  // who set the channel up, while that person still has access; approvals
-  // still apply. Guests and other organizations' users are refused.
+  // A full Slack workspace member with no Valet account is answered only on a
+  // rule open to the whole organization, and runs as the person who set the
+  // channel up while that person still has access; approvals still apply. A
+  // team-only rule would otherwise answer someone outside the team. Guests
+  // and other organizations' users are refused.
   if (reason === "unlinked_sender" && typeof externalId === "string") {
     const sender = await unlinkedSender(db, sub.orgId, externalId);
-    const actor = sender === "newcomer" ? sub.createdBy : sender?.userId;
+    const actor = sender === "newcomer" ? (audience === "organization" ? sub.createdBy : undefined) : sender?.userId;
     if (actor && (audience === "organization" ? await isCurrentOrgActor(db, sub, actor) : await isCurrentTeamActor(db, sub, actor))) return actor;
   }
   if (reason) {
@@ -278,11 +280,13 @@ export async function followedMessageActor(
   const identity = await identityForExternal(db, "slack", externalId);
   if (identity) return await admits(identity.userId) ? identity.userId : null;
   // Only a team thread answers an unlinked sender. One who is a Valet org
-  // member is judged as that member; a full Slack workspace member with no
-  // Valet account runs as the person who bound the thread. A personal thread
-  // never runs another person's message as its owner.
+  // member is judged as that member. A full Slack workspace member with no
+  // Valet account is answered only in a thread its rule opened to the whole
+  // organization, and runs as the person who bound the thread. A personal
+  // thread never runs another person's message as its owner.
   if (follow.ownerType !== "team") return null;
   const sender = await unlinkedSender(db, follow.orgId, externalId);
-  const actor = sender === "newcomer" ? follow.createdBy : sender?.userId;
+  const newcomerAdmitted = sender === "newcomer" && await followedThreadAudience(db, follow) === "organization";
+  const actor = sender === "newcomer" ? (newcomerAdmitted ? follow.createdBy : undefined) : sender?.userId;
   return actor && await admits(actor) ? actor : null;
 }

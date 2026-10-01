@@ -138,26 +138,36 @@ describe("handleFollowedMessage", () => {
     }, "U9")).toBe(USER);
   });
 
-  it("routes an unlinked Slack workspace member in a team thread as the person who bound it", async () => {
+  it("routes an unlinked Slack workspace member in an organization-wide team thread as the person who bound it", async () => {
     setSlackWorkspaceMemberCheck(async (userId) => userId === "OTHER" ? { email: "newcomer@example.com" } : null);
     await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
     await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
-    const follow = { orgId: ORG, ownerType: "team" as const, ownerId: "team-follow", createdBy: USER };
+    // A thread a team-only rule bound does not answer someone with no Valet account.
+    const teamOnly = { orgId: ORG, ownerType: "team" as const, ownerId: "team-follow", createdBy: USER };
+    expect(await followedMessageActor(testDb.appDb, teamOnly, "OTHER")).toBeNull();
+    await testDb.appDb.insert(eventSubscriptions).values({
+      id: "org-wide-rule", orgId: ORG, ownerType: "team", ownerId: "team-follow", createdBy: USER, name: "Org wide",
+      eventKeys: ["slack.app_mention"], filters: [], target: { kind: "orchestrator", follow: true }, audience: "organization",
+      enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const follow = { ...teamOnly, subscriptionId: "org-wide-rule" };
     expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBe(USER);
     // A guest or another organization's user does not route.
     expect(await followedMessageActor(testDb.appDb, follow, "GUEST")).toBeNull();
     // No sender (another app's post) does not route.
     expect(await followedMessageActor(testDb.appDb, follow, undefined)).toBeNull();
-    // An unlinked sender whose email belongs to an org member outside the team is refused as that member.
+    // On a team-only thread, an unlinked sender whose email belongs to an org
+    // member outside the team is refused as that member.
     await testDb.appDb.insert(users).values({ id: "outsider-user", name: "Outsider", email: "outsider@example.com" }).onConflictDoNothing();
     await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "outsider-user", role: "member" }).onConflictDoNothing();
     setSlackWorkspaceMemberCheck(async () => ({ email: "outsider@example.com" }));
-    expect(await followedMessageActor(testDb.appDb, follow, "WAS_LINKED")).toBeNull();
+    expect(await followedMessageActor(testDb.appDb, teamOnly, "WAS_LINKED")).toBeNull();
     setSlackWorkspaceMemberCheck(async (userId) => userId === "OTHER" ? { email: "newcomer@example.com" } : null);
     // A personal thread never runs another person's message as its owner.
     expect(await followedMessageActor(testDb.appDb, { orgId: ORG, ownerType: "user", ownerId: USER, createdBy: USER }, "OTHER")).toBeNull();
     // Once the person who bound the thread loses access, nobody routes under it.
-    await testDb.appDb.delete(teamMembers).where(eq(teamMembers.userId, USER));
+    // An organization-wide thread needs only that person's org membership.
+    await testDb.appDb.delete(orgMembers).where(eq(orgMembers.userId, USER));
     expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBeNull();
   });
 

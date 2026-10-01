@@ -103,15 +103,21 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ createdBy: "member-b", ownerId: "team-1" });
   });
 
-  it("answers an unlinked member of the Slack workspace as the rule's creator, and still refuses a guest", async () => {
+  it("answers an unlinked member of the Slack workspace as the rule's creator only on an organization rule, and still refuses a guest", async () => {
     setSlackWorkspaceMemberCheck(async (userId) => userId === "U_UNLINKED" ? { email: "newcomer@example.com" } : null);
     try {
-      await seed();
+      // A team-only rule does not answer someone with no Valet account.
+      const teamOnly = await seed();
+      expect(await ingest(mention("U_UNLINKED"))).toMatchObject({ deliveries: 0, skipped: true });
+      await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, teamOnly.id));
+      const orgWide = await seed("team", false, false, "organization");
       expect((await ingest(mention("U_UNLINKED"))).deliveries).toBe(1);
       const { host, deliver } = dispatcher();
       await host.pollOnce();
       expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a" }));
       expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
+      await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, orgWide.id));
+      await seed();
       // A linked sender outside the team stays refused, even as a workspace member.
       setSlackWorkspaceMemberCheck(async () => ({ email: "linked@example.com" }));
       expect(await ingest(mention("U_X", "C1", "300.1"))).toMatchObject({ deliveries: 0, skipped: true });
