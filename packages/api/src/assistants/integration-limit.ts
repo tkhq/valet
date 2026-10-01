@@ -2,8 +2,10 @@
  * The integration limit a workspace carried over from its assistant's stored
  * `behavior` allow-list. A workspace now has one assistant and no per-assistant
  * editor, but dropping the allow-list on upgrade would hand that workspace
- * every entitled integration. So the limit keeps applying, to every session
- * the workspace owns, until an admin clears it. Nothing writes a new one.
+ * every entitled integration. So the limit keeps shaping the workspace's
+ * assistant, the one session it shaped before, until an admin clears it.
+ * Coding, child, and workflow sessions ignore it, as they did. Nothing
+ * writes a new one.
  *
  * Like the editor it came from, this shapes capability; action policies and
  * approval gates stay the enforcement layer. A value that does not parse

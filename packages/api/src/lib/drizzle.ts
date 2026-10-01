@@ -149,7 +149,7 @@ export async function reportRetiredAssistantSettings(db: PgDb): Promise<string |
   if (result.rows.length === 0) return null;
   const names = result.rows.map((row) => `${String(row.owner_type)}:${String(row.owner_id)}${row.allow_list === true ? " (integration allow-list)" : ""}`);
   const message = `[migrations] ${names.length} workspace assistant(s) carry settings from before one assistant per workspace: ${names.join(", ")}. `
-    + "An integration allow-list keeps limiting its workspace until an admin clears it on the Integrations page. "
+    + "An integration allow-list keeps limiting that workspace's assistant until an admin clears it on the Integrations page. "
     + "Stored models and reasoning levels no longer apply; workspaces use the organization's model defaults and each thread's model.";
   console.warn(message);
   return message;

@@ -1379,6 +1379,9 @@ export class EngineHost {
     // plugins keep shadow priority.
     extraPlugins: readonly ValetPlugin[] = [],
     appendedNativeToolNames: readonly string[] = [],
+    // The carried-over integration allow-list shaped the assistant alone, as
+    // it did before a workspace had one assistant; other sessions ignore it.
+    applyIntegrationLimit = false,
   ): Promise<PluginSessionExtras> {
     const assembled = [...this.basePlugins(), ...extraPlugins];
     const assembledServices = actionServices(assembled);
@@ -1386,7 +1389,7 @@ export class EngineHost {
       (item) => !assembledServices.has(item.service),
     );
     const entitled = await this.filterEntitledPlugins(assembled, owner, orgId);
-    const limit = this.opts.db ? await loadIntegrationLimit(this.opts.db, orgId, owner) : null;
+    const limit = applyIntegrationLimit && this.opts.db ? await loadIntegrationLimit(this.opts.db, orgId, owner) : null;
     const plugins = limit ? limitPlugins(entitled, limit, new Set(pins.map((pin) => pin.actionId))) : entitled;
     const limitedServices = removedActionServices(entitled, plugins).map((service) => ({
       service,
@@ -2603,6 +2606,7 @@ export class EngineHost {
       pins,
       [],
       buildMemoryTools().map((tool) => tool.name),
+      true,
     );
 
     // The profile comes from the app row, not from the caller's meta. An
