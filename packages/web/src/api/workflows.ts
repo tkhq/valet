@@ -459,13 +459,22 @@ function useInvalidateTriggers() {
   return () => qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
 }
 
-/** Turns a workflow on or off: every schedule and event trigger it has at once. */
+/** Turns a workflow on or off: every schedule and event trigger it has.
+ * Turning it on leaves a proposal (a trigger Valet suggested, id
+ * `proposal-…`) off, because a person must still review it. Each trigger
+ * saves on its own, so a failure is reported, and the trigger list is read
+ * again either way to show what actually saved. */
 export function useSetWorkflowEnabled() {
   const invalidate = useInvalidateTriggers();
-  return useMutation<unknown, Error, { triggers: WorkflowTriggerItem[]; enabled: boolean }>({
-    mutationFn: ({ triggers, enabled }) => Promise.all(triggers.map((trigger) => trigger.kind === "schedule"
-      ? api.updateWorkflowSchedule(trigger.id, { enabled })
-      : api.updateWorkflowEventTrigger(trigger.id, { enabled }))),
+  return useMutation<void, Error, { triggers: WorkflowTriggerItem[]; enabled: boolean }>({
+    mutationFn: async ({ triggers, enabled }) => {
+      const targets = enabled ? triggers.filter((trigger) => trigger.enabled || !trigger.id.startsWith("proposal-")) : triggers;
+      const results = await Promise.allSettled(targets.map((trigger) => trigger.kind === "schedule"
+        ? api.updateWorkflowSchedule(trigger.id, { enabled })
+        : api.updateWorkflowEventTrigger(trigger.id, { enabled })));
+      const failed = results.filter((result) => result.status === "rejected").length;
+      if (failed > 0) throw new Error(`${failed} of ${targets.length} triggers did not save.`);
+    },
     onSettled: invalidate,
   });
 }

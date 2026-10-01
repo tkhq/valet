@@ -285,7 +285,7 @@ function DefinitionRow({
           <label className="inline-flex items-center gap-2 text-xs text-muted">
             <Switch checked={on} onCheckedChange={(enabled) => setEnabled.mutate({ triggers, enabled })} disabled={setEnabled.isPending}
               aria-label={`${workflow.name} ${on ? "on" : "off"}`} />
-            {setEnabled.isPending ? "Saving…" : setEnabled.isError ? <span role="alert" className="text-danger-500">Not saved. Try again.</span> : on ? "On" : "Off"}
+            {setEnabled.isPending ? "Saving…" : setEnabled.isError ? <span role="alert" className="text-danger-500">{setEnabled.error?.message ?? "Not saved."} Try again.</span> : on ? "On" : "Off"}
           </label>
         )}
         {workflow.latestFailedRun && (
