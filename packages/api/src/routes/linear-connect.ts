@@ -213,8 +213,10 @@ linearConnectRouter.delete("/", async (c) => {
     }
   }
 
+  // The app config goes first: a token renewal in flight checks it after its
+  // save and removes the token it wrote (linear-app-token-store.ts).
+  await engineCredentials.delete({ type: "org", id: orgId }, LINEAR_APP_SERVICE);
   await db.delete(linearInstallations).where(eq(linearInstallations.orgId, orgId));
   await engineCredentials.delete({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
-  await engineCredentials.delete({ type: "org", id: orgId }, LINEAR_APP_SERVICE);
   return c.body(null, 204);
 });

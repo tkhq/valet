@@ -67,6 +67,18 @@ describe("LinearAppTokenStore", () => {
     expect(await inner.get(ORG, "linear")).toBeNull();
   });
 
+  it("removes its renewal when the disconnect lands between its last read and its save", async () => {
+    const { store, inner } = await setup(NOW + DAY / 2);
+    // The disconnect runs in its order (app config first) right before the renewal's save.
+    const save = inner.save.bind(inner);
+    inner.save = async (owner, service, credential) => {
+      if (service === "linear") { await inner.delete(ORG, "linear_app"); await inner.delete(ORG, "linear"); }
+      await save(owner, service, credential);
+    };
+    expect(await store.get(ORG, "linear")).toBeNull();
+    expect(await inner.get(ORG, "linear")).toBeNull();
+  });
+
   it("does not call Linear again until the retry window after a failed renewal", async () => {
     let now = NOW;
     const { inner, f } = await setup(NOW - 1, { oauthToken: () => ({ status: 401, body: { error: "invalid_client" } }) });

@@ -95,13 +95,19 @@ export class LinearAppTokenStore implements CredentialStore {
    * An admin can disconnect or reconnect Linear while the token request is in
    * flight; saving then would bring back a revoked installation. Returns what
    * callers should use: `next` when saved, otherwise the current row, or null
-   * after a disconnect. The store offers no compare-and-swap, so a write that
-   * lands between this read and the save can still lose to it.
+   * after a disconnect. The store offers no compare-and-swap, so a disconnect
+   * can still land between this read and the save. Disconnect deletes the app
+   * config first, so a renewal that finds the config gone after its save
+   * deletes what it saved: whichever order the two run in, the disconnect wins.
    */
   private async saveIfUnchanged(owner: CredentialOwner, expected: StoredCredential, next: StoredCredential): Promise<StoredCredential | null> {
     const current = await this.inner.get(owner, LINEAR_CREDENTIAL_SERVICE);
     if (!current || current.accessToken !== expected.accessToken) return current;
     await this.inner.save(owner, LINEAR_CREDENTIAL_SERVICE, next);
+    if (!(await loadLinearAppConfig(this.inner, owner.id))) {
+      await this.inner.delete(owner, LINEAR_CREDENTIAL_SERVICE);
+      return null;
+    }
     return next;
   }
 
