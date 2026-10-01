@@ -758,8 +758,7 @@ export async function updateWorkflowDefinition(
   if (input.definition !== undefined) {
     await validateWorkflowAssistant(deps.db, owner.orgId, { type: row.ownerType, id: row.ownerId }, input.definition);
   }
-  const stepsChange = input.definition !== undefined
-    && definitionVersionId(input.definition) !== definitionVersionId(row.definition);
+  const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
   // A grant approves the steps as they were. When someone who could not have
   // granted it changes them, an approver must look again. Revoke before the
   // write, so no run can start on the new steps under the old grant.

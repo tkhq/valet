@@ -250,6 +250,13 @@ describe("workflow grants after a definition change", () => {
     // The admin who granted it edits the steps: the approval stands.
     expect((await edit(2)).status).toBe(200);
     expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
+    // A member only moves a step on the map: the steps are the same, so the approval stands.
+    const moved = await fetch(`${api.baseUrl}/api/workflows/${wfId}`, {
+      method: "PUT", headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ definition: { ...ships(2), ui: { nodes: { ship0: { position: { x: 512, y: 96 } } } } } }),
+    });
+    expect(moved.status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
     // A member adds another use of the approved action: the grants go, so an approver must look again.
     expect((await edit(3, { "x-valet-test-user-id": "test-member" })).status).toBe(200);
     expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
