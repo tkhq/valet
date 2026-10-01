@@ -28,6 +28,8 @@ import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { FilterChips, pageClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -354,7 +356,7 @@ export function UsagePage() {
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10 space-y-10">
+      <div className={cn(pageClass, "space-y-10")}>
         {/* Header — the workspace clause names the active scope, same as the
             other scoped list pages. */}
         <div>
@@ -385,20 +387,12 @@ export function UsagePage() {
 
         {/* Window selector + scope toggle + CSV export */}
         <div className="flex items-center gap-2 flex-wrap">
-          {WINDOWS.map((w) => (
-            <button
-              key={w}
-              type="button"
-              onClick={() => handleWindowChange(w)}
-              className={`min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 ${
-                period.kind === "lookback" && period.window === w
-                  ? "border-moss text-moss bg-moss-wash font-medium"
-                  : "border-line text-muted hover:text-ink hover:border-ink"
-              }`}
-            >
-              {w}
-            </button>
-          ))}
+          <FilterChips<string>
+            label="Period"
+            value={period.kind === "lookback" ? period.window : ""}
+            onChange={(w) => { const window = WINDOWS.find((candidate) => candidate === w); if (window) handleWindowChange(window); }}
+            options={WINDOWS.map((w) => ({ value: w, label: w }))}
+          />
           <label className="flex items-center gap-2 text-sm text-muted">
             <span>Month</span>
             <input
@@ -455,32 +449,13 @@ export function UsagePage() {
             Apply dates
           </button>
           {personalWorkspace && isOrgAdmin && (
-            <div className="flex items-center gap-1 sm:ml-4 rounded border border-line overflow-hidden text-sm">
-              <button
-                type="button"
-                onClick={() => setPersonalScope("me")}
-                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
-                  scope === "me"
-                    ? "bg-moss-wash text-moss font-medium"
-                    : "text-muted hover:text-ink"
-                }`}
-                aria-pressed={scope === "me"}
-              >
-                My usage
-              </button>
-              <button
-                type="button"
-                onClick={() => setPersonalScope("org")}
-                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
-                  scope === "org"
-                    ? "bg-moss-wash text-moss font-medium"
-                    : "text-muted hover:text-ink"
-                }`}
-                aria-pressed={scope === "org"}
-              >
-                Organization
-              </button>
-            </div>
+            <FilterChips
+              label="Whose usage"
+              className="sm:ml-4"
+              value={personalScope}
+              onChange={setPersonalScope}
+              options={[{ value: "me", label: "My usage" }, { value: "org", label: "Organization" }]}
+            />
           )}
           {scopeKnown && (
             <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">

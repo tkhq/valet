@@ -64,7 +64,7 @@ const GATE_BACKED: readonly NotificationKind[] = ["question", "approval"];
  * id. The notifications query is already polling for the bell, so a caller
  * that wants to mark a row costs no extra request.
  *
- * `livePendingGates` (see `useLivePendingGates`) upgrades the poll to live
+ * `livePendingGates` upgrades the poll to live
  * data where it exists: a key is a session with an open WS, its value
  * whether any gate is pending there. For those sessions the store decides
  * the gate-backed kinds — a poll row lags the truth by up to 30s on open

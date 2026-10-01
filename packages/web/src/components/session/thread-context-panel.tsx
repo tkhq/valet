@@ -5,7 +5,8 @@ import { ArrowDownLeft, ArrowUpRight, FileText, Link2, Plus, Terminal } from "lu
 import type { Message } from "@valet/api/wire";
 import { api, type OwnerFilter } from "~/api/client";
 import { qkCatchUp } from "~/api/catch-up";
-import { useThreadChannelMessages } from "~/api/channels";
+import { useThreadChannelActivity } from "~/api/channels";
+import { relativeTime } from "~/lib/relative-time";
 
 /** Context belongs to the selected thread, never the entire shared runtime. */
 export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy, onCreate, onAttach, onReveal }: {
@@ -52,9 +53,10 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
     const command = args && typeof args === "object" && "command" in args && typeof args.command === "string" ? args.command : part.toolName;
     return [{ id: part.callId, label: command, messageId: message.id }];
   })) : [];
-  const channelMessages = useThreadChannelMessages(sessionId, threadId);
-  const posted = channelMessages.data?.messages ?? [];
-  const channelKey = posted[0]?.channelKey;
+  const channelActivity = useThreadChannelActivity(sessionId, threadId).data;
+  const latest = channelActivity?.latest;
+  const LatestIcon = latest?.direction === "out" ? ArrowUpRight : ArrowDownLeft;
+  const latestLabel = latest ? `${latest.direction === "out" ? "Valet" : latest.author ?? "Someone"}: ${latest.text ?? "(message)"}` : "";
   const rowClass = "flex w-full min-w-0 items-center gap-2.5 rounded-md py-1.5 text-left text-sm text-muted hover:text-ink";
   return (
     <aside aria-label="Thread context" className="rounded-2xl bg-ink-wash p-4 text-sm">
@@ -74,19 +76,19 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
         {activeTools.length === 0 && <p className="text-xs text-muted">No active tool calls</p>}
         {activeTools.map((tool) => <button key={tool.id} onClick={() => onReveal(tool.messageId)} className={rowClass} title={tool.label}><Terminal className="h-4 w-4 shrink-0 text-ink" /><span className="truncate text-ink">{tool.label}</span></button>)}
       </section>
-      {posted.length > 0 && (
+      {latest && channelActivity && (
+        // One summary row, whatever the thread's length: the transcript already holds every message.
         <section aria-label="Channel" className="border-t border-line py-3">
           <div className="mb-2 flex items-center justify-between text-muted">
             <h2 className="font-medium">Channel</h2>
-            {channelKey && <Link to="/channel" search={{ key: channelKey }} className="text-xs hover:text-ink">Open channel</Link>}
+            <Link to="/channel" search={{ key: latest.channelKey }} className="text-xs hover:text-ink">Open channel</Link>
           </div>
-          {posted.slice(0, 5).map((message) => {
-            const Icon = message.direction === "out" ? ArrowUpRight : ArrowDownLeft;
-            const label = `${message.direction === "out" ? "Valet" : message.author ?? "Someone"}: ${message.text ?? "(message)"}`;
-            return message.url
-              ? <a key={message.id} href={message.url} target="_blank" rel="noopener noreferrer" className={rowClass} title={label}><Icon className="h-4 w-4 shrink-0" /><span className="truncate">{label}</span></a>
-              : <p key={message.id} className={rowClass} title={label}><Icon className="h-4 w-4 shrink-0" /><span className="truncate">{label}</span></p>;
-          })}
+          <p className="text-xs text-muted">
+            {channelActivity.total} {channelActivity.total === 1 ? "message" : "messages"} in the channel · latest {relativeTime(latest.createdAt)}
+          </p>
+          {latest.url
+            ? <a href={latest.url} target="_blank" rel="noopener noreferrer" className={rowClass} title={latestLabel}><LatestIcon className="h-4 w-4 shrink-0" /><span className="truncate">{latestLabel}</span></a>
+            : <p className={rowClass} title={latestLabel}><LatestIcon className="h-4 w-4 shrink-0" /><span className="truncate">{latestLabel}</span></p>}
         </section>
       )}
       <section aria-label="Sources" className="border-t border-line pt-3">

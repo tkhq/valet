@@ -14,7 +14,7 @@ import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
-import { and, desc, eq, exists, gt, gte, lt, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, or, type SQL } from "drizzle-orm";
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
@@ -26,7 +26,7 @@ import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
+import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
@@ -43,8 +43,6 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
-  ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
@@ -53,7 +51,7 @@ import type {
 import { armableDefinitionRow } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { readOwnerFilter } from "./_owner-filter.js";
-import { EVENT_LOG_STATUSES, EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
+import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -80,18 +78,6 @@ async function canMutateSubscription(
 const FEED_DEFAULT_LIMIT = 50;
 const FEED_MAX_LIMIT = 100;
 
-/**
- * How far back the OWNER-FILTERED feed looks. No index can pre-select the
- * owner, so without this bound a workspace that matched nothing walks the
- * org's whole event history for one empty page. A lower bound on
- * `received_at` joins the `(org_id, received_at)` index condition, so it is
- * the cheapest bound available. The unfiltered feed keeps no window.
- *
- * `components/events/feed.tsx` prints this window to the reader and must
- * hold the same number. `feed-window.test.ts` reads this declaration and
- * fails when only one of them moves.
- */
-const OWNER_FEED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** The jsonb columns come back `unknown`; their shapes are owned by
  * `validateSubscriptionWrite` (`events/subscription-write.ts`), the one gate
@@ -327,89 +313,10 @@ eventsRouter.get("/events/filter-options", async (c) => {
   return c.json(resp);
 });
 
-// ── Feed ────────────────────────────────────────────────────────────────────
-
 /**
- * The org's feed, with an optional owner filter. The `events` table has no
- * owner column: ownership is read one join away, through the deliveries the
- * dispatcher wrote. An event with no deliveries matches no owner, because
- * no subscription acted on it.
- *
- * The owner predicate must stay the SAME union the subscriptions list uses
- * — the named owner's rows, or the org's own. Drop the org branch here and
- * a workspace lists an org-owned subscription whose events its feed hides.
- */
-eventsRouter.get("/events", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-
-  const service = c.req.query("service");
-  const key = c.req.query("key");
-  const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
-  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, FEED_MAX_LIMIT) : FEED_DEFAULT_LIMIT;
-
-  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
-  if (filter.error) return c.json({ error: filter.error }, 400);
-
-  const conditions = [eq(events.orgId, user.orgId)];
-  if (service) conditions.push(eq(events.service, service));
-  if (key) conditions.push(eq(events.eventKey, key));
-  if (filter.owner) {
-    const owner = filter.owner;
-    conditions.push(gte(events.receivedAt, Date.now() - OWNER_FEED_WINDOW_MS));
-    conditions.push(
-      exists(
-        db
-          .select({ present: sql<number>`1` })
-          .from(eventDeliveries)
-          .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
-          .where(
-            and(
-              eq(eventDeliveries.eventId, events.id),
-              // Repeats the outer scope, so the join cannot reach another
-              // org's subscription even if a delivery ever crossed one.
-              eq(eventSubscriptions.orgId, user.orgId),
-              or(
-                and(
-                  eq(eventSubscriptions.ownerType, owner.type),
-                  eq(eventSubscriptions.ownerId, owner.id),
-                ),
-                // Org-owned subscriptions belong to every workspace.
-                eq(eventSubscriptions.ownerType, "org"),
-              ),
-            ),
-          ),
-      ),
-    );
-  }
-
-  const rows = await db
-    .select()
-    .from(events)
-    .where(and(...conditions))
-    .orderBy(desc(events.receivedAt))
-    .limit(limit);
-
-  const resp: ListEventsResponse = { events: rows.map(rowToEventSummary) };
-  return c.json(resp);
-});
-
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
-}
-
-/**
- * `GET /api/events/drops` — recent reasons an event arrived but did not become
- * a feed row: a bad signature, the wrong workspace, a missing credential, or
- * (the common one) it matched no subscription. Answers "my trigger didn't
- * fire" when the feed is empty. Registered before `/events/:id` so the literal
- * path wins over the id param. No payload is exposed — the drop-log holds none.
- */
-/**
- * `GET /api/events/log` — stored events and recorded problems in one
- * timeline. `status` picks one kind of outcome; `ownerType`/`ownerId` scope
- * events to a workspace (problems are org-wide). Registered before
- * `/events/:id` so the literal path wins.
+ * `GET /api/events/log` — a workspace's stored events and the organization's
+ * recorded problems in one timeline. `problems=1` keeps failed events and
+ * problems only. Registered before `/events/:id` so the literal path wins.
  */
 eventsRouter.get("/events/log", async (c) => {
   const { db } = c.var.providers;
@@ -417,14 +324,12 @@ eventsRouter.get("/events/log", async (c) => {
   const limit = readLimit(c.req.query("limit"), FEED_DEFAULT_LIMIT, FEED_MAX_LIMIT);
   if (limit === undefined) return c.json({ error: "limit must be a whole number of 1 or more" }, 400);
   const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
-  if (filter.error) return c.json({ error: filter.error }, 400);
-  const rawStatus = c.req.query("status");
-  const status = EVENT_LOG_STATUSES.find((candidate) => candidate === rawStatus);
-  if (rawStatus !== undefined && !status) return c.json({ error: `status must be one of: ${EVENT_LOG_STATUSES.join(", ")}.` }, 400);
+  if (filter.error || !filter.owner) return c.json({ error: filter.error ?? "Send ownerType and ownerId for the workspace whose Log to read." }, 400);
+  const owner = filter.owner;
+  const problemsOnly = c.req.query("problems") === "1";
   const q = c.req.query("q")?.trim() || undefined;
   if (q && q.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
-  const service = c.req.query("service") || undefined;
-  const scopeKey = JSON.stringify([filter.owner ?? null, status ?? null, service ?? null, q ?? null]);
+  const scopeKey = JSON.stringify([owner, problemsOnly, q ?? null]);
   const rawCursor = c.req.query("cursor");
   const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
   const before = decoded && decoded.orgId === user.orgId && decoded.scope === scopeKey &&
@@ -434,94 +339,14 @@ eventsRouter.get("/events/log", async (c) => {
 
   const admin = await isOrgAdminUser(c);
   const { items, hasMore } = await listEventLog(db, {
-    orgId: user.orgId, owner: filter.owner ?? null, admin, limit,
-    ...(status ? { status } : {}), ...(service ? { service } : {}), ...(q ? { q } : {}), ...(before ? { before } : {}),
+    orgId: user.orgId, owner, admin, limit, problemsOnly, ...(q ? { q } : {}), ...(before ? { before } : {}),
   });
   const last = items.at(-1);
   const resp: EventLogResponse = {
     items,
     nextCursor: hasMore && last ? encodePageCursor({ orgId: user.orgId, scope: scopeKey, at: last.at, id: last.id }) : null,
     lastEventAt: await lastEventLogActivity(db, user.orgId, admin),
-    windowDays: filter.owner ? EVENT_LOG_WINDOW_MS / (24 * 60 * 60 * 1000) : null,
-  };
-  return c.json(resp);
-});
-
-eventsRouter.get("/events/drops", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-  const limit = readLimit(c.req.query("limit"), FEED_DEFAULT_LIMIT, FEED_MAX_LIMIT);
-  if (limit === undefined) return c.json({ error: "limit must be a whole number of 1 or more" }, 400);
-  const query = c.req.query("q")?.trim() ?? "";
-  if (query.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
-  const rawDirection = c.req.query("direction");
-  if (rawDirection !== undefined && rawDirection !== "previous") return c.json({ error: "direction must be previous" }, 400);
-  const direction = rawDirection === "previous" ? "previous" : "next";
-  const rawCursor = c.req.query("cursor");
-  const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
-  const cursor = decoded && typeof decoded.orgId === "string" && decoded.orgId === user.orgId &&
-    typeof decoded.q === "string" && decoded.q === query &&
-    typeof decoded.createdAt === "number" && Number.isFinite(decoded.createdAt) &&
-    typeof decoded.id === "string"
-    ? { createdAt: decoded.createdAt, id: decoded.id }
-    : undefined;
-  if (rawCursor !== undefined && !cursor) return c.json({ error: "cursor is invalid" }, 400);
-
-  const admin = await isOrgAdminUser(c);
-  const dropConditions: SQL[] = [eq(eventDropLog.orgId, user.orgId)];
-  // Slack interaction diagnostics identify form activity. They are the one
-  // new sensitive diagnostic class, so members keep the established drop feed
-  // without seeing those rows.
-  if (!admin) dropConditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"), ne(eventDropLog.reason, "slack_classifier_rejected"));
-  const visibleDropConditions = [...dropConditions];
-  if (query) {
-    const escapedQuery = escapeLike(query);
-    const search = or(
-      sql`${eventDropLog.reason} ILIKE ${`%${escapedQuery}%`} ESCAPE '\\'`,
-      sql`${eventDropLog.detail} ILIKE ${`%${escapedQuery}%`} ESCAPE '\\'`,
-    );
-    if (search) dropConditions.push(search);
-  }
-  if (cursor) {
-    const boundary = direction === "previous"
-      ? or(gt(eventDropLog.createdAt, cursor.createdAt), and(eq(eventDropLog.createdAt, cursor.createdAt), gt(eventDropLog.id, cursor.id)))
-      : or(lt(eventDropLog.createdAt, cursor.createdAt), and(eq(eventDropLog.createdAt, cursor.createdAt), lt(eventDropLog.id, cursor.id)));
-    if (boundary) dropConditions.push(boundary);
-  }
-  const rows = await db.select().from(eventDropLog).where(and(...dropConditions))
-    .orderBy(...(direction === "previous" ? [eventDropLog.createdAt, eventDropLog.id] : [desc(eventDropLog.createdAt), desc(eventDropLog.id)])).limit(limit + 1);
-  const page = direction === "previous" ? rows.slice(0, limit).reverse() : rows.slice(0, limit);
-  const first = page[0];
-  const last = page.at(-1);
-  const makeCursor = (row: typeof eventDropLog.$inferSelect) => encodePageCursor({ orgId: user.orgId, q: query, createdAt: row.createdAt, id: row.id });
-  const nextCursor = last && (direction === "previous" ? cursor !== undefined : rows.length > limit) ? makeCursor(last) : null;
-  const previousCursor = first && (direction === "previous" ? rows.length > limit : cursor !== undefined) ? makeCursor(first) : null;
-
-  // "Last event received" = the most recent time ANY event reached ingest,
-  // matched (an events row) or not (a visible drop-log row). This remains
-  // global to the org, not the current search or cursor page.
-  const [lastDropRow] = await db
-    .select({ at: eventDropLog.createdAt })
-    .from(eventDropLog)
-    .where(and(...visibleDropConditions))
-    .orderBy(desc(eventDropLog.createdAt), desc(eventDropLog.id))
-    .limit(1);
-  const lastEventRow = await db
-    .select({ at: events.receivedAt })
-    .from(events)
-    .where(eq(events.orgId, user.orgId))
-    .orderBy(desc(events.receivedAt))
-    .limit(1);
-  const candidates = [lastDropRow?.at, lastEventRow[0]?.at].filter(
-    (v): v is number => typeof v === "number",
-  );
-  const lastEventAt = candidates.length > 0 ? Math.max(...candidates) : null;
-
-  const resp: ListEventDropsResponse = {
-    drops: page.map((r) => ({ id: r.id, reason: r.reason, detail: r.detail, createdAt: r.createdAt })),
-    nextCursor,
-    previousCursor,
-    lastEventAt,
+    windowDays: EVENT_LOG_WINDOW_MS / (24 * 60 * 60 * 1000),
   };
   return c.json(resp);
 });

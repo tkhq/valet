@@ -25,8 +25,14 @@ and a reader then sees two small inconsistencies instead of one pattern.
   When a second feature needs the same thing, move it to `primitives/` (or to a
   shared folder) in that change, and switch both callers to it.
 - **One layout for one kind of list.** Rows in one list share one row
-  component. The work lists on the dashboard all render through `WorkRow`:
-  a title link, an optional status, the time, and optional detail and actions.
+  component. Work lists render through `WorkRow` inside `WorkList` or
+  `WorkSection`: a title link, an optional badge and status mark, optional
+  detail, and a right-hand column with actions and then the time.
+- **One box, one inset, one column.** A boxed surface uses `cardClass` (or
+  `Card`) and starts its content 20px in (`px-5`), the line `WorkRow` titles
+  use. A page uses `pageClass` for its width and gutters, so page titles and
+  cards start on the same line on every page. Filters with a few choices use
+  `FilterChips`; tabs use `TabBar`.
 - **Links are not buttons.** Style a text link with `textLinkClass` on a router
   `Link` or an `<a>`. Use `Button asChild` only when a link must look like a
   button.

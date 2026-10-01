@@ -3,9 +3,10 @@ import { Link } from "@tanstack/react-router";
 import type { ListEventReceiptsResponse } from "@valet/api/wire";
 import { useEventReceipts } from "~/api/events";
 import { useMe } from "~/api/settings";
-import { Badge, Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, cardClass } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import { SearchInput } from "~/components/search-input";
+import { cn } from "~/lib/cn";
 
 type Receipt = ListEventReceiptsResponse["receipts"][number];
 
@@ -68,7 +69,7 @@ export function ReceiptsPanel() {
     {receiptsQ.isPending && <LoadingRow label="Loading incoming events…" />}
     {receiptsQ.error && <ErrorRow>Could not load delivery receipts. <button className="underline" onClick={() => void receiptsQ.refetch()}>Retry</button>{cursor && <> or <button className="underline" onClick={() => setCursors([])}>Return to the first page</button>.</>}</ErrorRow>}
     {data?.receipts.length === 0 && <EmptyRow>{query ? "No receipts match this search in the last 7 days." : "No receipts recorded in the last 7 days. Check the provider’s delivery logs for missing events."}</EmptyRow>}
-    {data && data.receipts.length > 0 && <ul className="divide-y divide-line rounded-lg border border-line bg-paper">{data.receipts.map(receipt => <ReceiptRow key={receipt.id} receipt={receipt} />)}</ul>}
+    {data && data.receipts.length > 0 && <ul className={cn(cardClass, "divide-y divide-line")}>{data.receipts.map(receipt => <ReceiptRow key={receipt.id} receipt={receipt} />)}</ul>}
     <nav aria-label="Incoming event pages" className="flex gap-2">
       <Button variant="secondary" disabled={!cursor || receiptsQ.isFetching} onClick={() => setCursors(previous => previous.slice(0, -1))}>Previous</Button>
       <Button variant="secondary" disabled={!data?.nextCursor || receiptsQ.isFetching} onClick={() => { const next = data?.nextCursor; if (next) setCursors(previous => [...previous, next]); }}>Next</Button>

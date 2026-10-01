@@ -2,7 +2,8 @@ import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
-import { budgetBriefingEvidence, collectWorkspaceBriefingSources, slackUrlForThreadKey, type BriefingEvidence } from "./workspace-briefing-sources.js";
+import { budgetBriefingEvidence, collectWorkspaceBriefingSources, type BriefingEvidence } from "./workspace-briefing-sources.js";
+import { slackThreadUrl } from "./channel-messages.js";
 import { briefingModelSpec, defaultBriefingSummarizer, createBriefingGenerator, withoutInternalIds, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
 
 const user = { type: "user" as const, id: "local-user" };
@@ -77,10 +78,10 @@ describe("workspace briefing synthesis", () => {
     expect(brief.originUrl).toBe("https://slack.com/archives/C1/p1700000000000100");
   });
   it("builds a Slack permalink only from a Slack thread key", () => {
-    expect(slackUrlForThreadKey("slack:C0123:1700000000.000100")).toBe("https://slack.com/archives/C0123/p1700000000000100");
-    expect(slackUrlForThreadKey("web:abc")).toBeUndefined();
-    expect(slackUrlForThreadKey("slack:C0123:not-a-ts")).toBeUndefined();
-    expect(slackUrlForThreadKey(null)).toBeUndefined();
+    expect(slackThreadUrl("slack:C0123:1700000000.000100")).toBe("https://slack.com/archives/C0123/p1700000000000100");
+    expect(slackThreadUrl("web:abc")).toBeUndefined();
+    expect(slackThreadUrl("slack:C0123:not-a-ts")).toBeUndefined();
+    expect(slackThreadUrl(null)).toBeUndefined();
   });
   it("coalesces identical requests and binds the cache to full evidence, org and owner", async () => {
     let release: ((value: string) => void) | undefined;

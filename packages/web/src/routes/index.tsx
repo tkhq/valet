@@ -4,8 +4,9 @@ import { MemoryCard } from "~/components/assistant/memory-card";
 import { WorkspaceCatchUp } from "~/components/dashboard/workspace-catch-up";
 import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamDashboard } from "~/components/dashboard/team-dashboard";
-import { Spinner } from "~/components/primitives";
+import { Spinner, pageClass } from "~/components/primitives";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { cn } from "~/lib/cn";
 
 /** Home follows the workspace switcher and shows the personal or team activity dashboard. */
 export const Route = createFileRoute("/")({
@@ -52,7 +53,7 @@ export function Dashboard() {
 function DashboardBody() {
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-8">
+      <div className={cn(pageClass, "space-y-8")}>
         <header><h1 className="font-display text-2xl">Personal</h1><p className="mt-1 text-sm text-muted">Your briefing: what needs attention, what finished, and what comes next.</p></header>
         <WorkspaceCatchUp />
         <div className="grid gap-4 md:grid-cols-2">

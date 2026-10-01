@@ -959,9 +959,11 @@ export interface ChannelDetailResponse {
   messages: ChannelMessage[];
 }
 
-/** `GET /api/sessions/:id/threads/:threadId/channel-messages`, newest first. */
-export interface ListThreadChannelMessagesResponse {
-  messages: ChannelMessage[];
+/** `GET /api/sessions/:id/threads/:threadId/channel-activity`. */
+export interface ThreadChannelActivity {
+  /** Messages this thread sent to, and received from, its channel. */
+  total: number;
+  latest: ChannelMessage | null;
 }
 
 export interface ThreadPullRequest {
@@ -4676,10 +4678,6 @@ export interface EventSummaryWire {
   receivedAt: number;
 }
 
-export interface ListEventsResponse {
-  events: EventSummaryWire[];
-}
-
 export interface EventDeliveryWire {
   id: string;
   subscriptionId: string;
@@ -4712,18 +4710,6 @@ export interface GetEventResponse {
   deliveries: EventDeliveryWire[];
 }
 
-/** One `event_drop_log` row — an event that arrived but did not become a feed
- * row. `detail` names the corrective action; no payload is retained. */
-export interface EventDropWire {
-  id: string;
-  reason: string;
-  detail: string;
-  createdAt: number;
-}
-
-/** `GET /api/events/drops` — recent drops plus the last time ANY event reached
- * ingest (matched or not), so the Problems tab can tell "nothing arrived" from
- * "arrived but matched nothing". */
 /** One row of the Events Log: a stored event, or a recorded problem. */
 export type EventLogStatus = "delivered" | "pending" | "failed" | "filtered" | "no_match" | "rejected";
 
@@ -4749,17 +4735,8 @@ export interface EventLogResponse {
   nextCursor: string | null;
   /** When anything last reached ingest, matched or not. */
   lastEventAt: number | null;
-  /** Days of events a workspace-scoped Log covers. Null for the whole org. */
-  windowDays: number | null;
-}
-
-export interface ListEventDropsResponse {
-  drops: EventDropWire[];
-  /** Opaque cursor for the next older page, or null at the end. */
-  nextCursor: string | null;
-  /** Opaque cursor for the previous newer page, or null at the start. */
-  previousCursor: string | null;
-  lastEventAt: number | null;
+  /** Days of the workspace's events the Log covers. */
+  windowDays: number;
 }
 
 // ── REST: changelog ────────────────────────────────────────────────────

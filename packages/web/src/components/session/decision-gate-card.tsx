@@ -13,9 +13,10 @@
 import { useState } from "react";
 import { AlertTriangle, HelpCircle, KeyRound, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
-import { Badge, Button, Spinner, Textarea, Tooltip } from "~/components/primitives";
+import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
 import { useMe } from "~/api/settings";
+import { cn } from "~/lib/cn";
 
 // The gate action id the policy resolver offers on a `require_approval`
 // decision that grants an org-wide `allow` policy going forward — the API
@@ -75,7 +76,7 @@ export function DecisionGateCard({
 
   return (
     <div
-      className="mx-3 mt-3 rounded-lg border border-line bg-paper"
+      className={cn(cardClass, "mx-3 mt-3")}
       role="dialog"
       aria-live="polite"
       aria-labelledby={`gate-${gate.id}-title`}

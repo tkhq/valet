@@ -24,12 +24,13 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { WorkflowTemplateSummary } from "@valet/api/wire";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Spinner, cardClass } from "~/components/primitives";
 import { ServiceIcon } from "~/components/service-icon";
 import { useWorkflowTemplates } from "~/api/templates";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { InstallTemplateDialog } from "./install-template-dialog";
 import { describeCadence } from "./cadence";
+import { cn } from "~/lib/cn";
 import {
   connectLabel,
   isInstallable,
@@ -90,7 +91,7 @@ function TemplateCard({ template, refreshing }: { template: WorkflowTemplateSumm
   const scope = useWorkspaceScope();
 
   return (
-    <div className="flex min-w-0 flex-col break-words rounded-lg border border-line bg-paper p-4 transition-shadow hover:shadow-sm">
+    <div className={cn(cardClass, "flex min-w-0 flex-col break-words p-5 transition-shadow hover:shadow-sm")}>
       {template.requires.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-1.5">
           {/* Opacity for an unconnected service, not the grey `quiet` tile:

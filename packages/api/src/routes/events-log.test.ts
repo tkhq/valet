@@ -27,11 +27,13 @@ async function seed(a: TestApi) {
   ]);
 }
 
+const MINE = "ownerType=user&ownerId=local-user";
+
 async function log(a: TestApi, query = "", headers: Record<string, string> = {}) {
-  return await (await fetch(`${a.baseUrl}/api/events/log${query}`, { headers })).json() as EventLogResponse;
+  return await (await fetch(`${a.baseUrl}/api/events/log?${MINE}${query}`, { headers })).json() as EventLogResponse;
 }
 
-it("merges events and problems newest first, each with one status", async () => {
+it("merges the workspace's events and the org's problems newest first, each with one status", async () => {
   api = await bootTestApi();
   await seed(api);
   const body = await log(api);
@@ -39,36 +41,53 @@ it("merges events and problems newest first, each with one status", async () => 
     ["ev_ok", "delivered"], ["drop_filter", "filtered"], ["ev_bad", "failed"], ["drop_form", "rejected"],
   ]);
   expect(body.lastEventAt).toBeTypeOf("number");
-  expect(body.windowDays).toBeNull();
+  expect(body.windowDays).toBe(30);
 });
 
-it("narrows to one status and searches both kinds", async () => {
+it("keeps only problems and failed events, and searches both kinds", async () => {
   api = await bootTestApi();
   await seed(api);
-  expect((await log(api, "?status=failed")).items.map((item) => item.id)).toEqual(["ev_bad"]);
-  expect((await log(api, "?status=filtered")).items.map((item) => item.id)).toEqual(["drop_filter"]);
-  expect((await log(api, "?q=did%20not")).items.map((item) => item.id)).toEqual(["drop_filter"]);
-  expect((await fetch(`${api.baseUrl}/api/events/log?status=bogus`)).status).toBe(400);
+  expect((await log(api, "&problems=1")).items.map((item) => item.id)).toEqual(["drop_filter", "ev_bad", "drop_form"]);
+  expect((await log(api, "&q=did%20not")).items.map((item) => item.id)).toEqual(["drop_filter"]);
+  expect((await fetch(`${api.baseUrl}/api/events/log`)).status).toBe(400);
 });
 
 it("pages the merged list with one cursor, and refuses it under other filters", async () => {
   api = await bootTestApi();
   await seed(api);
-  const first = await log(api, "?limit=2");
+  const first = await log(api, "&limit=2");
   expect(first.items.map((item) => item.id)).toEqual(["ev_ok", "drop_filter"]);
   expect(first.nextCursor).toBeTruthy();
-  const second = await log(api, `?limit=2&cursor=${encodeURIComponent(first.nextCursor!)}`);
+  const second = await log(api, `&limit=2&cursor=${encodeURIComponent(first.nextCursor!)}`);
   expect(second.items.map((item) => item.id)).toEqual(["ev_bad", "drop_form"]);
   expect(second.nextCursor).toBeNull();
-  expect((await fetch(`${api.baseUrl}/api/events/log?status=failed&cursor=${encodeURIComponent(first.nextCursor!)}`)).status).toBe(400);
+  expect((await fetch(`${api.baseUrl}/api/events/log?${MINE}&problems=1&cursor=${encodeURIComponent(first.nextCursor!)}`)).status).toBe(400);
 });
 
-it("scopes events to a workspace and hides form diagnostics from members", async () => {
+it("keeps other workspaces' events out, and hides form diagnostics from members", async () => {
   api = await bootTestApi();
   await seed(api);
-  const scoped = await log(api, "?ownerType=team&ownerId=other");
-  expect(scoped.items.map((item) => item.kind)).toEqual(["problem", "problem"]);
-  expect(scoped.windowDays).toBe(30);
-  const member = await log(api, "", { "x-valet-test-user-id": "test-member" });
+  const other = await (await fetch(`${api.baseUrl}/api/events/log?ownerType=team&ownerId=other`)).json() as EventLogResponse;
+  expect(other.items.map((item) => item.kind)).toEqual(["problem", "problem"]);
+  const member = await (await fetch(`${api.baseUrl}/api/events/log?ownerType=user&ownerId=test-member`, { headers: { "x-valet-test-user-id": "test-member" } })).json() as EventLogResponse;
   expect(member.items.map((item) => item.id)).not.toContain("drop_form");
+});
+
+it("includes events an org-owned rule received, skips other orgs, and looks back 30 days", async () => {
+  api = await bootTestApi();
+  const now = Date.now();
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_org", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Org rule",
+    eventKeys: ["github.push"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  const event = (id: string, orgId: string, at: number) => ({
+    id, orgId, service: "github", eventKey: "github.push", dedupeKey: id, refs: {}, summary: id, payload: {}, occurredAt: at, receivedAt: at,
+  });
+  await api.providers.db.insert(events).values([
+    event("ev_org", "local-org", now - 1_000), event("ev_old", "local-org", now - 31 * 86_400_000), event("ev_foreign", "other-org", now),
+  ]);
+  await api.providers.db.insert(eventDeliveries).values(["ev_org", "ev_old", "ev_foreign"].map((eventId) => ({
+    id: `d_${eventId}`, eventId, subscriptionId: "sub_org", status: "delivered" as const, attempts: 1, nextAttemptAt: 0, createdAt: now,
+  })));
+  expect((await log(api)).items.map((item) => item.id)).toEqual(["ev_org"]);
 });

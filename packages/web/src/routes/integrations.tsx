@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
-import { Spinner } from "~/components/primitives";
+import { Spinner, pageClass } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
 import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
@@ -133,7 +133,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <h1 className="font-display text-2xl text-ink">Integrations</h1>
 
         {/* The live region is on the page from the first paint, and stays

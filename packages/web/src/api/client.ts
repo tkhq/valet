@@ -13,7 +13,7 @@ import type {
   WorkspaceBriefingsResponse,
   ListChannelsResponse,
   ChannelDetailResponse,
-  ListThreadChannelMessagesResponse,
+  ThreadChannelActivity,
   DismissWorkspaceBriefingResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -204,7 +204,6 @@ import type {
   GetEventCatalogResponse,
   GetEventResponse,
   EventLogResponse,
-  EventLogStatus,
   ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
@@ -239,7 +238,6 @@ import type {
   WithdrawDecisionRequest,
   ListCommandsResponse,
   ProxyUsageSummary,
-  ProxyRequestDetail,
   ProxyRequestListResponse,
   ProxySettingsResponse,
   UsageBreakdownResponse,
@@ -577,8 +575,8 @@ export const api = {
     request<ListChannelsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channels`),
   getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
     request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
-  listThreadChannelMessages: (sessionId: string, threadId: string) =>
-    request<ListThreadChannelMessagesResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/channel-messages`),
+  getThreadChannelActivity: (sessionId: string, threadId: string) =>
+    request<ThreadChannelActivity>("GET", `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/channel-activity`),
   dismissWorkspaceBriefing: (owner: OwnerFilter, briefingId: string) =>
     request<DismissWorkspaceBriefingResponse>("POST", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings/${encodeURIComponent(briefingId)}/dismiss`),
   listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
@@ -1059,10 +1057,9 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  getEventLog: (params: { owner?: OwnerFilter; status?: EventLogStatus; q?: string; cursor?: string }) => {
-    const qs = new URLSearchParams();
-    if (params.owner) { qs.set("ownerType", params.owner.ownerType); qs.set("ownerId", params.owner.ownerId); }
-    if (params.status) qs.set("status", params.status);
+  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; q?: string; cursor?: string }) => {
+    const qs = new URLSearchParams({ ownerType: params.owner.ownerType, ownerId: params.owner.ownerId });
+    if (params.problems) qs.set("problems", "1");
     if (params.q) qs.set("q", params.q);
     if (params.cursor) qs.set("cursor", params.cursor);
     return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
@@ -1560,8 +1557,6 @@ export const api = {
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`);
   },
-  proxyRequestDetail: (id: string) =>
-    request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),
   proxySettings: () =>
     request<ProxySettingsResponse>("GET", "/proxy/settings"),
   setProxyMode: (mode: "centralized" | "passthrough") =>

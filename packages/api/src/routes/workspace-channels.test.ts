@@ -4,7 +4,7 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { eq } from "drizzle-orm";
 import { channelMessages, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
 import { recordActionChannelMessage, recordChannelMessage, threadKeyForPullRequest } from "../services/channel-messages.js";
-import type { ChannelDetailResponse, ListChannelsResponse, ListThreadChannelMessagesResponse, ListThreadsResponse } from "../wire/types.js";
+import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -49,8 +49,8 @@ it("lists a workspace's Slack channel with its listener, thread, and messages, a
   expect(threads.threads.find((t) => t.id === thread.id)?.channel).toEqual({
     key: "slack:CENG", provider: "slack", conversationUrl: "https://slack.com/archives/CENG/p17001",
   });
-  const own = await (await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/channel-messages`)).json() as ListThreadChannelMessagesResponse;
-  expect(own.messages.map((m) => m.text)).toEqual(["Is staging up?"]);
+  const activity = await (await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads/${thread.id}/channel-activity`)).json() as ThreadChannelActivity;
+  expect(activity).toMatchObject({ total: 1, latest: { text: "Is staging up?", author: "Dana" } });
 
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("slack:COTHER")}`)).status).toBe(404);
   expect((await fetch(`${api.baseUrl}/api/workspaces/user/channel`)).status).toBe(400);

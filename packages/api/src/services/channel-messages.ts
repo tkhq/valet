@@ -9,6 +9,7 @@ import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { channelMessages } from "../schema/index.js";
 import { resolveGithubUrl } from "./github-env.js";
+import type { ThreadChannelActivity } from "../wire/types.js";
 
 export type ChannelProvider = "slack" | "github";
 
@@ -39,14 +40,27 @@ export function parseChannelKey(key: string): ParsedChannelKey | null {
   return null;
 }
 
+/** The parts of a Slack engine thread key (`slack:C123:<thread ts>`), DMs included. */
+function slackThreadParts(key: string | null | undefined): { channelId: string; threadTs: string } | null {
+  const match = /^slack:([^:]+):([^:]+)$/.exec(key ?? "");
+  if (!match || !SLACK_CHANNEL.test(match[1]!) || !/^\d+\.\d+$/.test(match[2]!)) return null;
+  return { channelId: match[1]!, threadTs: match[2]! };
+}
+
 /**
- * The Slack conversation an engine thread key names (`slack:C123:<thread ts>`).
- * A DM (`D…`) is a personal conversation, not a channel, so it reads as null.
+ * The Slack conversation an engine thread key names. A DM (`D…`) is a
+ * personal conversation, not a channel, so it reads as null.
  */
 export function slackConversationFromThreadKey(key: string | null | undefined): { channelId: string; threadTs: string } | null {
-  const match = /^slack:([^:]+):([^:]+)$/.exec(key ?? "");
-  if (!match || !SLACK_CHANNEL.test(match[1]!) || match[1]!.startsWith("D")) return null;
-  return { channelId: match[1]!, threadTs: match[2]! };
+  const parts = slackThreadParts(key);
+  return parts && !parts.channelId.startsWith("D") ? parts : null;
+}
+
+/** Where a Slack engine thread key opens in Slack, DMs included. Slack routes a
+ * signed-in reader to the right workspace, so the team id is not needed. */
+export function slackThreadUrl(key: string | null | undefined): string | undefined {
+  const parts = slackThreadParts(key);
+  return parts ? slackMessageUrl(parts.channelId, parts.threadTs) : undefined;
 }
 
 /** A Slack message permalink. With `threadTs`, a reply opens inside its thread. */
@@ -239,32 +253,21 @@ export function actionChannelMessage(record: ActionRecord, threadKey: string | n
   return null;
 }
 
-export interface ChannelMessageRow {
-  id: string;
-  sessionId: string;
-  threadId: string;
-  channelKey: string;
-  conversationKey: string;
-  direction: "in" | "out";
-  author: string | null;
-  text: string | null;
-  url: string | null;
-  createdAt: number;
-}
-
-/** One thread's channel messages, newest first. */
-export async function listThreadChannelMessages(
-  db: AppDb, sessionId: string, threadId: string, limit = 20,
-): Promise<ChannelMessageRow[]> {
-  return await db.select({
-    id: channelMessages.id, sessionId: channelMessages.sessionId, threadId: channelMessages.threadId,
-    channelKey: channelMessages.channelKey, conversationKey: channelMessages.conversationKey,
-    direction: channelMessages.direction, author: channelMessages.author, text: channelMessages.text,
-    url: channelMessages.url, createdAt: channelMessages.createdAt,
-  }).from(channelMessages)
-    .where(and(eq(channelMessages.sessionId, sessionId), eq(channelMessages.threadId, threadId)))
-    .orderBy(desc(channelMessages.createdAt))
-    .limit(limit);
+/**
+ * How much one thread has talked in its channel: the message count and the
+ * newest message. A fixed-size summary, so a long thread costs one row.
+ */
+export async function threadChannelActivity(db: AppDb, sessionId: string, threadId: string): Promise<ThreadChannelActivity> {
+  const scope = and(eq(channelMessages.sessionId, sessionId), eq(channelMessages.threadId, threadId));
+  const [counted] = await db.select({ total: sql<number>`count(*)::int` }).from(channelMessages).where(scope);
+  const [latest] = await db.select().from(channelMessages).where(scope).orderBy(desc(channelMessages.createdAt)).limit(1);
+  return {
+    total: Number(counted?.total ?? 0),
+    latest: latest ? {
+      id: latest.id, sessionId: latest.sessionId, threadId: latest.threadId, channelKey: latest.channelKey,
+      direction: latest.direction, author: latest.author, text: latest.text, url: latest.url, createdAt: latest.createdAt,
+    } : null,
+  };
 }
 
 /**

@@ -4,25 +4,13 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { WorkspaceBriefingSource } from "../wire/types.js";
 import { sharedThreadKey } from "./thread-read-state.js";
 import { listWorkspaceOutcomes } from "./workspace-outcomes.js";
+import { slackThreadUrl } from "./channel-messages.js";
 
 export interface BriefingEvidence {
   source: WorkspaceBriefingSource;
   content: string;
   state: "needs_attention" | "in_progress" | "updated";
 }
-/** A Slack permalink for a thread root. Slack routes a signed-in reader to
- * the right workspace, so the team id is not needed. */
-export function slackThreadUrl(channel: string, ts: string): string | undefined {
-  if (!/^[A-Z0-9]+$/.test(channel) || !/^\d+\.\d+$/.test(ts)) return undefined;
-  return `https://slack.com/archives/${channel}/p${ts.replace(".", "")}`;
-}
-
-/** The Slack thread an engine thread key names (`slack:{channel}:{thread_ts}`). */
-export function slackUrlForThreadKey(key: string | null | undefined): string | undefined {
-  const match = /^slack:([^:]+):([^:]+)$/.exec(key ?? "");
-  return match ? slackThreadUrl(match[1]!, match[2]!) : undefined;
-}
-
 interface ThreadRow {
   session_id: string; thread_id: string; thread_key: string | null; title: string; updated_at: number | string;
   role: string; text: string; message_at: number | string;
@@ -126,7 +114,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
     const id = `thread:${row.session_id}:${row.thread_id}`;
     let evidence = threads.get(id);
     if (!evidence) {
-      const originUrl = slackUrlForThreadKey(row.thread_key);
+      const originUrl = slackThreadUrl(row.thread_key);
       evidence = { source: { id, kind: "thread", title: row.title, updatedAt: Number(row.updated_at), sessionId: row.session_id, threadId: row.thread_id,
         ...(originUrl ? { originUrl } : {}) },
         content: "", state: row.needs_attention ? "needs_attention" : row.in_progress ? "in_progress" : "updated" };
@@ -141,7 +129,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
     // A run started from a conversation reports into it; a run a Slack
     // event started links back to that Slack thread.
     const originUrl = row.event_key?.startsWith("slack.") && row.event_channel && row.event_ts
-      ? slackThreadUrl(row.event_channel, row.event_ts) : undefined;
+      ? slackThreadUrl(`slack:${row.event_channel}:${row.event_ts}`) : undefined;
     candidates.push({ source: { id: `workflow:${row.id}`, kind: "workflow", title: row.title, updatedAt: Number(row.updated_at), runId: row.id,
       ...(row.origin_session_id && row.origin_thread_id ? { sessionId: row.origin_session_id, threadId: row.origin_thread_id } : {}),
       ...(originUrl ? { originUrl } : {}) },

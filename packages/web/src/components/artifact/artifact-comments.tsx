@@ -11,9 +11,10 @@ import { useState } from "react";
 import { MessageSquare, Send, X } from "lucide-react";
 import type { ArtifactCommentWire } from "@valet/api/wire";
 import type { ArtifactAnchorRect } from "@valet/shared";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Spinner, cardClass } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import type { ArtifactPick } from "./artifact-frame";
+import { cn } from "~/lib/cn";
 
 export interface ThreadView {
   root: ArtifactCommentWire;
@@ -109,7 +110,7 @@ export function CommentComposer({
 
   return (
     <div
-      className="absolute z-20 w-[340px] rounded-lg border border-line bg-paper p-3 shadow-xl"
+      className={cn(cardClass, "absolute z-20 w-[340px] p-3 shadow-xl")}
       style={{ top, left }}
     >
       <div className="mb-2 flex items-center justify-between">

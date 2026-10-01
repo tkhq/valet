@@ -4,13 +4,14 @@ import { Ear } from "lucide-react";
 import type { ChannelDetailResponse, ChannelListener, ChannelMessage, EventSubscriptionWire } from "@valet/api/wire";
 import { useWorkspaceChannel } from "~/api/channels";
 import { useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
-import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection, textLinkClass } from "~/components/primitives";
+import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, StatusDot, WorkRow, WorkSection, textLinkClass, cardClass, pageClass } from "~/components/primitives";
 import { ChannelIcon, ProviderLink } from "~/components/channels/channel-parts";
 import { EditSubscriptionDialog } from "~/components/events/edit-subscription-dialog";
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { TeamSlackSetupModal } from "~/components/events/team-slack-setup";
 import { useListOwner } from "~/lib/use-list-owner";
 import { textParam } from "~/lib/search-params";
+import { cn } from "~/lib/cn";
 
 /**
  * `/channel?key=slack:C123` — one channel: who listens there, the Valet
@@ -28,7 +29,7 @@ function ChannelPage() {
   const channel = useWorkspaceChannel(owner, key);
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <Link to="/events" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
           ← Channels
         </Link>
@@ -53,7 +54,7 @@ export function ChannelBody({ data }: { data: ChannelDetailResponse }) {
         {channel.url && <ProviderLink provider={channel.provider} href={channel.url} className="ml-auto" />}
       </header>
 
-      {channel.provider === "slack" && <Listeners listeners={channel.listeners} />}
+      {channel.provider === "slack" && <Listening listeners={channel.listeners} />}
       {channel.provider === "github" && (
         <p className="text-sm text-muted">
           Comments and reviews on this pull request go to the thread that opened it. Valet answers with a pull request comment.
@@ -95,50 +96,48 @@ function MessageRow({ message, provider }: { message: ChannelMessage; provider: 
   );
 }
 
-function Listeners({ listeners }: { listeners: ChannelListener[] }) {
+/**
+ * Whether this workspace's Valet listens here. A workspace has one Valet, so
+ * this is one line with its controls, not a list; another workspace's Valet
+ * that also listens is noted under it.
+ */
+function Listening({ listeners }: { listeners: ChannelListener[] }) {
   const owner = useListOwner();
   const subscriptions = useEventSubscriptions(owner);
   const patch = usePatchEventSubscription();
   const [editing, setEditing] = useState<EventSubscriptionWire>();
   const [setup, setSetup] = useState(false);
   const team = owner?.ownerType === "team" ? owner.ownerId : undefined;
-  const own = listeners.some((listener) => listener.editable);
+  const own = listeners.find((listener) => listener.editable);
+  const rule = own ? subscriptions.data?.subscriptions.find((candidate) => candidate.id === own.subscriptionId) : undefined;
+  const others = [...new Set(listeners.filter((listener) => !listener.editable).map((listener) => `${listener.ownerName}'s Valet`))];
   return (
-    <WorkSection
-      title="Who listens"
-      icon={<Ear aria-hidden className="h-4 w-4 text-moss" />}
-      count={listeners.length}
-      actions={team || !own ? <Button size="sm" variant={own ? "secondary" : "primary"} onClick={() => setSetup(true)}>
-        <Ear aria-hidden className="h-4 w-4" />{own ? "Edit channels" : "Listen here"}
-      </Button> : undefined}
-    >
-      {listeners.length === 0 && (
-        <EmptyRow className="px-4 py-3">No Valet listens here. A mention reaches Valet only when a rule routes it. Choose Listen here to add one.</EmptyRow>
-      )}
-      {listeners.map((listener) => {
-        const sub = subscriptions.data?.subscriptions.find((candidate) => candidate.id === listener.subscriptionId);
-        return (
-          <WorkRow
-            key={listener.subscriptionId}
-            title={listener.editable && listener.ownerType === "user" ? "Your Valet" : `${listener.ownerName}'s Valet`}
-            badge={listener.everywhere ? <Badge>Every channel</Badge> : undefined}
-            detail={listener.everywhere
-              ? "Answers mentions in every channel the Valet bot is in."
-              : "Answers mentions here and follows each thread it joins."}
-            actions={listener.editable && sub ? <>
-              <Button size="sm" variant="ghost" onClick={() => setEditing(sub)}>Edit</Button>
-              <Button size="sm" variant="ghost" disabled={patch.isPending}
-                onClick={() => patch.mutate({ id: sub.id, body: { enabled: false } })}>Pause</Button>
-            </> : undefined}
-          />
-        );
-      })}
+    <section aria-label="Listening" className={cn(cardClass)}>
+      <WorkRow
+        leading={<StatusDot tone={own ? "success" : "neutral"} label={own ? "Listening" : "Not listening"} />}
+        title={own ? "Valet is listening here" : "Valet is not listening here"}
+        detail={own
+          ? own.everywhere ? "It answers mentions in every channel the Valet bot is in." : "It answers mentions here and follows each thread it joins."
+          : "A mention here does not reach this workspace."}
+        actions={<>
+          {own && rule && <>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(rule)}>Edit</Button>
+            <Button size="sm" variant="ghost" disabled={patch.isPending} onClick={() => patch.mutate({ id: rule.id, body: { enabled: false } })}>Pause</Button>
+          </>}
+          {(!own || team) && (
+            <Button size="sm" variant={own ? "secondary" : "primary"} onClick={() => setSetup(true)}>
+              <Ear aria-hidden className="h-4 w-4" />{own ? "Edit channels" : "Listen here"}
+            </Button>
+          )}
+        </>}
+      />
+      {others.length > 0 && <p className="border-t border-line px-4 py-2 text-xs text-muted">Also listening: {others.join(", ")}.</p>}
       {editing && (
         <EditSubscriptionDialog open onOpenChange={(open) => { if (!open) setEditing(undefined); }} sub={editing}
           targetLabel="Replies in the thread as this workspace's Valet" />
       )}
       {setup && team && <TeamSlackSetupModal teamId={team} onOpenChange={setSetup} />}
       {setup && !team && <AutomationWizard open onOpenChange={setSetup} />}
-    </WorkSection>
+    </section>
   );
 }

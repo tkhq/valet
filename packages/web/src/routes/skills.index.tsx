@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useCatalogOwner } from "~/lib/use-list-owner";
 import { useSkills } from "~/api/skills";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Spinner, pageClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import {
   readScopeFilter,
@@ -111,7 +111,7 @@ export function SkillsIndexPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="flex min-w-0 flex-wrap items-baseline gap-3">
             <h1 className="font-display text-2xl text-ink">Skills</h1>

@@ -1,7 +1,9 @@
 /**
- * The Events page Log: stored events and recorded problems (the drop log) in
- * one timeline, newest first, with one status per row. Each source is read in
- * keyset order and merged, so one cursor pages the combined list.
+ * The Events page Log: a workspace's stored events and the organization's
+ * recorded problems (the drop log) in one timeline, newest first, with one
+ * status per row. Each source is read in keyset order and merged, so one
+ * cursor pages the combined list. "Problems only" keeps failed events and
+ * every drop.
  */
 import { sql, type SQL } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
@@ -10,8 +12,6 @@ import type { EventLogItem, EventLogStatus } from "../wire/types.js";
 
 /** A workspace-scoped Log reaches this far back for events, like the old feed. */
 export const EVENT_LOG_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-
-export const EVENT_LOG_STATUSES: readonly EventLogStatus[] = ["delivered", "pending", "failed", "filtered", "no_match", "rejected"];
 
 /** Drop reasons that mean the event never reached a subscription on purpose. */
 const REJECTED_REASONS = [
@@ -28,16 +28,6 @@ export function dropStatus(reason: string): EventLogStatus {
   return "failed";
 }
 
-function dropStatusSql(status: EventLogStatus): SQL | null {
-  if (status === "filtered") return sql`reason = 'filter_excluded'`;
-  if (status === "no_match") return sql`reason = 'no_subscription_match'`;
-  if (status === "rejected") return sql`reason IN (${sql.join(REJECTED_REASONS.map((r) => sql`${r}`), sql`, `)})`;
-  if (status === "failed") {
-    return sql`reason NOT IN (${sql.join([...REJECTED_REASONS, "filter_excluded", "no_subscription_match"].map((r) => sql`${r}`), sql`, `)})`;
-  }
-  return null;
-}
-
 /** An event's status from its deliveries: a failure wins, then work in flight. */
 const EVENT_STATUS = sql`CASE
   WHEN BOOL_OR(d.status IN ('failed','dead')) THEN 'failed'
@@ -48,11 +38,11 @@ const EVENT_STATUS = sql`CASE
 
 export interface EventLogQuery {
   orgId: string;
-  /** Null lists the whole org; a workspace sees events its rules (or the org's) received. */
-  owner: Principal | null;
+  /** Events reach the Log when this workspace's rules (or the org's) received them. */
+  owner: Principal;
   admin: boolean;
-  status?: EventLogStatus;
-  service?: string;
+  /** Only failed events and recorded problems. */
+  problemsOnly?: boolean;
   q?: string;
   before?: { at: number; id: string };
   limit: number;
@@ -64,25 +54,22 @@ function escapeLike(value: string): string {
 }
 
 export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ items: EventLogItem[]; hasMore: boolean }> {
-  const { orgId, owner, status, service, limit } = query;
+  const { orgId, owner, problemsOnly, limit } = query;
   const like = query.q ? `%${escapeLike(query.q)}%` : undefined;
   const take = limit + 1;
 
-  // Events: problem-only statuses never come from a stored event.
-  const wantEvents = !status || status === "delivered" || status === "pending" || status === "failed";
   const eventRows: EventLogItem[] = [];
-  if (wantEvents) {
-    const where: SQL[] = [sql`e.org_id = ${orgId}`];
-    if (owner) {
-      where.push(sql`e.received_at >= ${(query.now ?? Date.now()) - EVENT_LOG_WINDOW_MS}`);
-      where.push(sql`EXISTS (SELECT 1 FROM event_deliveries od JOIN event_subscriptions s ON s.id = od.subscription_id
+  {
+    const where: SQL[] = [
+      sql`e.org_id = ${orgId}`,
+      sql`e.received_at >= ${(query.now ?? Date.now()) - EVENT_LOG_WINDOW_MS}`,
+      sql`EXISTS (SELECT 1 FROM event_deliveries od JOIN event_subscriptions s ON s.id = od.subscription_id
         WHERE od.event_id = e.id AND s.org_id = ${orgId}
-          AND ((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org'))`);
-    }
-    if (service) where.push(sql`e.service = ${service}`);
+          AND ((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org'))`,
+    ];
     if (like) where.push(sql`(e.summary ILIKE ${like} ESCAPE '\\' OR e.event_key ILIKE ${like} ESCAPE '\\')`);
     if (query.before) where.push(sql`(e.received_at, e.id) < (${query.before.at}, ${query.before.id})`);
-    const having = status ? sql`HAVING ${EVENT_STATUS} = ${status}` : sql``;
+    const having = problemsOnly ? sql`HAVING ${EVENT_STATUS} = 'failed'` : sql``;
     const result = await db.execute(sql`
       SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries
       FROM events e LEFT JOIN event_deliveries d ON d.event_id = e.id
@@ -104,15 +91,11 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
     }
   }
 
-  // Problems: the drop log is org-wide, so it shows in every scope.
-  const wantProblems = !status || (status !== "delivered" && status !== "pending");
+  // Problems carry no owner, so the organization's are listed in every workspace.
   const problemRows: EventLogItem[] = [];
-  if (wantProblems) {
+  {
     const where: SQL[] = [sql`org_id = ${orgId}`];
     if (!query.admin) where.push(sql`reason NOT IN (${sql.join(ADMIN_ONLY_REASONS.map((r) => sql`${r}`), sql`, `)})`);
-    const statusSql = status ? dropStatusSql(status) : null;
-    if (statusSql) where.push(statusSql);
-    if (service) where.push(sql`event_key LIKE ${`${escapeLike(service)}.%`} ESCAPE '\\'`);
     if (like) where.push(sql`(reason ILIKE ${like} ESCAPE '\\' OR detail ILIKE ${like} ESCAPE '\\')`);
     if (query.before) where.push(sql`(created_at, id) < (${query.before.at}, ${query.before.id})`);
     const result = await db.execute(sql`

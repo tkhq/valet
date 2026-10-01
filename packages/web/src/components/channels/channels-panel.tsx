@@ -6,7 +6,7 @@
 import { Link } from "@tanstack/react-router";
 import type { ChannelSummary } from "@valet/api/wire";
 import { useWorkspaceChannels } from "~/api/channels";
-import { Badge, EmptyRow, ErrorRow, LoadingRow, WorkRow } from "~/components/primitives";
+import { Badge, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkList } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
 import { ChannelIcon, ProviderLink } from "./channel-parts";
 
@@ -24,9 +24,9 @@ export function ChannelsPanel() {
         <EmptyRow>No channels yet. Mention Valet in Slack, set a team to listen in a channel, or ask Valet to open a pull request.</EmptyRow>
       )}
       {channels.data && channels.data.channels.length > 0 && (
-        <div className="divide-y divide-line rounded-lg border border-line bg-paper">
+        <WorkList>
           {channels.data.channels.map((channel) => <ChannelRow key={channel.key} channel={channel} />)}
-        </div>
+        </WorkList>
       )}
     </div>
   );

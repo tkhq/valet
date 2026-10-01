@@ -5,7 +5,7 @@ import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Input, Label, Spinner } from "~/components/primitives";
+import { Badge, Button, Input, Label, Spinner, cardClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
 import {
@@ -227,7 +227,7 @@ function NewReviewCard() {
   }
 
   return (
-    <section className="min-w-0 rounded-lg border border-line bg-paper p-4 sm:p-5 space-y-5">
+    <section className={cn(cardClass, "min-w-0 p-5 space-y-5")}>
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-2 text-base font-semibold text-ink sm:text-sm"><ShieldCheck className="h-5 w-5 text-moss sm:hidden" aria-hidden />Start a review</h2>

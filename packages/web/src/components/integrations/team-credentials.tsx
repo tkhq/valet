@@ -1,10 +1,11 @@
 import { useState } from "react";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
-import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow, cardClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
+import { cn } from "~/lib/cn";
 
 /**
  * The verb for a removal control. One route serves both rows
@@ -89,7 +90,7 @@ export function TeamCredentials({
           const removal = removalLabels(row, team.name);
           return (
             <li key={row.service}>
-              <div className={cards ? "flex h-full flex-col rounded-lg border border-line bg-paper p-4" : "flex items-center justify-between gap-4 py-2"}>
+              <div className={cards ? cn(cardClass, "flex h-full flex-col p-5") : "flex items-center justify-between gap-4 py-2"}>
               <div className="min-w-0">
                 {cards ? <CardHeading title={row.service === "linear" ? "Linear MCP" : displayName(row.service)} slug={row.service} /> : <p className="truncate text-sm text-ink">{row.service === "linear" ? "Linear MCP" : displayName(row.service)}</p>}
                 <p className="text-xs text-muted">

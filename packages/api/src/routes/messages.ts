@@ -32,7 +32,7 @@ import type {
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
-  ListThreadChannelMessagesResponse,
+  ThreadChannelActivity,
   MarkThreadsReadRequest,
   Message,
   MessagePart,
@@ -68,7 +68,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { listThreadActivity, markThreadsRead, recheckOpenPullRequests } from "../services/thread-read-state.js";
 import { threadChannel } from "../services/channels.js";
-import { listThreadChannelMessages } from "../services/channel-messages.js";
+import { threadChannelActivity } from "../services/channel-messages.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -392,8 +392,8 @@ messagesRouter.get("/:id/threads", async (c) => {
   return c.json(body);
 });
 
-/** The channel messages one thread sent or received, newest first. */
-messagesRouter.get("/:id/threads/:threadId/channel-messages", async (c) => {
+/** How much one thread has talked in its channel: a count and the newest message. */
+messagesRouter.get("/:id/threads/:threadId/channel-activity", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
@@ -401,10 +401,7 @@ messagesRouter.get("/:id/threads/:threadId/channel-messages", async (c) => {
   if (!engineSession.listThreads().some((thread) => thread.id === threadId)) {
     return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
   }
-  const rows = await listThreadChannelMessages(c.var.providers.db, session.id, threadId);
-  const body: ListThreadChannelMessagesResponse = {
-    messages: rows,
-  };
+  const body: ThreadChannelActivity = await threadChannelActivity(c.var.providers.db, session.id, threadId);
   return c.json(body);
 });
 

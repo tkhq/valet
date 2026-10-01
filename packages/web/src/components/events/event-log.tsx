@@ -1,22 +1,22 @@
 /**
- * The Events Log: stored events and recorded problems in one timeline,
- * newest first. Status chips narrow it to one outcome; a stored event opens
- * its own page (deliveries, payload, redeliver). Admins also get the raw
- * incoming receipts behind their own chip, in place of the list.
+ * The Events Log: this workspace's stored events and the organization's
+ * recorded problems in one timeline, newest first. "Problems" keeps what went
+ * wrong; a stored event opens its own page (deliveries, payload, redeliver).
+ * Admins also get the raw incoming receipts behind their own chip, in place
+ * of the list.
  */
 import { Link } from "@tanstack/react-router";
 import type { EventLogItem, EventLogStatus } from "@valet/api/wire";
 import { useEventLog } from "~/api/events";
 import { useMe } from "~/api/settings";
-import { Badge, Button, EmptyRow, ErrorRow, FilterChips, LoadingRow, SelectMenu, StatusDot, WorkRow } from "~/components/primitives";
+import { Badge, Button, EmptyRow, ErrorRow, FilterChips, LoadingRow, StatusDot, WorkRow, WorkList } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
 import { problemStage, reasonLabel } from "~/lib/event-log-labels";
 import { ReceiptsPanel } from "./receipts-panel";
 
-export type LogScope = "workspace" | "all";
-export type LogFilter = "all" | Exclude<EventLogStatus, "pending"> | "receipts";
+export type LogFilter = "all" | "problems" | "receipts";
 
 const STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "warning" | "danger" | "neutral" | "accent"; tone: "success" | "warning" | "danger" | "neutral" | "info" }> = {
   delivered: { label: "Delivered", badge: "success", tone: "success" },
@@ -29,21 +29,10 @@ const STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "w
 
 const FILTERS: readonly { value: LogFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "delivered", label: "Delivered" },
-  { value: "failed", label: "Failed" },
-  { value: "filtered", label: "Filtered out" },
-  { value: "no_match", label: "No match" },
-  { value: "rejected", label: "Rejected" },
+  { value: "problems", label: "Problems" },
 ];
 
-const SCOPE_OPTIONS = [
-  { value: "workspace", label: "This workspace" },
-  { value: "all", label: "All" },
-] as const;
-
-export function EventLog({ scope, onScopeChange, filter, onFilterChange, query, onQueryChange }: {
-  scope: LogScope;
-  onScopeChange: (next: LogScope) => void;
+export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
   filter: LogFilter;
   onFilterChange: (next: LogFilter) => void;
   query: string;
@@ -53,13 +42,7 @@ export function EventLog({ scope, onScopeChange, filter, onFilterChange, query, 
   const admin = !me.error && me.data?.orgRole === "admin";
   const owner = useListOwner();
   const receipts = filter === "receipts" && admin;
-  const status = filter === "all" || filter === "receipts" ? undefined : filter;
-  // An owner-less request is the org-wide Log, so "This workspace" waits for the owner.
-  const canFetch = !receipts && (scope === "all" || owner !== undefined);
-  const log = useEventLog(
-    { ...(scope === "workspace" && owner ? { owner } : {}), ...(status ? { status } : {}), ...(query ? { q: query } : {}) },
-    { enabled: canFetch },
-  );
+  const log = useEventLog({ owner: receipts ? undefined : owner, problems: filter === "problems", ...(query ? { q: query } : {}) });
   const items = log.data?.pages.flatMap((page) => page.items) ?? [];
   const first = log.data?.pages[0];
 
@@ -72,34 +55,29 @@ export function EventLog({ scope, onScopeChange, filter, onFilterChange, query, 
         options={admin ? [...FILTERS, { value: "receipts", label: "Raw receipts" }] : FILTERS}
       />
       {receipts ? <ReceiptsPanel /> : <>
-        <div className="flex flex-wrap items-center gap-2">
-          <SearchInput
-            value={query}
-            onSettled={onQueryChange}
-            placeholder="Search events and problems"
-            aria-label="Search the log"
-            maxLength={200}
-            className="min-w-0 flex-1"
-          />
-          <SelectMenu value={scope} onChange={onScopeChange} options={SCOPE_OPTIONS}
-            triggerLabel={`Scope: ${scope === "all" ? "All" : "This workspace"}`} />
-        </div>
+        <SearchInput
+          value={query}
+          onSettled={onQueryChange}
+          placeholder="Search events and problems"
+          aria-label="Search the log"
+          maxLength={200}
+        />
         {first && (
           <p className="text-xs text-muted">
-            {first.lastEventAt ? `Last activity ${relativeTime(first.lastEventAt)}.` : "Nothing has arrived yet."}
-            {first.windowDays !== null && ` Events from the last ${first.windowDays} days that reached this workspace. Problems are listed for the whole organization.`}
+            {first.lastEventAt ? `Last activity ${relativeTime(first.lastEventAt)}. ` : "Nothing has arrived yet. "}
+            Events from the last {first.windowDays} days that reached this workspace, and problems from the whole organization.
           </p>
         )}
-        {!canFetch && me.isError && <ErrorRow>Could not load your workspace. Choose Scope: All to see every event.</ErrorRow>}
-        {log.isPending && canFetch && <LoadingRow label="Loading the log…" />}
+        {owner === undefined && me.isError && <ErrorRow>Could not load your workspace. Reload the page to try again.</ErrorRow>}
+        {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
         {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
         {log.data && items.length === 0 && (
-          <EmptyRow>{query || status ? "Nothing matches these filters. Choose All or clear the search." : "Nothing has arrived yet. Events and problems appear here as integrations report them."}</EmptyRow>
+          <EmptyRow>{query || filter === "problems" ? "Nothing matches. Choose All or clear the search." : "Nothing has arrived yet. Events and problems appear here as integrations report them."}</EmptyRow>
         )}
         {items.length > 0 && (
-          <div className="divide-y divide-line rounded-lg border border-line bg-paper">
+          <WorkList>
             {items.map((item) => <LogRow key={`${item.kind}:${item.id}`} item={item} />)}
-          </div>
+          </WorkList>
         )}
         {log.hasNextPage && (
           <Button variant="secondary" size="sm" disabled={log.isFetchingNextPage} onClick={() => void log.fetchNextPage()}>

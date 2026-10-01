@@ -15,7 +15,7 @@ import {
 import { WorkflowCreation } from "~/components/workflows/workflow-creation";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "~/components/primitives/dropdown-menu";
 import { OwnerBadge } from "~/components/owner-badge";
-import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner, TabBar } from "~/components/primitives";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
@@ -62,15 +62,13 @@ export function WorkflowsIndexPage() {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="min-w-0 border-b border-line px-4 pt-4 sm:px-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-            <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
-              Automation
-            </h1>
-            <WorkspaceClause />
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
+      <div className="min-w-0 border-b border-line">
+        <div className="mx-auto w-full max-w-5xl px-4 pt-6 sm:px-6 sm:pt-10">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h1 className="font-display text-2xl text-ink">Automation</h1>
+              <WorkspaceClause />
+            </div>
             <DropdownMenu>
               <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="Workflow options"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -79,36 +77,21 @@ export function WorkflowsIndexPage() {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-        </div>
-        <div role="tablist" className="mt-3 flex max-w-full gap-1 overflow-x-auto">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              onClick={() =>
-                void navigate({
-                  to: "/workflows",
-                  search: t.id === "workflows" ? {} : { tab: t.id },
-                })
-              }
-              className={`min-h-11 shrink-0 rounded-t px-2 py-1.5 sm:min-h-0 text-sm sm:px-3 border-b-2 ${
-                tab === t.id
-                  ? "border-ink font-medium text-ink"
-                  : "border-transparent text-muted hover:text-ink"
-              }`}
-            >
-              {t.label}
-
-            </button>
-          ))}
+          <div className="mt-6">
+            <TabBar
+              tabs={TABS}
+              active={tab}
+              label="Automation sections"
+              onSelect={(id) => void navigate({ to: "/workflows", search: id === "workflows" ? {} : { tab: id } })}
+            />
+          </div>
         </div>
       </div>
 
       <NewWorkflowDialog open={newOpen} onOpenChange={setNewOpen} />
       <ImportWorkflowDialog open={importOpen} onOpenChange={setImportOpen} />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4 sm:p-6">
+      <div className="mx-auto flex min-h-0 w-full min-w-0 max-w-5xl flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6">
         {tab === "workflows" && <WorkflowsTab creating={creating} onBegin={() => setCreating(true)} onBack={() => setCreating(false)} />}
         {tab === "scheduled" && <ScheduledTab reviewId={search.review} onReviewClose={() => void navigate({ to: "/workflows", search: { tab: "scheduled" } })} />}
       </div>

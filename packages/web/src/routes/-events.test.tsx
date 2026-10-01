@@ -118,9 +118,9 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/components/channels/channels-panel", () => ({ ChannelsPanel: () => <p>Channels list</p> }));
 
 /** The props the page last gave the Log. Its own behaviour is `event-log.test.tsx`'s. */
-let logProps: { scope: string; filter: string; query: string; onFilterChange: (next: string) => void } | undefined;
+let logProps: { filter: string; query: string; onFilterChange: (next: string) => void } | undefined;
 vi.mock("~/components/events/event-log", () => ({
-  EventLog: (props: { scope: string; filter: string; query: string; onFilterChange: (next: string) => void }) => {
+  EventLog: (props: { filter: string; query: string; onFilterChange: (next: string) => void }) => {
     logProps = props;
     return <p>Log list</p>;
   },
@@ -224,24 +224,24 @@ describe("EventsPage — Log", () => {
     for (const tab of ["activity", "logs", "problems"]) {
       expect(readEventsSearch({ tab }).tab).toBe("log");
     }
-    expect(readEventsSearch({ tab: "problems", problemsQ: "signature" }).q).toBe("signature");
+    expect(readEventsSearch({ tab: "problems", problemsQ: "signature" })).toEqual({ tab: "log", status: "problems", q: "signature" });
     expect(readEventsSearch({ tab: "receipts" })).toEqual({ tab: "log", status: "receipts" });
   });
 
-  it("passes the URL's scope, status, and search to the Log", () => {
-    searchState = { tab: "log", scope: "all", status: "failed", q: "slack" };
+  it("passes the URL's filter and search to the Log", () => {
+    searchState = { tab: "log", status: "problems", q: "slack" };
     render(<EventsPage />);
     expect(screen.getByRole("tab", { name: "Log" }).getAttribute("aria-selected")).toBe("true");
-    expect(logProps).toMatchObject({ scope: "all", filter: "failed", query: "slack" });
+    expect(logProps).toMatchObject({ filter: "problems", query: "slack" });
   });
 
-  it("writes a filter change to the URL and keeps the other filters", () => {
-    searchState = { tab: "log", scope: "all", q: "slack" };
+  it("writes a filter change to the URL and keeps the search", () => {
+    searchState = { tab: "log", q: "slack" };
     render(<EventsPage />);
-    logProps?.onFilterChange("rejected");
-    expect(searchState).toEqual({ tab: "log", scope: "all", status: "rejected", q: "slack" });
+    logProps?.onFilterChange("problems");
+    expect(searchState).toEqual({ tab: "log", status: "problems", q: "slack" });
     logProps?.onFilterChange("all");
-    expect(searchState).toEqual({ tab: "log", scope: "all", q: "slack" });
+    expect(searchState).toEqual({ tab: "log", q: "slack" });
   });
 
   it("writes tab changes to the URL so history restores the selected tab", async () => {

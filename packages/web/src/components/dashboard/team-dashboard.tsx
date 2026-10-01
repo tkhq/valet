@@ -4,15 +4,16 @@ import { useTeams } from "~/api/settings";
 import { useUsageBreakdown } from "~/api/usage";
 import { memoryStats } from "~/components/assistant/memory-card";
 import { TeamSlackSetupCard } from "~/components/events/team-slack-setup";
-import { Badge, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Badge, ErrorRow, LoadingRow, cardClass, pageClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { formatTokens, formatUsd } from "~/lib/format-usage";
 import { WorkspaceCatchUp } from "./workspace-catch-up";
+import { cn } from "~/lib/cn";
 
 export function TeamDashboard({ teamId }: { teamId: string }) {
   const teams = useTeams();
   const team = teams.error ? undefined : teams.data?.teams.find(row => row.id === teamId);
-  return <div className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-5xl space-y-8 px-4 py-6 sm:px-6 sm:py-8">
+  return <div className="min-w-0 flex-1 overflow-y-auto"><div className={cn(pageClass, "space-y-8")}>
     <header className="space-y-1"><div className="flex flex-wrap items-center gap-3"><h1 className="font-display text-2xl">{team?.name ?? "Team"}</h1>{team && <Badge variant="neutral">{team.memberCount} members</Badge>}</div><p className="text-sm text-muted">Your team’s briefing: what needs attention, what finished, and what comes next.</p></header>
     <TeamSlackSetupCard key={teamId} teamId={teamId} />
     <WorkspaceCatchUp owner={{ ownerType: "team", ownerId: teamId }} />
@@ -30,8 +31,8 @@ function CardShell({
   children: React.ReactNode;
 }) {
   return (
-    <section className="flex min-h-0 min-w-0 flex-col rounded-lg border border-line bg-paper">
-      <header className="flex flex-wrap items-center justify-between gap-x-3 border-b border-line px-4 py-3">
+    <section className={cn(cardClass, "flex min-h-0 min-w-0 flex-col")}>
+      <header className="flex flex-wrap items-center justify-between gap-x-3 border-b border-line px-5 py-3">
         <h2 className="font-display text-base text-ink">{title}</h2>
         {link && (
           <Link to={link.to} className="inline-flex min-h-11 items-center text-xs text-moss underline-offset-2 sm:min-h-0 hover:underline">
@@ -39,7 +40,7 @@ function CardShell({
           </Link>
         )}
       </header>
-      <div className="space-y-3 px-4 py-3">{children}</div>
+      <div className="space-y-3 px-5 py-3">{children}</div>
     </section>
   );
 }

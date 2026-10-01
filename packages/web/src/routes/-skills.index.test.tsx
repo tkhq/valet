@@ -267,7 +267,7 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
 
   it("writes the Prompts chip to the URL as the kind it means", () => {
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
 
     expect(lastNavigationSearch()).toMatchObject({ filter: "prompts" });
   });
@@ -277,7 +277,7 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
     render(<SkillsIndexPage />);
 
     expect(lastSkillsQuery()).toEqual({ kind: "prompt" });
-    expect(screen.getByRole("tab", { name: "Prompts" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("button", { name: "Prompts" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("sends the search box on as a catalog-wide query, once typing settles", async () => {
@@ -315,7 +315,7 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
   it("returns to the first page when a filter changes", () => {
     searchParams = { page: "cursor_1" };
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
 
     // A different question has a different first page, so the old cursor
     // names a row that the new question may not even list.

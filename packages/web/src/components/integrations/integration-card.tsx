@@ -1,4 +1,6 @@
 import { ServiceIcon } from "~/components/service-icon";
+import { cardClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 
 export function CardHeading({
   title,
@@ -38,5 +40,5 @@ export function CardFooter({ meta, right }: { meta?: string | null; right?: Reac
 
 
 export function IntegrationCard({ children }: { children: React.ReactNode }) {
-  return <div className="flex flex-col rounded-lg border border-line bg-paper p-4 transition-shadow hover:shadow-sm">{children}</div>;
+  return <div className={cn(cardClass, "flex flex-col p-5 transition-shadow hover:shadow-sm")}>{children}</div>;
 }

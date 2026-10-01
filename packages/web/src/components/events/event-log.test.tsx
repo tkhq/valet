@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The Log merges stored events and recorded problems. These cases pin the
- * owner it asks for (an owner-less request is the whole org, so "This
- * workspace" waits for the owner), the status chips, and how each kind of row
- * reads.
+ * The Log merges this workspace's events and the organization's problems.
+ * These cases pin the owner it asks for (it waits for the owner), the two
+ * chips, and how each kind of row reads.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -11,19 +10,17 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { EventLogItem } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
 
-let lastParams: { owner?: OwnerFilter; status?: string; q?: string } | undefined;
-let lastEnabled: boolean | undefined;
+let lastParams: { owner: OwnerFilter | undefined; problems: boolean; q?: string } | undefined;
 let items: EventLogItem[] = [];
 let owner: OwnerFilter | undefined = { ownerType: "user", ownerId: "u1" };
 let role = "member";
 
 vi.mock("~/api/events", () => ({
-  useEventLog: (params: { owner?: OwnerFilter; status?: string; q?: string }, opts: { enabled?: boolean }) => {
+  useEventLog: (params: { owner: OwnerFilter | undefined; problems: boolean; q?: string }) => {
     lastParams = params;
-    lastEnabled = opts.enabled;
-    const held = opts.enabled === false;
+    const held = params.owner === undefined;
     return {
-      data: held ? undefined : { pages: [{ items, nextCursor: null, lastEventAt: null, windowDays: params.owner ? 30 : null }] },
+      data: held ? undefined : { pages: [{ items, nextCursor: null, lastEventAt: null, windowDays: 30 }] },
       isPending: held, error: null, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(),
     };
   },
@@ -35,7 +32,7 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));
 
-import { EventLog, type LogFilter, type LogScope } from "./event-log";
+import { EventLog, type LogFilter } from "./event-log";
 
 afterEach(() => {
   cleanup();
@@ -44,10 +41,9 @@ afterEach(() => {
   role = "member";
 });
 
-function renderLog(props: { scope?: LogScope; filter?: LogFilter } = {}) {
+function renderLog(filter: LogFilter = "all") {
   const onFilterChange = vi.fn();
-  render(<EventLog scope={props.scope ?? "workspace"} onScopeChange={vi.fn()} filter={props.filter ?? "all"}
-    onFilterChange={onFilterChange} query="" onQueryChange={vi.fn()} />);
+  render(<EventLog filter={filter} onFilterChange={onFilterChange} query="" onQueryChange={vi.fn()} />);
   return { onFilterChange };
 }
 
@@ -61,31 +57,25 @@ const problem: EventLogItem = {
 };
 
 describe("EventLog", () => {
-  it("asks for the workspace's events, and holds until the owner resolves", () => {
+  it("asks for the workspace's Log and names the window", () => {
     renderLog();
-    expect(lastParams?.owner).toEqual({ ownerType: "user", ownerId: "u1" });
-    expect(lastEnabled).toBe(true);
-    cleanup();
-    owner = undefined;
-    renderLog();
-    expect(lastEnabled).toBe(false);
-  });
-
-  it("drops the owner on All, and names the window only for a workspace", () => {
-    renderLog({ scope: "all" });
-    expect(lastParams?.owner).toBeUndefined();
-    expect(screen.queryByText(/last 30 days/)).toBeNull();
-    cleanup();
-    renderLog();
+    expect(lastParams).toMatchObject({ owner: { ownerType: "user", ownerId: "u1" }, problems: false });
     expect(screen.getByText(/last 30 days/)).toBeTruthy();
   });
 
-  it("sends the chosen status and reports chip clicks to the route", () => {
-    const { onFilterChange } = renderLog({ filter: "failed" });
-    expect(lastParams?.status).toBe("failed");
-    expect(screen.getByRole("button", { name: "Failed" }).getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Filtered out" }));
-    expect(onFilterChange).toHaveBeenCalledWith("filtered");
+  it("waits for the workspace owner before loading", () => {
+    owner = undefined;
+    renderLog();
+    expect(lastParams?.owner).toBeUndefined();
+    expect(screen.queryByText(/last 30 days/)).toBeNull();
+  });
+
+  it("asks for problems only on the Problems chip, and reports chip clicks", () => {
+    const { onFilterChange } = renderLog("problems");
+    expect(lastParams?.problems).toBe(true);
+    expect(screen.getByRole("button", { name: "Problems" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    expect(onFilterChange).toHaveBeenCalledWith("all");
   });
 
   it("lists events and problems in one list, each with its status", () => {
@@ -93,7 +83,7 @@ describe("EventLog", () => {
     renderLog();
     expect(screen.getByRole("link", { name: "PR #7 opened" }).getAttribute("href")).toBe("/events/$eventId");
     expect(screen.getByText("The text did not match.")).toBeTruthy();
-    expect(screen.getAllByText("Filtered out").length).toBeGreaterThan(1);
+    expect(screen.getByText("Failed")).toBeTruthy();
     expect(screen.getByText(/2 deliveries/)).toBeTruthy();
   });
 
@@ -102,8 +92,8 @@ describe("EventLog", () => {
     expect(screen.queryByRole("button", { name: "Raw receipts" })).toBeNull();
     cleanup();
     role = "admin";
-    renderLog({ filter: "receipts" });
+    renderLog("receipts");
     expect(screen.getByText("Receipts list")).toBeTruthy();
-    expect(lastEnabled).toBe(false);
+    expect(lastParams?.owner).toBeUndefined();
   });
 });

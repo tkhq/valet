@@ -7,8 +7,9 @@ import { useDismissBriefing, useWorkspaceBriefings } from "~/api/catch-up";
 import { useMe } from "~/api/settings";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
-import { Badge, Button, ErrorRow, LoadingRow, textLinkClass } from "~/components/primitives";
+import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, cardClass } from "~/components/primitives";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
+import { cn } from "~/lib/cn";
 
 export function WorkspaceCatchUp({ owner: explicitOwner }: { owner?: OwnerFilter }) {
   const selectedOwner = useListOwner();
@@ -78,7 +79,7 @@ const BRIEFING_FACTS = [
 function BriefingPlaceholder({ title, children }: { title: string; children: ReactNode }) {
   const headingId = useId();
   return (
-    <section aria-labelledby={headingId} className="rounded-xl border border-line bg-paper p-5 sm:p-6">
+    <section aria-labelledby={headingId} className={cn(cardClass, "p-5")}>
       <h2 id={headingId} className="font-display text-xl text-ink">{title}</h2>
       <div className="mt-3 max-w-2xl space-y-3 text-sm leading-relaxed text-muted">{children}</div>
       <dl className="mt-6 grid gap-4 border-t border-line pt-4 sm:grid-cols-3">
@@ -114,7 +115,7 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
   // A run a schedule or an event started has no conversation. Link the newest run instead.
   const latestRun = briefing.latestThread ? undefined
     : [...briefing.sources].filter(source => source.kind === "workflow" && source.runId).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.runId;
-  return <article aria-labelledby={headingId} className="rounded-lg border border-line bg-paper px-4 py-3">
+  return <article aria-labelledby={headingId} className={cn(cardClass, "px-5 py-3")}>
     <header className="flex h-6 items-center gap-2">
       <h2 id={headingId} title={briefing.title} className="min-w-0 flex-1 truncate text-sm font-medium leading-6 text-ink">{briefing.title}</h2>
       <Badge variant={status.variant} className="shrink-0">{status.label}</Badge>

@@ -3,8 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import type { MemoryTreeEntry } from "@valet/api/wire";
 import { api } from "~/api/client";
 import { useMemoryTree } from "~/api/memory";
-import { Spinner } from "~/components/primitives";
+import { Spinner, cardClass } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
+import { cn } from "~/lib/cn";
 
 /** Pure — UTC date, matches the server's `journal/YYYY-MM-DD.md` convention
  * (`packages/api/src/orchestrator/bootstrap.ts` `todayJournalPath`). */
@@ -60,7 +61,7 @@ export function MemoryCard() {
   const empty = treeQ.data !== undefined && entries.length === 0;
 
   return (
-    <section className="min-w-0 rounded-lg border border-line bg-paper flex flex-col min-h-0">
+    <section className={cn(cardClass, "min-w-0 flex flex-col min-h-0")}>
       <header className="px-4 py-3 border-b border-line flex flex-wrap items-center justify-between gap-x-3">
         <h2 className="font-display text-base text-ink">
           <Link to="/memory" className="inline-flex min-h-11 items-center hover:text-moss sm:min-h-0">
