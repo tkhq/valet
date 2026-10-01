@@ -39,7 +39,7 @@ import { workspaceBriefingsRouter } from "./routes/workspace-briefings.js";
 import { workspaceChannelsRouter } from "./routes/workspace-channels.js";
 import { workspaceActiveWorkRouter } from "./routes/workspace-active-work.js";
 import { workspaceOutcomesRouter } from "./routes/workspace-outcomes.js";
-import { workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
+import { legacyOrchestratorRouter, workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
 import { childWorkRouter } from "./routes/child-work.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { changelogRouter } from "./routes/changelog.js";
@@ -323,6 +323,8 @@ export function createApp(
   app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
   // Before the teams router, so the legacy team runtime path is not read as a team route.
+  // Installed CLI builds and team-key CI clients still call these to find their target.
+  app.route("/api", legacyOrchestratorRouter);
   app.route("/api/teams", teamDeletionRequestsRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/teams", teamApiKeysRouter);
