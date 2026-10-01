@@ -5,6 +5,16 @@ import { eventReceipts } from "../schema/index.js";
 import type { EventReceiptWire, ReceiptStage, ReceiptSubscriptionDecision } from "../wire/types.js";
 
 export const RECEIPT_RETENTION_DAYS = 7;
+/** Retention runs at most this often per organization, not on every receipt,
+ * so busy channel traffic does not repeat the same index scans. */
+export const RECEIPT_CLEANUP_INTERVAL_MS = 60_000;
+const lastCleanup = new Map<string, number>();
+/** Whether this organization's receipts are due a retention pass, and claims it. */
+export function receiptCleanupDue(orgId: string, now: number): boolean {
+  if (now - (lastCleanup.get(orgId) ?? -Infinity) < RECEIPT_CLEANUP_INTERVAL_MS) return false;
+  lastCleanup.set(orgId, now);
+  return true;
+}
 const metadataKeys = new Set(["channelId", "workspaceId", "actorId", "botId", "appId", "rawType", "rawSubtype", "messageTs", "threadTs", "retryNum", "retryReason", "botIdentityAvailable", "botUserIdentityAvailable", "payloadBytes", "configuredTriggerCount"]);
 const outcomes = new Set(["matched", "filter_excluded", "authorization_denied", "disabled", "key_mismatch"]);
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -31,8 +41,8 @@ export async function createEventReceipt(db: AppDb, input: { orgId: string; serv
     const id = randomUUID(), now = Date.now();
     await db.insert(eventReceipts).values({ id, orgId: input.orgId, service: bounded(input.service), externalId: input.externalId === undefined ? null : bounded(input.externalId), metadata: sanitizeReceiptMetadata(input.metadata), stages: [], subscriptions: [], createdAt: now, updatedAt: now });
     // Both scans are index-bounded: excess records are drained in batches of at most
-    // 1000 per receipt. The API also enforces the age window during cleanup backlogs.
-    try {
+    // 1000 per pass. The API also enforces the age window during cleanup backlogs.
+    if (receiptCleanupDue(input.orgId, now)) try {
       await db.execute(sql`DELETE FROM event_receipts WHERE org_id = ${input.orgId} AND id IN (
         SELECT id FROM (
           (SELECT id FROM event_receipts WHERE org_id = ${input.orgId} AND created_at < ${now - 7 * 86400000} ORDER BY created_at, id LIMIT 1000)

@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventReceipts } from "../schema/index.js";
-import { appendReceiptStage, createEventReceipt, sanitizeReceiptSubscriptions } from "../events/receipts.js";
+import { appendReceiptStage, createEventReceipt, RECEIPT_CLEANUP_INTERVAL_MS, sanitizeReceiptSubscriptions } from "../events/receipts.js";
 import type { ListEventReceiptsResponse, CreateTeamResponse, CreateTeamApiKeyResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -49,20 +49,29 @@ describe("event receipts", () => {
     expect((await (await fetch(`${url}?q=secret`)).json() as ListEventReceiptsResponse).receipts).toEqual([]);
     expect((await (await fetch(`${url}?q=excluded`)).json() as ListEventReceiptsResponse).receipts).toHaveLength(3);
   });
-  it("cleans stale and excess receipts in bounded batches without touching other organizations", async () => {
+  it("cleans stale and excess receipts in bounded batches, at most once a minute, without touching other organizations", async () => {
     api = await bootTestApi(); const db = api.providers.db;
-    await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) SELECT 'old-' || i, 'local-org', 'slack', 1, 1 FROM generate_series(1,1100) i`);
-    await db.insert(eventReceipts).values({ id: "other", orgId: "other-org", service: "slack", createdAt: 1, updatedAt: 1 });
-    await createEventReceipt(db, { orgId: "local-org", service: "slack" });
-    expect((await db.select({ id: eventReceipts.id }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org")))).toHaveLength(101);
-    expect((await (await fetch(`${api.baseUrl}/api/events/receipts`)).json() as ListEventReceiptsResponse).receipts).toHaveLength(1);
-    await createEventReceipt(db, { orgId: "local-org", service: "slack" });
-    expect(await db.select().from(eventReceipts).where(eq(eventReceipts.id, "other"))).toHaveLength(1);
-    const now = Date.now();
-    await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) SELECT 'new-' || i, 'local-org', 'slack', ${now}, ${now} FROM generate_series(1,10005) i`);
-    await createEventReceipt(db, { orgId: "local-org", service: "slack" });
-    const count = await db.select({ count: sql<number>`count(*)::int` }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org"));
-    expect(count[0]?.count).toBe(10000);
+    // Each retention pass needs a fresh minute; the clock moves past the interval between passes.
+    let clock = Date.now() + 365 * 86_400_000;
+    const nextPass = () => { clock += RECEIPT_CLEANUP_INTERVAL_MS; };
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) SELECT 'old-' || i, 'local-org', 'slack', 1, 1 FROM generate_series(1,1100) i`);
+      await db.insert(eventReceipts).values({ id: "other", orgId: "other-org", service: "slack", createdAt: 1, updatedAt: 1 });
+      await createEventReceipt(db, { orgId: "local-org", service: "slack" });
+      expect((await db.select({ id: eventReceipts.id }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org")))).toHaveLength(101);
+      // A second receipt inside the interval does not run retention again.
+      await createEventReceipt(db, { orgId: "local-org", service: "slack" });
+      expect((await db.select({ id: eventReceipts.id }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org")))).toHaveLength(102);
+      nextPass();
+      await createEventReceipt(db, { orgId: "local-org", service: "slack" });
+      expect(await db.select().from(eventReceipts).where(eq(eventReceipts.id, "other"))).toHaveLength(1);
+      await db.execute(sql`INSERT INTO event_receipts(id,org_id,service,created_at,updated_at) SELECT 'new-' || i, 'local-org', 'slack', ${clock}, ${clock} FROM generate_series(1,10005) i`);
+      nextPass();
+      await createEventReceipt(db, { orgId: "local-org", service: "slack" });
+      const count = await db.select({ count: sql<number>`count(*)::int` }).from(eventReceipts).where(eq(eventReceipts.orgId, "local-org"));
+      expect(count[0]?.count).toBe(10000);
+    } finally { now.mockRestore(); }
   });
   it("rejects team API keys even when their issuing user is an admin", async () => {
     api = await bootTestApi({ auth: true });
