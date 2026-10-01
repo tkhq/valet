@@ -1,5 +1,9 @@
 import { setPluginEntitlement } from "../services/plugin-entitlements.js";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
+import { sql } from "drizzle-orm";
+import { parseIntegrationLimit } from "../assistants/integration-limit.js";
+import { addMember, createTeam } from "../services/teams.js";
+import type { WorkspaceIntegrationLimitResponse } from "../wire/types.js";
 /** Workspace capabilities and persona use owner configuration. */
 import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
@@ -168,6 +172,52 @@ describe("workspace runtime configuration", () => {
     expect(listed).toContain("workflows.save_workflow");
     expect(listed).toContain("slack.post_message");
     expect(listed).toContain("github.create_issue");
+  });
+
+  it("keeps a carried-over integration allow-list until an admin clears it", async () => {
+    const workflowsPlugin: ValetPlugin = {
+      name: "workflows-fixture", version: "0.0.1",
+      actions: [{ service: "workflows", actions: [makeAction("workflows.get_workflow"), makeAction("workflows.patch_workflow")] } satisfies ActionPlugin],
+    };
+    api = await bootTestApi({ plugins: [fixturePlugin, workflowsPlugin] });
+    const { db, engineHost } = api.providers;
+    const row = await seedWorkspaceAssistant(db, ORG, { type: "user", id: USER });
+    const behavior = JSON.stringify({ integrations: { mode: "allowlist", entries: [{ service: "github", excludeActions: ["github.delete_repo"] }] } });
+    await db.execute(sql`UPDATE assistants SET behavior = ${behavior} WHERE id = ${row.id}`);
+    const owner = { type: row.ownerType, id: row.ownerId };
+
+    const { session } = await ensureDefaultAssistantSession({ db, engineHost }, owner, { actorUserId: USER, orgId: ORG });
+    const listed = await listToolIds(session.options.tools);
+    expect(listed).toContain("github.create_issue");
+    expect(listed).not.toContain("github.delete_repo");
+    expect(listed).not.toContain("slack.post_message");
+    // Pinned actions are host substrate and stay.
+    expect((session.options.tools ?? []).map((t) => t.name)).toContain("workflows__patch_workflow");
+
+    const limit = await (await fetch(`${api.baseUrl}/api/workspaces/user/integration-limit`)).json() as WorkspaceIntegrationLimitResponse;
+    expect(limit.services).toEqual(["github"]);
+    expect((await fetch(`${api.baseUrl}/api/workspaces/user/integration-limit`, { method: "DELETE" })).status).toBe(204);
+    expect((await (await fetch(`${api.baseUrl}/api/workspaces/user/integration-limit`)).json() as WorkspaceIntegrationLimitResponse).services).toBeNull();
+    const { session: rebuilt } = await ensureDefaultAssistantSession({ db, engineHost }, owner, { actorUserId: USER, orgId: ORG });
+    expect(await listToolIds(rebuilt.options.tools)).toContain("slack.post_message");
+  });
+
+  it("lets only a team admin clear a team's integration limit", async () => {
+    api = await bootTestApi({ plugins: [fixturePlugin] });
+    const { db } = api.providers;
+    const team = await createTeam(db, { orgId: ORG, name: "Limited", creatorUserId: USER });
+    await addMember(db, { teamId: team.id, userId: "test-member", role: "member" });
+    const row = await seedWorkspaceAssistant(db, ORG, { type: "team", id: team.id });
+    await db.execute(sql`UPDATE assistants SET behavior = ${JSON.stringify({ integrations: { mode: "allowlist", entries: [] } })} WHERE id = ${row.id}`);
+    const url = `${api.baseUrl}/api/workspaces/${team.id}/integration-limit`;
+    expect((await (await fetch(url, { headers: { "x-valet-test-user-id": "test-member" } })).json() as WorkspaceIntegrationLimitResponse).services).toEqual([]);
+    expect((await fetch(url, { method: "DELETE", headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(403);
+    expect((await fetch(url, { method: "DELETE" })).status).toBe(204);
+  });
+
+  it("applies no limit when the stored allow-list does not parse", () => {
+    expect(parseIntegrationLimit("{not json")).toBeNull();
+    expect(parseIntegrationLimit(JSON.stringify({ integrations: { mode: "all" } }))).toBeNull();
   });
 
   it("reads persona directly from owner memory without a profile name", async () => {

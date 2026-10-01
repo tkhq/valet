@@ -141,6 +141,7 @@ import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
+import { limitPlugins, loadIntegrationLimit } from "../assistants/integration-limit.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
@@ -1385,7 +1386,14 @@ export class EngineHost {
       (item) => !assembledServices.has(item.service),
     );
     const entitled = await this.filterEntitledPlugins(assembled, owner, orgId);
-    const plugins = entitled;
+    const limit = this.opts.db ? await loadIntegrationLimit(this.opts.db, orgId, owner) : null;
+    const plugins = limit ? limitPlugins(entitled, limit, new Set(pins.map((pin) => pin.actionId))) : entitled;
+    const limitedServices = removedActionServices(entitled, plugins).map((service) => ({
+      service,
+      state: "limited_by_workspace" as const,
+      reason: "this workspace's integration limit leaves the service out",
+      fix: `A workspace admin can clear the integration limit on the Integrations page to use ${service}.`,
+    }));
 
     const disabledServices = removedActionServices(assembled, entitled).map((service) => ({
       service,
@@ -1418,6 +1426,7 @@ export class EngineHost {
         loadFailures,
         availabilityFailures,
         disabledServices,
+        limitedServices,
         deploymentServices,
       );
     };

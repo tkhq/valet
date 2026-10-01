@@ -136,10 +136,11 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await reportRetiredAssistantSettings(db);
 }
 
-/** The runtime no longer applies an assistant's stored behavior allow-list,
- * model, or reasoning; those columns stay only for a rollback. An allow-list
- * limited the integrations a workspace could use, so its removal widens access.
- * Name each affected workspace once at boot so an admin can review it. */
+/** The runtime no longer applies an assistant's stored model or reasoning;
+ * those columns stay only for a rollback. A stored integration allow-list
+ * keeps limiting its workspace until an admin clears it
+ * (`assistants/integration-limit.ts`). Name each affected workspace once at
+ * boot so an admin can review it. */
 export async function reportRetiredAssistantSettings(db: PgDb): Promise<string | null> {
   const result = await db.query(
     `SELECT owner_type, owner_id, behavior IS NOT NULL AS allow_list FROM assistants WHERE archived_at IS NULL
@@ -147,9 +148,9 @@ export async function reportRetiredAssistantSettings(db: PgDb): Promise<string |
   );
   if (result.rows.length === 0) return null;
   const names = result.rows.map((row) => `${String(row.owner_type)}:${String(row.owner_id)}${row.allow_list === true ? " (integration allow-list)" : ""}`);
-  const message = `[migrations] ${names.length} workspace assistant(s) have stored settings that no longer apply: ${names.join(", ")}. `
-    + "Workspaces now use every integration they are entitled to, the organization's model defaults, and each thread's model. "
-    + "Review the integrations connected to each listed workspace.";
+  const message = `[migrations] ${names.length} workspace assistant(s) carry settings from before one assistant per workspace: ${names.join(", ")}. `
+    + "An integration allow-list keeps limiting its workspace until an admin clears it on the Integrations page. "
+    + "Stored models and reasoning levels no longer apply; workspaces use the organization's model defaults and each thread's model.";
   console.warn(message);
   return message;
 }

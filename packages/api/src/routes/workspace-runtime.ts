@@ -5,8 +5,9 @@ import type { AppEnv } from "../env.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant } from "../assistants/service.js";
 import { canViewAssistantOwner } from "../assistants/access.js";
 import { childWatches } from "../schema/index.js";
-import { getTeamInOrg } from "../services/teams.js";
-import type { WorkspaceRuntimeInfoResponse, EnsureWorkspaceRuntimeResponse } from "../wire/types.js";
+import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
+import { clearIntegrationLimit, loadIntegrationLimit } from "../assistants/integration-limit.js";
+import type { WorkspaceRuntimeInfoResponse, EnsureWorkspaceRuntimeResponse, WorkspaceIntegrationLimitResponse } from "../wire/types.js";
 
 export const workspaceRuntimeRouter = new Hono<AppEnv>();
 
@@ -25,6 +26,29 @@ workspaceRuntimeRouter.post("/:workspace/runtime", async (c) => {
   const { sessionId } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
   const body: EnsureWorkspaceRuntimeResponse = { sessionId };
   return c.json(body);
+});
+
+workspaceRuntimeRouter.get("/:workspace/integration-limit", async (c) => {
+  const owner = await authorizedWorkspaceOwner(c);
+  if (!owner) return c.json({ error: "Workspace not found." }, 404);
+  const limit = await loadIntegrationLimit(c.var.providers.db, c.var.user.orgId, owner);
+  const body: WorkspaceIntegrationLimitResponse = { services: limit ? [...limit.keys()].sort() : null };
+  return c.json(body);
+});
+
+// Clearing widens what every session of the workspace can call, so it takes a
+// workspace admin. The cached runtime is evicted so its next turn sees it.
+workspaceRuntimeRouter.delete("/:workspace/integration-limit", async (c) => {
+  const owner = await authorizedWorkspaceOwner(c);
+  if (!owner) return c.json({ error: "Workspace not found." }, 404);
+  const { db, engineHost } = c.var.providers;
+  if (owner.type === "team" && !await canAdministerTeam(db, owner.id, c.var.user.id)) {
+    return c.json({ error: "Only a team admin can clear the integration limit. Ask a team admin." }, 403);
+  }
+  await clearIntegrationLimit(db, c.var.user.orgId, owner);
+  const assistant = await findDefaultAssistant(db, c.var.user.orgId, owner);
+  if (assistant) engineHost.evictCache(assistant.sessionId);
+  return c.body(null, 204);
 });
 
 // A durable app-assistant Thread per viewer in this workspace. Opening it is

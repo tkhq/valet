@@ -830,6 +830,9 @@ export interface WorkspaceRuntimeInfoResponse {
 }
 export interface EnsureWorkspaceRuntimeResponse { sessionId: string; }
 
+/** The services a workspace's carried-over integration limit allows, or null for no limit. */
+export interface WorkspaceIntegrationLimitResponse { services: string[] | null; }
+
 export interface ChildWorkSummary {
   sessionId: string;
   title: string;

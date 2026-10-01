@@ -12,6 +12,7 @@ import type {
   WorkspaceOutcomesResponse,
   WorkspaceBriefingsResponse,
   ListChannelsResponse,
+  WorkspaceIntegrationLimitResponse,
   ChannelDetailResponse,
   ThreadChannelActivity,
   DismissWorkspaceBriefingResponse,
@@ -573,6 +574,10 @@ export const api = {
     request<WaitingThreadsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/waiting`),
   listWorkspaceChannels: (owner: OwnerFilter) =>
     request<ListChannelsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channels`),
+  getIntegrationLimit: (owner: OwnerFilter) =>
+    request<WorkspaceIntegrationLimitResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
+  clearIntegrationLimit: (owner: OwnerFilter) =>
+    request<void>("DELETE", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
   getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
     request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
   getThreadChannelActivity: (sessionId: string, threadId: string) =>

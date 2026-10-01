@@ -10,6 +10,8 @@ import { matchesNeedle } from "~/lib/text-match";
 import { textParam } from "~/lib/search-params";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { TeamIntegrations } from "~/components/integrations/team-integrations";
+import { IntegrationLimitNotice } from "~/components/integrations/integration-limit-notice";
+import { useListOwner } from "~/lib/use-list-owner";
 
 /**
  * `/integrations` — the services a person can connect, in the settings
@@ -109,6 +111,7 @@ export function IntegrationsPage() {
 
 function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectResult }) {
   const { data, isLoading, error } = usePlugins();
+  const owner = useListOwner();
   const plugins = data?.plugins ?? [];
 
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
@@ -135,6 +138,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
     <div className="flex-1 overflow-y-auto">
       <div className={pageClass}>
         <h1 className="font-display text-2xl text-ink">Integrations</h1>
+        {owner && <IntegrationLimitNotice owner={owner} canClear />}
 
         {/* The live region is on the page from the first paint, and stays
             empty until the connect result arrives. A screen reader ignores a

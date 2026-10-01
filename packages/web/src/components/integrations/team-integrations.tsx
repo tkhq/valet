@@ -1,5 +1,6 @@
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
 import { ErrorRow, LoadingRow, pageClass } from "~/components/primitives";
+import { IntegrationLimitNotice } from "./integration-limit-notice";
 import { Section } from "~/components/settings/section";
 import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
@@ -21,6 +22,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
       <div className={pageClass}>
         <h1 className="font-display text-2xl text-ink">Integrations</h1>
         {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
+        <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
         <div className="mt-10 space-y-6">
           {loading && <LoadingRow label="Loading team integrations…" />}
           {!loading && failed && (
