@@ -5,25 +5,26 @@ import plugin0 from "@valet/plugin-assistants/plugin";
 import plugin1 from "@valet/plugin-browser/plugin";
 import plugin2 from "@valet/plugin-cloudflare/plugin";
 import plugin3 from "@valet/plugin-deepwiki/plugin";
-import plugin4 from "@valet/plugin-github/plugin";
-import plugin5 from "@valet/plugin-gmail/plugin";
-import plugin6 from "@valet/plugin-google-calendar/plugin";
-import plugin7 from "@valet/plugin-google-workspace/plugin";
-import plugin8 from "@valet/plugin-linear/plugin";
-import plugin9 from "@valet/plugin-memory/plugin";
-import plugin10 from "@valet/plugin-notion/plugin";
-import plugin11 from "@valet/plugin-openai/plugin";
-import plugin12 from "@valet/plugin-security/plugin";
-import plugin13 from "@valet/plugin-sentry/plugin";
-import plugin14 from "@valet/plugin-slack/plugin";
-import plugin15 from "@valet/plugin-slack-user/plugin";
-import plugin16 from "@valet/plugin-stripe/plugin";
-import plugin17 from "@valet/plugin-telegram/plugin";
-import plugin18 from "@valet/plugin-typefully/plugin";
-import plugin19 from "@valet/plugin-valet/plugin";
-import plugin20 from "@valet/plugin-workflows/plugin";
+import plugin4 from "@valet/plugin-docs-analytics/plugin";
+import plugin5 from "@valet/plugin-github/plugin";
+import plugin6 from "@valet/plugin-gmail/plugin";
+import plugin7 from "@valet/plugin-google-calendar/plugin";
+import plugin8 from "@valet/plugin-google-workspace/plugin";
+import plugin9 from "@valet/plugin-linear/plugin";
+import plugin10 from "@valet/plugin-memory/plugin";
+import plugin11 from "@valet/plugin-notion/plugin";
+import plugin12 from "@valet/plugin-openai/plugin";
+import plugin13 from "@valet/plugin-security/plugin";
+import plugin14 from "@valet/plugin-sentry/plugin";
+import plugin15 from "@valet/plugin-slack/plugin";
+import plugin16 from "@valet/plugin-slack-user/plugin";
+import plugin17 from "@valet/plugin-stripe/plugin";
+import plugin18 from "@valet/plugin-telegram/plugin";
+import plugin19 from "@valet/plugin-typefully/plugin";
+import plugin20 from "@valet/plugin-valet/plugin";
+import plugin21 from "@valet/plugin-workflows/plugin";
 
-export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4, plugin5, plugin6, plugin7, plugin8, plugin9, plugin10, plugin11, plugin12, plugin13, plugin14, plugin15, plugin16, plugin17, plugin18, plugin19, plugin20];
+export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4, plugin5, plugin6, plugin7, plugin8, plugin9, plugin10, plugin11, plugin12, plugin13, plugin14, plugin15, plugin16, plugin17, plugin18, plugin19, plugin20, plugin21];
 
 /** Brand slug per plugin, from each manifest's `iconSlug`. The connect UI
  * maps a slug to a brand mark; a plugin with no entry keeps the fallback
