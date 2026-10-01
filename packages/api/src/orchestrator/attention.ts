@@ -270,4 +270,3 @@ async function privateThreadOwner(db: AppDb, event: AttentionEvent): Promise<str
   if (key.startsWith("workflow:")) return key.split(":")[2] || undefined;
   return undefined;
 }
-
