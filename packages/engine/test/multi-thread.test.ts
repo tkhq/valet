@@ -202,6 +202,30 @@ describe("thread_read built-in tool", () => {
   });
 });
 
+describe("thread_read in an agent turn", () => {
+  it("reads a sibling thread from a pasted Valet link, not only a key", async () => {
+    const faux = registerFauxProvider({ provider: "thread-read-link-turn" });
+    faux.setResponses([fauxAssistantMessage("B-said-this")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const tB = session.thread("task:B");
+    await tB.submitPrompt("hello B", {});
+    await waitFor(() => events.some((e) => e.threadId === tB.id && e.event.type === "turn_end"));
+
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("thread_read", { key: `https://valet.example.com/threads/${tB.id}` }, { id: "tr-link" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("A read B"),
+    ]);
+    const tA = session.thread("task:A");
+    await tA.submitPrompt("read the linked thread", {});
+    await waitFor(() => events.some((e) => e.threadId === tA.id && e.event.type === "turn_end"
+      && (e.event as { reason: string }).reason === "end_turn"));
+    const toolEnd = events.filter((e) => e.threadId === tA.id && e.event.type === "tool_end").at(-1);
+    expect((toolEnd!.event as { result: string }).result).toContain("B-said-this");
+    faux.unregister();
+  });
+});
+
 describe("thread_read references (TKAI-394)", () => {
   it("resolves a thread id and a pasted Valet thread link, not only a key", async () => {
     const faux = registerFauxProvider({ provider: "thread-read-ref" });

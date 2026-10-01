@@ -5035,11 +5035,9 @@ export class Thread {
           releaseCycle();
         }
       },
-      threadRead: async (key, opts) => {
-        const sibling = await this.session.threadByKey(key);
-        if (!sibling) return [];
-        return sibling.readEntries(opts);
-      },
+      // The same lookup slash commands use: a key, or a thread id (a pasted
+      // link reaches here as its id).
+      threadRead: (key, opts) => this.session.readEntries(key, opts),
       listThreads: async () => {
         // Pull from the store so paused/archived threads not currently
         // hydrated in memory still surface.
