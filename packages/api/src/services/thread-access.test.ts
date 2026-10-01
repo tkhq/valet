@@ -5,7 +5,7 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess } from "./thread-access.js";
+import { resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -40,6 +40,8 @@ it("lets a thread read only what its audience may see", async () => {
   expect(await read("web:default", "slack:CREADPUB:1.1")).toBe(true);
   expect(await read("web:default", "slack:CREADPRIV:1.1")).toBe(false);
   expect(await read("web:default", "app-assistant:member")).toBe(false);
+  // An editor conversation from before per-person keys names nobody, so nobody else reads it.
+  expect(await read("web:default", "workflow:wf_legacy")).toBe(false);
   // A private channel's thread reads its own channel.
   expect(await read("slack:CREADPRIV:2.2", "slack:CREADPRIV:1.1")).toBe(true);
   // A helper thread reads what its person may see.
@@ -95,4 +97,17 @@ it("streams a private Slack thread's events only to the channel's members", asyn
   const threadIds = frames.flatMap((frame) => "threadId" in frame && typeof frame.threadId === "string" ? [frame.threadId] : []);
   expect(threadIds).toContain(shown.id);
   expect(threadIds).not.toContain(hidden.id);
+});
+
+it("shows a person's helper and editor threads only to that person, and a legacy editor key to nobody", async () => {
+  api = await bootTestApi();
+  const visible = threadVisibility(api.providers, { ownerType: "team" }, { orgId: "local-org", userId: "member" });
+  expect(await visible("app-assistant:member")).toBe(true);
+  expect(await visible("workflow:wf_1:member")).toBe(true);
+  expect(await visible("app-assistant:other")).toBe(false);
+  expect(await visible("workflow:wf_1:other")).toBe(false);
+  expect(await visible("workflow:wf_legacy")).toBe(false);
+  expect(await visible("web:default")).toBe(true);
+  // A personal runtime has one person, who sees every thread.
+  expect(await threadVisibility(api.providers, { ownerType: "user" }, { orgId: "local-org", userId: "member" })("workflow:wf_legacy")).toBe(true);
 });

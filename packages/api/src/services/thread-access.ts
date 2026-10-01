@@ -102,7 +102,15 @@ export function resetThreadAccessCache(): void {
   membershipCache.clear();
 }
 
-/** Who a team thread belongs to when only one member may see it, from its key. */
+/** Whether a key names one person's thread: a helper or a workflow editor
+ * conversation. Such a thread is never shared, even when the key names no
+ * person, as an editor key from before per-person keys (`workflow:<id>`) does. */
+export function isPersonalThreadKey(key: string | null | undefined): boolean {
+  return !!key && (key.startsWith("app-assistant:") || key.startsWith("workflow:"));
+}
+
+/** The person a helper or workflow editor thread belongs to, from its key, or
+ * undefined when the key names nobody. */
 export function privateThreadOwner(key: string | null | undefined): string | undefined {
   if (!key) return undefined;
   if (key.startsWith("app-assistant:")) return key.slice("app-assistant:".length) || undefined;
@@ -168,8 +176,10 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string 
   if (session.ownerType !== "team") return async () => true;
   const canSee = channelVisibility(deps, viewer);
   return async (key) => {
-    const owner = privateThreadOwner(key);
-    if (owner !== undefined) return owner === viewer.userId;
+    if (isPersonalThreadKey(key)) {
+      const owner = privateThreadOwner(key);
+      return owner !== undefined && owner === viewer.userId;
+    }
     const conversation = slackConversationFromThreadKey(key ?? null);
     return conversation ? canSee(`slack:${conversation.channelId}`) : true;
   };
@@ -221,7 +231,7 @@ export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
     if (owner.type !== "team") return true;
     const person = privateThreadOwner(reader.key);
     if (person) return threadVisibility(deps, { ownerType: "team" }, { orgId, userId: person })(target.key);
-    if (privateThreadOwner(target.key) !== undefined) return false;
+    if (isPersonalThreadKey(target.key)) return false;
     const targetChannel = slackConversationFromThreadKey(target.key)?.channelId;
     if (!targetChannel || targetChannel === slackConversationFromThreadKey(reader.key)?.channelId) return true;
     let token: Promise<string | null> | undefined;
