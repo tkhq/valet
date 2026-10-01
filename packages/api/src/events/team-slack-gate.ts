@@ -179,10 +179,13 @@ export async function subscriptionMatchOutcome(
   eventKey: string,
   payload: unknown,
   catalog: EventCatalogEntry[],
+  // Off for a re-check, such as a personal rule's team-coverage test, so
+  // a denial ingest already logged is not logged again on every delivery.
+  logDenied = true,
 ): Promise<SubscriptionMatchOutcome> {
   const teamMention = isTeamAssistantMention(sub, eventKey);
   if (!subscriptionMatchesEvent(sub, eventKey, payload, catalog, teamMention)) return "not_matched";
-  if (!teamMention || await teamMentionActor(db, sub, payload) !== null) return "matched";
+  if (!teamMention || await teamMentionActor(db, sub, payload, logDenied) !== null) return "matched";
   return "authorization_denied";
 }
 

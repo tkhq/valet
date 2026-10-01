@@ -31,7 +31,7 @@ export async function hasTeamCoverage(
           .where(and(eq(teamMembers.teamId, sub.ownerId), eq(teamMembers.userId, personal.ownerId))).limit(1);
         if (!member) continue;
       }
-      if (await subscriptionMatchOutcome(db, sub, event.eventKey, event.payload, catalog) === "matched") return true;
+      if (await subscriptionMatchOutcome(db, sub, event.eventKey, event.payload, catalog, false) === "matched") return true;
     }
     if (page.length < 100) return false;
     after = page[page.length - 1]!.sub.id;
