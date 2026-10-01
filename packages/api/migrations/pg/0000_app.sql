@@ -292,6 +292,8 @@ CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_external" ON "teams" ("org_id","origin","external_id");
 --> statement-breakpoint
+CREATE UNIQUE INDEX "teams_org_slack_home" ON "teams" ("org_id","slack_home_channel_id") WHERE "slack_home_channel_id" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE "team_members" (
 	"team_id" text NOT NULL,
 	"user_id" text NOT NULL,

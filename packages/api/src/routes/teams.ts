@@ -42,6 +42,7 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray, ne } from "drizzle-orm";
+import { isPgUniqueViolation } from "@valet/store-postgres";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
@@ -421,7 +422,16 @@ teamsRouter.patch("/:id", async (c) => {
     }
   }
   if (Object.keys(update).length > 0) {
-    const updated = await db.update(teams).set(update).where(eq(teams.id, id)).returning();
+    let updated: (typeof teams.$inferSelect)[];
+    try {
+      updated = await db.update(teams).set(update).where(eq(teams.id, id)).returning();
+    } catch (err) {
+      // Another team saved this home channel after the check above.
+      if (update.slackHomeChannelId && isPgUniqueViolation(err)) {
+        return c.json({ error: "Another team already uses this channel as its home channel. Choose another channel." }, 409);
+      }
+      throw err;
+    }
     // Zero rows = the team was deleted between the gate and the write.
     if (!updated[0]) return c.json({ error: "team not found" }, 404);
     fresh = updated[0];

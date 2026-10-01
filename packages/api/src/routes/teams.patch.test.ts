@@ -60,6 +60,9 @@ describe("PATCH /api/teams/:id", () => {
     const taken = await patchTeam(api, { slackHomeChannelId: "C0999999999" }, "test-lead");
     expect(taken.status).toBe(409);
     expect(((await taken.json()) as { error: string }).error).toContain("Other already uses this channel");
+    // The database enforces it too: a second team on the same channel is refused.
+    await expect(api.providers.db.insert(teams).values({ id: "racing-team", orgId: "local-org", name: "Racing", createdAt: 2, slackHomeChannelId: "C0999999999" }))
+      .rejects.toThrow();
     const cleared = await patchTeam(api, { slackHomeChannelId: null }, "test-lead");
     expect(((await cleared.json()) as PatchTeamResponse).team.slackHomeChannelId).toBeNull();
   });

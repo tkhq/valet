@@ -87,7 +87,10 @@ Team administrators can choose a Slack home channel. New team attention uses tha
 channel, with generic links that keep content and approval controls behind web
 access checks. Replies stay in the originating Slack thread. Choosing a home
 channel does not subscribe to every message in it. A channel can be the home of only one team;
-the API refuses a channel that another team already uses.
+the API refuses a channel that another team already uses. A partial unique index
+(`teams_org_slack_home`) enforces this, so two saves at the same time cannot both
+win. If an earlier race left two teams on one channel, the upgrade keeps the oldest
+team and logs the names of the teams it cleared.
 
 Personal team DM copies are opt-in by notification kind. Members present at upgrade keep them on for every kind. Delivery verifies current
 team and organization membership. Preferences do not change team access or approval

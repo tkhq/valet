@@ -517,6 +517,8 @@ export const teams = pgTable(
   (t) => [
     uniqueIndex("teams_org_name").on(t.orgId, t.name),
     uniqueIndex("teams_org_external").on(t.orgId, t.origin, t.externalId),
+    // One team per home channel, so two admins saving at once cannot both win.
+    uniqueIndex("teams_org_slack_home").on(t.orgId, t.slackHomeChannelId).where(sql`"slack_home_channel_id" IS NOT NULL`),
   ],
 );
 

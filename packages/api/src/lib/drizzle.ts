@@ -453,6 +453,24 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "assistants legacy default index", probe: { kind: "index", index: "assistants_default_owner" }, sql: 'CREATE UNIQUE INDEX assistants_default_owner ON assistants(org_id, owner_type, owner_id) WHERE is_default' },
   { describe: "teams.slack_home_channel_id column", probe: { kind: "column", table: "teams", column: "slack_home_channel_id" }, sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "slack_home_channel_id" text' },
   {
+    describe: "teams_org_slack_home",
+    probe: { kind: "index", index: "teams_org_slack_home" },
+    // The route checked before it wrote, so a race can have left two teams on
+    // one channel. The oldest keeps it; the others are named so an admin can
+    // pick a new home channel.
+    prepare: async (db) => {
+      const cleared = await db.query(`UPDATE "teams" t SET "slack_home_channel_id" = NULL
+        WHERE "slack_home_channel_id" IS NOT NULL AND EXISTS (SELECT 1 FROM "teams" o
+          WHERE o."org_id" = t."org_id" AND o."slack_home_channel_id" = t."slack_home_channel_id"
+            AND (o."created_at", o."id") < (t."created_at", t."id"))
+        RETURNING t."name"`);
+      if (cleared.rows.length > 0) {
+        console.warn(`[schema] cleared a Slack home channel another team already used: ${cleared.rows.map((row) => String(row.name)).join(", ")}. Set a new home channel on each.`);
+      }
+    },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "teams_org_slack_home" ON "teams" ("org_id", "slack_home_channel_id") WHERE "slack_home_channel_id" IS NOT NULL',
+  },
+  {
     describe: "user_notification_preferences.team_dm column",
     probe: { kind: "column", table: "user_notification_preferences", column: "team_dm" },
     sql: 'ALTER TABLE "user_notification_preferences" ADD COLUMN IF NOT EXISTS "team_dm" boolean DEFAULT false NOT NULL',
