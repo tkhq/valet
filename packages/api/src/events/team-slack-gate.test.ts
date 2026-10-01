@@ -4,7 +4,7 @@ import type { RunHost } from "@valet/workflow";
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks, users } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
@@ -104,7 +104,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
   });
 
   it("answers an unlinked member of the Slack workspace as the rule's creator, and still refuses a guest", async () => {
-    setSlackWorkspaceMemberCheck(async (userId) => userId === "U_UNLINKED");
+    setSlackWorkspaceMemberCheck(async (userId) => userId === "U_UNLINKED" ? { email: "newcomer@example.com" } : null);
     try {
       await seed();
       expect((await ingest(mention("U_UNLINKED"))).deliveries).toBe(1);
@@ -113,10 +113,22 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a" }));
       expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
       // A linked sender outside the team stays refused, even as a workspace member.
-      setSlackWorkspaceMemberCheck(async () => true);
+      setSlackWorkspaceMemberCheck(async () => ({ email: "linked@example.com" }));
       expect(await ingest(mention("U_X", "C1", "300.1"))).toMatchObject({ deliveries: 0, skipped: true });
+      // Removing a Slack link changes nothing: an unlinked sender whose email
+      // belongs to an org member outside the team is refused as that member,
+      // and one whose email belongs to a team member runs as that member.
+      await tdb.appDb.insert(users).values([
+        { id: "member-b", name: "B", email: "b@example.com" },
+        { id: "member-c", name: "C", email: "c@example.com" },
+      ]).onConflictDoNothing();
+      setSlackWorkspaceMemberCheck(async (userId) => ({ email: userId === "U_WAS_C" ? "C@example.com" : "b@example.com" }));
+      expect(await ingest(mention("U_WAS_C", "C1", "400.1"))).toMatchObject({ deliveries: 0, skipped: true });
+      expect((await ingest(mention("U_WAS_B", "C1", "500.1"))).deliveries).toBe(1);
+      await host.pollOnce();
+      expect(deliver).toHaveBeenLastCalledWith(expect.objectContaining({ actorUserId: "member-b" }));
     } finally {
-      setSlackWorkspaceMemberCheck(async () => false);
+      setSlackWorkspaceMemberCheck(async () => null);
     }
   });
 

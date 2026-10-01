@@ -1091,10 +1091,20 @@ export class SlackTransport implements ChannelTransport {
     return { senderName, text };
   }
 
-  /** A full member of this Slack workspace — see `ChannelTransport`. */
-  async isWorkspaceMember(userId: string): Promise<boolean> {
-    const user = await this.api.usersInfo(userId);
-    return user !== null && user.member && user.teamId === this.teamId;
+  /** Authorization answers last five minutes, so a member made a guest
+   *  loses access within that window, not at the next restart. */
+  private readonly standing = new Map<string, { value: { email?: string } | null; expiresAt: number }>();
+
+  /** A full member of this Slack workspace, with their email — see `ChannelTransport`. */
+  async workspaceMember(userId: string): Promise<{ email?: string } | null> {
+    const cached = this.standing.get(userId);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const user = await this.api.userStanding(userId);
+    // A failed lookup is not cached, so the next message asks again.
+    if (user === null) return null;
+    const value = user.member && user.teamId === this.teamId ? { ...(user.email ? { email: user.email } : {}) } : null;
+    this.standing.set(userId, { value, expiresAt: Date.now() + 5 * 60_000 });
+    return value;
   }
 
   /** The triggering message's own ts, so `react_to_origin` has a target — see

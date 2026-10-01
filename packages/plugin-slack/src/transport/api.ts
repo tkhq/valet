@@ -445,10 +445,8 @@ export class SlackApi {
   /** users.info → the member's display name, or null when the id names nobody.
    *  Cached per client: a thread transcript resolves the same authors and
    *  in-text mentions repeatedly, and the transport outlives one message. */
-  private readonly userInfoCache = new Map<string, { id: string; displayName: string; teamId?: string; member: boolean } | null>();
-  /** `member` is false for a deactivated account, a bot, a guest, or a
-   *  Slack Connect user from another workspace (`is_stranger`). */
-  async usersInfo(userId: string): Promise<{ id: string; displayName: string; teamId?: string; member: boolean } | null> {
+  private readonly userInfoCache = new Map<string, { id: string; displayName: string } | null>();
+  async usersInfo(userId: string): Promise<{ id: string; displayName: string } | null> {
     const cached = this.userInfoCache.get(userId);
     if (cached !== undefined) return cached;
     let res: SlackResponse;
@@ -465,11 +463,28 @@ export class SlackApi {
     const profile = rec(user.profile);
     const displayName =
       str(profile?.display_name) || str(profile?.real_name) || str(user.real_name) || str(user.name) || userId;
-    const member = !["deleted", "is_bot", "is_restricted", "is_ultra_restricted", "is_stranger"].some((flag) => user[flag] === true);
-    const teamId = str(user.team_id);
-    const result = { id: userId, displayName, ...(teamId ? { teamId } : {}), member };
+    const result = { id: userId, displayName };
     this.userInfoCache.set(userId, result);
     return result;
+  }
+
+  /** users.info for an authorization decision: never cached here, so a
+   *  member who became a guest is not still a member. `member` is false for a
+   *  deactivated account, a bot, a guest, or a Slack Connect user from another
+   *  workspace (`is_stranger`). Null when Slack cannot answer. */
+  async userStanding(userId: string): Promise<{ member: boolean; teamId?: string; email?: string } | null> {
+    let res: SlackResponse;
+    try {
+      res = await this.get("users.info", { user: userId });
+    } catch {
+      return null;
+    }
+    const user = rec(res.user);
+    if (!user) return null;
+    const member = !["deleted", "is_bot", "is_restricted", "is_ultra_restricted", "is_stranger"].some((flag) => user[flag] === true);
+    const teamId = str(user.team_id);
+    const email = str(rec(user.profile)?.email);
+    return { member, ...(teamId ? { teamId } : {}), ...(email ? { email } : {}) };
   }
 
   async filesInfo(fileId: string): Promise<Record<string, unknown>> {
