@@ -55,6 +55,16 @@ describe("ask_question tool", () => {
     expect(result.text).toBe('answer to "Which repo?": api');
   });
 
+  it("ignores a stored answer that is not text, instead of crashing", async () => {
+    // Read back from storage, the way a bad answer would arrive.
+    const stored = '{"actionId":"option-0","resolvedBy":"u1","resolvedAt":1,"value":123}';
+    const result = await askQuestionTool.execute(
+      { question: "Which repo?", options: ["web"] },
+      makeCtx(async () => JSON.parse(stored)),
+    );
+    expect(result.text).toBe('answer to "Which repo?": web');
+  });
+
   it("tells the model to go on without asking again when the question expires", async () => {
     const result = await askQuestionTool.execute(
       { question: "Ship it?" },

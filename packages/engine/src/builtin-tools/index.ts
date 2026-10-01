@@ -776,7 +776,9 @@ export const askQuestionTool = defineTool({
       throw err;
     }
     const picked = resolution.actionId?.startsWith("option-") ? options[Number(resolution.actionId.slice("option-".length))] : undefined;
-    const answer = resolution.value?.trim() || picked;
+    // The host checks the type, but a resolution is stored data: narrow it here too.
+    const typed = typeof resolution.value === "string" ? resolution.value.trim() : "";
+    const answer = typed || picked;
     return { text: answer ? `answer to "${args.question}": ${answer}` : `the question "${args.question}" was closed without an answer.` };
   },
 });

@@ -1229,6 +1229,11 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   if (body.actionId === undefined && body.value === undefined) {
     return c.json({ error: "actionId or value is required" }, 400);
   }
+  // A typed answer is text. Refuse anything else before it resolves the gate:
+  // a resolved gate cannot be answered again.
+  if ((body.value !== undefined && typeof body.value !== "string") || (body.actionId !== undefined && typeof body.actionId !== "string")) {
+    return c.json({ error: "Send actionId and value as text, such as {\"value\": \"staging\"}." }, 400);
+  }
 
   // Route-level 403 for `always_allow` (action-policies plan, Task 4):
   // defense-in-depth's front half — `onResolution` (T3) already fails this

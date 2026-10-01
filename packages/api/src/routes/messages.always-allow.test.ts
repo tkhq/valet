@@ -130,3 +130,17 @@ it("lets current team members reach an existing workflow agent gate without an a
   await p.db.delete(teamMembers).where(eq(teamMembers.teamId, "approval-team"));
   expect((await fetch(base)).status).toBe(404);
 });
+
+describe("POST /decisions/:gateId/resolve — answer types", () => {
+  it("refuses a non-text answer before it can resolve a gate", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/decisions/nonexistent-gate/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 123 }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toContain("as text");
+  });
+});

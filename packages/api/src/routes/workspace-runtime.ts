@@ -56,9 +56,10 @@ workspaceRuntimeRouter.get("/:workspace/runtime/info", async (c) => {
  * Routes that clients built before workspace runtimes still call. A CLI
  * posts `/api/orchestrator` (a team key: `/api/teams/:id/orchestrator`) to
  * find its default target, and an open tab running the previous web bundle
- * probes `GET /api/orchestrator`. They answer with the workspace runtime, so
- * those clients keep working through a rollout. New code uses
- * `/api/workspaces/:workspace/runtime`.
+ * probes `GET /api/orchestrator`. They answer with the workspace runtime.
+ * That tab's other reads (`/api/orchestrator/info`, `/children`, and
+ * `/api/assistants`) are gone and return 404, so it works only after a
+ * reload. New code uses `/api/workspaces/:workspace/runtime`.
  */
 export const legacyOrchestratorRouter = new Hono<AppEnv>();
 
