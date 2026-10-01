@@ -22,6 +22,7 @@ const STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "w
   delivered: { label: "Delivered", badge: "success" },
   pending: { label: "In progress", badge: "accent" },
   failed: { label: "Failed", badge: "danger" },
+  skipped: { label: "Skipped", badge: "neutral" },
   filtered: { label: "Filtered out", badge: "neutral" },
   no_match: { label: "No match", badge: "neutral" },
   rejected: { label: "Rejected", badge: "warning" },
@@ -111,7 +112,7 @@ function LogRow({ item, count }: { item: EventLogItem; count: number }) {
         title={<Link to="/events/$eventId" params={{ eventId: item.id }}>{item.summary || item.eventKey || "Event"}</Link>}
         badge={<Badge variant={meta.badge}>{meta.label}</Badge>}
         time={item.at}
-        detail={[source, item.actor, `${item.deliveryCount} ${item.deliveryCount === 1 ? "delivery" : "deliveries"}`].filter(Boolean).join(" · ")}
+        detail={[source, item.actor, item.detail ?? `${item.deliveryCount} ${item.deliveryCount === 1 ? "delivery" : "deliveries"}`].filter(Boolean).join(" · ")}
       />
     );
   }

@@ -28,13 +28,13 @@ export function dropStatus(reason: string): EventLogStatus {
   return "failed";
 }
 
-/** An event's status from its deliveries: a failure wins, then work in flight. */
+/** An event's status from this workspace's deliveries: a failure wins, then
+ * work in flight, then a delivery. Only skipped deliveries read as skipped. */
 const EVENT_STATUS = sql`CASE
   WHEN BOOL_OR(d.status IN ('failed','dead')) THEN 'failed'
   WHEN BOOL_OR(d.status = 'pending') THEN 'pending'
   WHEN BOOL_OR(d.status = 'delivered') THEN 'delivered'
-  WHEN COUNT(d.id) > 0 THEN 'delivered'
-  ELSE 'no_match' END`;
+  ELSE 'skipped' END`;
 
 export interface EventLogQuery {
   orgId: string;
@@ -63,30 +63,32 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
     const where: SQL[] = [
       sql`e.org_id = ${orgId}`,
       sql`e.received_at >= ${(query.now ?? Date.now()) - EVENT_LOG_WINDOW_MS}`,
-      sql`EXISTS (SELECT 1 FROM event_deliveries od JOIN event_subscriptions s ON s.id = od.subscription_id
-        WHERE od.event_id = e.id AND s.org_id = ${orgId}
-          AND ((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org'))`,
+      // Only this workspace's deliveries (and the org's) count, so another
+      // workspace's failure never marks this workspace's event failed.
+      sql`s.org_id = ${orgId}`,
+      sql`((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org')`,
     ];
     if (like) where.push(sql`(e.summary ILIKE ${like} ESCAPE '\\' OR e.event_key ILIKE ${like} ESCAPE '\\')`);
     if (query.before) where.push(sql`(e.received_at, e.id) < (${query.before.at}, ${query.before.id})`);
     const having = problemsOnly ? sql`HAVING ${EVENT_STATUS} = 'failed'` : sql``;
     const result = await db.execute(sql`
-      SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries
-      FROM events e LEFT JOIN event_deliveries d ON d.event_id = e.id
+      SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
+        MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason
+      FROM events e JOIN event_deliveries d ON d.event_id = e.id JOIN event_subscriptions s ON s.id = d.subscription_id
       WHERE ${sql.join(where, sql` AND `)}
       GROUP BY e.id
       ${having}
       ORDER BY e.received_at DESC, e.id DESC
       LIMIT ${take}`) as { rows: Array<{
         id: string; service: string; event_key: string; summary: string | null; actor: unknown;
-        received_at: string | number; status: EventLogStatus; deliveries: number;
+        received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
       }> };
     for (const row of result.rows) {
       const actor = row.actor && typeof row.actor === "object" ? row.actor as { login?: string; externalId?: string } : null;
       eventRows.push({
         kind: "event", id: row.id, at: Number(row.received_at), status: row.status,
         service: row.service, eventKey: row.event_key, summary: row.summary, actor: actor?.login ?? actor?.externalId ?? null,
-        reason: null, detail: null, deliveryCount: Number(row.deliveries),
+        reason: null, detail: row.status === "skipped" ? row.skipped_reason : null, deliveryCount: Number(row.deliveries),
       });
     }
   }

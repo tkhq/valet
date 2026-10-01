@@ -4711,7 +4711,7 @@ export interface GetEventResponse {
 }
 
 /** One row of the Events Log: a stored event, or a recorded problem. */
-export type EventLogStatus = "delivered" | "pending" | "failed" | "filtered" | "no_match" | "rejected";
+export type EventLogStatus = "delivered" | "pending" | "failed" | "skipped" | "filtered" | "no_match" | "rejected";
 
 export interface EventLogItem {
   kind: "event" | "problem";

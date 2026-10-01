@@ -64,6 +64,29 @@ it("pages the merged list with one cursor, and refuses it under other filters", 
   expect((await fetch(`${api.baseUrl}/api/events/log?${MINE}&problems=1&cursor=${encodeURIComponent(first.nextCursor!)}`)).status).toBe(400);
 });
 
+it("counts only this workspace's deliveries, and shows why a skipped event was skipped", async () => {
+  api = await bootTestApi();
+  await seed(api);
+  const now = Date.now();
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_theirs", orgId: "local-org", ownerType: "team", ownerId: "team-b", name: "Theirs",
+    eventKeys: ["github.push"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  await api.providers.db.insert(events).values({
+    id: "ev_skip", orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: "ev_skip", refs: {}, summary: "push ev_skip",
+    payload: {}, occurredAt: now - 500, receivedAt: now - 500,
+  });
+  await api.providers.db.insert(eventDeliveries).values([
+    // Another workspace's dead delivery of an event this workspace received.
+    { id: "d3", eventId: "ev_ok", subscriptionId: "sub_theirs", status: "dead", attempts: 5, nextAttemptAt: 0, createdAt: now },
+    { id: "d4", eventId: "ev_skip", subscriptionId: "sub_mine", status: "skipped", lastError: "Skipped — matching team subscription.", attempts: 0, nextAttemptAt: 0, createdAt: now },
+  ]);
+  const body = await log(api);
+  expect(body.items.find((item) => item.id === "ev_ok")).toMatchObject({ status: "delivered", deliveryCount: 1 });
+  expect(body.items.find((item) => item.id === "ev_skip")).toMatchObject({ status: "skipped", detail: "Skipped — matching team subscription." });
+  expect((await log(api, "&problems=1")).items.map((item) => item.id)).not.toContain("ev_ok");
+});
+
 it("keeps other workspaces' events out, and hides form diagnostics from members", async () => {
   api = await bootTestApi();
   await seed(api);
