@@ -10,6 +10,17 @@ import { resolvePath, subscriptionMatchesEvent } from "./match.js";
 import { isOrgMember } from "../services/org.js";
 
 /**
+ * Whether a Slack sender is a full member of the connected workspace. Boot
+ * sets it from the channel host (`setSlackWorkspaceMemberCheck`); the gate is
+ * called from ingest, delivery policy, the dispatcher, and the follow router,
+ * so one setter replaces a dependency on each. Unset, no sender qualifies.
+ */
+let slackWorkspaceMember: (userId: string) => Promise<boolean> = async () => false;
+export function setSlackWorkspaceMemberCheck(check: (userId: string) => Promise<boolean>): void {
+  slackWorkspaceMember = check;
+}
+
+/**
  * Who may invoke a team assistant by mention. `team` is the owning team's
  * current members; `organization` is any current member of the organization
  * that owns the team. The audience decides invocation only: the rule still
@@ -85,7 +96,7 @@ export function isTeamAssistantMention(
 /** No identity or membership cache: removal applies to the next match. */
 export async function teamMentionActor(
   db: AppDb,
-  sub: { orgId: string; ownerId: string; audience?: string | null },
+  sub: { orgId: string; ownerId: string; audience?: string | null; createdBy?: string },
   payload: unknown,
   logDenied = true,
 ): Promise<string | null> {
@@ -101,6 +112,14 @@ export async function teamMentionActor(
   } else if (!(await isCurrentTeamActor(db, sub, identity.userId))) {
     reason = "not_team_member";
   }
+  // Valet answers any full member of the Slack workspace, linked or not. A
+  // sender who is not a linked, authorized member runs as the person who set
+  // the channel up, while that person still has access; approvals still
+  // apply. Guests and other organizations' users are still refused.
+  if (reason && sub.createdBy && typeof externalId === "string" && await slackWorkspaceMember(externalId)
+    && (audience === "organization"
+      ? await isCurrentOrgActor(db, sub, sub.createdBy)
+      : await isCurrentTeamActor(db, sub, sub.createdBy))) return sub.createdBy;
   if (reason) {
     if (logDenied) {
       await writeDropLog(db, {
@@ -122,7 +141,7 @@ export async function teamMentionActor(
  */
 export async function authorizedSlackDiagnosticSubscription(
   db: AppDb,
-  sub: { orgId: string; ownerId: string; ownerType: string; target: unknown; audience?: string | null },
+  sub: { orgId: string; ownerId: string; ownerType: string; target: unknown; audience?: string | null; createdBy?: string },
   payload: unknown,
   logDenied = true,
 ): Promise<boolean> {
@@ -137,7 +156,7 @@ export async function subscriptionMatchOutcome(
   db: AppDb,
   sub: {
     orgId: string; ownerId: string; ownerType: string; target: unknown;
-    eventKeys: unknown; filters: unknown; audience?: string | null;
+    eventKeys: unknown; filters: unknown; audience?: string | null; createdBy?: string;
   },
   eventKey: string,
   payload: unknown,
@@ -215,17 +234,29 @@ export async function followBindingAuthorized(
     : isCurrentTeamActor(db, follow, follow.createdBy);
 }
 
-/** A binding grants no authority to other participants in its Slack thread. */
+/**
+ * Who a message in a followed thread runs as: the sender when they are a
+ * linked user the binding admits; otherwise, for a full member of the Slack
+ * workspace, the person who bound the thread, while the binding still admits
+ * them. Approvals still apply.
+ */
 export async function followedMessageActor(
   db: AppDb,
-  follow: { orgId: string; ownerType: string; ownerId: string; subscriptionId?: string | null },
+  follow: { orgId: string; ownerType: string; ownerId: string; createdBy: string; subscriptionId?: string | null },
   externalId: string | undefined,
 ): Promise<string | null> {
+  const admits = async (userId: string): Promise<boolean> => {
+    if (!(await isOrgMember(db, follow.orgId, userId))) return false;
+    if (follow.ownerType === "user") return userId === follow.ownerId;
+    if (follow.ownerType === "org") return follow.ownerId === follow.orgId;
+    if (follow.ownerType !== "team") return false;
+    return followBindingAuthorized(db, { ...follow, createdBy: userId });
+  };
+  // A message with no sender, such as another app's post, never routes.
   if (!externalId) return null;
   const identity = await identityForExternal(db, "slack", externalId);
-  if (!identity || !(await isOrgMember(db, follow.orgId, identity.userId))) return null;
-  if (follow.ownerType === "user") return identity.userId === follow.ownerId ? identity.userId : null;
-  if (follow.ownerType === "org") return follow.ownerId === follow.orgId ? identity.userId : null;
-  if (follow.ownerType !== "team") return null;
-  return await followBindingAuthorized(db, { ...follow, createdBy: identity.userId }) ? identity.userId : null;
+  if (identity && await admits(identity.userId)) return identity.userId;
+  // Guests and other organizations' users are still refused.
+  if (!(await slackWorkspaceMember(externalId))) return null;
+  return await admits(follow.createdBy) ? follow.createdBy : null;
 }

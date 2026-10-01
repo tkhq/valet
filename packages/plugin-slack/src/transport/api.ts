@@ -445,8 +445,10 @@ export class SlackApi {
   /** users.info → the member's display name, or null when the id names nobody.
    *  Cached per client: a thread transcript resolves the same authors and
    *  in-text mentions repeatedly, and the transport outlives one message. */
-  private readonly userInfoCache = new Map<string, { id: string; displayName: string } | null>();
-  async usersInfo(userId: string): Promise<{ id: string; displayName: string } | null> {
+  private readonly userInfoCache = new Map<string, { id: string; displayName: string; teamId?: string; member: boolean } | null>();
+  /** `member` is false for a deactivated account, a bot, a guest, or a
+   *  Slack Connect user from another workspace (`is_stranger`). */
+  async usersInfo(userId: string): Promise<{ id: string; displayName: string; teamId?: string; member: boolean } | null> {
     const cached = this.userInfoCache.get(userId);
     if (cached !== undefined) return cached;
     let res: SlackResponse;
@@ -463,7 +465,9 @@ export class SlackApi {
     const profile = rec(user.profile);
     const displayName =
       str(profile?.display_name) || str(profile?.real_name) || str(user.real_name) || str(user.name) || userId;
-    const result = { id: userId, displayName };
+    const member = !["deleted", "is_bot", "is_restricted", "is_ultra_restricted", "is_stranger"].some((flag) => user[flag] === true);
+    const teamId = str(user.team_id);
+    const result = { id: userId, displayName, ...(teamId ? { teamId } : {}), member };
     this.userInfoCache.set(userId, result);
     return result;
   }

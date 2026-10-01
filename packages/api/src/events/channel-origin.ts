@@ -16,6 +16,7 @@ interface TransportRegistry {
     threadKeyFromEvent?(eventKey: string, payload: unknown): string | null;
     messageTsFromEvent?(eventKey: string, payload: unknown): string | null;
     normalizeForAgent?(msg: { userId?: string; text: string }): Promise<{ senderName?: string; text: string }>;
+    isWorkspaceMember?(userId: string): Promise<boolean>;
   } | null;
 }
 
@@ -30,6 +31,11 @@ export function channelOriginResolver(
     // A dispatched channel event is an addressed mention.
     return { channelType: service, threadKey, reply: "auto", ...(messageTs ? { messageTs } : {}) };
   };
+}
+
+/** Whether a sender is a full member of the service's connected workspace. */
+export function channelWorkspaceMember(registry: TransportRegistry): (service: string, userId: string) => Promise<boolean> {
+  return async (service, userId) => (await registry.transportFor(service)?.isWorkspaceMember?.(userId)) ?? false;
 }
 
 export function channelMessageNormalizer(

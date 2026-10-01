@@ -14,7 +14,7 @@ import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 import { eq } from "drizzle-orm";
 import { eventSubscriptions, teams, teamMembers, orgMembers } from "../schema/index.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
-import { followedMessageActor } from "../events/team-slack-gate.js";
+import { followedMessageActor, setSlackWorkspaceMemberCheck } from "../events/team-slack-gate.js";
 
 const ORG = "org-1";
 const USER = "user-1";
@@ -77,7 +77,7 @@ describe("handleFollowedMessage", () => {
     });
   });
 
-  afterEach(async () => {
+  afterEach(async () => { setSlackWorkspaceMemberCheck(async () => false);
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
@@ -128,26 +128,24 @@ describe("handleFollowedMessage", () => {
 
   it("fails closed for an unknown owner type", async () => {
     expect(await followedMessageActor(testDb.appDb, {
-      orgId: ORG, ownerType: "unknown", ownerId: ORG,
+      orgId: ORG, ownerType: "unknown", ownerId: ORG, createdBy: USER,
     }, "U9")).toBeNull();
   });
 
   it("allows the personal assistant owner", async () => {
     expect(await followedMessageActor(testDb.appDb, {
-      orgId: ORG, ownerType: "user", ownerId: USER,
+      orgId: ORG, ownerType: "user", ownerId: USER, createdBy: USER,
     }, "U9")).toBe(USER);
   });
 
-  it.each(["missing", "unlinked", "non-member", "removed", "foreign-org"])(
-    "does not route a %s sender under the binding actor's authority",
+  it.each(["unlinked", "non-member", "removed", "foreign-org"])(
+    "routes a %s sender's message as the person who bound the thread when the sender is in the Slack workspace",
     async (mode) => {
+      setSlackWorkspaceMemberCheck(async (userId) => userId === "OTHER");
       await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
       await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
-      await upsertFollowedThread(testDb.appDb, {
-        orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
-        ownerType: "team", ownerId: "team-follow", createdBy: USER, lastSeenTs: "1.3",
-      });
-      if (mode !== "unlinked" && mode !== "missing") {
+      const follow = { orgId: ORG, ownerType: "team" as const, ownerId: "team-follow", createdBy: USER };
+      if (mode !== "unlinked") {
         await linkIdentity(testDb.appDb, { provider: "slack", externalId: "OTHER", userId: "other-user" });
         await testDb.appDb.insert(orgMembers).values({ orgId: mode === "foreign-org" ? "other-org" : ORG, userId: "other-user", role: "member" });
       }
@@ -155,16 +153,14 @@ describe("handleFollowedMessage", () => {
         await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: "other-user", role: "member" });
         await testDb.appDb.delete(teamMembers).where(eq(teamMembers.userId, "other-user"));
       }
-      const fetchThreadWindow = vi.fn(async () => null);
-      const normalizeChannelMessage = vi.fn(async () => ({ text: "approve" }));
-      const ensure = vi.spyOn(engineHost, "ensureFreshThread");
-      await handleFollowedMessage({ db: testDb.appDb, engineHost, fetchThreadWindow, normalizeChannelMessage }, {
-        orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: mode === "missing" ? undefined : "OTHER", text: "approve" }),
-      });
-      expect(fetchThreadWindow).not.toHaveBeenCalled();
-      expect(normalizeChannelMessage).not.toHaveBeenCalled();
-      expect(ensure).not.toHaveBeenCalled();
-      expect((await findFollowedThread(testDb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" }))?.lastSeenTs).toBe("1.3");
+      expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBe(USER);
+      // A guest or another organization's user does not route.
+      expect(await followedMessageActor(testDb.appDb, follow, "GUEST")).toBeNull();
+      // No sender (another app's post) still does not route.
+      expect(await followedMessageActor(testDb.appDb, follow, undefined)).toBeNull();
+      // Once the person who bound the thread loses access, nobody routes under it.
+      await testDb.appDb.delete(teamMembers).where(eq(teamMembers.userId, USER));
+      expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBeNull();
     },
   );
 

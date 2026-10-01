@@ -962,6 +962,21 @@ describe("assistant thread controls", () => {
   });
 });
 
+describe("workspace membership", () => {
+  it("counts a full member of the connected team, and not a guest, a bot, or another organization's user", async () => {
+    const transport = makeTransport();
+    fake.setMembers([
+      { id: "UFULL", team_id: TEAM, name: "full" },
+      { id: "UGUEST", team_id: TEAM, name: "guest", is_restricted: true },
+      { id: "USINGLE", team_id: TEAM, name: "single", is_ultra_restricted: true },
+      { id: "UBOT2", team_id: TEAM, name: "bot", is_bot: true },
+      { id: "UEXT", team_id: "TOTHER", name: "external", is_stranger: true },
+    ]);
+    expect(await transport.isWorkspaceMember("UFULL")).toBe(true);
+    for (const id of ["UGUEST", "USINGLE", "UBOT2", "UEXT", "UNKNOWN"]) expect(await transport.isWorkspaceMember(id)).toBe(false);
+  });
+});
+
 describe("gate prompts", () => {
   it("escapes broadcasts in gate titles and bodies", async () => {
     const transport = makeTransport();

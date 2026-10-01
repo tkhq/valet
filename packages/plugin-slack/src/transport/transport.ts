@@ -1091,6 +1091,12 @@ export class SlackTransport implements ChannelTransport {
     return { senderName, text };
   }
 
+  /** A full member of this Slack workspace — see `ChannelTransport`. */
+  async isWorkspaceMember(userId: string): Promise<boolean> {
+    const user = await this.api.usersInfo(userId);
+    return user !== null && user.member && user.teamId === this.teamId;
+  }
+
   /** The triggering message's own ts, so `react_to_origin` has a target — see
    *  `ChannelTransport`. `thread_ts` would point at the parent, not the message
    *  that mentioned the bot. */

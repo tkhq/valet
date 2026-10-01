@@ -11,7 +11,7 @@ import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
 import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
-import { authorizedSubscriptionMatchesEvent } from "./team-slack-gate.js";
+import { authorizedSubscriptionMatchesEvent, setSlackWorkspaceMemberCheck } from "./team-slack-gate.js";
 
 const ORG = "org-team-events";
 const channelFilter = { field: "channel", op: "eq", value: "C1" } as const;
@@ -101,6 +101,20 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(deliver).toHaveBeenCalledTimes(2);
     expect(deliver.mock.calls[0][0]).not.toHaveProperty("assistantId");
     expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ createdBy: "member-b", ownerId: "team-1" });
+  });
+
+  it("answers an unlinked member of the Slack workspace as the rule's creator, and still refuses a guest", async () => {
+    setSlackWorkspaceMemberCheck(async (userId) => userId === "U_UNLINKED");
+    try {
+      await seed();
+      expect((await ingest(mention("U_UNLINKED"))).deliveries).toBe(1);
+      const { host, deliver } = dispatcher();
+      await host.pollOnce();
+      expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a" }));
+      expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
+    } finally {
+      setSlackWorkspaceMemberCheck(async () => false);
+    }
   });
 
   it.each([["U_X", "not_team_member"], ["U_UNLINKED", "unlinked_sender"]])("denies %s before event persistence", async (sender, reason) => {
