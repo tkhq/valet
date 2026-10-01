@@ -112,6 +112,9 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       await host.pollOnce();
       expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a" }));
       expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
+      // A linked sender outside the team stays refused, even as a workspace member.
+      setSlackWorkspaceMemberCheck(async () => true);
+      expect(await ingest(mention("U_X", "C1", "300.1"))).toMatchObject({ deliveries: 0, skipped: true });
     } finally {
       setSlackWorkspaceMemberCheck(async () => false);
     }

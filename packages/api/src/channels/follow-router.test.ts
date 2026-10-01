@@ -138,29 +138,36 @@ describe("handleFollowedMessage", () => {
     }, "U9")).toBe(USER);
   });
 
-  it.each(["unlinked", "non-member", "removed", "foreign-org"])(
-    "routes a %s sender's message as the person who bound the thread when the sender is in the Slack workspace",
+  it("routes an unlinked Slack workspace member in a team thread as the person who bound it", async () => {
+    setSlackWorkspaceMemberCheck(async (userId) => userId === "OTHER");
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
+    const follow = { orgId: ORG, ownerType: "team" as const, ownerId: "team-follow", createdBy: USER };
+    expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBe(USER);
+    // A guest or another organization's user does not route.
+    expect(await followedMessageActor(testDb.appDb, follow, "GUEST")).toBeNull();
+    // No sender (another app's post) does not route.
+    expect(await followedMessageActor(testDb.appDb, follow, undefined)).toBeNull();
+    // A personal thread never runs another person's message as its owner.
+    expect(await followedMessageActor(testDb.appDb, { orgId: ORG, ownerType: "user", ownerId: USER, createdBy: USER }, "OTHER")).toBeNull();
+    // Once the person who bound the thread loses access, nobody routes under it.
+    await testDb.appDb.delete(teamMembers).where(eq(teamMembers.userId, USER));
+    expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBeNull();
+  });
+
+  it.each(["non-member", "removed", "foreign-org"])(
+    "does not route a linked %s sender under the binding actor's authority",
     async (mode) => {
-      setSlackWorkspaceMemberCheck(async (userId) => userId === "OTHER");
+      setSlackWorkspaceMemberCheck(async () => true);
       await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
       await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
-      const follow = { orgId: ORG, ownerType: "team" as const, ownerId: "team-follow", createdBy: USER };
-      if (mode !== "unlinked") {
-        await linkIdentity(testDb.appDb, { provider: "slack", externalId: "OTHER", userId: "other-user" });
-        await testDb.appDb.insert(orgMembers).values({ orgId: mode === "foreign-org" ? "other-org" : ORG, userId: "other-user", role: "member" });
-      }
+      await linkIdentity(testDb.appDb, { provider: "slack", externalId: "OTHER", userId: "other-user" });
+      await testDb.appDb.insert(orgMembers).values({ orgId: mode === "foreign-org" ? "other-org" : ORG, userId: "other-user", role: "member" });
       if (mode === "removed") {
         await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: "other-user", role: "member" });
         await testDb.appDb.delete(teamMembers).where(eq(teamMembers.userId, "other-user"));
       }
-      expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBe(USER);
-      // A guest or another organization's user does not route.
-      expect(await followedMessageActor(testDb.appDb, follow, "GUEST")).toBeNull();
-      // No sender (another app's post) still does not route.
-      expect(await followedMessageActor(testDb.appDb, follow, undefined)).toBeNull();
-      // Once the person who bound the thread loses access, nobody routes under it.
-      await testDb.appDb.delete(teamMembers).where(eq(teamMembers.userId, USER));
-      expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBeNull();
+      expect(await followedMessageActor(testDb.appDb, { orgId: ORG, ownerType: "team", ownerId: "team-follow", createdBy: USER }, "OTHER")).toBeNull();
     },
   );
 

@@ -112,11 +112,12 @@ export async function teamMentionActor(
   } else if (!(await isCurrentTeamActor(db, sub, identity.userId))) {
     reason = "not_team_member";
   }
-  // Valet answers any full member of the Slack workspace, linked or not. A
-  // sender who is not a linked, authorized member runs as the person who set
-  // the channel up, while that person still has access; approvals still
-  // apply. Guests and other organizations' users are still refused.
-  if (reason && sub.createdBy && typeof externalId === "string" && await slackWorkspaceMember(externalId)
+  // A team's Valet also answers a full member of the Slack workspace who has
+  // not linked a Valet account. That sender runs as the person who set the
+  // channel up, while that person still has access; approvals still apply.
+  // A linked sender outside the audience, a guest, or another organization's
+  // user is still refused.
+  if (reason === "unlinked_sender" && sub.createdBy && typeof externalId === "string" && await slackWorkspaceMember(externalId)
     && (audience === "organization"
       ? await isCurrentOrgActor(db, sub, sub.createdBy)
       : await isCurrentTeamActor(db, sub, sub.createdBy))) return sub.createdBy;
@@ -236,9 +237,9 @@ export async function followBindingAuthorized(
 
 /**
  * Who a message in a followed thread runs as: the sender when they are a
- * linked user the binding admits; otherwise, for a full member of the Slack
- * workspace, the person who bound the thread, while the binding still admits
- * them. Approvals still apply.
+ * linked user the binding admits. In a team thread, an unlinked full member
+ * of the Slack workspace runs as the person who bound the thread, while the
+ * binding still admits them. Approvals still apply.
  */
 export async function followedMessageActor(
   db: AppDb,
@@ -255,8 +256,10 @@ export async function followedMessageActor(
   // A message with no sender, such as another app's post, never routes.
   if (!externalId) return null;
   const identity = await identityForExternal(db, "slack", externalId);
-  if (identity && await admits(identity.userId)) return identity.userId;
-  // Guests and other organizations' users are still refused.
-  if (!(await slackWorkspaceMember(externalId))) return null;
+  if (identity) return await admits(identity.userId) ? identity.userId : null;
+  // Only a team thread answers an unlinked sender, and only a full member of
+  // the Slack workspace. A personal thread never runs another person's
+  // message as its owner.
+  if (follow.ownerType !== "team" || !(await slackWorkspaceMember(externalId))) return null;
   return await admits(follow.createdBy) ? follow.createdBy : null;
 }
