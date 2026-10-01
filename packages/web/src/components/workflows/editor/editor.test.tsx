@@ -13,12 +13,12 @@
  * also match.
  */
 import { useEffect } from "react";
-import { describe, expect, it, vi, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WorkflowDefinition } from "@valet/workflow";
 import { ApiError } from "~/api/client";
-import { Editor } from "./editor";
+import { Editor, WORKFLOW_VIEW_KEY } from "./editor";
 
 /**
  * Stands in for the assistant conversation the page passes into the right-
@@ -63,19 +63,22 @@ function baseDefinition(): WorkflowDefinition {
 
 afterEach(() => vi.unstubAllGlobals());
 
+// These suites drive the map (the canvas); the steps view has its own tests.
+beforeEach(() => localStorage.setItem(WORKFLOW_VIEW_KEY, "map"));
+
 describe("Editor", () => {
   it("moves phone focus into the inspector and back to the canvas control", () => {
     vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("max-width"), addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     render(<Editor initialDefinition={baseDefinition()} onSave={vi.fn()} />);
     fireEvent.click(screen.getByText("hello"));
-    const back = screen.getByRole("button", { name: "Back to canvas" });
+    const back = screen.getByRole("button", { name: "Back to workflow" });
     expect(document.activeElement).toBe(back);
     const prompt = screen.getByLabelText("Prompt");
     prompt.focus();
     fireEvent.change(prompt, { target: { value: "Keep typing" } });
     expect(document.activeElement).toBe(prompt);
     fireEvent.click(back);
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Show canvas" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Show workflow" }));
   });
 
   it("does not move desktop focus into the phone inspector navigation", () => {
@@ -93,16 +96,16 @@ describe("Editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show assistant" }));
     const draft = screen.getByLabelText("Assistant draft");
     fireEvent.change(draft, { target: { value: "Keep this draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "Show canvas" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show workflow" }));
     fireEvent.click(screen.getByText("hello"));
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Edited on phone" } });
-    fireEvent.click(screen.getByRole("button", { name: "Back to canvas" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to workflow" }));
     expect(screen.queryByTestId("inspector")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show assistant" }));
     expect(screen.getByLabelText("Assistant draft")).toBe(draft);
     expect(draft).toHaveProperty("value", "Keep this draft");
     expect(assistantMounts).toBe(1);
-    fireEvent.click(screen.getByRole("button", { name: "Show canvas" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show workflow" }));
     fireEvent.click(screen.getByText("Edited on phone"));
     expect(screen.getByLabelText("Prompt")).toHaveProperty("value", "Edited on phone");
   });
@@ -114,7 +117,7 @@ describe("Editor", () => {
     await user.click(screen.getByRole("button", { name: "Add node" }));
     await user.click(screen.getByRole("menuitem", { name: "Wait" }));
     await waitFor(() => expect(screen.getByTestId("inspector")).toBeTruthy());
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to canvas" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to workflow" }));
     expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
   });
 
