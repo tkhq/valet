@@ -258,6 +258,9 @@ export async function expandLegacySlackWildcards(db: PgDb): Promise<void> {
 interface SchemaRepair {
   /** Optional resumable preparation, outside the final DDL transaction. */
   prepare?: (db: PgDb) => Promise<void>;
+  /** A statement that must commit with `sql`, such as dropping the index it
+   * replaces. It runs first, inside the same lock-timed transaction. */
+  before?: string;
   /** Names the element in logs and errors, e.g. "orgs.sso_team_groups column". */
   describe: string;
   probe:
@@ -384,7 +387,9 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     // the key names the session. The first key (without it) is dropped.
     describe: "channel_messages_session_message",
     probe: { kind: "index", index: "channel_messages_session_message" },
-    prepare: async (db) => { await db.query('DROP INDEX IF EXISTS "channel_messages_provider_message"'); },
+    // The replaced index goes in the same transaction, so a lock timeout
+    // never leaves the table with neither index.
+    before: 'DROP INDEX IF EXISTS "channel_messages_provider_message"',
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel_messages" ("org_id", "session_id", "channel_key", "provider_message_id", "direction")',
   },
   { describe: "channel_messages_channel", probe: { kind: "index", index: "channel_messages_channel" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at")' },
@@ -1785,6 +1790,7 @@ async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
         // ALTER waits forever behind any open transaction on the table —
         // during a rolling update, the previous api pod's.
         await tx.query(`SET LOCAL lock_timeout = '${REPAIR_LOCK_TIMEOUT}'`);
+        if (repair.before) await tx.query(repair.before);
         await tx.query(repair.sql);
         if (!repair.backfill) return 0;
         const result = await tx.query(repair.backfill);
