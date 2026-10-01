@@ -394,6 +394,9 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   },
   { describe: "channel_messages_channel", probe: { kind: "index", index: "channel_messages_channel" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at")' },
   { describe: "channel_messages_thread", probe: { kind: "index", index: "channel_messages_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at")' },
+  { describe: "slack channel privacy", probe: { kind: "table", table: "slack_channel_privacy" }, sql: `CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (
+    "org_id" text NOT NULL, "channel_id" text NOT NULL, "is_private" boolean NOT NULL, "checked_at" bigint NOT NULL,
+    PRIMARY KEY("org_id","channel_id"))` },
   { describe: "briefing dismissals", probe: { kind: "table", table: "briefing_dismissals" }, sql: `CREATE TABLE IF NOT EXISTS "briefing_dismissals" (
     "user_id" text NOT NULL, "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
     "briefing_id" text NOT NULL, "dismissed_at" bigint NOT NULL,

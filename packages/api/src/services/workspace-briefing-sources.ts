@@ -1,8 +1,9 @@
 import type { Principal } from "@valet/engine";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkspaceBriefingSource } from "../wire/types.js";
 import { sharedThreadKey } from "./thread-read-state.js";
+import { sharedWithWholeTeamSql } from "./thread-access.js";
 import { listWorkspaceOutcomes } from "./workspace-outcomes.js";
 import { slackThreadUrl } from "./channel-messages.js";
 
@@ -27,8 +28,15 @@ interface ArtifactRow {
   session_id: string | null; thread_id: string | null;
 }
 
-/** Every read is owner-scoped before its limit. Only narrative text enters model context. */
+/**
+ * Every read is owner-scoped before its limit. Only narrative text enters model
+ * context. A team's briefing is cached once for every member, so it reads only
+ * what the whole team shares (`services/thread-access.ts`).
+ */
 export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, owner: Principal): Promise<BriefingEvidence[]> {
+  const teamShared = owner.type === "team" ? (key: SQL) => sharedWithWholeTeamSql(orgId, key) : undefined;
+  const shared = (key: SQL) => teamShared ? teamShared(key) : sql`true`;
+  const threadKey = (sessionId: SQL, threadId: SQL) => sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=${sessionId} AND et.id=${threadId})`;
   const scopedSession = sql`s.status<>'deleted' AND s.org_id=${orgId} AND s.owner_type=${owner.type}
     AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id}`;
   const hasNarrative = sql`(NULLIF(e.content,'') IS NOT NULL OR EXISTS(
@@ -44,7 +52,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
         WHERE e.session_id=s.id AND e.thread_id=t.id AND e.entry_type='message' AND e.role IN ('user','assistant') AND ${hasNarrative}
         ORDER BY e.created_at DESC,e.id DESC LIMIT 1) latest ON true
       WHERE ${scopedSession} AND t.archived_at IS NULL
-        AND ${sharedThreadKey(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=s.id AND et.id=t.id)`)}
+        AND ${teamShared ? teamShared(threadKey(sql`s.id`, sql`t.id`)) : sharedThreadKey(threadKey(sql`s.id`, sql`t.id`))}
       ORDER BY latest.created_at DESC,t.id DESC LIMIT 30
     ) SELECT t.*,m.role,m.text,m.created_at AS message_at,
       EXISTS(SELECT 1 FROM engine_queue_items q WHERE q.session_id=t.session_id AND q.thread_id=t.thread_id
@@ -75,6 +83,9 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
         AND NOT EXISTS (SELECT 1 FROM workflow_runs newer
           WHERE newer.workflow_id=r.workflow_id AND newer.owner_type=r.owner_type AND newer.owner_id=r.owner_id
             AND (newer.created_at,newer.id) > (r.created_at,r.id))
+        -- A run a private conversation or channel started reports what it read there.
+        AND ${shared(threadKey(sql`r.params->'origin'->>'assistantSessionId'`, sql`r.params->'origin'->>'threadId'`))}
+        AND (r.params->'input'->'data'->>'key' NOT LIKE 'slack.%' OR ${shared(sql`('slack:' || (r.params->'input'->'data'->'payload'->>'channel') || ':')`)})
       ORDER BY r.updated_at DESC,r.id DESC LIMIT 12
     ) SELECT r.id,r.title,r.updated_at,r.status,
       -- Only a thread in this same workspace: a team run started from a
@@ -105,8 +116,9 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
       LEFT JOIN agent_sessions s ON s.id=a.source_session_id AND ${scopedSession}
       LEFT JOIN session_threads t ON t.session_id=s.id AND t.id=a.source_thread_id
       WHERE a.org_id=${orgId} AND a.owner_type=${owner.type} AND a.owner_id=${owner.id} AND a.revoked_at IS NULL
+        AND ${shared(threadKey(sql`a.source_session_id`, sql`a.source_thread_id`))}
       ORDER BY a.updated_at DESC,a.id DESC LIMIT 10`) as Promise<{ rows: ArtifactRow[] }>,
-    listWorkspaceOutcomes(db,orgId,owner,15),
+    listWorkspaceOutcomes(db,orgId,owner,15,undefined,teamShared),
   ]);
   const threads = new Map<string, BriefingEvidence>();
   for (const row of threadResult.rows) {

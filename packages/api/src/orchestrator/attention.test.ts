@@ -14,7 +14,9 @@ import {
   type AttentionChannelDeliverer,
   type AttentionEvent,
 } from "./attention.js";
-import { notifications, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
+import { notifications, orgMembers, slackChannelPrivacy, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
+import { linkIdentity } from "../channels/identity-links.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 
 let api: TestApi | undefined;
 
@@ -127,6 +129,38 @@ describe("routeAttention (DB-backed)", () => {
     const recipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
     expect(recipients.map((r) => r.userId)).toEqual(["test-member"]);
     expect(deliverTeam).not.toHaveBeenCalled();
+  });
+
+  it("keeps a private Slack channel's attention to the channel's members, with no team channel post", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(teams).values({ id: "team-s", orgId: "local-org", name: "Slack", createdAt: Date.now() });
+    await db.insert(teamMembers).values([
+      { teamId: "team-s", userId: "local-user", role: "admin" },
+      { teamId: "team-s", userId: "test-member", role: "member" },
+    ]);
+    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CATTN", isPrivate: true, checkedAt: Date.now() });
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('thr-slack', 'sess-team-s', 'slack:CATTN:1.1', 'idle', 'steer', 1, 1)`);
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    await linkIdentity(db, { provider: "slack", externalId: "UIN", userId: "test-member" });
+    await linkIdentity(db, { provider: "slack", externalId: "UOUT", userId: "local-user" });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      const body = url.pathname.endsWith("conversations.members") ? { ok: true, members: ["UIN"] } : { ok: true, channel: { is_private: true } };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    });
+    const deliverTeam = vi.fn(async () => {});
+    await routeAttention({ db, access: api.providers, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+      kind: "notification", owner: { type: "team", id: "team-s" }, title: "approve?", sessionId: "sess-team-s", threadId: "thr-slack",
+    });
+    const recipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
+    expect(recipients.map((r) => r.userId)).toEqual(["test-member"]);
+    expect(deliverTeam).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+    resetThreadAccessCache();
   });
 
   it("routes to org admins for an org owner", async () => {

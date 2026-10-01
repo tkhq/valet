@@ -6,11 +6,12 @@ import { channelMessages, childWatches, eventSubscriptions, sessionThreads, thre
 import { linkIdentity } from "../channels/identity-links.js";
 import { recordDelegatedPullRequest } from "../services/thread-read-state.js";
 import { createTeam } from "../services/teams.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
-afterEach(async () => { vi.restoreAllMocks(); await api?.cleanup(); api = undefined; });
+afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
 
 /** Connects the org Slack bot and answers Slack's channel checks: `members`
  * lists each private channel's members; any other channel is public. */
@@ -134,6 +135,66 @@ it("hides a team runtime's private Slack thread from members outside that channe
   await linkIdentity(api.providers.db, { provider: "slack", externalId: "UTEAMMATE", userId: "local-user" });
   expect(await threads()).toContain(thread.id);
   expect((await messages()).status).toBe(200);
+});
+
+async function teamRuntime(a: TestApi) {
+  const team = await createTeam(a.providers.db, { orgId: "local-org", name: "Secret", creatorUserId: "local-user" });
+  return await ensureDefaultAssistantSession(a.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
+}
+
+it("applies a private Slack thread's access to every route that addresses the thread", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await teamRuntime(api);
+  const thread = await session.createThread("slack:CROUTES:1700.1");
+  await recordChannelMessage(api.providers.db, {
+    orgId: "local-org", sessionId, threadId: thread.id, channelKey: "slack:CROUTES", conversationKey: "slack:CROUTES:1700.1",
+    providerMessageId: "1700.1", direction: "in", author: "Alice", text: "secret plans",
+  });
+  await connectSlack(api, { CROUTES: ["UROUTES"] });
+  const base = `${api.baseUrl}/api/sessions/${sessionId}`;
+  const json = { "content-type": "application/json" };
+  const statuses = async () => [
+    (await fetch(`${api!.baseUrl}/api/threads/${thread.id}`)).status,
+    (await fetch(`${base}/threads/${thread.id}/channel-activity`)).status,
+    (await fetch(`${base}/threads/${thread.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ title: "Renamed" }) })).status,
+    (await fetch(`${base}/threads/${thread.id}/resume`, { method: "POST" })).status,
+    (await fetch(`${base}/threads`, { method: "POST", headers: json, body: JSON.stringify({ sourceThreadId: thread.id }) })).status,
+  ];
+  // Outside the channel, every path reads the thread as missing, and nothing is sent into it.
+  expect(await statuses()).toEqual([404, 404, 404, 404, 404]);
+  const send = await fetch(`${base}/messages`, { method: "POST", headers: json, body: JSON.stringify({ text: "hi", threadId: thread.id }) });
+  expect(send.status).toBe(404);
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UROUTES", userId: "local-user" });
+  const [read, activity, rename, resume, fork] = await statuses();
+  expect([read, activity, rename, resume]).toEqual([200, 200, 200, 200]);
+  expect(fork).toBeLessThan(300);
+});
+
+it("keeps a public channel's threads readable after Slack disconnects, and a private channel's hidden", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await teamRuntime(api);
+  const open = await session.createThread("slack:CKEEPPUB:1700.1");
+  const closed = await session.createThread("slack:CKEEPPRIV:1700.1");
+  await connectSlack(api, { CKEEPPRIV: ["USOMEONE"] });
+  const threads = async () => ((await (await fetch(`${api!.baseUrl}/api/sessions/${sessionId}/threads`)).json()) as ListThreadsResponse).threads.map((t) => t.id);
+  expect(await threads()).toEqual(expect.arrayContaining([open.id]));
+  // Disconnect Slack and forget what this process remembered, as a restart would.
+  vi.restoreAllMocks();
+  await api.providers.engineCredentials.delete({ type: "org", id: "local-org" }, "slack");
+  resetThreadAccessCache();
+  const listed = await threads();
+  expect(listed).toContain(open.id);
+  expect(listed).not.toContain(closed.id);
+});
+
+it("keeps another member's helper thread private in the API", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await teamRuntime(api);
+  const theirs = await session.createThread("app-assistant:another-user");
+  const mine = await session.createThread("app-assistant:local-user");
+  expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${theirs.id}`)).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/threads/${theirs.id}`)).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${mine.id}`)).status).toBe(200);
 });
 
 it("routes a delegated child's pull request back to the thread that delegated it", async () => {

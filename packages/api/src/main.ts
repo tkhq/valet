@@ -324,6 +324,7 @@ wireAttentionRouter({
   engineStore: providers.engineStore,
   eventStream: providers.eventStream,
   channels: [providers.channelHost.attentionDeliverer()],
+  access: providers,
 });
 // A child stopped at a gate tells its parent thread (TKAI-564). Settlement
 // alone left the parent unaware of a blocked child until it finished.

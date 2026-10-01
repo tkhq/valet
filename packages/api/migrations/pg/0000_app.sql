@@ -2518,3 +2518,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel
 CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at");
+--> statement-breakpoint
+-- Whether a Slack channel is private, as the bot last saw it. Thread access
+-- reads this when Slack cannot answer, so a known private channel stays hidden
+-- and a public one stays readable after a disconnect.
+CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (
+	"org_id" text NOT NULL,
+	"channel_id" text NOT NULL,
+	"is_private" boolean NOT NULL,
+	"checked_at" bigint NOT NULL,
+	PRIMARY KEY("org_id","channel_id")
+);

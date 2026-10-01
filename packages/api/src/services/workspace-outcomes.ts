@@ -1,5 +1,5 @@
 import type { Principal } from "@valet/engine";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { encodePageCursor } from "../lib/page-cursor.js";
 import type { WorkspaceOutcome, WorkspaceOutcomesResponse } from "../wire/types.js";
@@ -25,13 +25,19 @@ export function safeOutcomeUrl(value: string | null): string | undefined {
   } catch { return undefined; }
 }
 
+/** `shared`, when given, keeps only outcomes from threads it accepts, by thread key. */
 export async function listWorkspaceOutcomes(
   db: AppDb, orgId: string, owner: Principal, limit: number, cursor?: OutcomeCursor,
+  shared?: (threadKey: SQL) => SQL,
 ): Promise<WorkspaceOutcomesResponse> {
   const owned = sql`(s.id IS NULL OR s.status<>'deleted') AND COALESCE(s.org_id,d.org_id) = ${orgId}
     AND COALESCE(s.owner_type,r.owner_type) = ${owner.type}
     AND COALESCE(NULLIF(s.owner_id,''), CASE WHEN s.owner_type='user' THEN s.user_id END,r.owner_id) = ${owner.id}`;
-  const after = cursor ? sql`WHERE (occurred_at,id) < (${cursor.at},${cursor.id})` : sql``;
+  const conditions = [
+    ...(cursor ? [sql`(occurred_at,id) < (${cursor.at},${cursor.id})`] : []),
+    ...(shared ? [shared(sql`(SELECT et.key FROM engine_threads et WHERE et.session_id=outcomes.session_id AND et.id=outcomes.thread_id)`)] : []),
+  ];
+  const after = conditions.length ? sql`WHERE ${sql.join(conditions, sql` AND `)}` : sql``;
   // Compact usage facts identify confirmed writes before touching source results.
   // Terminal parts are read only for entries that already have outcome markers.
   const result = await db.execute(sql`WITH outcomes AS (

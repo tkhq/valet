@@ -1,0 +1,98 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { sql } from "drizzle-orm";
+import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { linkIdentity } from "../channels/identity-links.js";
+import { slackChannelPrivacy } from "../schema/index.js";
+import { createTeam } from "./teams.js";
+import { resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess } from "./thread-access.js";
+import type { WireEvent } from "../wire/types.js";
+
+let api: TestApi | undefined;
+afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
+
+/** Answers Slack's channel checks: `members` lists each private channel's members. */
+async function connectSlack(a: TestApi, members: Record<string, string[]>) {
+  await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname !== "slack.com") return realFetch(input, init);
+    const channel = url.searchParams.get("channel") ?? "";
+    const body = url.pathname.endsWith("conversations.members")
+      ? { ok: true, members: members[channel] ?? [] }
+      : { ok: true, channel: { name: channel.toLowerCase(), is_private: members[channel] !== undefined } };
+    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  });
+}
+
+const team = { type: "team" as const, id: "team-1" };
+const ref = (key: string) => ({ id: key, key });
+
+it("lets a thread read only what its audience may see", async () => {
+  api = await bootTestApi();
+  await connectSlack(api, { CREADPRIV: ["UMEMBER"] });
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UMEMBER", userId: "member" });
+  const canRead = threadReadAccess(api.providers);
+  const read = (reader: string, target: string) => canRead({ owner: team, orgId: "local-org", reader: ref(reader), target: ref(target) });
+
+  // A shared thread reads shared threads and public channels, never a private one.
+  expect(await read("web:default", "slack:CREADPUB:1.1")).toBe(true);
+  expect(await read("web:default", "slack:CREADPRIV:1.1")).toBe(false);
+  expect(await read("web:default", "app-assistant:member")).toBe(false);
+  // A private channel's thread reads its own channel.
+  expect(await read("slack:CREADPRIV:2.2", "slack:CREADPRIV:1.1")).toBe(true);
+  // A helper thread reads what its person may see.
+  expect(await read("app-assistant:member", "slack:CREADPRIV:1.1")).toBe(true);
+  expect(await read("app-assistant:outsider", "slack:CREADPRIV:1.1")).toBe(false);
+  expect(await read("app-assistant:outsider", "app-assistant:member")).toBe(false);
+  // A personal runtime has one person: it reads everything.
+  expect(await canRead({ owner: { type: "user", id: "member" }, orgId: "local-org", reader: ref("web:default"), target: ref("app-assistant:x") })).toBe(true);
+});
+
+it("shares a team thread with the whole team only when nothing narrows it", async () => {
+  api = await bootTestApi();
+  await api.providers.db.insert(slackChannelPrivacy).values([
+    { orgId: "local-org", channelId: "CSHAREPUB", isPrivate: false, checkedAt: 1 },
+    { orgId: "local-org", channelId: "CSHAREPRIV", isPrivate: true, checkedAt: 1 },
+  ]);
+  const shared = async (key: string | null) => {
+    const result = await api!.providers.db.execute(sql`SELECT ${sharedWithWholeTeamSql("local-org", sql`${key}::text`)} AS shared`) as { rows: Array<{ shared: boolean }> };
+    return result.rows[0]?.shared;
+  };
+  expect(await shared(null)).toBe(true);
+  expect(await shared("web:default")).toBe(true);
+  expect(await shared("slack:CSHAREPUB:1.1")).toBe(true);
+  expect(await shared("slack:CSHAREPRIV:1.1")).toBe(false);
+  // A channel never classified waits until a thread list classifies it.
+  expect(await shared("slack:CSHARENEW:1.1")).toBe(false);
+  expect(await shared("app-assistant:someone")).toBe(false);
+  expect(await shared("workflow:wf-1:someone")).toBe(false);
+});
+
+it("streams a private Slack thread's events only to the channel's members", async () => {
+  api = await bootTestApi();
+  const created = await createTeam(api.providers.db, { orgId: "local-org", name: "Stream", creatorUserId: "local-user" });
+  const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: created.id }, { actorUserId: "local-user", orgId: "local-org" });
+  const hidden = await session.createThread("slack:CSTREAM:1700.1");
+  const shown = await session.createThread("web:shared");
+  await connectSlack(api, { CSTREAM: ["USTREAM"] });
+
+  const frames: WireEvent[] = [];
+  const ws = new WebSocket(`${api.wsUrl}/api/sessions/${sessionId}/ws?fromOffset=0`);
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`no model.state for the shared thread; saw ${frames.map((f) => f.type).join(", ")}`)), 5_000);
+    ws.onmessage = (event) => {
+      const frame = JSON.parse(String(event.data)) as WireEvent;
+      frames.push(frame);
+      if (frame.type === "model.state" && frame.threadId === shown.id) { clearTimeout(timeout); resolve(); }
+    };
+    ws.onerror = () => { clearTimeout(timeout); reject(new Error("ws error")); };
+  });
+  // Seeds come out in thread order through one chain, so every frame for the
+  // hidden thread would have arrived by now.
+  ws.close();
+  const threadIds = frames.flatMap((frame) => "threadId" in frame && typeof frame.threadId === "string" ? [frame.threadId] : []);
+  expect(threadIds).toContain(shown.id);
+  expect(threadIds).not.toContain(hidden.id);
+});

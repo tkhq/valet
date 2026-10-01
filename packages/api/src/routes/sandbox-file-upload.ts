@@ -48,6 +48,7 @@ import type {
   PostSessionFileUploadResponse,
   PostSessionFileUploadPdfInfo,
 } from "../wire/types.js";
+import { threadsVisibleTo } from "./_thread-access.js";
 
 export const fileUploadRouter = new Hono<AppEnv>();
 
@@ -493,7 +494,8 @@ fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
   const { engineHost, db } = c.var.providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
   await engineSession.ensureDefaultThread();
-  const thread = engineSession.threadById(c.req.param("threadId"));
+  const found = engineSession.threadById(c.req.param("threadId"));
+  const thread = found && await threadsVisibleTo(c, row)(found.key) ? found : undefined;
   const path = c.req.query("path");
   const entries = thread && path ? await thread.readEntries() : [];
   const file = entries

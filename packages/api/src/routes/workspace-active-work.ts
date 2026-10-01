@@ -6,6 +6,7 @@ import { listWaitingThreads } from "../services/thread-read-state.js";
 import type { WaitingThreadsResponse } from "../wire/types.js";
 import type { OutcomeCursor } from "../services/workspace-outcomes.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
+import { keepVisibleThreads } from "./_thread-access.js";
 
 export const workspaceActiveWorkRouter = new Hono<AppEnv>();
 workspaceActiveWorkRouter.get("/:workspace/active-work", async c => {
@@ -24,7 +25,8 @@ workspaceActiveWorkRouter.get("/:workspace/active-work", async c => {
     }
     cursor = { at: parsed.at, id: parsed.id };
   }
-  return c.json(await listWorkspaceActiveWork(c.var.providers.db, c.var.user.orgId, owner, limit, cursor, c.var.user.id));
+  const page = await listWorkspaceActiveWork(c.var.providers.db, c.var.user.orgId, owner, limit, cursor, c.var.user.id);
+  return c.json({ ...page, items: await keepVisibleThreads(c, owner, page.items) });
 });
 
 /** Threads that wait on a person's reply, newest first. */
@@ -32,7 +34,7 @@ workspaceActiveWorkRouter.get("/:workspace/waiting", async c => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const body: WaitingThreadsResponse = {
-    threads: await listWaitingThreads(c.var.providers.db, c.var.user.orgId, owner, c.var.user.id),
+    threads: await keepVisibleThreads(c, owner, await listWaitingThreads(c.var.providers.db, c.var.user.orgId, owner, c.var.user.id)),
   };
   return c.json(body);
 });

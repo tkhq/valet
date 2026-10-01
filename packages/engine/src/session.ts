@@ -1127,9 +1127,9 @@ export class Session {
         // `resolveDecision`, same as every other gate.
         return this.awaitCommandGate(thread, req);
       },
-      threadRead: (key, opts) => this.readEntries(key, opts),
+      threadRead: (key, opts) => this.readEntries(key, opts, thread),
       listThreads: async () => {
-        const datas = await this.providers.store.listThreads(this.id);
+        const datas = await this.readableThreads(thread);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
@@ -1502,10 +1502,28 @@ export class Session {
   }
 
   /** Reads a thread by key, or by id when no thread has that key. */
-  async readEntries(threadKey: string, opts?: MessageQuery): Promise<SessionEntry[]> {
+  /** A thread's entries by key or id. With `reader`, only a thread that
+   * reader may see (`CreateSessionOptions.threadAccess`); any other reads as
+   * missing. */
+  async readEntries(threadKey: string, opts?: MessageQuery, reader?: { id: string; key: string }): Promise<SessionEntry[]> {
     const t = (await this.threadByKey(threadKey)) ?? this.threadById(threadKey);
-    if (!t) return [];
+    if (!t || (reader && !(await this.threadReadable(reader, t)))) return [];
     return t.readEntries(opts);
+  }
+
+  /** Whether `reader` may see `target` (`CreateSessionOptions.threadAccess`). */
+  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string }): Promise<boolean> {
+    const check = this.options.threadAccess;
+    if (!check || reader.id === target.id) return true;
+    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key } })
+      .catch(() => false);
+  }
+
+  /** The stored threads `reader` may see, for `list_threads`. */
+  async readableThreads(reader: { id: string; key: string }): Promise<ThreadData[]> {
+    const datas = await this.providers.store.listThreads(this.id);
+    const shown = await Promise.all(datas.map((d) => this.threadReadable(reader, d)));
+    return datas.filter((_, i) => shown[i]);
   }
 
   /** Owning principal (Phase 4 decision 8). See `principal` field doc. */

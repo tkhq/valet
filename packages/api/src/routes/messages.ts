@@ -55,7 +55,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { canResolveSessionGate, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import { threadVisibility } from "./_slack-channel-access.js";
+import { threadsVisibleTo } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -365,9 +365,9 @@ messagesRouter.get("/:id/threads", async (c) => {
 
   // Default list excludes archived threads; `?archived=1` lists only them.
   const wantArchived = c.req.query("archived") === "1";
-  // A team runtime's thread from a private Slack channel shows only to that
-  // channel's members (`_slack-channel-access.ts`).
-  const visible = session.ownerType === "team" ? threadVisibility(c) : async () => true;
+  // A team runtime's private threads show only to the people they belong to
+  // (`services/thread-access.ts`).
+  const visible = threadsVisibleTo(c, session);
   const shown = new Set<string>();
   for (const t of threads) if (await visible(t.key)) shown.add(t.id);
   const summaries = threads
@@ -405,7 +405,7 @@ messagesRouter.get("/:id/threads/:threadId/channel-activity", async (c) => {
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const threadId = c.req.param("threadId");
-  if (!engineSession.listThreads().some((thread) => thread.id === threadId)) {
+  if (!await visibleThread(c, session, engineSession, threadId)) {
     return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
   }
   const body: ThreadChannelActivity = await threadChannelActivity(c.var.providers.db, session.id, threadId);
@@ -485,7 +485,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   const { db } = c.var.providers;
 
   const threadId = c.req.param("threadId");
-  const thread = engineSession.threadById(threadId);
+  const thread = await visibleThread(c, session, engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
   let body: PatchThreadRequest;
@@ -671,7 +671,8 @@ messagesRouter.post("/:id/threads", async (c) => {
   }
 
   const sourceThreadId = body.sourceThreadId;
-  const source = sourceThreadId === undefined ? null : engineSession.threadById(sourceThreadId);
+  // An empty id names no thread; `visibleThread` would read it as the default.
+  const source = sourceThreadId ? await visibleThread(c, session, engineSession, sourceThreadId) : null;
   if (sourceThreadId !== undefined && !source) {
     return c.json({ error: "thread not found. Select a thread from this session." }, 404);
   }
@@ -730,6 +731,19 @@ function resolveThread(
   return engineSession.threadById(threadId);
 }
 
+/** `resolveThread`, but only a thread this request may see
+ * (`services/thread-access.ts`): a team runtime's private thread reads as
+ * missing to anyone else. */
+async function visibleThread(
+  c: Context<AppEnv>,
+  session: { ownerType: string },
+  engineSession: EngineSession,
+  threadId: string | undefined,
+) {
+  const thread = resolveThread(engineSession, threadId);
+  return thread && await threadsVisibleTo(c, session)(thread.key) ? thread : undefined;
+}
+
 // ── Messages: list ────────────────────────────────────────────────────────
 
 messagesRouter.get("/:id/messages", async (c) => {
@@ -739,8 +753,8 @@ messagesRouter.get("/:id/messages", async (c) => {
 
   await engineSession.ensureDefaultThread();
   const requested = c.req.query("threadId") || undefined;
-  const thread = resolveThread(engineSession, requested);
-  if (!thread || (session.ownerType === "team" && !(await threadVisibility(c)(thread.key)))) {
+  const thread = await visibleThread(c, session, engineSession, requested);
+  if (!thread) {
     return c.json({ error: "thread not found" }, 404);
   }
 
@@ -1014,6 +1028,11 @@ messagesRouter.post("/:id/messages", async (c) => {
   if (!promoteItemId && !body.text.trim() && !body.attachments?.length && !body.fileRefs?.length) {
     return c.json({ error: "Add a message or an attachment." }, 400);
   }
+  if (row.ownerType === "team" && body.threadId !== undefined) {
+    const loaded = await loadEngineSession(c);
+    if ("error" in loaded) return loaded.error;
+    if (!await visibleThread(c, row, loaded.engineSession, body.threadId)) return c.json({ error: "thread not found" }, 404);
+  }
 
   try {
     let replyTo: MessageReplyReference | undefined;
@@ -1023,7 +1042,7 @@ messagesRouter.post("/:id/messages", async (c) => {
       }
       const loaded = await loadEngineSession(c);
       if ("error" in loaded) return loaded.error;
-      const targetThread = resolveThread(loaded.engineSession, body.threadId);
+      const targetThread = await visibleThread(c, loaded.session, loaded.engineSession, body.threadId);
       if (!targetThread) return c.json({ error: "thread not found" }, 404);
       const entries = await targetThread.readEntries();
       const target = entries.find(
@@ -1092,10 +1111,10 @@ messagesRouter.post("/:id/messages", async (c) => {
 messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
 
   const threadId = c.req.param("threadId");
-  const thread = engineSession.threadById(threadId);
+  const thread = await visibleThread(c, session, engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
   const rawBody = await c.req.text();
@@ -1146,10 +1165,10 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
 messagesRouter.post("/:id/threads/:threadId/resume", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
 
   const threadId = c.req.param("threadId");
-  if (!engineSession.threadById(threadId)) return c.json({ error: "thread not found" }, 404);
+  if (!await visibleThread(c, session, engineSession, threadId)) return c.json({ error: "thread not found" }, 404);
 
   await engineSession.resume({ threadId });
   return c.json({ ok: true });
@@ -1203,12 +1222,20 @@ async function loadDecisionSession(c: Context<AppEnv>) {
   return { session, engineSession };
 }
 
+/** Pending gates on threads this request may see. */
+async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, engineSession: EngineSession) {
+  const visible = threadsVisibleTo(c, session);
+  const pending = await engineSession.pendingDecisionGates();
+  const shown = await Promise.all(pending.map((gate) => visible(engineSession.threadById(gate.threadId)?.key)));
+  return pending.filter((_, i) => shown[i]);
+}
+
 messagesRouter.get("/:id/decisions", async (c) => {
   const result = await loadDecisionSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
 
-  const pending = await engineSession.pendingDecisionGates();
+  const pending = await visibleGates(c, session, engineSession);
   const body: ListDecisionsResponse = { gates: pending.map(engineGateToWire) };
   return c.json(body);
 });
@@ -1270,7 +1297,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
 
   // Confirm the gate is actually pending in this session before resolving.
   // Without this check, a stale gateId from the client would silently no-op.
-  const pending = await engineSession.pendingDecisionGates();
+  const pending = await visibleGates(c, session, engineSession);
   const gate = pending.find((g) => g.id === gateId);
   if (!gate) return c.json({ error: "gate not pending" }, 404);
 
@@ -1328,7 +1355,7 @@ messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
     return c.json({ error: "only reason='cancel' is allowed from clients" }, 400);
   }
 
-  const pending = await engineSession.pendingDecisionGates();
+  const pending = await visibleGates(c, session, engineSession);
   const gate = pending.find((g) => g.id === gateId);
   if (!gate) return c.json({ error: "gate not pending" }, 404);
 

@@ -2287,6 +2287,13 @@ export interface ResolvedModel {
   canonicalId?: string;
 }
 
+export type ThreadAccessCheck = (req: {
+  owner: Principal;
+  orgId: string;
+  reader: { id: string; key: string };
+  target: { id: string; key: string };
+}) => Promise<boolean>;
+
 export interface CreateSessionOptions {
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
@@ -2301,6 +2308,13 @@ export interface CreateSessionOptions {
   parentThreadId?: string;
   /** A channel-originated ancestor makes every child turn's transcript shared. */
   sharedTranscript?: boolean;
+  /**
+   * Whether one thread may read another thread of this session through
+   * `thread_read`, `list_threads`, or a slash command. Absent, every thread
+   * reads every other. A host narrows it where threads have different
+   * audiences, such as a team runtime's private threads.
+   */
+  threadAccess?: ThreadAccessCheck;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
   /**

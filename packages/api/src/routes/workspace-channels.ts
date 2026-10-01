@@ -5,7 +5,8 @@
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { getChannel, listChannels, type ChannelNames } from "../services/channels.js";
-import { channelVisibility, orgSlackCredential, setCapped } from "./_slack-channel-access.js";
+import { orgSlackCredential, setCapped } from "../services/thread-access.js";
+import { channelsVisibleTo } from "./_thread-access.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 
 export const workspaceChannelsRouter = new Hono<AppEnv>();
@@ -25,7 +26,7 @@ function slackChannelNames(c: Context<AppEnv>): ChannelNames {
     const plugin = c.var.providers.plugins.find((candidate) => candidate.filterOptionResolvers?.["slack.channels"]);
     const resolver = plugin?.filterOptionResolvers?.["slack.channels"];
     if (!plugin || !resolver) return new Map();
-    const credential = await orgSlackCredential(c);
+    const credential = await orgSlackCredential(c.var.providers, c.var.user.orgId);
     if (!credential) return new Map();
     const options = await resolver({ orgId, deps: {}, credential });
     const names = new Map(options.map((option) => [option.id, option.label]));
@@ -37,7 +38,7 @@ function slackChannelNames(c: Context<AppEnv>): ChannelNames {
 workspaceChannelsRouter.get("/:workspace/channels", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
-  return c.json(await listChannels(c.var.providers.db, c.var.user.orgId, owner, slackChannelNames(c), channelVisibility(c)));
+  return c.json(await listChannels(c.var.providers.db, c.var.user.orgId, owner, slackChannelNames(c), channelsVisibleTo(c)));
 });
 
 workspaceChannelsRouter.get("/:workspace/channel", async (c) => {
@@ -45,7 +46,7 @@ workspaceChannelsRouter.get("/:workspace/channel", async (c) => {
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const key = c.req.query("key");
   if (!key) return c.json({ error: "Send the channel key, such as ?key=slack:C123." }, 400);
-  const detail = await getChannel(c.var.providers.db, c.var.user.orgId, owner, key, slackChannelNames(c), channelVisibility(c));
+  const detail = await getChannel(c.var.providers.db, c.var.user.orgId, owner, key, slackChannelNames(c), channelsVisibleTo(c));
   if (!detail) return c.json({ error: "This workspace has no conversation in that channel. Open Channels to see the channels it uses." }, 404);
   return c.json(detail);
 });

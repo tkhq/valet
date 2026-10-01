@@ -3,6 +3,7 @@ import type { AppEnv } from "../env.js";
 import { decodePageCursor, readLimit } from "../lib/page-cursor.js";
 import { listWorkspaceOutcomes, type OutcomeCursor } from "../services/workspace-outcomes.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
+import { keepVisibleThreads } from "./_thread-access.js";
 
 export const workspaceOutcomesRouter = new Hono<AppEnv>();
 workspaceOutcomesRouter.get("/:workspace/outcomes", async c => {
@@ -21,5 +22,6 @@ workspaceOutcomesRouter.get("/:workspace/outcomes", async c => {
     }
     cursor = { at: parsed.at, id: parsed.id };
   }
-  return c.json(await listWorkspaceOutcomes(c.var.providers.db, c.var.user.orgId, owner, limit, cursor));
+  const page = await listWorkspaceOutcomes(c.var.providers.db, c.var.user.orgId, owner, limit, cursor);
+  return c.json({ ...page, items: await keepVisibleThreads(c, owner, page.items) });
 });

@@ -5,6 +5,7 @@ import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
+import { threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant, loadAssistantBySessionId } from "../assistants/service.js";
 
 /** Compatibility adapter: execution and authorization remain in the existing handlers. */
@@ -96,7 +97,9 @@ export function createThreadsRouter(forward: (request: Request) => Promise<Respo
     }
     if (!sessionId) return c.json({ error: "Thread not found." }, 404);
     const thread = await c.var.providers.engineStore.getThread(sessionId, threadId);
-    if (!thread) return c.json({ error: "Thread not found." }, 404);
+    // A team runtime's private thread reads as missing to anyone else
+    // (`services/thread-access.ts`).
+    if (!thread || (appSession && !await threadsVisibleTo(c, appSession)(thread.key))) return c.json({ error: "Thread not found." }, 404);
     const base = `/api/sessions/${encodeURIComponent(sessionId)}`;
     if (suffix === "decisions" && c.req.method === "GET") {
       const gates = await c.var.providers.engineStore.listDecisionGates(sessionId, threadId, "pending");

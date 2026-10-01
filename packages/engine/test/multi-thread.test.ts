@@ -250,3 +250,34 @@ describe("thread_read references (TKAI-394)", () => {
     faux.unregister();
   });
 });
+
+describe("thread_read access", () => {
+  it("reads only the threads the host lets the reading thread see", async () => {
+    const faux = registerFauxProvider({ provider: "thread-read-access" });
+    faux.setResponses([fauxAssistantMessage("private-B")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      threadAccess: async ({ target }) => target.key !== "task:B",
+    });
+    const tB = session.thread("task:B");
+    await tB.submitPrompt("hello B", {});
+    await waitFor(() => events.some((e) => e.threadId === tB.id && e.event.type === "turn_end"));
+
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("thread_read", { key: "task:B" }, { id: "tr-denied" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const tA = session.thread("task:A");
+    await tA.submitPrompt("read B", {});
+    await waitFor(() => events.some((e) => e.threadId === tA.id && e.event.type === "turn_end"
+      && (e.event as { reason: string }).reason === "end_turn"));
+    const toolEnd = events.filter((e) => e.threadId === tA.id && e.event.type === "tool_end").at(-1);
+    expect((toolEnd!.event as { result: string }).result).not.toContain("private-B");
+    // A host read without a reader is not narrowed, and a thread reads itself.
+    expect((await session.readEntries("task:B")).length).toBeGreaterThan(0);
+    expect((await session.readableThreads(tA)).map((t) => t.key)).not.toContain("task:B");
+    expect((await session.readEntries("task:B", undefined, tB)).length).toBeGreaterThan(0);
+    faux.unregister();
+  });
+});

@@ -1,4 +1,5 @@
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
+import { threadReadAccess } from "../services/thread-access.js";
 import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
@@ -1216,6 +1217,7 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
+            ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
@@ -1245,6 +1247,7 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
+          ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
@@ -1772,6 +1775,13 @@ export class EngineHost {
 
   browserPolicy() {
     return this.opts.db ? createBrowserPolicy(this.opts.db, this.opts.engineStore, this.opts.blobs) : undefined;
+  }
+
+  /** Team runtime threads read only what their audience may see
+   * (`services/thread-access.ts`). */
+  private threadAccessOptions() {
+    const { db, engineCredentials, onePassword } = this.opts;
+    return db ? { threadAccess: threadReadAccess({ db, engineCredentials, onePassword }) } : {};
   }
 
   private browserOptions(sessionId: string) {
@@ -2658,6 +2668,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: principal,
@@ -3680,6 +3691,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
+      ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,
@@ -3869,6 +3881,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
       owner: opts.owner,

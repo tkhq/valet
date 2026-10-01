@@ -175,7 +175,7 @@ export function createBriefingGenerator(options: {
 
 const generateBriefings = createBriefingGenerator();
 // Bump the algorithm prefix for changes to source collection, grouping or rendering.
-const CACHE_VERSION = `briefings-v9-org-model:${briefingModelSpec(process.env)}:${digest(SYSTEM_PROMPT)}`;
+const CACHE_VERSION = `briefings-v10-org-model:${briefingModelSpec(process.env)}:${digest(SYSTEM_PROMPT)}`;
 export const getWorkspaceBriefings = createDurableBriefingCache({
   version: CACHE_VERSION,
   collect: collectWorkspaceBriefingSources,

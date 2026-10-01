@@ -2713,6 +2713,15 @@ export const channelMessages = pgTable("channel_messages", {
   index("channel_messages_thread").on(t.sessionId, t.threadId, t.createdAt),
 ]);
 
+/** Whether a Slack channel is private, as the bot last saw it
+ * (`services/thread-access.ts`). */
+export const slackChannelPrivacy = pgTable("slack_channel_privacy", {
+  orgId: text("org_id").notNull(),
+  channelId: text("channel_id").notNull(),
+  isPrivate: boolean("is_private").notNull(),
+  checkedAt: bigint("checked_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.channelId] })]);
+
 /** Pull requests a thread created, with their last known GitHub state. */
 export const threadPullRequests = pgTable("thread_pull_requests", {
   sessionId: text("session_id").notNull(),

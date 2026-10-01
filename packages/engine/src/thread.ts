@@ -5037,11 +5037,11 @@ export class Thread {
       },
       // The same lookup slash commands use: a key, or a thread id (a pasted
       // link reaches here as its id).
-      threadRead: (key, opts) => this.session.readEntries(key, opts),
+      threadRead: (key, opts) => this.session.readEntries(key, opts, this),
       listThreads: async () => {
         // Pull from the store so paused/archived threads not currently
         // hydrated in memory still surface.
-        const datas = await session.providers.store.listThreads(session.id);
+        const datas = await session.readableThreads(this);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
