@@ -375,6 +375,9 @@ export class ChannelHost {
    * in-flight DM send. This map lets the late prompt get the resolution edit
    * immediately instead of keeping live buttons forever. */
   private settledGates = new Map<string, DecisionResolution>();
+  /** Gates that expired or were withdrawn, kept the same way, so a prompt
+   * recorded after that still gets its outcome edit and loses its buttons. */
+  private endedGates = new Map<string, { label: string; resolvedAtMs: number }>();
   private settledOrder: string[] = [];
   private orgId: string | null = null;
   private outboundUnsub: Unsubscribe | null = null;
@@ -745,10 +748,8 @@ export class ChannelHost {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
         await this.deliverGateResolution(e.gateId, e.resolution);
-      } else if (e.type === "decision_gate_expired") {
-        await this.settleGatePrompts(e.gateId, GATE_EXPIRED_LABEL, { resolvedAtMs: event.timestamp });
-      } else if (e.type === "decision_gate_withdrawn") {
-        await this.settleGatePrompts(e.gateId, GATE_WITHDRAWN_LABEL, { resolvedAtMs: event.timestamp });
+      } else if (e.type === "decision_gate_expired" || e.type === "decision_gate_withdrawn") {
+        await this.endGate(e.gateId, e.type === "decision_gate_expired" ? GATE_EXPIRED_LABEL : GATE_WITHDRAWN_LABEL, event.timestamp);
       } else if (e.type === "command_result") {
         await this.deliverCommandResult(event.sessionId, e.threadId, e.entry);
       }
@@ -1169,9 +1170,24 @@ export class ChannelHost {
       console.error(`[channels] could not save the callback reference for gate ${prompt.gateId}; the card works until this host restarts`, err);
     }
     const settled = this.settledGates.get(prompt.gateId);
+    const ended = this.endedGates.get(prompt.gateId);
     if (settled) {
       await this.deliverGateResolution(prompt.gateId, settled);
+    } else if (ended) {
+      await this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs });
     }
+  }
+
+  /** An expiry or a withdrawal: remembered first, like a decision, so a
+   * prompt whose send is still in flight is settled when it lands. */
+  private async endGate(gateId: string, label: string, resolvedAtMs: number): Promise<void> {
+    this.endedGates.set(gateId, { label, resolvedAtMs });
+    this.settledOrder.push(gateId);
+    if (this.settledOrder.length > DEDUP_CAP) {
+      const evict = this.settledOrder.shift();
+      if (evict !== undefined) { this.settledGates.delete(evict); this.endedGates.delete(evict); }
+    }
+    await this.settleGatePrompts(gateId, label, { resolvedAtMs });
   }
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
@@ -1183,7 +1199,7 @@ export class ChannelHost {
     this.settledOrder.push(gateId);
     if (this.settledOrder.length > DEDUP_CAP) {
       const evict = this.settledOrder.shift();
-      if (evict !== undefined) this.settledGates.delete(evict);
+      if (evict !== undefined) { this.settledGates.delete(evict); this.endedGates.delete(evict); }
     }
 
     const refs = this.gatePrompts.get(gateId);
@@ -1201,12 +1217,10 @@ export class ChannelHost {
    * the gate from all three gate maps. The single place a gate's channel
    * state ends: a decision, an expiry, and a withdrawal all arrive here.
    *
-   * One window stays open. A prompt whose send is still in flight has no ref
-   * yet, so this settles nothing for it, and `sendAndRecordGatePrompt`
-   * re-seeds the maps when that send lands. Only a decision is replayed onto
-   * such a prompt (`settledGates` holds a resolution), so an expiry or a
-   * withdrawal in that window leaves that one message with live buttons
-   * until someone clicks and reads the answer.
+   * A prompt whose send is still in flight has no ref yet, so this settles
+   * nothing for it. `sendAndRecordGatePrompt` replays the remembered outcome
+   * (`settledGates` for a decision, `endedGates` for an expiry or a
+   * withdrawal) when that send lands.
    */
   private async settleGatePrompts(
     gateId: string,

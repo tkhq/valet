@@ -2408,6 +2408,26 @@ describe("ChannelHost.attentionDeliverer", () => {
     }
   });
 
+  it("a prompt sent after its gate expired gets the expired edit, not live buttons", async () => {
+    host = await buildHost({ publicUrl: "https://valet.example.com" });
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({
+      id: "sess-late", userId: USER_ID, orgId: ORG_ID, workspace: "w", ownerType: "user", ownerId: USER_ID,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    // The expiry lands first: routeAttention does not await its deliverers.
+    await eventStream.append({
+      sessionId: "sess-late", threadId: "t-late", timestamp: Date.now(),
+      event: { type: "decision_gate_expired", threadId: "t-late", gateId: "gate-late" },
+    }, `gate-late-expire-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await host.attentionDeliverer().deliver(USER_ID, event({
+      kind: "approval", sessionId: "sess-late", gate: { id: "gate-late", actions: [{ id: "approve", label: "Approve" }] },
+    }));
+    await vi.waitFor(() => expect(fakeTransport.gateEdits).toHaveLength(1));
+    expect(fakeTransport.gateEdits[0]!.resolution.label).toMatch(/Expired/);
+  });
+
   it("a recipient who may not resolve the gate gets the plain summary, not dead buttons", async () => {
     host = await buildHost({ publicUrl: "https://valet.example.com" });
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
