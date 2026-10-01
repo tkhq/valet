@@ -1615,9 +1615,11 @@ export class ChannelHost {
 
     // Explicit resolve authorization — the same named check the web
     // decision routes make (`canResolveSessionGate`): the session's direct
-    // owner, or a live member of the owning team. The reply deliberately
-    // matches the unknown-ref case so a probe cannot distinguish "not
-    // yours" from "gone".
+    // owner, or a live member of the owning team. A refusal matches the
+    // unknown-ref reply, so a probe cannot tell "not yours" from "gone". One
+    // exception, below: a team-owned card already names its team to everyone
+    // in the thread ("Only members of X can approve."), so a non-member's
+    // click gets that same sentence; it discloses nothing the card did not.
     const rows = await this.deps.db
       .select()
       .from(agentSessions)

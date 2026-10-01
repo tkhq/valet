@@ -385,6 +385,11 @@ class WorkflowPass implements CollectorPass {
           );
         }
         if (row.contentSha === candidate.blobSha && row.name === name) continue;
+        const stepsChanged = canonicalJson(parsed.file.definition) !== canonicalJson(row.definition);
+        // A repository commit is not an approver's edit. Revoke before the
+        // write, as the product edit path does, so no run starts on the new
+        // steps under the old grant.
+        if (stepsChanged) await revokeWorkflowGrants(db, source.orgId, row.id);
         await db
           .update(workflowDefinitions)
           .set({
@@ -394,9 +399,7 @@ class WorkflowPass implements CollectorPass {
             updatedAt: now(),
           })
           .where(eq(workflowDefinitions.id, row.id));
-        if (canonicalJson(parsed.file.definition) !== canonicalJson(row.definition)) {
-          // A repository commit is not an approver's edit.
-          await revokeWorkflowGrants(db, source.orgId, row.id);
+        if (stepsChanged) {
           await snapshot(
             db,
             row.id,

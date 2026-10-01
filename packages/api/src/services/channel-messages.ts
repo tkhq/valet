@@ -4,7 +4,7 @@
  * each message belongs to. See docs/specs/2026-09-30-channels-design.md.
  */
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { channelMessages } from "../schema/index.js";
@@ -148,7 +148,7 @@ export const PULL_REQUEST_CONVERSATION_EVENTS: ReadonlySet<string> = new Set([
 interface GithubPayload {
   issue?: { pull_request?: { html_url?: string } };
   pull_request?: { html_url?: string };
-  comment?: { id?: number; html_url?: string; body?: string; user?: { login?: string; type?: string } };
+  comment?: { id?: number; html_url?: string; body?: string; pull_request_review_id?: number; user?: { login?: string; type?: string } };
   review?: { id?: number; html_url?: string; body?: string | null; state?: string; user?: { login?: string; type?: string } };
 }
 
@@ -158,6 +158,8 @@ interface GithubPayload {
  */
 export function pullRequestComment(eventKey: string, payload: unknown): {
   pullRequestUrl: string; message: InboundChannelMessage; channelKey: string;
+  /** The review an inline comment belongs to, so a review Valet sent covers its comments. */
+  reviewId?: string;
 } | null {
   if (!PULL_REQUEST_CONVERSATION_EVENTS.has(eventKey) || !payload || typeof payload !== "object") return null;
   const body = payload as GithubPayload;
@@ -173,9 +175,11 @@ export function pullRequestComment(eventKey: string, payload: unknown): {
   const channelKey = githubPullRequestKey(match[1]!, match[2]!, Number(match[3]));
   const reviewState = body.review?.state ? `Review: ${body.review.state.toLowerCase().replace(/_/g, " ")}` : undefined;
   const text = item.body || reviewState || "";
+  const reviewId = body.comment?.pull_request_review_id;
   return {
     pullRequestUrl,
     channelKey,
+    ...(reviewId !== undefined ? { reviewId: String(reviewId) } : {}),
     message: {
       channelKey,
       conversationKey: channelKey,
@@ -232,6 +236,21 @@ export function actionChannelMessage(record: ActionRecord, threadKey: string | n
       url: slackMessageUrl(channel, ts, threadTs),
     };
   }
+  if (record.actionId === "github.create_review") {
+    // The review's id is the one its webhook and its inline comments carry.
+    const reviewId = field(data, "review_id");
+    const url = text(field(data, "url"));
+    const owner = text(field(record.params, "owner"));
+    const repo = text(field(record.params, "repo"));
+    const number = field(record.params, "pullNumber");
+    if (reviewId === undefined || !owner || !repo || typeof number !== "number") return null;
+    const channelKey = githubPullRequestKey(owner, repo, number);
+    return {
+      ...base, channelKey, conversationKey: channelKey, providerMessageId: String(reviewId),
+      ...(text(field(record.params, "body")) ? { text: text(field(record.params, "body")) } : {}),
+      ...(url ? { url } : {}),
+    };
+  }
   if (record.actionId === "github.create_comment") {
     const url = text(field(data, "html_url"));
     const id = field(data, "id");
@@ -270,13 +289,16 @@ export async function threadChannelActivity(db: AppDb, sessionId: string, thread
   };
 }
 
-/** Whether Valet recorded this provider message as one it sent. */
+/**
+ * Whether Valet recorded this provider message as one it sent. `alsoIds` names
+ * the review an inline comment belongs to: a review Valet sent covers them.
+ */
 export async function wasSentByValet(
-  db: AppDb, orgId: string, message: Pick<InboundChannelMessage, "channelKey" | "providerMessageId">,
+  db: AppDb, orgId: string, message: Pick<InboundChannelMessage, "channelKey" | "providerMessageId">, alsoIds: string[] = [],
 ): Promise<boolean> {
   const [row] = await db.select({ id: channelMessages.id }).from(channelMessages).where(and(
     eq(channelMessages.orgId, orgId), eq(channelMessages.channelKey, message.channelKey),
-    eq(channelMessages.providerMessageId, message.providerMessageId), eq(channelMessages.direction, "out"),
+    inArray(channelMessages.providerMessageId, [message.providerMessageId, ...alsoIds]), eq(channelMessages.direction, "out"),
   )).limit(1);
   return row !== undefined;
 }
@@ -302,7 +324,7 @@ export async function threadKeyForPullRequest(
   return result.rows[0]?.key ?? null;
 }
 
-const CHANNEL_ACTIONS = new Set([...SLACK_SEND_ACTIONS, "github.create_comment"]);
+const CHANNEL_ACTIONS = new Set([...SLACK_SEND_ACTIONS, "github.create_comment", "github.create_review"]);
 
 /** Records the channel message a completed send action posted. */
 export async function recordActionChannelMessage(db: AppDb, record: ActionRecord): Promise<void> {

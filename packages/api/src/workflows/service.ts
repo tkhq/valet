@@ -1632,7 +1632,7 @@ async function ownedRun(
 
 export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
-  | "forbidden_always" | "forbidden_workflow" | "org_mismatch" | "human_only";
+  | "forbidden_always" | "forbidden_workflow" | "stale_workflow" | "org_mismatch" | "human_only";
 
 /** Scan `definition` (unknown at runtime) for the node with `nodeId`. Searches
  * `definition.nodes` directly and, for each `type === "foreach"` node, also checks
@@ -1795,6 +1795,12 @@ export async function resolveWorkflowApproval(
   let workflowPermission: Awaited<ReturnType<typeof prepareWorkflowPermissions>> = null;
   if (input.approved && input.scope === "workflow") {
     if (!isPolicyGate || !node || typeof node.service !== "string" || typeof node.action !== "string") return "forbidden_workflow";
+    // A workflow grant covers the current steps. This run was parked on the
+    // steps it started with; when they changed since, approving its card must
+    // not grant the new steps nobody reviewed. Approving this run still works.
+    const [current] = await deps.db.select({ definition: workflowDefinitions.definition }).from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, run.params.workflowId)).limit(1);
+    if (!current || definitionVersionId(current.definition) !== definitionVersionId(run.definition)) return "stale_workflow";
     const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
     workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
     if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";

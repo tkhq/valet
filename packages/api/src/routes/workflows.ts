@@ -908,6 +908,7 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (result === "timed_out") return c.json({ error: "this approval gate has timed out" }, 409);
   if (result === "forbidden_workflow") return c.json({ error: "This workflow permission cannot be saved. Its owner or team admin must review the current workflow and any policy restrictions." }, 403);
   if (result === "forbidden_always") return c.json({ error: "Always allow requires an org admin. Ask an org admin, or approve for the rest of this run." }, 403);
+  if (result === "stale_workflow") return c.json({ error: "This workflow's steps changed after this run started. Approve for this run only, or review the new steps and approve them on the workflow." }, 409);
   if (result === "org_mismatch") return c.json({ error: "not a member of this workflow's org" }, 403);
   if (result === "human_only") return c.json({ error: "policy gates must be resolved by a human from the run page" }, 403);
 

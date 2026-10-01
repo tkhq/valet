@@ -67,6 +67,24 @@ describe("actionChannelMessage", () => {
   });
 });
 
+describe("Valet's own reviews", () => {
+  it("records a review Valet posts under the id its webhook carries", () => {
+    const message = actionChannelMessage({
+      ...base, actionId: "github.create_review", params: { owner: "acme", repo: "app", pullNumber: 12, body: "Looks risky" },
+      result: { success: true, data: { review_id: 501, state: "COMMENTED", url: "https://github.com/acme/app/pull/12#pullrequestreview-501" } },
+    }, null);
+    expect(message).toMatchObject({ channelKey: "github:acme/app#12", providerMessageId: "501", text: "Looks risky", direction: "out" });
+  });
+
+  it("names the review an inline comment belongs to", () => {
+    const comment = pullRequestComment("github.pull_request_review_comment.created", {
+      pull_request: { html_url: "https://github.com/acme/app/pull/12" },
+      comment: { id: 77, body: "nit", pull_request_review_id: 501, user: { login: "person", type: "User" } },
+    });
+    expect(comment?.reviewId).toBe("501");
+  });
+});
+
 describe("pullRequestComment", () => {
   it("reads a comment on a pull request, and skips an issue comment", () => {
     const comment = pullRequestComment("github.issue_comment.created", {

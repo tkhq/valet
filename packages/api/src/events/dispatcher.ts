@@ -306,7 +306,7 @@ export class EventDispatcher {
         // Valet posts with a person's GitHub token, so its own comment arrives
         // as that person. A comment it recorded as sent is its own: it never
         // wakes the thread that posted it.
-        const prComment = parsedComment && !(await wasSentByValet(db, event.orgId, parsedComment.message)) ? parsedComment : null;
+        const prComment = parsedComment && !(await wasSentByValet(db, event.orgId, parsedComment.message, parsedComment.reviewId ? [parsedComment.reviewId] : [])) ? parsedComment : null;
         const prThreadKey = prComment && sub.ownerType !== "org"
           ? await threadKeyForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, prComment.pullRequestUrl)
           : null;

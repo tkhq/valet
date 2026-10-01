@@ -18,6 +18,7 @@ import {
   assistants,
   orgs,
   runtimeGrants,
+  workflowActionGrants,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
@@ -1348,6 +1349,24 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     const grants = await localApi.providers.db.select().from(runtimeGrants);
     expect(grants).toHaveLength(1);
     expect(grants[0]).toMatchObject({ workflowExecutionId: runId, policyKey: "widgets.nuke" });
+  });
+
+  it("refuses a workflow-wide grant from a run whose steps changed since it started", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [{ kind: "signal", signalType: "approval:gate", nodeId: "gate" }]);
+    const run = await localApi.providers.workflowStore.getRun(runId);
+    const workflowId = run!.params.workflowId;
+    // Someone changes the steps after the run parked on its approval card.
+    const [row] = await localApi.providers.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
+    await localApi.providers.db.update(workflowDefinitions)
+      .set({ definition: { ...(row!.definition as Record<string, unknown>), description: "changed steps" } })
+      .where(eq(workflowDefinitions.id, workflowId));
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved: true, scope: "workflow" }),
+    });
+    expect(res.status).toBe(409);
+    expect(await localApi.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
   });
 
   it("legacy always scope cannot create an org-wide grant for an undiscoverable action", async () => {
