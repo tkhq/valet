@@ -2,8 +2,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { eq } from "drizzle-orm";
-import { channelMessages, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
+import { channelMessages, childWatches, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
 import { linkIdentity } from "../channels/identity-links.js";
+import { recordDelegatedPullRequest } from "../services/thread-read-state.js";
 import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
@@ -117,6 +118,19 @@ it("shows a private Slack channel only to a viewer whose linked Slack account is
   await linkIdentity(api.providers.db, { provider: "slack", externalId: "UALICE", userId: "local-user" });
   expect((await list()).map((channel) => channel.key)).toEqual(["slack:CSECRET"]);
   expect((await detail()).status).toBe(200);
+});
+
+it("routes a delegated child's pull request back to the thread that delegated it", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await runtime(api);
+  const thread = await session.createThread("web:delegating");
+  await api.providers.db.insert(childWatches).values({
+    childSessionId: "child-1", queueItemId: "q1", parentSessionId: sessionId, parentThreadId: thread.id,
+    actorUserId: "local-user", orgId: "local-org", createdAt: 1,
+  });
+  const url = "https://github.com/acme/app/pull/77";
+  await recordDelegatedPullRequest(api.providers.db, { sessionId: "child-1", threadId: "child-thread", url });
+  expect(await threadKeyForPullRequest(api.providers.db, "local-org", owner, url)).toBe("web:delegating");
 });
 
 it("finds the thread that opened a pull request, and records the comment Valet posts there", async () => {

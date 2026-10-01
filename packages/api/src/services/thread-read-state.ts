@@ -1,7 +1,7 @@
 import type { EventStream, Principal } from "@valet/engine";
 import { and, eq, inArray, lt, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, threadPullRequests, threadReads } from "../schema/index.js";
+import { agentSessions, childWatches, threadPullRequests, threadReads } from "../schema/index.js";
 import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { resolveGitHubToken, type GitHubTokenDeps } from "./github-tokens.js";
@@ -88,6 +88,24 @@ export async function markThreadsRead(
 }
 
 /** Records a pull request the thread created. A repeat of the same URL is ignored. */
+/** How far up the delegation chain a pull request is recorded. */
+const MAX_DELEGATION_DEPTH = 5;
+
+/**
+ * Records a pull request on the thread that opened it and on each thread that
+ * delegated that work. A child's pull request then shows on the workspace
+ * thread that asked for it, and its comments route back to that thread.
+ */
+export async function recordDelegatedPullRequest(db: AppDb, input: { sessionId: string; threadId: string; url: string }): Promise<void> {
+  let current: { sessionId: string; threadId: string } | undefined = { sessionId: input.sessionId, threadId: input.threadId };
+  for (let depth = 0; current && depth <= MAX_DELEGATION_DEPTH; depth++) {
+    if (!(await recordThreadPullRequest(db, { ...current, url: input.url }))) return;
+    const [parent] = await db.select({ sessionId: childWatches.parentSessionId, threadId: childWatches.parentThreadId })
+      .from(childWatches).where(eq(childWatches.childSessionId, current.sessionId)).limit(1);
+    current = parent;
+  }
+}
+
 export async function recordThreadPullRequest(
   db: AppDb, input: { sessionId: string; threadId: string; url: string }, at = Date.now(),
 ): Promise<boolean> {
@@ -130,7 +148,7 @@ export function wireThreadPullRequests(eventStream: EventStream, db: AppDb): () 
     if (event.type !== "tool_end" || !event.outcome) return;
     const { kind, url } = event.outcome;
     if (kind === "pull_request_created" && url) {
-      void recordThreadPullRequest(db, { sessionId, threadId: event.threadId, url })
+      void recordDelegatedPullRequest(db, { sessionId, threadId: event.threadId, url })
         .catch(err => console.error("[thread-activity] could not record a pull request", err));
       return;
     }
