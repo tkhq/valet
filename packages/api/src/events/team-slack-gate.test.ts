@@ -123,18 +123,12 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       // A linked sender outside the team stays refused, even as a workspace member.
       setSlackWorkspaceMemberCheck(async () => ({ email: "linked@example.com" }));
       expect(await ingest(mention("U_X", "C1", "300.1"))).toMatchObject({ deliveries: 0, skipped: true });
-      // Removing a Slack link changes nothing: an unlinked sender whose email
-      // belongs to an org member outside the team is refused as that member,
-      // and one whose email belongs to a team member runs as that member.
-      await tdb.appDb.insert(users).values([
-        { id: "member-b", name: "B", email: "b@example.com" },
-        { id: "member-c", name: "C", email: "c@example.com" },
-      ]).onConflictDoNothing();
-      setSlackWorkspaceMemberCheck(async (userId) => ({ email: userId === "U_WAS_C" ? "C@example.com" : "b@example.com" }));
-      expect(await ingest(mention("U_WAS_C", "C1", "400.1"))).toMatchObject({ deliveries: 0, skipped: true });
-      expect((await ingest(mention("U_WAS_B", "C1", "500.1"))).deliveries).toBe(1);
-      await host.pollOnce();
-      expect(deliver).toHaveBeenLastCalledWith(expect.objectContaining({ actorUserId: "member-b" }));
+      // Only a Slack link proves who a sender is. An unlinked sender whose
+      // Slack email matches a team member does not act as that member, so a
+      // team-only rule refuses them like any other unlinked sender.
+      await tdb.appDb.insert(users).values([{ id: "member-b", name: "B", email: "b@example.com" }]).onConflictDoNothing();
+      setSlackWorkspaceMemberCheck(async () => ({ email: "b@example.com" }));
+      expect(await ingest(mention("U_WAS_B", "C1", "500.1"))).toMatchObject({ deliveries: 0, skipped: true });
     } finally {
       setSlackWorkspaceMemberCheck(async () => null);
     }

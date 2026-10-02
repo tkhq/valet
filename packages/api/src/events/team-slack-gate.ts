@@ -1,6 +1,6 @@
 /** Live authorization for team assistant mentions (TKAI-304/364), under the
  * audience the subscription carries. */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, PromptAuthor } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions, teams, teamMembers, orgMembers, users } from "../schema/index.js";
@@ -34,24 +34,20 @@ export async function newcomerAuthor(
 ): Promise<PromptAuthor | undefined> {
   if (typeof externalId !== "string" || !externalId) return undefined;
   if (await identityForExternal(db, "slack", externalId)) return undefined;
-  if (await unlinkedSender(db, orgId, externalId) !== "newcomer") return undefined;
+  if (!(await isWorkspaceNewcomer(externalId))) return undefined;
   return { id: actorUserId, externalId, name: name || externalId };
 }
 
 /**
- * Who an unlinked Slack sender is. A full workspace member whose email
- * belongs to a member of this Valet org is that person, so removing a Slack
- * link changes nothing about what they may do. A full member with no Valet
- * account is a `newcomer`. Anyone else, including a member whose email Slack
- * does not give, is null.
+ * Whether an unlinked Slack sender is a full member of the workspace, with an
+ * email Slack verified. Guests, bots, and other organizations' users are not.
+ * A sender never acts as a Valet member by email: a Slack admin can change a
+ * profile email, so only an explicit Slack link proves who they are. An
+ * unlinked member is a newcomer, whatever their email.
  */
-async function unlinkedSender(db: AppDb, orgId: string, externalId: string): Promise<{ userId: string } | "newcomer" | null> {
+async function isWorkspaceNewcomer(externalId: string): Promise<boolean> {
   const member = await slackWorkspaceMember(externalId);
-  if (!member?.email) return null;
-  const [user] = await db.select({ id: users.id }).from(users)
-    .innerJoin(orgMembers, and(eq(orgMembers.userId, users.id), eq(orgMembers.orgId, orgId)))
-    .where(sql`lower(${users.email}) = lower(${member.email})`).limit(1);
-  return user ? { userId: user.id } : "newcomer";
+  return !!member?.email;
 }
 
 /**
@@ -146,16 +142,14 @@ export async function teamMentionActor(
   } else if (!(await isCurrentTeamActor(db, sub, identity.userId))) {
     reason = "not_team_member";
   }
-  // An unlinked sender who is a Valet org member is judged as that member.
-  // A full Slack workspace member with no Valet account is answered only on a
-  // rule open to the whole organization, and runs as the person who set the
-  // channel up while that person still has access; approvals still apply. A
-  // team-only rule would otherwise answer someone outside the team. Guests
-  // and other organizations' users are refused.
-  if (reason === "unlinked_sender" && typeof externalId === "string") {
-    const sender = await unlinkedSender(db, sub.orgId, externalId);
-    const actor = sender === "newcomer" ? (audience === "organization" ? sub.createdBy : undefined) : sender?.userId;
-    if (actor && (audience === "organization" ? await isCurrentOrgActor(db, sub, actor) : await isCurrentTeamActor(db, sub, actor))) return actor;
+  // An unlinked full Slack workspace member is answered only on a rule open
+  // to the whole organization, and runs as the person who set the channel up
+  // while that person still has access; approvals still apply. A team-only
+  // rule would otherwise answer someone outside the team. Guests and other
+  // organizations' users are refused.
+  if (reason === "unlinked_sender" && audience === "organization" && typeof externalId === "string"
+    && await isWorkspaceNewcomer(externalId) && sub.createdBy && await isCurrentOrgActor(db, sub, sub.createdBy)) {
+    return sub.createdBy;
   }
   if (reason) {
     if (logDenied) {
@@ -296,14 +290,11 @@ export async function followedMessageActor(
   if (!externalId) return null;
   const identity = await identityForExternal(db, "slack", externalId);
   if (identity) return await admits(identity.userId) ? identity.userId : null;
-  // Only a team thread answers an unlinked sender. One who is a Valet org
-  // member is judged as that member. A full Slack workspace member with no
-  // Valet account is answered only in a thread its rule opened to the whole
-  // organization, and runs as the person who bound the thread. A personal
-  // thread never runs another person's message as its owner.
+  // Only a team thread answers an unlinked sender: a full Slack workspace
+  // member, in a thread its rule opened to the whole organization. They run
+  // as the person who bound the thread. A personal thread never runs another
+  // person's message as its owner.
   if (follow.ownerType !== "team") return null;
-  const sender = await unlinkedSender(db, follow.orgId, externalId);
-  const newcomerAdmitted = sender === "newcomer" && await followedThreadAudience(db, follow) === "organization";
-  const actor = sender === "newcomer" ? (newcomerAdmitted ? follow.createdBy : undefined) : sender?.userId;
-  return actor && await admits(actor) ? actor : null;
+  if (await followedThreadAudience(db, follow) !== "organization" || !(await isWorkspaceNewcomer(externalId))) return null;
+  return await admits(follow.createdBy) ? follow.createdBy : null;
 }
