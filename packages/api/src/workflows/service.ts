@@ -568,9 +568,11 @@ export async function listWorkflowDefinitions(
     ))
     .orderBy(workflowRuns.workflowId, desc(workflowRuns.createdAt), desc(workflowRuns.id));
   const failedIds = latestRuns.filter((run) => run.outcome === "failed").map((run) => dismissedRunKey(run.runId));
+  // A dismissal is the workspace's: one person acknowledging a failure clears
+  // it for everyone, so one person's debugging does not fill every list.
   const dismissed = new Set(failedIds.length === 0 ? [] : (await deps.db.select({ id: briefingDismissals.briefingId })
     .from(briefingDismissals)
-    .where(and(eq(briefingDismissals.userId, owner.userId), inArray(briefingDismissals.briefingId, failedIds)))).map((row) => row.id));
+    .where(inArray(briefingDismissals.briefingId, failedIds))).map((row) => row.id));
   const latestByWorkflow = new Map(latestRuns.map((run) => [run.workflowId, {
     runId: run.runId, workflowId: run.workflowId, status: run.status, outcome: run.outcome ?? undefined, createdAt: run.createdAt, updatedAt: run.updatedAt,
     ...(dismissed.has(dismissedRunKey(run.runId)) ? { dismissed: true } : {}),
@@ -1678,9 +1680,10 @@ async function definitionOrgId(db: AppDb, workflowId: string): Promise<string | 
 export const dismissedRunKey = (runId: string) => `run:${runId}`;
 
 /**
- * Takes a failed run out of one person's Needs attention list. The run, its
- * failure, and the workflow's state are unchanged, and a later failed run
- * needs attention again.
+ * Takes a failed run out of Needs attention for everyone in its workspace.
+ * The run, its failure, and the workflow's state are unchanged, and a later
+ * failed run needs attention again. Only someone who can open the run can
+ * dismiss it.
  */
 export async function dismissWorkflowRun(
   deps: WorkflowServiceDeps,
