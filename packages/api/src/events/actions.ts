@@ -74,7 +74,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       value: Type.Unknown(),
     }))),
     any_channel: Type.Optional(Type.Boolean()),
-    follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread." })),
+    follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
     delivery_policy: Type.Optional(Type.Union([
       Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),
     ], { description: "Personal target only: choose whether matching team subscriptions suppress delivery." })),
@@ -104,10 +104,14 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       if (input.follow === true && (input.event_keys.length !== 1 || input.event_keys[0] !== "slack.app_mention")) {
         return { success: false, error: "Follow is only available for slack.app_mention. Message subscriptions already deliver matching replies." };
       }
+      // A mention rule follows its thread by default, as the setup wizard
+      // does: Valet answers follow-ups meant for it without a fresh mention.
+      const mentionOnly = input.event_keys.length === 1 && input.event_keys[0] === "slack.app_mention";
+      const follow = input.follow ?? (mentionOnly ? true : undefined);
       const target = {
         kind: "orchestrator" as const, orchestrator: ownerType,
         ...(ownerType === "team" ? { teamId: ownerId } : {}),
-        ...(input.follow !== undefined ? { follow: input.follow } : {}),
+        ...(follow !== undefined ? { follow } : {}),
         ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
         ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
         ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
