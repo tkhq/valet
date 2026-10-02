@@ -29,7 +29,11 @@ import { identityForUser } from "../channels/identity-links.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { Providers } from "../providers/types.js";
 import { slackChannelPrivacy } from "../schema/index.js";
-import { slackConversationFromThreadKey } from "./channel-messages.js";
+/** The Slack conversation a thread key names, DMs and group DMs included. */
+function slackConversation(key: string | null | undefined): { channelId: string } | null {
+  const match = /^slack:([^:]+):[^:]+$/.exec(key ?? "");
+  return match ? { channelId: match[1]! } : null;
+}
 import type { ChannelVisibility } from "./channels.js";
 import { resolveOrgCredentialRead } from "./credential-resolution.js";
 import { OnePasswordAuthError } from "./onepassword.js";
@@ -85,7 +89,9 @@ export async function slackChannelIsPrivate(
     const bot = await token();
     // Privacy comes from `conversations.info`, which answers before any
     // membership check, so no viewer is needed here.
-    const info = bot ? await checkPrivateChannelAccess(bot, channelId, undefined).catch(() => null) : null;
+    // A DM or group DM counts as private: one person's conversation with the
+    // bot is not the team's.
+    const info = bot ? await checkPrivateChannelAccess(bot, channelId, undefined, { directIsPrivate: true }).catch(() => null) : null;
     const answered = info && (!info.error || info.isPrivate);
     if (answered) {
       isPrivate = info.isPrivate;
@@ -193,7 +199,7 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): Chann
     if (cached && cached.expiresAt > Date.now()) return cached.allowed;
     const token = await bot();
     if (!token) return false;
-    const access = await checkPrivateChannelAccess(token, channelId, member).catch(() => null);
+    const access = await checkPrivateChannelAccess(token, channelId, member, { directIsPrivate: true }).catch(() => null);
     const allowed = access?.allowed === true;
     // A Slack error is not cached, so the next request asks again. "Not a
     // member" is an answer and is cached.
@@ -224,7 +230,7 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string;
       const owner = privateThreadOwner(key);
       return owner !== undefined && owner === viewer.userId;
     }
-    const conversation = slackConversationFromThreadKey(key ?? null);
+    const conversation = slackConversation(key ?? null);
     return conversation ? canSee(`slack:${conversation.channelId}`) : true;
   };
 }
@@ -238,7 +244,7 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string;
  */
 export function sharedWithWholeTeamSql(orgId: string, key: SQL): SQL {
   return sql`(${key} IS NULL OR (${key} NOT LIKE 'app-assistant:%' AND ${key} NOT LIKE 'workflow:%'
-    AND (${key} NOT LIKE 'slack:%' OR ${key} LIKE 'slack:D%' OR EXISTS (SELECT 1 FROM slack_channel_privacy p
+    AND (${key} NOT LIKE 'slack:%' OR EXISTS (SELECT 1 FROM slack_channel_privacy p
       WHERE p.org_id = ${orgId} AND p.channel_id = split_part(${key}, ':', 2) AND p.is_private = false))))`;
 }
 
@@ -276,8 +282,8 @@ export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
     const person = privateThreadOwner(reader.key);
     if (person) return threadVisibility(deps, { ownerType: "team" }, { orgId, userId: person })(target.key);
     if (isPersonalThreadKey(target.key)) return false;
-    const targetChannel = slackConversationFromThreadKey(target.key)?.channelId;
-    if (!targetChannel || targetChannel === slackConversationFromThreadKey(reader.key)?.channelId) return true;
+    const targetChannel = slackConversation(target.key)?.channelId;
+    if (!targetChannel || targetChannel === slackConversation(reader.key)?.channelId) return true;
     let token: Promise<string | null> | undefined;
     const isPrivate = await slackChannelIsPrivate(deps, orgId, targetChannel,
       () => (token ??= orgSlackCredential(deps, orgId).then(botToken)));

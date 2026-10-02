@@ -3,6 +3,8 @@ import { slackGet } from './api.js';
 export interface ChannelAccessResult {
   allowed: boolean;
   isPrivate: boolean;
+  /** Set for a direct message (`im`) or a group direct message (`mpim`). */
+  direct?: "im" | "mpim";
   /** The channel name from `conversations.info`. Absent for a direct message,
    *  which Slack gives no name, and when the check fails. */
   name?: string;
@@ -21,6 +23,10 @@ export async function checkPrivateChannelAccess(
   token: string,
   channelId: string,
   ownerSlackUserId: string | undefined,
+  /** Treat a direct or group direct message like a private channel: only its
+   * members pass. Slack actions leave this off; a team's shared views need it,
+   * since the whole team must not read one person's DM. */
+  opts: { directIsPrivate?: boolean } = {},
 ): Promise<ChannelAccessResult> {
   // 1. Get channel info
   const infoRes = await slackGet('conversations.info', token, { channel: channelId });
@@ -41,13 +47,15 @@ export async function checkPrivateChannelAccess(
 
   const name = typeof channel.name === 'string' ? channel.name : undefined;
 
-  // 2. DMs and group DMs are always allowed
-  if (channel.is_im || channel.is_mpim) {
-    return { allowed: true, isPrivate: false, name };
+  // 2. DMs and group DMs are always allowed, unless the caller treats them
+  // as private.
+  const direct = channel.is_im ? "im" : channel.is_mpim ? "mpim" : undefined;
+  if (direct && !opts.directIsPrivate) {
+    return { allowed: true, isPrivate: false, name, direct };
   }
 
   // 3. Public channels are always allowed
-  if (!channel.is_private) {
+  if (!direct && !channel.is_private) {
     return { allowed: true, isPrivate: false, name };
   }
 

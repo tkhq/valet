@@ -149,3 +149,29 @@ it("hides a channel never classified when Slack cannot answer", async () => {
   resetThreadAccessCache();
   expect(await threadVisibility(api.providers, { ownerType: "team" }, { orgId: "local-org", userId: "outsider" })("slack:CNEVERSEEN:1.1")).toBe(true);
 });
+
+it("keeps a DM and a group DM to their members", async () => {
+  api = await bootTestApi();
+  await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UINDM", userId: "member" });
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname !== "slack.com") return realFetch(input, init);
+    const channel = url.searchParams.get("channel") ?? "";
+    const body = url.pathname.endsWith("conversations.members")
+      ? { ok: true, members: ["UINDM", "UBOT"] }
+      : { ok: true, channel: channel.startsWith("D") ? { is_im: true } : { is_private: true, is_mpim: true } };
+    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  });
+  for (const key of ["slack:G0MPIM:1700.1", "slack:D0DIRECT:1700.1"]) {
+    const visibleTo = (userId: string | undefined) => threadVisibility(api!.providers, { ownerType: "team" }, { orgId: "local-org", userId })(key);
+    expect(await visibleTo("member")).toBe(true);
+    expect(await visibleTo("outsider-no-slack-link")).toBe(false);
+    expect(await visibleTo(undefined)).toBe(false);
+    expect(await threadReadAccess(api.providers)({ owner: team, orgId: "local-org", reader: ref("web:default"), target: ref(key) })).toBe(false);
+  }
+  // Neither enters content the whole team sees at once.
+  const shared = await api.providers.db.execute(sql`SELECT ${sharedWithWholeTeamSql("local-org", sql`${"slack:D0DIRECT:1700.1"}::text`)} AS shared`) as { rows: Array<{ shared: boolean }> };
+  expect(shared.rows[0]?.shared).toBe(false);
+});
