@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
-import { pgDbFromPglite } from "@valet/store-postgres";
+import { applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, reportOrganizationSlackRules, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
+import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, rekeyLegacyEditorThreads, reportOrganizationSlackRules, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
 
 describe("workspace singleton repair on an already migrated database", () => {
   const pglite = new PGlite();
@@ -23,6 +23,28 @@ describe("workspace singleton repair on an already migrated database", () => {
     expect(message).toContain("user:user-modelled");
     expect(message).not.toContain("user:user-modelled (");
     await db.query("DELETE FROM assistants WHERE id IN ('limited', 'modelled')");
+  });
+
+  it("gives a team workflow editor thread from an earlier build its first author", async () => {
+    await applyEngineMigrations(db);
+    await db.query(`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
+      VALUES ('team-rt', 'team', 'team-x', 'u-first', 'org', '/', 'interactive', 'running', 1, 1),
+             ('user-rt', 'user', 'u-solo', 'u-solo', 'org', '/', 'interactive', 'running', 1, 1)`);
+    await db.query(`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('th-legacy', 'team-rt', 'workflow:wf_old', 'idle', 'steer', 1, 1),
+             ('th-empty', 'team-rt', 'workflow:wf_empty', 'idle', 'steer', 1, 1),
+             ('th-solo', 'user-rt', 'workflow:wf_solo', 'idle', 'steer', 1, 1)`);
+    await db.query(`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, author, created_at)
+      VALUES ('e-later', 'team-rt', 'th-legacy', 'message', 'user', '{"id":"u-second"}', 2),
+             ('e-first', 'team-rt', 'th-legacy', 'message', 'user', '{"id":"u-first"}', 1)`);
+    expect(await rekeyLegacyEditorThreads(db)).toBe(1);
+    const keys = await db.query("SELECT id, key FROM engine_threads WHERE id LIKE 'th-%' ORDER BY id");
+    expect(keys.rows).toEqual([
+      { id: "th-empty", key: "workflow:wf_empty" },
+      { id: "th-legacy", key: "workflow:wf_old:u-first" },
+      { id: "th-solo", key: "workflow:wf_solo" },
+    ]);
+    expect(await rekeyLegacyEditorThreads(db)).toBe(0);
   });
 
   it("names each enabled team Slack rule open to the whole organization", async () => {

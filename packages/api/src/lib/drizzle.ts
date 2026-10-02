@@ -132,6 +132,7 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
+  await rekeyLegacyEditorThreads(db);
   await syncAssistantSessionStatus(db);
   await reportRetiredAssistantSettings(db);
   await reportOrganizationSlackRules(db);
@@ -152,6 +153,32 @@ export async function reportOrganizationSlackRules(db: PgDb): Promise<string | n
     + `with no Valet account: ${names.join(", ")}. To limit a rule to the team's members, set its audience to the team on the Events page.`;
   console.warn(message);
   return message;
+}
+
+/**
+ * Gives each team workflow-editor thread from an earlier build its person.
+ * Those threads were keyed `workflow:<id>` with no person, and thread access
+ * shows a person's thread only to that person (`thread-access.ts`), so they
+ * were hidden from everyone, approvals included. Each is re-keyed to the first
+ * person who wrote in it. A thread nobody wrote in, or whose per-person key is
+ * already taken, keeps its key and stays hidden. Idempotent.
+ */
+export async function rekeyLegacyEditorThreads(db: PgDb): Promise<number> {
+  const tables = await db.query(`SELECT to_regclass('engine_threads') IS NOT NULL AND to_regclass('engine_entries') IS NOT NULL
+    AND to_regclass('engine_sessions') IS NOT NULL AS ready`);
+  if (tables.rows[0]?.ready !== true) return 0;
+  const result = await db.query(`UPDATE engine_threads t SET key = t.key || ':' || first.author_id
+    FROM (SELECT DISTINCT ON (e.session_id, e.thread_id) e.session_id, e.thread_id, e.author::jsonb->>'id' AS author_id
+            FROM engine_entries e WHERE e.author IS NOT NULL AND e.role = 'user'
+            ORDER BY e.session_id, e.thread_id, e.created_at, e.id) first,
+         engine_sessions s
+    WHERE t.key ~ '^workflow:[^:]+$' AND first.session_id = t.session_id AND first.thread_id = t.id
+      AND s.id = t.session_id AND s.owner_type = 'team'
+      AND first.author_id IS NOT NULL AND first.author_id <> '' AND first.author_id NOT LIKE 'slack:%'
+      AND NOT EXISTS (SELECT 1 FROM engine_threads o WHERE o.session_id = t.session_id AND o.key = t.key || ':' || first.author_id)`);
+  const count = result.rowCount;
+  if (count > 0) console.warn(`[migrations] gave ${count} team workflow editor thread(s) from an earlier build their person`);
+  return count;
 }
 
 /** The runtime no longer applies an assistant's stored model or reasoning;
