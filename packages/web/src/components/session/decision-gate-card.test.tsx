@@ -135,7 +135,7 @@ describe("DecisionGateCard — long request layout", () => {
     const { container } = renderCard(gate({ body }));
 
     const card = container.querySelector('[role="dialog"]');
-    const request = screen.getByTestId("gate-body");
+    const request = screen.getByRole("region", { name: "Request details" });
     expect(card?.className).toContain("max-h-[min(28rem,40dvh)]");
     expect(card?.className).toContain("flex-col");
     expect(request.className).toContain("overflow-y-auto");
@@ -157,5 +157,4 @@ describe("DecisionGateCard — long request layout", () => {
     expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
-
 });

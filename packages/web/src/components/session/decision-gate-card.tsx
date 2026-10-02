@@ -122,6 +122,7 @@ export function DecisionGateCard({
         <div
           className="min-h-0 overflow-y-auto overscroll-y-contain px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap [overflow-wrap:anywhere]"
           data-testid="gate-body"
+          role="region"
           tabIndex={0}
           aria-label="Request details"
         >
