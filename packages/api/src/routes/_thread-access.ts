@@ -28,3 +28,10 @@ export async function keepVisibleThreads<T extends { sessionId?: string; threadI
   const shown = await visibleThreadIds(c.var.providers, { ownerType: owner.type }, viewerOf(c), threads);
   return items.filter((item) => !item.sessionId || !item.threadId || shown.has(`${item.sessionId}:${item.threadId}`));
 }
+
+/** Whether this request may see a session it can already view by owner: a
+ * child session started from a private thread is visible only to the people
+ * that thread belongs to (`governingThreadKeySql`). */
+export async function spawnedFromVisibleThread(c: Context<AppEnv>, session: { ownerType: string; id: string }): Promise<boolean> {
+  return session.ownerType !== "team" || threadsVisibleTo(c, session)(null);
+}

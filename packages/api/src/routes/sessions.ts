@@ -66,6 +66,7 @@ import type {
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";
+import { spawnedFromVisibleThread } from "./_thread-access.js";
 
 
 export const sessionsRouter = new Hono<AppEnv>();
@@ -874,7 +875,7 @@ sessionsRouter.get("/:id", async (c) => {
   // other session route in this file stays direct-owner-only.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, c.var.principal))) {
+  if (!row || !(await canViewSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -942,7 +943,7 @@ sessionsRouter.patch("/:id", async (c) => {
   // an unauthorized caller still gets the same 404 a missing id gets.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1278,7 +1279,7 @@ sessionsRouter.post("/:id/pause", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1390,7 +1391,7 @@ sessionsRouter.delete("/:id", async (c) => {
 
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 

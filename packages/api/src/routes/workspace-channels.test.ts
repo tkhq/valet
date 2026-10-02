@@ -1,8 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
-import { eq } from "drizzle-orm";
-import { channelMessages, childWatches, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
+import { eq, sql } from "drizzle-orm";
+import { agentSessions, channelMessages, childWatches, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { recordDelegatedPullRequest } from "../services/thread-read-state.js";
 import { createTeam } from "../services/teams.js";
@@ -195,6 +195,38 @@ it("keeps another member's helper thread private in the API", async () => {
   expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${theirs.id}`)).status).toBe(404);
   expect((await fetch(`${api.baseUrl}/api/threads/${theirs.id}`)).status).toBe(404);
   expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${mine.id}`)).status).toBe(200);
+});
+
+it("leaves another member's helper thread out of a team channel's conversations and messages", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await teamRuntime(api);
+  const theirs = await session.createThread("app-assistant:another-user");
+  const shared = await session.createThread("web:shared");
+  await connectSlack(api);
+  for (const [thread, text] of [[theirs, "private draft"], [shared, "team update"]] as const) {
+    await recordChannelMessage(api.providers.db, {
+      orgId: "local-org", sessionId, threadId: thread.id, channelKey: "slack:CPUBLICENG", conversationKey: "slack:CPUBLICENG:1700.1",
+      providerMessageId: `${text}-ts`, direction: "out", text,
+    });
+  }
+  const owner = (await api.providers.db.execute(sql`SELECT owner_id FROM agent_sessions WHERE id = ${sessionId}`) as { rows: Array<{ owner_id: string }> }).rows[0]!.owner_id;
+  const detail = await (await fetch(`${api.baseUrl}/api/workspaces/${owner}/channel?key=${encodeURIComponent("slack:CPUBLICENG")}`)).json() as ChannelDetailResponse;
+  expect(detail.conversations.map((c) => c.threadId)).toEqual([shared.id]);
+  expect(detail.messages.map((m) => m.text)).toEqual(["team update"]);
+  const list = await (await fetch(`${api.baseUrl}/api/workspaces/${owner}/channels`)).json() as ListChannelsResponse;
+  expect(list.channels.find((c) => c.key === "slack:CPUBLICENG")).toMatchObject({ messageCount: 1, conversationCount: 1 });
+});
+
+it("hides a child session started from another member's helper thread", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await teamRuntime(api);
+  const theirs = await session.createThread("app-assistant:another-user");
+  const owner = (await api.providers.db.execute(sql`SELECT owner_id FROM agent_sessions WHERE id = ${sessionId}`) as { rows: Array<{ owner_id: string }> }).rows[0]!.owner_id;
+  await api.providers.db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at)
+    VALUES ('their-child', 'team', ${owner}, 'another-user', 'local-org', '/', 'child', 'running', ${sessionId}, ${theirs.id}, 1, 1)`);
+  await api.providers.db.insert(agentSessions).values({ id: "their-child", userId: "another-user", orgId: "local-org", workspace: "/", ownerType: "team", ownerId: owner, title: "Private work", createdAt: 1, updatedAt: 1 });
+  expect((await fetch(`${api.baseUrl}/api/sessions/their-child`)).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/sessions/their-child/messages`)).status).toBe(404);
 });
 
 it("routes a delegated child's pull request back to the thread that delegated it", async () => {

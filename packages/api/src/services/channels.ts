@@ -3,7 +3,7 @@
  * runtime talks in, who listens there, and the conversations and messages that
  * link Valet threads to the channel. A channel is derived, never stored.
  */
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { assistants, channelMessages, eventSubscriptions, teams } from "../schema/index.js";
@@ -28,6 +28,8 @@ interface ChannelState {
 interface Loaded {
   sessionId: string | null;
   channels: Map<string, ChannelState>;
+  /** The runtime's threads the viewer may see. */
+  shown: Set<string>;
 }
 
 /** The session of the workspace's runtime, or null before its first use. */
@@ -85,7 +87,7 @@ function touch(state: ChannelState, at: number | null): void {
   }
 }
 
-async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: ChannelNames): Promise<Loaded> {
+async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: ChannelNames, threadsShown: ThreadsShown): Promise<Loaded> {
   const sessionId = await runtimeSessionId(db, orgId, owner);
   const channels = new Map<string, ChannelState>();
   const channelFor = (key: string): ChannelState | null => {
@@ -132,6 +134,7 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
     if (own) for (const id of ids) channelFor(slackChannelKey(id));
   }
 
+  let shown = new Set<string>();
   if (sessionId) {
     // Slack conversations: the runtime's threads keyed by a Slack thread.
     const slackThreads = await db.execute(sql`
@@ -140,7 +143,12 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
       WHERE et.session_id = ${sessionId} AND et.key LIKE 'slack:%' AND st.archived_at IS NULL`) as {
       rows: Array<{ id: string; key: string; updated_at: string | number; title: string | null }>;
     };
+    // The runtime's threads this viewer may see; another person's helper
+    // thread or a private channel's thread adds nothing (`thread-access.ts`).
+    const ids = (await db.execute(sql`SELECT id FROM engine_threads WHERE session_id = ${sessionId}`) as { rows: Array<{ id: string }> }).rows.map((row) => row.id);
+    shown = await threadsShown(sessionId, ids);
     for (const row of slackThreads.rows) {
+      if (!shown.has(row.id)) continue;
       const conversation = slackConversationFromThreadKey(row.key);
       const state = conversation ? channelFor(slackChannelKey(conversation.channelId)) : null;
       if (!conversation || !state) continue;
@@ -158,6 +166,7 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
       rows: Array<{ thread_id: string; url: string; state: "open" | "merged" | "closed"; updated_at: string | number; title: string | null }>;
     };
     for (const row of pullRequests.rows) {
+      if (!shown.has(row.thread_id)) continue;
       const parsed = parsePullRequestUrl(row.url);
       if (!parsed) continue;
       const state = channelFor(githubPullRequestKey(parsed.owner, parsed.repo, parsed.number));
@@ -181,6 +190,7 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
       rows: Array<{ channel_key: string; thread_id: string; conversation_key: string; count: number; last_at: string | number; title: string | null }>;
     };
     for (const row of recorded.rows) {
+      if (!shown.has(row.thread_id)) continue;
       const state = channelFor(row.channel_key);
       if (!state) continue;
       state.summary.messageCount += Number(row.count);
@@ -214,17 +224,19 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
     state.summary.name = name ? `#${name.replace(/^#/, "")}` : parsed.channelId;
   }
   for (const state of channels.values()) state.summary.conversationCount = state.conversations.size;
-  return { sessionId, channels };
+  return { sessionId, channels, shown };
 }
 
 /** Whether the viewer may see a channel. A private Slack channel takes membership. */
 export type ChannelVisibility = (key: string) => Promise<boolean>;
+/** Of a runtime's threads, the ids the viewer may see. */
+export type ThreadsShown = (sessionId: string, threadIds: string[]) => Promise<Set<string>>;
 
 /** The channels a workspace talks or listens in, most recent first. */
 export async function listChannels(
-  db: AppDb, orgId: string, owner: Principal, names: ChannelNames, canSee: ChannelVisibility,
+  db: AppDb, orgId: string, owner: Principal, names: ChannelNames, canSee: ChannelVisibility, threadsShown: ThreadsShown,
 ): Promise<ListChannelsResponse> {
-  const { channels } = await loadChannels(db, orgId, owner, names);
+  const { channels } = await loadChannels(db, orgId, owner, names, threadsShown);
   const all = [...channels.values()].map((state) => state.summary);
   const visible = await Promise.all(all.map((row) => canSee(row.key)));
   const rows = all.filter((_, index) => visible[index]);
@@ -234,15 +246,16 @@ export async function listChannels(
 
 /** One channel: its summary, conversations, and newest messages. Null when unknown. */
 export async function getChannel(
-  db: AppDb, orgId: string, owner: Principal, key: string, names: ChannelNames, canSee: ChannelVisibility, limit = 50,
+  db: AppDb, orgId: string, owner: Principal, key: string, names: ChannelNames, canSee: ChannelVisibility, threadsShown: ThreadsShown, limit = 50,
 ): Promise<ChannelDetailResponse | null> {
   if (!parseChannelKey(key) || !(await canSee(key))) return null;
-  const { sessionId, channels } = await loadChannels(db, orgId, owner, names);
+  const { sessionId, channels, shown } = await loadChannels(db, orgId, owner, names, threadsShown);
   const state = channels.get(key);
   if (!state) return null;
   const messages: ChannelMessage[] = sessionId
     ? (await db.select().from(channelMessages)
-      .where(and(eq(channelMessages.orgId, orgId), eq(channelMessages.sessionId, sessionId), eq(channelMessages.channelKey, key)))
+      .where(and(eq(channelMessages.orgId, orgId), eq(channelMessages.sessionId, sessionId), eq(channelMessages.channelKey, key),
+        inArray(channelMessages.threadId, [...shown])))
       .orderBy(desc(channelMessages.createdAt))
       .limit(limit)).map((row) => ({
         id: row.id, sessionId: row.sessionId, threadId: row.threadId, channelKey: row.channelKey,

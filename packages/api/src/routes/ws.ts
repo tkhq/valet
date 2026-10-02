@@ -144,7 +144,9 @@ export function registerWsRoutes(
               ws.close(4040, "session not found");
               return;
             }
-            const canView = await canViewSession(providers.db, row, caller);
+            const canView = await canViewSession(providers.db, row, caller)
+              // A child started from a private thread is that thread's audience's.
+              && (row.ownerType !== "team" || await threadVisibility(providers, row, requestViewer(row.orgId, caller, c.var.user.id))(null));
             if (lifecycle.closed) return;
             if (!canView) {
               ws.close(4040, "session not found");

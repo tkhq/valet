@@ -55,7 +55,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { canResolveSessionGate, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import { threadsVisibleTo } from "./_thread-access.js";
+import { spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -86,7 +86,7 @@ export async function loadOwnedSession(c: Context<AppEnv>) {
   const id = c.req.param("id");
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, c.var.principal))) return null;
+  if (!row || !(await canViewSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) return null;
   return row;
 }
 

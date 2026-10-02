@@ -6,7 +6,8 @@ import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { getChannel, listChannels, type ChannelNames } from "../services/channels.js";
 import { orgSlackCredential, setCapped } from "../services/thread-access.js";
-import { channelsVisibleTo } from "./_thread-access.js";
+import { channelsVisibleTo, keepVisibleThreads } from "./_thread-access.js";
+import type { ThreadsShown } from "../services/channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 
 export const workspaceChannelsRouter = new Hono<AppEnv>();
@@ -38,7 +39,7 @@ function slackChannelNames(c: Context<AppEnv>): ChannelNames {
 workspaceChannelsRouter.get("/:workspace/channels", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
-  return c.json(await listChannels(c.var.providers.db, c.var.user.orgId, owner, slackChannelNames(c), channelsVisibleTo(c)));
+  return c.json(await listChannels(c.var.providers.db, c.var.user.orgId, owner, slackChannelNames(c), channelsVisibleTo(c), threadsShownTo(c, owner)));
 });
 
 workspaceChannelsRouter.get("/:workspace/channel", async (c) => {
@@ -46,7 +47,13 @@ workspaceChannelsRouter.get("/:workspace/channel", async (c) => {
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const key = c.req.query("key");
   if (!key) return c.json({ error: "Send the channel key, such as ?key=slack:C123." }, 400);
-  const detail = await getChannel(c.var.providers.db, c.var.user.orgId, owner, key, slackChannelNames(c), channelsVisibleTo(c));
+  const detail = await getChannel(c.var.providers.db, c.var.user.orgId, owner, key, slackChannelNames(c), channelsVisibleTo(c), threadsShownTo(c, owner));
   if (!detail) return c.json({ error: "This workspace has no conversation in that channel. Open Channels to see the channels it uses." }, 404);
   return c.json(detail);
 });
+
+/** Of a runtime's threads, the ones this request may see (`thread-access.ts`). */
+function threadsShownTo(c: Context<AppEnv>, owner: { type: string }): ThreadsShown {
+  return async (sessionId, threadIds) => new Set((await keepVisibleThreads(c, owner,
+    threadIds.map((threadId) => ({ sessionId, threadId })))).map((row) => row.threadId));
+}
