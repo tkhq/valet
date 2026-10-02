@@ -140,7 +140,7 @@ function DecisionGateResponse({
           <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">
             <Badge variant={kind.variant}>{kind.label}</Badge>
-            <h3 id={`gate-${gate.id}-title`} className="mt-1.5 break-words text-sm font-medium leading-relaxed text-ink">
+            <h3 id={`gate-${gate.id}-title`} className="mt-1.5 line-clamp-3 break-words text-sm font-medium leading-relaxed text-ink [overflow-wrap:anywhere]" title={gate.title}>
               {gate.title}
             </h3>
           </div>
@@ -152,7 +152,13 @@ function DecisionGateResponse({
         {error && <p role="alert" className="px-5 py-2 break-words text-sm text-danger-600">{error} Try again.</p>}
 
         {gate.body && (
-          <div id={`gate-${gate.id}-body`} className="px-5 pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words">
+          <div
+            id={`gate-${gate.id}-body`}
+            role="region"
+            tabIndex={0}
+            aria-label="Request details"
+            className="max-h-[min(14rem,25dvh)] overflow-y-auto px-5 pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+          >
             {gate.body}
           </div>
         )}

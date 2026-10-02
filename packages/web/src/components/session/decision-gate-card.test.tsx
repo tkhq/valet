@@ -262,3 +262,26 @@ describe("question image answers", () => {
     expect(screen.queryByAltText("pasted.png")).toBeNull();
   });
 });
+
+describe("DecisionGateCard — long request layout", () => {
+  it("bounds only the named request-details region so actions remain reachable", () => {
+    const body = "https://example.com/" + "a".repeat(10_000);
+    const { container } = renderCard(gate({ body, title: "A title ".repeat(100) }));
+
+    const card = container.querySelector('[role="dialog"]');
+    const title = screen.getByRole("heading", { name: "A title ".repeat(100) });
+    const request = screen.getByRole("region", { name: "Request details" });
+    expect(card?.className).not.toContain("max-h-");
+    expect(title.className).toContain("line-clamp-3");
+    expect(title.className).toContain("[overflow-wrap:anywhere]");
+    expect(title.getAttribute("title")).toBe("A title ".repeat(100));
+    expect(request.id).toBe("gate-gate_1-body");
+    expect(request.getAttribute("tabindex")).toBe("0");
+    expect(request.className).toContain("max-h-[min(14rem,25dvh)]");
+    expect(request.className).toContain("overflow-y-auto");
+    expect(request.className).toContain("[overflow-wrap:anywhere]");
+    expect(request.className).not.toContain("overscroll-y-contain");
+    expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+});
