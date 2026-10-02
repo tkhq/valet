@@ -128,3 +128,19 @@ describe("DecisionGateCard — always_allow admin gate", () => {
     expect((screen.getByRole("button", { name: "Deny" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+describe("DecisionGateCard — long request layout", () => {
+  it("bounds a long unbroken request so the action controls remain reachable", () => {
+    const body = "https://example.com/" + "a".repeat(10_000);
+    const { container } = renderCard(gate({ body }));
+
+    const card = container.querySelector('[role="dialog"]');
+    const request = screen.getByTestId("gate-body");
+    expect(card?.className).toContain("max-h-[min(28rem,40dvh)]");
+    expect(card?.className).toContain("flex-col");
+    expect(request.className).toContain("overflow-y-auto");
+    expect(request.className).toContain("[overflow-wrap:anywhere]");
+    expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+});

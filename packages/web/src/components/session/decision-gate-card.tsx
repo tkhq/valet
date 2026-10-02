@@ -77,7 +77,8 @@ export function DecisionGateCard({
   return (
     <div
       className={cn(
-        "border-t border-x mx-3 mt-3 rounded-md",
+        "border-t border-x mx-3 mt-3 rounded-md min-w-0",
+        "flex flex-col max-h-[min(28rem,40dvh)]",
         "border-amber-300 dark:border-amber-700/60",
         "bg-amber-50/70 dark:bg-amber-950/40",
       )}
@@ -85,7 +86,7 @@ export function DecisionGateCard({
       aria-live="polite"
       aria-labelledby={`gate-${gate.id}-title`}
     >
-      <header className="flex items-start gap-2.5 px-3.5 pt-3 pb-1.5">
+      <header className="shrink-0 flex items-start gap-2.5 px-3.5 pt-3 pb-1.5">
         <span
           className={cn(
             "mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full",
@@ -100,7 +101,7 @@ export function DecisionGateCard({
           </div>
           <h3
             id={`gate-${gate.id}-title`}
-            className="text-sm font-semibold text-[--fg] mt-0.5"
+            className="text-sm font-semibold text-[--fg] mt-0.5 break-words [overflow-wrap:anywhere]"
           >
             {gate.title}
           </h3>
@@ -117,7 +118,10 @@ export function DecisionGateCard({
       </header>
 
       {gate.body && (
-        <div className="px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap">
+        <div
+          className="min-h-0 overflow-y-auto overscroll-y-contain px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+          data-testid="gate-body"
+        >
           {gate.body}
         </div>
       )}
@@ -129,7 +133,7 @@ export function DecisionGateCard({
       )}
 
       {gate.type === "question" ? (
-        <div className="px-3.5 pb-3 flex items-end gap-2">
+        <div className="shrink-0 px-3.5 pb-3 flex items-end gap-2">
           <Textarea
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -146,7 +150,7 @@ export function DecisionGateCard({
           </Button>
         </div>
       ) : (
-        <div className="px-3.5 pb-3 flex flex-wrap gap-2">
+        <div className="shrink-0 px-3.5 pb-3 flex flex-wrap gap-2">
           {gate.actions.map((a) => {
             const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
             const disabled = busy || (isAlwaysAllow && !isAdmin);
