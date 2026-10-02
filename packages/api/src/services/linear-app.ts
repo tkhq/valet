@@ -17,6 +17,10 @@ export const LINEAR_CLIENT_CREDENTIALS_GRANT = "client_credentials";
 export interface LinearAppConfig {
   clientId: string;
   clientSecret: string;
+  /** Stamped by each connect on the app and on its token, so a token renewal
+   * can tell that a reconnect replaced the connection it renewed. Absent on
+   * connections saved before the stamp. */
+  connectionId?: string;
 }
 
 /** Reads the organization's saved Linear application. Deployment environment
@@ -26,5 +30,6 @@ export async function loadLinearAppConfig(credentials: CredentialStore, orgId: s
   const saved = await credentials.get({ type: "org", id: orgId }, LINEAR_APP_SERVICE);
   const clientId = saved?.metadata?.clientId;
   if (typeof clientId !== "string" || !clientId.trim() || !saved?.apiKey?.trim()) return null;
-  return { clientId, clientSecret: saved.apiKey };
+  const connectionId = typeof saved.metadata?.connectionId === "string" ? saved.metadata.connectionId : undefined;
+  return { clientId, clientSecret: saved.apiKey, ...(connectionId ? { connectionId } : {}) };
 }

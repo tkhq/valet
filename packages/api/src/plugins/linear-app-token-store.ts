@@ -102,10 +102,23 @@ export class LinearAppTokenStore implements CredentialStore {
    */
   private async saveIfUnchanged(owner: CredentialOwner, expected: StoredCredential, next: StoredCredential): Promise<StoredCredential | null> {
     const current = await this.inner.get(owner, LINEAR_CREDENTIAL_SERVICE);
-    if (!current || current.accessToken !== expected.accessToken) return current;
+    if (!current || current.accessToken !== expected.accessToken
+      || current.metadata?.connectionId !== expected.metadata?.connectionId) return current;
     await this.inner.save(owner, LINEAR_CREDENTIAL_SERVICE, next);
-    if (!(await loadLinearAppConfig(this.inner, owner.id))) {
+    const config = await loadLinearAppConfig(this.inner, owner.id);
+    if (!config) {
       await this.inner.delete(owner, LINEAR_CREDENTIAL_SERVICE);
+      return null;
+    }
+    // A reconnect stamps a new connection id on both rows in one transaction.
+    // If it committed between the check above and this save, the save put the
+    // old connection's token and webhook secret back over the new ones. A
+    // reconnect that committed after the save already replaced this row.
+    if (config.connectionId !== next.metadata?.connectionId) {
+      const after = await this.inner.get(owner, LINEAR_CREDENTIAL_SERVICE);
+      if (after?.metadata?.connectionId === config.connectionId) return after;
+      await this.inner.delete(owner, LINEAR_CREDENTIAL_SERVICE);
+      console.warn(`linear app token renewal raced a reconnect for org ${owner.id}; reconnect Linear in Settings to restore it.`);
       return null;
     }
     return next;

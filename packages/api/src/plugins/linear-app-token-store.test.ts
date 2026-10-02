@@ -79,6 +79,24 @@ describe("LinearAppTokenStore", () => {
     expect(await inner.get(ORG, "linear")).toBeNull();
   });
 
+  it("does not put an old connection back over a reconnect that lands between its last read and its save", async () => {
+    const { store, inner } = await setup(NOW + DAY / 2);
+    // The reconnect commits its new app and token (one connection id) right before the renewal's save.
+    const save = inner.save.bind(inner);
+    let reconnected = false;
+    inner.save = async (owner, service, credential) => {
+      if (service === "linear" && !reconnected) {
+        reconnected = true;
+        await save(ORG, "linear_app", { type: "service_account", apiKey: "secret2", metadata: { clientId: "client2", connectionId: "conn-2" } });
+        await save(ORG, "linear", { type: "oauth2", accessToken: "new", metadata: { grant: "client_credentials", tokenExpiresAt: NOW + 30 * DAY, webhookSecret: "hook2", workspaceId: "ws", connectionId: "conn-2" } });
+      }
+      await save(owner, service, credential);
+    };
+    // The stale renewal is removed rather than kept over the new connection.
+    expect(await store.get(ORG, "linear")).toBeNull();
+    expect(await inner.get(ORG, "linear")).toBeNull();
+  });
+
   it("does not call Linear again until the retry window after a failed renewal", async () => {
     let now = NOW;
     const { inner, f } = await setup(NOW - 1, { oauthToken: () => ({ status: 401, body: { error: "invalid_client" } }) });

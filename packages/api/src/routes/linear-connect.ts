@@ -143,8 +143,10 @@ linearConnectRouter.put("/", async (c) => {
     }
     const existing = installs.find((i) => i.workspaceId === workspace.workspaceId);
 
+    // One id for this connection on both rows (`LinearAppConfig.connectionId`).
+    const connectionId = randomUUID();
     await replaceCredential(tx, encryptionKey, { type: "org", id: user.orgId }, LINEAR_APP_SERVICE, {
-      type: "service_account", apiKey: clientSecret, metadata: { clientId },
+      type: "service_account", apiKey: clientSecret, metadata: { clientId, connectionId },
     });
     await replaceCredential(tx, encryptionKey, { type: "org", id: user.orgId }, LINEAR_CREDENTIAL_SERVICE, {
       type: "oauth2",
@@ -154,6 +156,7 @@ linearConnectRouter.put("/", async (c) => {
         workspaceId: workspace.workspaceId,
         grant: LINEAR_CLIENT_CREDENTIALS_GRANT,
         tokenExpiresAt: token.expiresAt,
+        connectionId,
       },
     });
     const now = Date.now();
