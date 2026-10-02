@@ -101,7 +101,8 @@ export function DecisionGateCard({
           </div>
           <h3
             id={`gate-${gate.id}-title`}
-            className="text-sm font-semibold text-[--fg] mt-0.5 break-words [overflow-wrap:anywhere]"
+            className="mt-0.5 line-clamp-3 text-sm font-semibold text-[--fg] [overflow-wrap:anywhere]"
+            title={gate.title}
           >
             {gate.title}
           </h3>
@@ -119,8 +120,10 @@ export function DecisionGateCard({
 
       {gate.body && (
         <div
-          className="min-h-0 overflow-y-auto overscroll-y-contain px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+          className="min-h-0 overflow-y-auto overscroll-y-contain px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap [overflow-wrap:anywhere]"
           data-testid="gate-body"
+          tabIndex={0}
+          aria-label="Request details"
         >
           {gate.body}
         </div>

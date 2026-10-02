@@ -140,7 +140,22 @@ describe("DecisionGateCard — long request layout", () => {
     expect(card?.className).toContain("flex-col");
     expect(request.className).toContain("overflow-y-auto");
     expect(request.className).toContain("[overflow-wrap:anywhere]");
+    expect(request.getAttribute("tabindex")).toBe("0");
+    expect(request.getAttribute("aria-label")).toBe("Request details");
     expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
+
+  it("clamps a long title and preserves it in a native tooltip", () => {
+    const title = "https://example.com/" + "a".repeat(300);
+    renderCard(gate({ title }));
+
+    const heading = screen.getByRole("heading", { name: title });
+    expect(heading.className).toContain("line-clamp-3");
+    expect(heading.className).toContain("[overflow-wrap:anywhere]");
+    expect(heading.getAttribute("title")).toBe(title);
+    expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+
 });
