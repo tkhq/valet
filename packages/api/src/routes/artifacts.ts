@@ -40,6 +40,8 @@ import { isOrgAdmin } from "../services/org.js";
 import { canViewSession } from "../services/session-access.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
+import { threadVisibility } from "../services/thread-access.js";
+import type { Providers } from "../providers/types.js";
 import {
   addArtifactComment,
   copyArtifactToTeam,
@@ -230,15 +232,18 @@ async function loadCommentContext(
 }
 
 /** Whether `user`'s `sendToSession` would deliver: the artifact records a
- * source session and the caller could open that session and type into it
- * (`canViewSession` — the exact check the messages route applies), so
- * sending a comment grants nothing new. The comment routes admit users
- * only (`loadCommentContext`), so the caller is that user's principal. */
+ * source session and the caller could open that session and its source
+ * thread and type into them (`canViewSession` plus the thread access the
+ * messages route applies, `thread-access.ts`), so sending a comment grants
+ * nothing new. A comment never reaches another member's helper thread or a
+ * private channel's thread. The comment routes admit users only
+ * (`loadCommentContext`), so the caller is that user's principal. */
 async function canSendToSourceSession(
-  db: AppDb,
+  providers: Providers,
   artifact: ArtifactRow,
   user: AuthUser,
 ): Promise<{ ok: false } | { ok: true; row: typeof agentSessions.$inferSelect }> {
+  const { db } = providers;
   if (!artifact.sourceSessionId) return { ok: false };
   const rows = await db
     .select()
@@ -248,6 +253,10 @@ async function canSendToSourceSession(
   const row = rows[0];
   if (!row) return { ok: false };
   if (!(await canViewSession(db, row, userPrincipal(user.id)))) return { ok: false };
+  const thread = artifact.sourceThreadId ? await providers.engineStore.getThread(row.id, artifact.sourceThreadId) : null;
+  if (artifact.sourceThreadId && !thread) return { ok: false };
+  const visible = threadVisibility(providers, row, { orgId: artifact.orgId, userId: user.id });
+  if (!(await visible(thread?.key ?? null))) return { ok: false };
   return { ok: true, row };
 }
 
@@ -365,7 +374,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
     const rows = await listArtifactComments(db, loaded.artifact.id);
     const [names, send, orgAdmin] = await Promise.all([
       authorNames(db, rows.map((r) => r.authorUserId)),
-      canSendToSourceSession(db, loaded.artifact, loaded.user),
+      canSendToSourceSession(c.var.providers, loaded.artifact, loaded.user),
       isOrgAdmin(db, loaded.user.orgId, loaded.user.id),
     ]);
     const body: ListArtifactCommentsResponse = {
@@ -410,7 +419,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       // send that silently failed.
       let sent = false;
       if (body.sendToSession === true) {
-        const send = await canSendToSourceSession(providers.db, artifact, user);
+        const send = await canSendToSourceSession(providers, artifact, user);
         if (send.ok) {
           const anchor = row.vdid ? `element ${row.vdid}` : "page";
           const text = `[artifact comment] on "${artifact.title}" (${anchor}): ${row.body}`;

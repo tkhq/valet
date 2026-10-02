@@ -12,6 +12,8 @@
 import { describe, it, expect } from "vitest";
 import { bootTestApi } from "./_setup.js";
 import { agentSessions } from "../schema/index.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import type {
   AddArtifactCommentResponse,
@@ -672,6 +674,39 @@ describe("api integration: artifact pages", () => {
       const foreign = (await foreignAdd.json()) as AddArtifactCommentResponse;
       expect(foreign.sent).toBe(false);
       expect(foreign.comment.sentToSession).toBeNull();
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("does not send a comment into another member's helper thread", async () => {
+    const api = await bootTestApi();
+    try {
+      const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Comments", creatorUserId: "local-user" });
+      const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
+      const publish = async (threadId: string, key: string) => {
+        const res = await fetch(`${api.baseUrl}/api/artifacts/share`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json", "x-valet-internal": internalToken(), "x-valet-owner": `team:${team.id}`,
+            "x-valet-actor": "local-user", "x-valet-session-id": sessionId, "x-valet-thread-id": threadId,
+          },
+          body: JSON.stringify({ key, content: "<h1>Draft</h1>", format: "html" }),
+        });
+        expect(res.status).toBe(200);
+        return new URL(((await res.json()) as ShareArtifactResponse).url).pathname.replace(/^\/a\//, "");
+      };
+      const theirs = await publish((await session.createThread("app-assistant:another-user")).id, "pages/theirs");
+      const mine = await publish((await session.createThread("app-assistant:local-user")).id, "pages/mine");
+      const canSend = async (token: string) =>
+        ((await (await fetch(`${api.baseUrl}/api/artifacts/${token}/comments`)).json()) as ListArtifactCommentsResponse).canSendToSession;
+      expect(await canSend(theirs)).toBe(false);
+      expect(await canSend(mine)).toBe(true);
+      const add = await fetch(`${api.baseUrl}/api/artifacts/${theirs}/comments`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: "Change this", sendToSession: true }),
+      });
+      expect(((await add.json()) as AddArtifactCommentResponse).sent).toBe(false);
     } finally {
       await api.cleanup();
     }
