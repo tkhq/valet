@@ -6,7 +6,6 @@ import type { OwnerFilter } from "~/api/client";
 import { useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads, useFinishWaitingThread } from "~/api/catch-up";
 import { useArtifacts } from "~/api/artifacts";
 import { useDismissRun, useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
-import { relativeTime } from "~/lib/relative-time";
 import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
 
@@ -32,13 +31,38 @@ type ResultItem = {
   sessionId?: string; threadId?: string; runId?: string; token?: string; url?: string;
 };
 
+/** A GitHub pull request named by a result link: `owner/repo #12`, and its page. */
+export function pullRequestOf(url?: string): { label: string; url: string } | undefined {
+  const match = url ? /^(https?:\/\/[^/]+\/([^/]+\/[^/]+)\/pull\/(\d+))/.exec(url) : null;
+  return match ? { label: `${match[2]} #${match[3]}`, url: match[1]! } : undefined;
+}
+
+/**
+ * Results grouped by what the work changed: a published file, a pull request,
+ * a thread's conversation, or a workflow run. Nine Slack messages in one
+ * thread are one line of work, so they are one row, newest first.
+ */
 export function groupResults(items: ResultItem[]): ResultItem[][] {
   const groups = new Map<string, ResultItem[]>();
   for (const item of [...items].sort((a, b) => b.time - a.time)) {
-    const key = item.runId ? `run:${item.runId}` : item.sessionId ? `session:${item.sessionId}` : item.id;
+    const pr = item.kind === "message" ? undefined : pullRequestOf(item.url);
+    const key = item.token ? `file:${item.token}` : pr ? `pr:${pr.url}` : item.threadId ? `thread:${item.threadId}`
+      : item.runId ? `run:${item.runId}` : item.id;
     groups.set(key, [...(groups.get(key) ?? []), item]);
   }
   return [...groups.values()];
+}
+
+/** What a group of results did, in words: "9 Slack messages · 1 review". */
+export function resultSummary(group: ResultItem[]): string {
+  const count = (kind: string) => group.filter((item) => item.kind === kind).length;
+  const plural = (n: number, one: string, many: string) => n === 1 ? one : `${n} ${many}`;
+  return [
+    count("pull_request") > 0 && "Opened the pull request",
+    count("review") > 0 && plural(count("review"), "Submitted a review", "reviews"),
+    count("message") > 0 && plural(count("message"), "Sent a Slack message", "Slack messages"),
+    count("artifact") > 0 && "Published a file",
+  ].filter(Boolean).join(" · ");
 }
 
 function outcomeResult(row: WorkspaceOutcome): ResultItem {
@@ -82,6 +106,7 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
     ...(outcomes.error ? [] : outcomes.data?.pages.flatMap(page => page.items).map(outcomeResult) ?? []),
     ...(artifacts.error ? [] : artifacts.data?.artifacts.filter(row => !row.revoked).map(artifactResult) ?? []),
   ];
+  const resultGroups = groupResults(resultItems);
   const loading = activeWork.isPending || workflows.isPending || gates.isPending;
   const errors = [
     { label: "active work", query: activeWork }, { label: "threads waiting on you", query: waitingQ }, { label: "results", query: outcomes }, { label: "artifacts", query: artifacts },
@@ -105,14 +130,9 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
       {progressRuns.map(row => <RunRow key={row.runId} row={row} />)}
     </WorkSection>}
     {!activeWork.error && activeWork.hasNextPage && <Button variant="secondary" size="sm" disabled={activeWork.isFetchingNextPage} onClick={() => void activeWork.fetchNextPage()}>Load more active work</Button>}
-    {(resultItems.length > 0 || outcomes.isPending || artifacts.isPending) && <WorkSection title="Recent results" icon={<CheckCheck className="h-4 w-4 text-moss" />} count={resultItems.length}>
+    {(resultGroups.length > 0 || outcomes.isPending || artifacts.isPending) && <WorkSection title="Recent results" icon={<CheckCheck className="h-4 w-4 text-moss" />} count={resultGroups.length}>
       {(outcomes.isPending || artifacts.isPending) && <LoadingRow label="Loading results…" />}
-      {groupResults(resultItems).map(group => {
-        const first = group[0]!;
-        return <div key={first.id} className="px-4 py-4">
-          <ul className="space-y-3">{group.map(item => <ResultRow key={item.id} item={item} />)}</ul>
-        </div>;
-      })}
+      {resultGroups.map(group => <ResultGroupRow key={group[0]!.id} group={group} />)}
     </WorkSection>}
     <div className="flex flex-wrap gap-3">
       {!outcomes.error && outcomes.hasNextPage && <Button size="sm" variant="secondary" disabled={outcomes.isFetchingNextPage} onClick={() => void outcomes.fetchNextPage()}>Load more results</Button>}
@@ -144,16 +164,28 @@ function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: strin
     badge={<Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
     actions={failed ? <Button variant="ghost" size="sm" disabled={dismiss.isPending} onClick={() => dismiss.mutate(row.runId)}>Dismiss</Button> : undefined} />;
 }
-function ResultRow({ item }: { item: ResultItem }) {
-  const Icon = item.kind === "pull_request" ? GitPullRequest : item.kind === "message" ? MessageSquare : FileText;
-  const label = item.kind === "pull_request" ? "Pull request" : item.kind === "artifact" ? "Published file" : item.kind === "review" ? "Review" : item.kind === "message" ? "Message" : item.kind === "completed" ? "Workflow completed" : item.kind === "cancelled" ? "Workflow cancelled" : "Workflow settled";
-  return <li className="flex gap-3"><Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-moss" /><div className="min-w-0 flex-1">
-    {item.token ? <Link to="/a/$token" params={{ token: item.token }} className="break-words text-sm font-medium hover:underline">{item.title}</Link> : item.url ? <a href={item.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 break-words text-sm font-medium hover:underline">{item.title}<ArrowUpRight className="h-3 w-3 shrink-0" /></a> : <span className="break-words text-sm font-medium">{item.title}</span>}
-    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted"><span>{label}</span><span>{relativeTime(item.time)}</span>
-      {item.threadId ? <Link to="/threads/$threadId" params={{ threadId: item.threadId }} className={textLinkClass}>Open thread</Link> : item.sessionId && <Link to="/sessions/$sessionId" params={{ sessionId: item.sessionId }} className={textLinkClass}>Open work</Link>}
-      {item.runId && <Link to="/workflows/runs/$runId" params={{ runId: item.runId }} className={textLinkClass}>Open workflow run</Link>}
-    </div>
-  </div></li>;
+function ResultGroupRow({ group }: { group: ResultItem[] }) {
+  const latest = group[0]!;
+  const pr = latest.kind === "message" ? undefined : pullRequestOf(latest.url);
+  const opened = group.find((item) => item.kind === "pull_request");
+  const name = latest.token ? latest.title : pr ? (opened?.title && opened.title !== "Pull request opened" ? opened.title : pr.label) : latest.title;
+  const Icon = pr ? GitPullRequest : latest.kind === "message" ? MessageSquare : FileText;
+  const threadId = group.find((item) => item.threadId)?.threadId;
+  const runId = group.find((item) => item.runId)?.runId;
+  const external = pr?.url ?? latest.url;
+  const title = latest.token ? <Link to="/a/$token" params={{ token: latest.token }}>{name}</Link>
+    : threadId && !pr ? <Link to="/threads/$threadId" params={{ threadId }}>{name}</Link>
+    : external ? <a href={external} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1">{name}<ArrowUpRight aria-hidden className="h-3 w-3 shrink-0" /></a>
+    : name;
+  return <WorkRow
+    title={<span className="inline-flex items-center gap-2"><Icon aria-hidden className="h-4 w-4 shrink-0 text-moss" />{title}</span>}
+    time={latest.time}
+    detail={resultSummary(group)}
+    actions={<>
+      {threadId && pr && <Link to="/threads/$threadId" params={{ threadId }} className={textLinkClass}>Open thread</Link>}
+      {threadId && !pr && latest.url && <a href={latest.url} target="_blank" rel="noopener noreferrer" className={textLinkClass}>Open in Slack</a>}
+      {runId && <Link to="/workflows/runs/$runId" params={{ runId }} className={textLinkClass}>Open run</Link>}
+    </>} />;
 }
 function PageControls({ cursor, next, onPage, label }: { cursor?: string; next?: string | null; onPage: (cursor?: string) => void; label: string }) {
   return <div className="flex gap-2">{cursor && <Button size="sm" variant="ghost" onClick={() => onPage(undefined)}>Latest {label}</Button>}{next && <Button size="sm" variant="secondary" onClick={() => onPage(next)}>Next {label}</Button>}</div>;

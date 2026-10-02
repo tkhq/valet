@@ -44,6 +44,18 @@ it("dismisses a failed run from Needs attention", async () => {
   await waitFor(() => expect(screen.queryByRole("region", { name: "Needs attention" })).toBeNull());
   expect(api.dismissWorkflowRun).toHaveBeenCalledWith("failed-run");
 });
+it("shows one result row per thread or pull request, saying what happened", async () => {
+  const messages = Array.from({ length: 9 }, (_, i) => ({ id: `m${i}`, kind: "message" as const, title: "Team Granola Integration Strategy", occurredAt: 100 - i, sessionId: "s", threadId: "granola", url: `https://slack.com/archives/C1/p${i}` }));
+  const reviews = [1, 2].map((i) => ({ id: `r${i}`, kind: "review" as const, title: "Review submitted", occurredAt: 200 + i, workflowRunId: `run-${i}`, url: `https://github.com/acme/app/pull/42#pullrequestreview-${i}` }));
+  vi.mocked(api.listWorkspaceOutcomes).mockResolvedValue({ items: [...reviews, ...messages], nextCursor: null });
+  setup();
+  const results = await screen.findByRole("region", { name: "Recent results" });
+  expect(await within(results).findAllByText("Team Granola Integration Strategy")).toHaveLength(1);
+  expect(within(results).getByText(/9 Slack messages/)).toBeTruthy();
+  expect(within(results).getByRole("link", { name: "acme/app #42" }).getAttribute("href")).toBe("https://github.com/acme/app/pull/42");
+  expect(within(results).getByText(/2 reviews/)).toBeTruthy();
+  expect(within(results).queryByText("Review submitted")).toBeNull();
+});
 it("separates approval from timer waits and shows the requested action", async () => {
   vi.mocked(api.listWorkflows).mockResolvedValue({ workflows: [
     { id: "wf", name: "Review rollout", definition: {}, ownerType: "user", ownerId: "u", createdAt: 1, updatedAt: 1, latestRun: { runId: "approval", workflowId: "wf", status: "parked", createdAt: 1, updatedAt: 2 } },
