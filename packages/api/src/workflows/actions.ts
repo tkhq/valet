@@ -374,7 +374,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Start workflow run",
     description:
       "Start a run of a workflow. Optional `input` becomes the trigger payload data. " +
-      "Returns { runId, workflowId } — always surface the runId to the user.",
+      "Returns { runId, workflowId } — always surface the runId to the user. " +
+      "When the run completes, fails, or is cancelled, a workflow.settled signal reports the result in this thread. " +
+      "End your turn after starting a run and continue from that signal; do not poll.",
     riskLevel: "medium",
     execute: async ({ workflow_id, input }, ctx) => {
       const owner = ownerFromContext(ctx);

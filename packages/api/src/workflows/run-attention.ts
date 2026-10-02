@@ -24,6 +24,8 @@ import { eq } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
 import type { NodeCheckpoint, OnRunSettled, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
+import { ensureAssistantRuntime, loadAssistantBySessionId } from "../assistants/service.js";
+import type { EngineHost } from "../engine/host.js";
 import { principalFromOwner, routeAttention, type AttentionChannelDeliverer } from "../orchestrator/attention.js";
 import { sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
@@ -110,6 +112,76 @@ export function failedNodeSummary(checkpoints: NodeCheckpoint[]): string {
 
 function truncate(text: string): string {
   return text.length <= ERROR_CHARS ? text : `${text.slice(0, ERROR_CHARS)}…`;
+}
+
+export interface RunOriginReportDeps {
+  db: AppDb;
+  engineHost: EngineHost;
+  store: Pick<WorkflowStore, "getRun" | "getCheckpoints">;
+}
+
+/** Budget for the run's final output in the report. */
+const OUTPUT_CHARS = 2_000;
+
+/**
+ * Reports a settled run to the assistant thread that started it, as a
+ * `workflow.settled` signal. The thread's turn starts from the result, the
+ * way a parent continues from a child's `child.settled`, so Valet can read
+ * a failure, fix the workflow, and start the next run without someone
+ * asking it to check. Only a top-level run that a thread started reports
+ * here; a scheduled or event run has no thread waiting on it.
+ *
+ * Contained by contract, like the notification above. Idempotent: the
+ * dispatch id is the run's, so a run reclaimed while `terminalizing`
+ * reports once.
+ */
+export function buildRunOriginReport(deps: RunOriginReportDeps): OnRunSettled {
+  return async (info) => {
+    if (info.parentRunId !== undefined) return;
+    try {
+      const run = await deps.store.getRun(info.runId);
+      const origin = run?.params.origin;
+      if (!run || !origin) return;
+      const assistant = await loadAssistantBySessionId(deps.db, origin.assistantSessionId);
+      if (!assistant || assistant.archivedAt !== null) return;
+      const actorUserId = run.actorUserId ?? (assistant.ownerType === "user" ? assistant.ownerId : undefined);
+      if (!actorUserId) return;
+      const { session } = await ensureAssistantRuntime({ db: deps.db, engineHost: deps.engineHost }, assistant,
+        { actorUserId, orgId: assistant.orgId });
+      const thread = session.threadById(origin.threadId);
+      if (!thread) return;
+      const name = await workflowName(deps.db, info.workflowId);
+      const checkpoints = await deps.store.getCheckpoints(info.runId);
+      await thread.submitPrompt({
+        kind: "signal",
+        signalType: "workflow.settled",
+        body: runReport(name, info.runId, info.outcome, checkpoints),
+        attributes: { runId: info.runId, outcome: info.outcome },
+      }, { dispatchId: `workflow-settled:${info.runId}` });
+    } catch (err) {
+      console.error(`workflow run report to its thread failed for ${info.runId}:`, err);
+    }
+  };
+}
+
+/** What a settled run tells the thread that started it. */
+export function runReport(name: string, runId: string, outcome: string, checkpoints: NodeCheckpoint[]): string {
+  const link = `Run ${runId} (/workflows/runs/${runId}).`;
+  if (outcome === "failed") return `Workflow "${name}" failed. ${failedNodeSummary(checkpoints)} ${link}`;
+  if (outcome === "cancelled") return `Workflow "${name}" was cancelled. ${link}`;
+  const stop = [...checkpoints].reverse().find((cp) => cp.status === "completed" && isStopResult(cp.result));
+  const result = stop && isStopResult(stop.result) ? stop.result : undefined;
+  const output = result?.output === undefined ? "" : `\nOutput: ${clip(JSON.stringify(result.output))}`;
+  const message = result?.message ? `\n${clip(result.message)}` : "";
+  return `Workflow "${name}" completed. ${link}${message}${output}`;
+}
+
+function isStopResult(value: unknown): value is { outcome?: string; output?: unknown; message?: string } {
+  return typeof value === "object" && value !== null && "outcome" in value;
+}
+
+function clip(text: string): string {
+  return text.length <= OUTPUT_CHARS ? text : `${text.slice(0, OUTPUT_CHARS)}…`;
 }
 
 export interface RunThreadArchiveDeps {

@@ -92,6 +92,9 @@ Give options when the answer is one of a few choices; each becomes a button in t
 Name a workflow by what it does, in 3 to 7 plain words, for example "Label new Slack bug reports".
 Replace a placeholder name such as "Untitled workflow" as soon as you know the goal.
 When you mention a workflow to a person, use its name. Do not show its wf_ id unless they ask for it.
+A run you start reports back to this thread as a workflow.settled signal when it completes, fails, or is cancelled.
+After you start a run, end your turn. Do not poll the run. Continue from the workflow.settled signal.
+When you are testing or fixing a workflow, read the result, fix the workflow, start the next run, and wait again.
 
 ## Errors
 
