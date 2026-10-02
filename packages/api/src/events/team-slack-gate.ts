@@ -1,7 +1,7 @@
 /** Live authorization for team assistant mentions (TKAI-304/364), under the
  * audience the subscription carries. */
 import { and, eq, sql } from "drizzle-orm";
-import type { EventCatalogEntry } from "@valet/engine";
+import type { EventCatalogEntry, PromptAuthor } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions, teams, teamMembers, orgMembers, users } from "../schema/index.js";
 import { identityForExternal } from "../channels/identity-links.js";
@@ -19,6 +19,22 @@ import { isOrgMember } from "../services/org.js";
 let slackWorkspaceMember: (userId: string) => Promise<{ email?: string } | null> = async () => null;
 export function setSlackWorkspaceMemberCheck(check: (userId: string) => Promise<{ email?: string } | null>): void {
   slackWorkspaceMember = check;
+}
+
+/**
+ * Who a Slack message shows as written by, when that is not the Valet user it
+ * runs as. A workspace member with no Valet account runs as the person who set
+ * the rule up, but wrote the message themselves, so the message names them by
+ * their Slack id and name. Any other sender writes as the user it runs as, and
+ * this returns undefined.
+ */
+export async function newcomerAuthor(
+  db: AppDb, orgId: string, externalId: unknown, name?: string,
+): Promise<PromptAuthor | undefined> {
+  if (typeof externalId !== "string" || !externalId) return undefined;
+  if (await identityForExternal(db, "slack", externalId)) return undefined;
+  if (await unlinkedSender(db, orgId, externalId) !== "newcomer") return undefined;
+  return { id: `slack:${externalId}`, externalId, ...(name ? { name } : {}) };
 }
 
 /**

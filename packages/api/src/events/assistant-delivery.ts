@@ -10,7 +10,7 @@
  *
  * The workspace owner determines the assistant.
  */
-import type { ChannelOrigin, Principal, Session, SignalContent } from "@valet/engine";
+import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent } from "@valet/engine";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -51,6 +51,8 @@ export interface AssistantDeliveryArgs {
   mismatchReason: string;
   /** The channel message this delivery carries, recorded once it lands. */
   inbound?: InboundChannelMessage;
+  /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
+  author?: PromptAuthor;
 }
 
 export async function deliverToAssistantThread(
@@ -121,7 +123,7 @@ async function deliverToAssistantThreadInner(
   }
   await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
-    author: { id: args.actorUserId },
+    author: args.author ?? { id: args.actorUserId },
   });
   if (args.inbound) {
     await recordChannelMessage(deps.db, {

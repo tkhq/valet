@@ -114,7 +114,9 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       expect((await ingest(mention("U_UNLINKED"))).deliveries).toBe(1);
       const { host, deliver } = dispatcher();
       await host.pollOnce();
-      expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a" }));
+      // It runs as the rule's creator, but the message names its real sender.
+      expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a",
+        author: expect.objectContaining({ id: "slack:U_UNLINKED", externalId: "U_UNLINKED" }) }));
       expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
       await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, orgWide.id));
       await seed();

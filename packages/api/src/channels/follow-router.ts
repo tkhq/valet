@@ -10,7 +10,7 @@ import { ConflictError } from "@valet/engine";
 import type { EngineHost } from "../engine/host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { findFollowedThread, touchFollowedThread } from "../events/followed-threads.js";
-import { followBindingAuthorized, followedMessageActor } from "../events/team-slack-gate.js";
+import { followBindingAuthorized, followedMessageActor, newcomerAuthor } from "../events/team-slack-gate.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { inboundSlackMessage } from "../services/channel-messages.js";
 
@@ -159,6 +159,7 @@ async function routeFollowedMessage(
     }
   }
   const inbound = inboundSlackMessage(threadKey, f.ts, sender, normalized.text);
+  const author = follow.ownerType === "team" ? await newcomerAuthor(deps.db, orgId, f.user, sender) : undefined;
   try {
     await deliverToAssistantThread(deps, {
       orgId,
@@ -173,6 +174,7 @@ async function routeFollowedMessage(
         // Overheard: the assistant observes it and replies only if it acts.
         origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
       },
+      ...(author ? { author } : {}),
       dispatchId: `slack:follow:${f.eventId}`,
       mismatchReason: "followed_target_mismatch",
       ...(inbound ? { inbound } : {}),

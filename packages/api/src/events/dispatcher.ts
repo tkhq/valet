@@ -24,7 +24,7 @@
  * would claim the row.) A crash mid-delivery leaves the row pending; it
  * becomes due again when the lease lapses.
  */
-import type { ChannelOrigin, SignalContent, ValetPlugin } from "@valet/engine";
+import type { ChannelOrigin, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
@@ -39,8 +39,10 @@ import {
   followBindingAuthorized,
   isTeamAssistantMention,
   mentionAudience,
+  newcomerAuthor,
   teamMentionActor,
 } from "./team-slack-gate.js";
+import { resolvePath } from "./match.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -70,6 +72,8 @@ export interface OrchestratorDeliverFn {
     threadKey?: string;
     /** The channel message this delivery carries, for the channel record. */
     inbound?: InboundChannelMessage;
+    /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
+    author?: PromptAuthor;
   }): Promise<void>;
 }
 
@@ -324,6 +328,7 @@ export class EventDispatcher {
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
           : prThreadKey && prComment ? prComment.message : undefined;
+        const author = teamMention ? await newcomerAuthor(db, event.orgId, resolvePath(event.payload, "user"), attributes.sender) : undefined;
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
           ownerType: sub.ownerType,
@@ -339,6 +344,7 @@ export class EventDispatcher {
           dispatchId: `event:${delivery.id}`,
           ...(prThreadKey ? { threadKey: prThreadKey } : {}),
           ...(inbound ? { inbound } : {}),
+          ...(author ? { author } : {}),
         });
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The
