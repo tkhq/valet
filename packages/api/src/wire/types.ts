@@ -1140,6 +1140,9 @@ export interface MessageAuthor {
   name?: string;
   email?: string;
   avatarUrl?: string;
+  /** Set when a Slack sender with no Valet account wrote the message; `id`
+   * is then the person it ran as, and `name` is the sender. */
+  externalId?: string;
 }
 
 export interface MessageReplyReference {

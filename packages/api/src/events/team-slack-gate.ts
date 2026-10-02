@@ -24,17 +24,18 @@ export function setSlackWorkspaceMemberCheck(check: (userId: string) => Promise<
 /**
  * Who a Slack message shows as written by, when that is not the Valet user it
  * runs as. A workspace member with no Valet account runs as the person who set
- * the rule up, but wrote the message themselves, so the message names them by
- * their Slack id and name. Any other sender writes as the user it runs as, and
- * this returns undefined.
+ * the rule up (`actorUserId`), but wrote the message themselves. The author
+ * keeps that person's id, so everything the turn starts runs as a real Valet
+ * user, and carries the sender's Slack id and name for display. Any other
+ * sender writes as the user it runs as, and this returns undefined.
  */
 export async function newcomerAuthor(
-  db: AppDb, orgId: string, externalId: unknown, name?: string,
+  db: AppDb, orgId: string, actorUserId: string, externalId: unknown, name?: string,
 ): Promise<PromptAuthor | undefined> {
   if (typeof externalId !== "string" || !externalId) return undefined;
   if (await identityForExternal(db, "slack", externalId)) return undefined;
   if (await unlinkedSender(db, orgId, externalId) !== "newcomer") return undefined;
-  return { id: `slack:${externalId}`, externalId, ...(name ? { name } : {}) };
+  return { id: actorUserId, externalId, name: name || externalId };
 }
 
 /**

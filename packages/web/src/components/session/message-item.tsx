@@ -216,7 +216,9 @@ export function senderLabel(
   author: StreamMessage["author"],
   viewerId: string | undefined,
 ): string | undefined {
-  if (!author || author.id === viewerId) return undefined;
+  // A Slack sender with no Valet account runs as the person who set the rule
+  // up; `externalId` marks that the name, not that person, wrote it.
+  if (!author || (author.id === viewerId && !author.externalId)) return undefined;
   return author.name || author.email || "Teammate";
 }
 

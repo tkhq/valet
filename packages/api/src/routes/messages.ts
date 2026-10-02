@@ -185,6 +185,7 @@ function authorFromEntry(
     ...(author.name ? { name: author.name } : {}),
     ...(author.email ? { email: author.email } : {}),
     ...(author.avatarUrl ? { avatarUrl: author.avatarUrl } : {}),
+    ...(author.externalId ? { externalId: author.externalId } : {}),
   };
 }
 

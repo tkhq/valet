@@ -159,7 +159,7 @@ async function routeFollowedMessage(
     }
   }
   const inbound = inboundSlackMessage(threadKey, f.ts, sender, normalized.text);
-  const author = follow.ownerType === "team" ? await newcomerAuthor(deps.db, orgId, f.user, sender) : undefined;
+  const author = follow.ownerType === "team" ? actorUserId ? await newcomerAuthor(deps.db, orgId, actorUserId, f.user, sender) : undefined : undefined;
   try {
     await deliverToAssistantThread(deps, {
       orgId,
