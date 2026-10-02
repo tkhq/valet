@@ -297,5 +297,4 @@ describe("DecisionGateCard — long request layout", () => {
     expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
-
 });
