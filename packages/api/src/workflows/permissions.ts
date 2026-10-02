@@ -1,7 +1,9 @@
 /** Permission preview and durable grants scoped to one workflow and its owner.
  * Explicit policy restrictions remain authoritative; human approval nodes are separate.
  */
+import { sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
+import { sameWorkflowSteps } from "./definition-version.js";
 import { workflowActionGrants } from "../schema/index.js";
 import { canAdministerTeam } from "../services/teams.js";
 import { resolvePolicyDecision } from "../policies/resolution.js";
@@ -136,7 +138,9 @@ async function analyzeDefinitionPermissions(
 }
 
 export type AllowWorkflowPermissionsOutcome =
-  | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[] }
+  /** `definition` is the one the grants were read from, so a write can check
+   * the steps have not changed since. */
+  | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[]; definition: unknown }
   | { ok: false; badRequest: string }
   | null;
 
@@ -196,7 +200,7 @@ export async function prepareWorkflowPermissions(
     });
     allowed.push(actionId);
   }
-  return { ok: true, result: { allowed, blocked }, grants };
+  return { ok: true, result: { allowed, blocked }, grants, definition: summary.definition };
 }
 
 /** Who may approve a workflow's actions for every later run: the owning user, or an admin of the owning team. */
@@ -219,6 +223,18 @@ export async function persistWorkflowPermissions(db: AppQueryable, grants: (type
 
 export async function allowWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined): Promise<AllowWorkflowPermissionsOutcome> {
   const prepared = await prepareWorkflowPermissions(deps, owner, workflowId, actionIds);
-  if (prepared?.ok) await persistWorkflowPermissions(deps.db, prepared.grants);
-  return prepared;
+  if (!prepared?.ok) return prepared;
+  // Lock the definition and compare the steps again, as an approval for the
+  // whole workflow does: an edit that committed after the read above must not
+  // keep grants for steps nobody reviewed. A later edit waits on this lock,
+  // and its revoke-after-write removes the grants.
+  const current = await deps.db.transaction(async (tx) => {
+    const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions WHERE id = ${workflowId} FOR UPDATE`) as {
+      rows: Array<{ definition: unknown }>;
+    };
+    if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, prepared.definition)) return false;
+    await persistWorkflowPermissions(tx, prepared.grants);
+    return true;
+  });
+  return current ? prepared : { ok: false, badRequest: "This workflow's steps changed while you allowed them. Review the steps again, then allow them." };
 }
