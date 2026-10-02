@@ -26,7 +26,11 @@ workflowConversationRouter.post("/:id/conversation", async (c) => {
     { type: workflow.ownerType, id: workflow.ownerId },
     { actorUserId: user.id, orgId: user.orgId },
   );
-  const thread = await session.createThread(workflowConversationKey(workflow.id, user.id));
+  // A new editor thread starts from the viewer's current model and reasoning
+  // defaults, as every other new thread does, not the runtime's stored model.
+  const data = await session.toData();
+  const thread = await engineHost.ensureFreshThread(session, workflowConversationKey(workflow.id, user.id),
+    { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, user.id);
   // Opening the editor does not submit a model turn. Reopens cannot duplicate
   // an automatic introduction, including after a lost HTTP response.
   const response: EnsureWorkflowConversationResponse = { sessionId, threadId: thread.id };

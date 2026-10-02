@@ -57,7 +57,11 @@ workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const { sessionId, session } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
-  const thread = await session.createThread(`app-assistant:${c.var.user.id}`);
+  // A new helper thread starts from the viewer's current model and reasoning
+  // defaults, as every other new thread does, not the runtime's stored model.
+  const data = await session.toData();
+  const thread = await c.var.providers.engineHost.ensureFreshThread(session, `app-assistant:${c.var.user.id}`,
+    { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, c.var.user.id);
   return c.json({ sessionId, threadId: thread.id });
 });
 
