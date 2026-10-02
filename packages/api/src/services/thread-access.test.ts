@@ -131,3 +131,21 @@ it("judges a child session's threads by the thread that started it", async () =>
   // A thread of the runtime itself decides by its own key.
   expect(await threadVisibility(api.providers, { ownerType: "team", id: "sess-p" }, { orgId: "local-org", userId: "other" })("web:default")).toBe(true);
 });
+
+it("hides a channel never classified when Slack cannot answer", async () => {
+  api = await bootTestApi();
+  await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  for (const error of ["ratelimited", "channel_not_found"]) {
+    resetThreadAccessCache();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: false, error }), { headers: { "content-type": "application/json" } }));
+    for (const userId of ["outsider", undefined]) {
+      expect(await threadVisibility(api.providers, { ownerType: "team" }, { orgId: "local-org", userId })("slack:CNEVERSEEN:1.1")).toBe(false);
+    }
+    expect(await threadReadAccess(api.providers)({ owner: team, orgId: "local-org", reader: ref("web:default"), target: ref("slack:CNEVERSEEN:1.1") })).toBe(false);
+    vi.restoreAllMocks();
+  }
+  // Once Slack answers, a public channel shows.
+  await connectSlack(api, {});
+  resetThreadAccessCache();
+  expect(await threadVisibility(api.providers, { ownerType: "team" }, { orgId: "local-org", userId: "outsider" })("slack:CNEVERSEEN:1.1")).toBe(true);
+});

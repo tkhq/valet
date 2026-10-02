@@ -18,8 +18,9 @@
  * is stored once per org (`slack_channel_privacy`) and Slack is asked again
  * only after it goes stale. When Slack cannot answer, the stored answer
  * stands: a public channel stays readable after a disconnect, and a private
- * one stays hidden. A channel never classified, with no bot credential to ask,
- * reads as shared, the rule before private channels were checked.
+ * one stays hidden. A channel never classified, when Slack cannot answer,
+ * stays hidden: it may be private. The first thread list after a channel's
+ * first message classifies it, while the bot's token still works there.
  */
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { StoredCredential, ThreadAccessCheck } from "@valet/engine";
@@ -178,7 +179,10 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): Chann
     const channelId = /^slack:([^:]+)$/.exec(channelKey)?.[1];
     if (!channelId) return true;
     const isPrivate = await slackChannelIsPrivate(deps, viewer.orgId, channelId, bot);
-    if (isPrivate !== true) return true;
+    if (isPrivate === false) return true;
+    // A channel never classified, with Slack unable to answer, may be
+    // private: it stays hidden until Slack says otherwise.
+    if (isPrivate === undefined) return false;
     if (!viewer.userId) return false;
     slackUserId ??= identityForUser(deps.db, "slack", viewer.userId).then((link) => link?.externalId);
     // Without a linked Slack account nobody can vouch for membership.
@@ -277,6 +281,6 @@ export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
     let token: Promise<string | null> | undefined;
     const isPrivate = await slackChannelIsPrivate(deps, orgId, targetChannel,
       () => (token ??= orgSlackCredential(deps, orgId).then(botToken)));
-    return isPrivate !== true;
+    return isPrivate === false;
   };
 }
