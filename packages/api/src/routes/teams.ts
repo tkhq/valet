@@ -45,6 +45,7 @@ import { and, eq, inArray, ne } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
+import { channelsVisibleTo } from "./_thread-access.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import {
   assistants,
@@ -384,6 +385,11 @@ teamsRouter.patch("/:id", async (c) => {
       const [taken] = await db.select({ name: teams.name }).from(teams)
         .where(and(eq(teams.orgId, user.orgId), eq(teams.slackHomeChannelId, channel), ne(teams.id, id))).limit(1);
       if (taken) return c.json({ error: `${taken.name} already uses this channel as its home channel. Choose another channel.` }, 409);
+      // Team notices post there, so an admin may choose only a channel they
+      // can see: a public one, or a private one they are a member of.
+      if (!(await channelsVisibleTo(c)(`slack:${channel}`))) {
+        return c.json({ error: "Choose a channel you can see. For a private channel, join it in Slack and link your Slack account in Settings." }, 403);
+      }
     }
     update.slackHomeChannelId = channel;
   }
