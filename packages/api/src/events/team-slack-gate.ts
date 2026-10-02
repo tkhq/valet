@@ -35,7 +35,7 @@ export async function newcomerAuthor(
   if (typeof externalId !== "string" || !externalId) return undefined;
   if (await identityForExternal(db, "slack", externalId)) return undefined;
   if (!(await isWorkspaceNewcomer(externalId))) return undefined;
-  return { id: actorUserId, externalId, name: name || externalId };
+  return { id: actorUserId, name: name || "Slack member", externalSender: true };
 }
 
 /**

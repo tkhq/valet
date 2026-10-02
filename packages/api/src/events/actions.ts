@@ -37,6 +37,13 @@ function timestampIsSafe(value: number | undefined): boolean {
   return value === undefined || (Number.isSafeInteger(value) && value >= MIN_TIMESTAMP && value <= MAX_TIMESTAMP);
 }
 
+/** A channel sender with no Valet account runs as the rule's creator, but is
+ * not that person: they may not manage or inspect the workspace's events. */
+const EXTERNAL_SENDER = {
+  success: false as const,
+  error: "Only a teammate with a linked Valet account can manage events. Ask them, or link your Slack account in Valet.",
+};
+
 function transcriptIsShared(ctx: PluginActionContext): boolean {
   // A missing owner cannot prove that the transcript is private. A channel
   // origin also makes this turn member-visible, even in a user-owned session.
@@ -81,6 +88,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and an Events review link. The user must review and enable it. Repeated proposal keys do not change the existing record.",
     riskLevel: "low",
     execute: async (input, ctx) => {
+      if (ctx.externalSender) return EXTERNAL_SENDER;
       const userId = ctx.actor?.id ?? ctx.userId;
       if (!userId || !ctx.orgId || (ctx.owner && ctx.owner.type !== "user" && ctx.owner.type !== "team") ||
           (ctx.owner?.type === "user" && ctx.owner.id !== userId)) {
@@ -145,6 +153,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       "Returns the received time, normalized key, raw event metadata, match outcome, and reason. Results are newest first.",
     riskLevel: "low",
     execute: async ({ event_key, channel, text, bot_id, since, until, limit }, ctx) => {
+      if (ctx.externalSender) return EXTERNAL_SENDER;
       const userId = ctx.actor?.id ?? ctx.userId;
       if (!userId || !ctx.orgId) return { success: false, error: "No authenticated organization member is available for this event query." };
       if (!timestampIsSafe(since) || !timestampIsSafe(until)) {
@@ -208,6 +217,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       "Receipts are retained for up to 7 days; an absent receipt does not prove the provider sent an event. Requires an organization admin in a private, non-channel session.",
     riskLevel: "low",
     execute: async ({ receipt_id, event_key, channel, since, until, limit }, ctx) => {
+      if (ctx.externalSender) return EXTERNAL_SENDER;
       const userId = ctx.actor?.id ?? ctx.userId;
       if (!userId || !ctx.orgId || transcriptIsShared(ctx)) return { success: false, error: "Event receipt logs require an organization admin in a private, non-channel session." };
       const [membership] = await db.select({ role: orgMembers.role }).from(orgMembers)

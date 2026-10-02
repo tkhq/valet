@@ -116,7 +116,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       await host.pollOnce();
       // It runs as the rule's creator, but the message names its real sender.
       expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a",
-        author: expect.objectContaining({ id: "member-a", externalId: "U_UNLINKED" }) }));
+        author: expect.objectContaining({ id: "member-a", externalSender: true }) }));
       expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
       await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, orgWide.id));
       await seed();

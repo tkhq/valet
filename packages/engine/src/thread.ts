@@ -4962,6 +4962,7 @@ export class Thread {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       userId: this.runningItem?.author?.id ?? session.options.userId,
+      ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,
       threadId: this.id,

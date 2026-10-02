@@ -13,6 +13,10 @@ export interface PromptAuthor {
   name?: string;
   avatarUrl?: string;
   externalId?: string;
+  /** A channel sender with no Valet account wrote this. `id` is the person
+   * the turn runs as; `name` is the sender. Tools the sender may not use on
+   * their own refuse such a turn (`ToolContext.externalSender`). */
+  externalSender?: boolean;
 }
 
 export interface ChannelTarget {
@@ -673,6 +677,9 @@ export interface ToolContext {
   threadId: string;
   sessionPurpose?: SessionPurpose;
   actor?: { id: string; name?: string; email?: string };
+  /** This turn came from a channel sender with no Valet account, running as
+   * `userId` (`PromptAuthor.externalSender`). */
+  externalSender?: boolean;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;

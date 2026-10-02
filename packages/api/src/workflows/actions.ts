@@ -144,6 +144,9 @@ export function formatEditLintErrors(blocking: string[], preExisting: string[], 
 }
 
 export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null {
+  // A channel sender with no Valet account runs as the rule's creator, but is
+  // not that person: they may not manage the workspace's workflows.
+  if (ctx.externalSender) return null;
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
   if (typeof userId !== "string" || userId.length === 0) return null;
   if (typeof orgId !== "string" || orgId.length === 0) return null;

@@ -111,6 +111,10 @@ describe("workflowsActionPlugin", () => {
 });
 
 describe("ownerFromContext", () => {
+  it("refuses a turn from a channel sender with no Valet account", () => {
+    expect(ownerFromContext({ ...ctx(), externalSender: true })).toBeNull();
+  });
+
   it("derives the owner from ctx.userId/orgId", () => {
     expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1" });
   });

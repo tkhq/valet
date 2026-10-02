@@ -217,8 +217,8 @@ export function senderLabel(
   viewerId: string | undefined,
 ): string | undefined {
   // A Slack sender with no Valet account runs as the person who set the rule
-  // up; `externalId` marks that the name, not that person, wrote it.
-  if (!author || (author.id === viewerId && !author.externalId)) return undefined;
+  // up; `externalSender` marks that the name, not that person, wrote it.
+  if (!author || (author.id === viewerId && !author.externalSender)) return undefined;
   return author.name || author.email || "Teammate";
 }
 
