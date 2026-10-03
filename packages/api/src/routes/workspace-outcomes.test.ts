@@ -93,11 +93,14 @@ describe("workspace confirmed outcomes", () => {
   it("fences owners, current membership and organizations before paging", async () => {
     const target = await setup(); const db = target.providers.db;
     await db.insert(actionInvocations).values(["own", "other", "team-work", "foreign-work"].map(sessionId => ({
-      invocationId: sessionId, sessionId, orgId: "local-org", createdAt: 100, durationMs: 1,
+      invocationId: sessionId, sessionId, threadId: `${sessionId}-thread`, orgId: "local-org", createdAt: 100, durationMs: 1,
       actionId: "slack.send_message", status: "completed" as const, result: { success: true },
     })));
     expect((await list(target)).items.map(i => i.id)).toEqual(["action:own"]);
     expect((await list(target, "team")).items.map(i => i.id)).toEqual(["action:team-work"]);
+    // A team action with no recorded thread cannot be judged, so the team feed leaves it out.
+    await db.update(actionInvocations).set({ threadId: null }).where(eq(actionInvocations.invocationId, "team-work"));
+    expect((await list(target, "team")).items).toEqual([]);
     for (const scope of ["missing", "foreign"]) expect((await fetch(`${target.baseUrl}/api/workspaces/${scope}/outcomes`)).status).toBe(404);
     await db.delete(teamMembers).where(eq(teamMembers.userId, "local-user"));
     expect((await fetch(`${target.baseUrl}/api/workspaces/team/outcomes`)).status).toBe(404);

@@ -36,7 +36,10 @@ export async function listWorkspaceOutcomes(
     AND COALESCE(NULLIF(s.owner_id,''), CASE WHEN s.owner_type='user' THEN s.user_id END,r.owner_id) = ${owner.id}`;
   const conditions = [
     ...(cursor ? [sql`(occurred_at,id) < (${cursor.at},${cursor.id})`] : []),
-    ...(shared ? [shared(governingThreadKeySql(sql`outcomes.session_id`, sql`outcomes.thread_id`))] : []),
+    // A write from a session with no recorded thread cannot be judged, so a
+    // shared view leaves it out.
+    ...(shared ? [sql`(outcomes.session_id IS NULL OR (outcomes.thread_id IS NOT NULL
+      AND ${shared(governingThreadKeySql(sql`outcomes.session_id`, sql`outcomes.thread_id`))}))`] : []),
   ];
   const after = conditions.length ? sql`WHERE ${sql.join(conditions, sql` AND `)}` : sql``;
   // Compact usage facts identify confirmed writes before touching source results.
@@ -45,7 +48,11 @@ export async function listWorkspaceOutcomes(
     SELECT 'action:' || a.invocation_id AS id,
       CASE f.outcome_kind WHEN 'pull_request_created' THEN 'pull_request'
         WHEN 'review_submitted' THEN 'review' ELSE 'message' END AS kind,
-      f.created_at AS occurred_at,s.id AS session_id,cm.thread_id AS thread_id,r.id AS workflow_run_id,
+      -- The thread the write came from: the channel record's, the action's own,
+      -- or, for a workflow run, the thread that started it. Thread access
+      -- needs it, so a private thread's work stays out of shared feeds.
+      f.created_at AS occurred_at,COALESCE(s.id,r.params->'origin'->>'assistantSessionId') AS session_id,
+      COALESCE(cm.thread_id,a.thread_id,r.params->'origin'->>'threadId') AS thread_id,r.id AS workflow_run_id,
       CASE WHEN f.outcome_kind='pull_request_created' THEN a.result->'data'->>'title'
         WHEN f.outcome_kind='slack_dm_sent' THEN 'Direct message sent'
         WHEN f.outcome_kind='slack_message_sent' THEN st.title END AS title,
@@ -69,7 +76,8 @@ export async function listWorkspaceOutcomes(
     SELECT 'terminal:' || e.id || ':' || p.ordinality::text,
       CASE p.part->'result'->'details'->'outcome'->>'kind'
         WHEN 'pull_request_created' THEN 'pull_request' ELSE 'review' END,
-      f.created_at,s.id,e.thread_id,r.id,NULL::text,
+      f.created_at,COALESCE(s.id,r.params->'origin'->>'assistantSessionId'),
+      CASE WHEN s.id IS NOT NULL THEN e.thread_id ELSE r.params->'origin'->>'threadId' END,r.id,NULL::text,
       p.part->'result'->'details'->'outcome'->>'url'
     FROM usage_entry_facts f
     LEFT JOIN agent_sessions s ON s.id=f.session_id

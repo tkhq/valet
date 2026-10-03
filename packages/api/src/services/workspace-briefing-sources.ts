@@ -116,7 +116,8 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
       LEFT JOIN agent_sessions s ON s.id=a.source_session_id AND ${scopedSession}
       LEFT JOIN session_threads t ON t.session_id=s.id AND t.id=a.source_thread_id
       WHERE a.org_id=${orgId} AND a.owner_type=${owner.type} AND a.owner_id=${owner.id} AND a.revoked_at IS NULL
-        AND ${shared(threadKey(sql`a.source_session_id`, sql`a.source_thread_id`))}
+        ${teamShared ? sql`AND (a.source_session_id IS NULL OR (a.source_thread_id IS NOT NULL
+          AND ${teamShared(threadKey(sql`a.source_session_id`, sql`a.source_thread_id`))}))` : sql``}
       ORDER BY a.updated_at DESC,a.id DESC LIMIT 10`) as Promise<{ rows: ArtifactRow[] }>,
     listWorkspaceOutcomes(db,orgId,owner,15,undefined,teamShared),
   ]);

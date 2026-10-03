@@ -569,6 +569,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "team_deletion_requests_team_status", probe: { kind: "index", index: "team_deletion_requests_team_status" }, sql: `CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");` },
 
   {
+    describe: "action_invocations.thread_id column",
+    probe: { kind: "column", table: "action_invocations", column: "thread_id" },
+    sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "thread_id" text',
+  },
+  {
     describe: "event_subscriptions.audience column",
     probe: { kind: "column", table: "event_subscriptions", column: "audience" },
     sql: 'ALTER TABLE "event_subscriptions" ADD COLUMN IF NOT EXISTS "audience" text',

@@ -26,7 +26,8 @@ export async function keepVisibleThreads<T extends { sessionId?: string; threadI
   if (owner.type !== "team") return items;
   const threads = items.flatMap((item) => item.sessionId && item.threadId ? [{ sessionId: item.sessionId, threadId: item.threadId }] : []);
   const shown = await visibleThreadIds(c.var.providers, { ownerType: owner.type }, viewerOf(c), threads);
-  return items.filter((item) => !item.sessionId || !item.threadId || shown.has(`${item.sessionId}:${item.threadId}`));
+  // An item from a session with no thread cannot be judged, so it stays out.
+  return items.filter((item) => !item.sessionId || (item.threadId !== undefined && shown.has(`${item.sessionId}:${item.threadId}`)));
 }
 
 /** Whether this request may see a session it can already view by owner: a

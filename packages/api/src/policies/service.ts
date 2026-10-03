@@ -446,6 +446,7 @@ export interface AuditInvocationRow {
   matchedOverrideId?: string | null;
   status?: PolicyInvocationRecord["status"] | null;
   sessionId?: string | null;
+  threadId?: string | null;
   workflowExecutionId?: string | null;
   userId?: string | null;
   orgId?: string | null;
@@ -488,6 +489,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         matchedOverrideId: row.matchedOverrideId ?? null,
         status: row.status ?? null,
         sessionId: row.sessionId ?? null,
+        threadId: row.threadId ?? null,
         workflowExecutionId: row.workflowExecutionId ?? null,
         userId: row.userId ?? null,
         orgId: row.orgId ?? null,
@@ -702,6 +704,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         matchedOverrideId: record.provenance.matchedOverrideId ?? null,
         status: record.status,
         sessionId: record.sessionId,
+        threadId: record.threadId,
         workflowExecutionId: null,
         userId: record.userId ?? null,
         orgId: record.orgId ?? null,

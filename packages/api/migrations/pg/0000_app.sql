@@ -893,6 +893,7 @@ CREATE TABLE "action_invocations" (
 	"matched_override_id" text,
 	"status" text,
 	"session_id" text,
+	"thread_id" text,
 	"workflow_execution_id" text,
 	"user_id" text,
 	"org_id" text,

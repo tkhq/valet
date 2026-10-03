@@ -1547,6 +1547,10 @@ export const actionInvocations = pgTable(
       enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"],
     }),
     sessionId: text("session_id"),
+    /** The thread the action ran in, so a team feed can apply that thread's
+     * access (`thread-access.ts`). Null on rows from before the column and on
+     * workflow actions. */
+    threadId: text("thread_id"),
     workflowExecutionId: text("workflow_execution_id"),
     userId: text("user_id"),
     orgId: text("org_id"),
