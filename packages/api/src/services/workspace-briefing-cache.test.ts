@@ -156,6 +156,7 @@ describe("durable workspace briefing cache", () => {
       VALUES ('slack-th', 'team-rt', 'slack:CFLIP:1.1', 'idle', 'steer', 1, 1)`);
     await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CFLIP", isPrivate: false, checkedAt: 1 });
     const response: WorkspaceBriefingsResponse = { generatedAt: 1, coverage: "recent", briefings: [{ id: "b", title: "t", summary: "s", status: "updated", updatedAt: 1,
+      latestThread: { sessionId: "team-rt", threadId: "slack-th" },
       sources: [{ id: "thread:team-rt:slack-th", kind: "thread", sessionId: "team-rt", threadId: "slack-th", title: "t", updatedAt: 1 }] }] };
     expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
     await db.update(slackChannelPrivacy).set({ isPrivate: true }).where(eq(slackChannelPrivacy.channelId,"CFLIP"));
