@@ -36,6 +36,24 @@ async function list(target: TestApi, workspace = "user", query = "") {
 }
 
 describe("workspace confirmed outcomes", () => {
+  it("keeps a workflow step's outcome from another member's helper thread out of the team feed", async () => {
+    const target = await setup(); const db = target.providers.db;
+    await db.insert(workflowDefinitions).values({ id: "wf-private", orgId: "local-org", ownerType: "team", ownerId: "team", name: "Private", definition: { version: "dag/v1" }, createdAt: 1, updatedAt: 1 });
+    await db.insert(workflowRuns).values({
+      id: "run-private", workflowId: "wf-private", definitionVersionId: "v1", definition: { version: "dag/v1" }, ownerType: "team", ownerId: "team",
+      params: { workflowId: "wf-private", origin: { assistantSessionId: "team-work", threadId: "helper" } }, createdAt: 1, updatedAt: 1,
+    });
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('helper', 'team-work', 'app-assistant:test-member', 'idle', 'steer', 1, 1)`);
+    // An agent step writes from its own workflow session and thread.
+    await db.insert(actionInvocations).values({
+      invocationId: "wf-step-pr", sessionId: "wf:run-private:step", threadId: "wf-step-thread", workflowExecutionId: "run-private",
+      orgId: "local-org", createdAt: 100, durationMs: 1, actionId: "github.create_pull_request", status: "completed" as const,
+      result: { success: true, data: { title: "Private change", html_url: "https://github.com/acme/app/pull/9" } },
+    });
+    expect((await list(target, "team")).items.map(i => i.id)).not.toContain("action:wf-step-pr");
+  });
+
   it("titles a Slack message by the thread that sent it, and links the thread and the message", async () => {
     const target = await setup(); const db = target.providers.db;
     await db.insert(actionInvocations).values({

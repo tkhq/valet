@@ -52,7 +52,10 @@ export async function listWorkspaceOutcomes(
       -- or, for a workflow run, the thread that started it. Thread access
       -- needs it, so a private thread's work stays out of shared feeds.
       f.created_at AS occurred_at,COALESCE(s.id,r.params->'origin'->>'assistantSessionId') AS session_id,
-      COALESCE(cm.thread_id,a.thread_id,r.params->'origin'->>'threadId') AS thread_id,r.id AS workflow_run_id,
+      -- A workflow session's own thread is not the runtime's, so a run's write
+      -- takes the thread that started the run.
+      CASE WHEN s.id IS NOT NULL THEN COALESCE(cm.thread_id,a.thread_id) ELSE r.params->'origin'->>'threadId' END AS thread_id,
+      r.id AS workflow_run_id,
       CASE WHEN f.outcome_kind='pull_request_created' THEN a.result->'data'->>'title'
         WHEN f.outcome_kind='slack_dm_sent' THEN 'Direct message sent'
         WHEN f.outcome_kind='slack_message_sent' THEN st.title END AS title,
