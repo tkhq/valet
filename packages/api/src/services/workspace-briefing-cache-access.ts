@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkspaceBriefingsResponse } from "../wire/types.js";
+import { governingThreadKeySql, sharedWithWholeTeamSql } from "./thread-access.js";
 
 /** Check source IDs and ownership on every cache read, without fetching narrative text. */
 export async function canReadCachedBriefingSources(db: AppDb, orgId: string, owner: Principal, response: WorkspaceBriefingsResponse): Promise<boolean> {
@@ -25,6 +26,11 @@ export async function canReadCachedBriefingSources(db: AppDb, orgId: string, own
     LEFT JOIN action_invocations i ON i.invocation_id=v.action_id AND i.org_id=${orgId}
     LEFT JOIN engine_entries e ON e.id=v.entry_id
     WHERE (v.session_id IS NULL OR s.id IS NOT NULL)
+      -- A team briefing is shown to every member, so each source must still
+      -- be shared with the whole team: a channel that turned private, or a
+      -- source with no thread to judge, fails the cached briefing.
+      ${owner.type === "team" ? sql`AND (v.session_id IS NULL OR (v.thread_id IS NOT NULL
+        AND ${sharedWithWholeTeamSql(orgId, governingThreadKeySql(sql`v.session_id`, sql`v.thread_id`))}))` : sql``}
       AND (v.run_id IS NULL OR d.id IS NOT NULL)
       AND (v.thread_id IS NULL OR t.id IS NOT NULL OR (v.session_id IS NULL AND d.id IS NOT NULL))
       AND CASE v.kind

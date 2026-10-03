@@ -1,8 +1,8 @@
 import { InMemoryCredentialStore } from "@valet/engine";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, artifacts, sessionThreads, workflowDefinitions, workflowRuns, workspaceBriefingCache } from "../schema/index.js";
+import { agentSessions, artifacts, sessionThreads, slackChannelPrivacy, workflowDefinitions, workflowRuns, workspaceBriefingCache } from "../schema/index.js";
 import type { WorkspaceBriefingsResponse } from "../wire/types.js";
 import type { BriefingEvidence } from "./workspace-briefing-sources.js";
 import { briefingEvidenceHash, createDurableBriefingCache } from "./workspace-briefing-cache.js";
@@ -146,6 +146,20 @@ describe("durable workspace briefing cache", () => {
     await db.update(artifacts).set({ revokedAt: null }).where(eq(artifacts.id,"a"));
     await db.update(workflowRuns).set({ ownerType: "team", ownerId: "another" }).where(eq(workflowRuns.id,"r"));
     expect(await canReadCachedBriefingSources(db,"local-org",owner,response)).toBe(false);
+  });
+  it("stops serving a cached team briefing once a source's Slack channel turns private", async () => {
+    const db = await setup();
+    const team = { type: "team" as const, id: "team-brief" };
+    await db.insert(agentSessions).values({ id: "team-rt", orgId: "local-org", userId: "local-user", ownerType: "team", ownerId: team.id, workspace: "w", createdAt: 1, updatedAt: 1 });
+    await db.insert(sessionThreads).values({ id: "slack-th", sessionId: "team-rt", createdAt: 1 });
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('slack-th', 'team-rt', 'slack:CFLIP:1.1', 'idle', 'steer', 1, 1)`);
+    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CFLIP", isPrivate: false, checkedAt: 1 });
+    const response: WorkspaceBriefingsResponse = { generatedAt: 1, coverage: "recent", briefings: [{ id: "b", title: "t", summary: "s", status: "updated", updatedAt: 1,
+      sources: [{ id: "thread:team-rt:slack-th", kind: "thread", sessionId: "team-rt", threadId: "slack-th", title: "t", updatedAt: 1 }] }] };
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
+    await db.update(slackChannelPrivacy).set({ isPrivate: true }).where(eq(slackChannelPrivacy.channelId,"CFLIP"));
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(false);
   });
   it("hashes semantic changes but ignores source ordering and non-conversation heartbeats", () => {
     const run: BriefingEvidence = { source: { id: "run", kind: "workflow", title: "Run", runId: "r", updatedAt: 10 }, content: "Awaiting approval.", state: "needs_attention" };
