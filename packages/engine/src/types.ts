@@ -2766,7 +2766,8 @@ export type ChildReader = (
  */
 export type ChildStatusReader = (
   req: { childSessionId: string },
-  ctx: { parentSessionId: string },
+  /** `readerThreadId`: the parent thread asking (`ChildReader`). */
+  ctx: { parentSessionId: string; readerThreadId?: string },
 ) => Promise<{ settled: boolean; lastActivityAt: number | null } | null>;
 
 /**

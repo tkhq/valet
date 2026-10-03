@@ -1006,6 +1006,27 @@ export function wireChildGateReports(eventStream: EventStream, watcher: ChildWat
   });
 }
 
+/**
+ * Whether a parent thread may reach a child: read it, check on it, or steer
+ * it. In a team runtime, a child started from a private thread (a person's
+ * helper, or a private Slack channel's) is reached only from that thread,
+ * so another thread cannot repeat or redirect its work for the whole team.
+ * Without a thread to check, the session-level edge decides.
+ */
+async function childReachableFrom(
+  db: AppDb,
+  watch: { parentThreadId: string; orgId: string },
+  parentSessionId: string,
+  readerThreadId: string | undefined,
+): Promise<boolean> {
+  if (readerThreadId === undefined || readerThreadId === watch.parentThreadId) return true;
+  const result = await db.execute(sql`SELECT s.owner_type, ${sharedWithWholeTeamSql(watch.orgId,
+    governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`))} AS shared
+    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; shared: boolean }> };
+  const parent = result.rows[0];
+  return parent?.owner_type !== "team" || parent.shared === true;
+}
+
 export function buildChildReader(deps: ChildrenDeps): ChildReader {
   return async (req, ctx) => {
     const rows = await deps.db
@@ -1023,16 +1044,7 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
     // somebody else's session id is real.
     const watch = rows[0];
     if (!watch) return null;
-    // In a team runtime, a child started from a private thread (a person's
-    // helper, or a private Slack channel's) is read only from that thread,
-    // so another thread cannot repeat its work to the whole team.
-    if (ctx.readerThreadId !== undefined && ctx.readerThreadId !== watch.parentThreadId) {
-      const result = await deps.db.execute(sql`SELECT s.owner_type, ${sharedWithWholeTeamSql(watch.orgId,
-        governingThreadKeySql(sql`${ctx.parentSessionId}`, sql`${watch.parentThreadId}`))} AS shared
-        FROM engine_sessions s WHERE s.id = ${ctx.parentSessionId}`) as { rows: Array<{ owner_type: string; shared: boolean }> };
-      const parent = result.rows[0];
-      if (parent?.owner_type === "team" && parent.shared !== true) return null;
-    }
+    if (!(await childReachableFrom(deps.db, watch, ctx.parentSessionId, ctx.readerThreadId))) return null;
 
     const childRows = await deps.db
       .select({ status: agentSessions.status })
@@ -1161,7 +1173,14 @@ export async function resolveChildSettlement(
  * reconcile, no engine rows for a deleted child).
  */
 export function buildChildStatusReader(deps: ChildrenDeps): ChildStatusReader {
-  return async (req, ctx) => resolveChildSettlement(deps, req.childSessionId, ctx.parentSessionId);
+  return async (req, ctx) => {
+    if (ctx.readerThreadId !== undefined) {
+      const [watch] = await deps.db.select({ parentThreadId: childWatches.parentThreadId, orgId: childWatches.orgId }).from(childWatches)
+        .where(and(eq(childWatches.childSessionId, req.childSessionId), eq(childWatches.parentSessionId, ctx.parentSessionId))).limit(1);
+      if (!watch || !(await childReachableFrom(deps.db, watch, ctx.parentSessionId, ctx.readerThreadId))) return null;
+    }
+    return resolveChildSettlement(deps, req.childSessionId, ctx.parentSessionId);
+  };
 }
 
 /**
@@ -1216,7 +1235,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // Same null contract as `buildChildReader`: "not yours" and "does not
     // exist" are indistinguishable, so foreign session ids stay unguessable.
     const watchRow = watchRows[0];
-    if (!watchRow) return null;
+    if (!watchRow || !(await childReachableFrom(deps.db, watchRow, ctx.parentSessionId, ctx.parentThreadId))) return null;
 
     const childRows = await deps.db
       .select({

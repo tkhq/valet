@@ -613,7 +613,7 @@ export const childStatusTool = defineTool({
 
     const status = await reader(
       { childSessionId: args.child_session_id },
-      { parentSessionId: ctx.sessionId },
+      { parentSessionId: ctx.sessionId, readerThreadId: ctx.threadId },
     );
     if (status === null) {
       return {

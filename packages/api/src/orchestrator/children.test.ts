@@ -1743,6 +1743,13 @@ describe("buildChildReader", () => {
     expect(await reader({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();
     // A child of a shared thread is readable from any thread.
     expect(await reader({ childSessionId: "shared-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-helper" })).toEqual([]);
+    // child_status and child_send apply the same rule.
+    const status = buildChildStatusReader(childrenDeps(api));
+    expect(await status({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();
+    const deps = childrenDeps(api);
+    const sender = buildChildSender(deps, new ChildWatcher(deps));
+    expect(await sender({ childSessionId: "private-child", message: "redirect" },
+      { parentSessionId: "team-runtime", parentThreadId: "thr-shared", actorUserId: "local-user" })).toBeNull();
   });
 
   it("returns the child's messages to the parent that spawned it", async () => {
