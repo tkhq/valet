@@ -659,10 +659,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!owner) return; // no recorded owner: nothing to notify
       const isPolicyGate = info.kind === "policy_gate";
       await routeAttention(
-        { db, channels: [channelHost.attentionDeliverer()] },
+        { db, channels: [channelHost.attentionDeliverer()], access: { engineCredentials, onePassword } },
         {
           kind: "approval",
           owner,
+          // A run started from a thread is that thread's audience's
+          // (`thread-access.ts`): a private thread's run notifies only them.
+          ...(run?.params.origin ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
           title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
           body: isPolicyGate
             ? `Workflow run ${info.runId} is paused on ${info.nodeId}.`
@@ -741,7 +744,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     store: workflowStore,
   });
-  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: [channelHost.attentionDeliverer()] });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: [channelHost.attentionDeliverer()], access: { engineCredentials, onePassword } });
   const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore });
   const runOriginReport = buildRunOriginReport({ db, engineHost, store: workflowStore });
 

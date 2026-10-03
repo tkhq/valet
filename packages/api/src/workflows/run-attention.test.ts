@@ -73,6 +73,8 @@ describe("buildRunSettledAttention", () => {
     getCheckpoints: async (): Promise<NodeCheckpoint[]> => [
       checkpoint({ nodeId: "call-api", status: "failed", error: "HTTP 500" }),
     ],
+    // No thread started these runs, so attention goes to the run's owner.
+    getRun: async () => null,
   };
 
   beforeAll(async () => {
@@ -158,6 +160,7 @@ describe("buildRunSettledAttention", () => {
       getCheckpoints: async (): Promise<NodeCheckpoint[]> => {
         throw new Error("store unreachable");
       },
+      getRun: async () => null,
     };
 
     await expect(buildRunSettledAttention({ db, store: brokenStore })(settled())).resolves.toBeUndefined();

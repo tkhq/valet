@@ -26,7 +26,7 @@ import type { NodeCheckpoint, OnRunSettled, WorkflowStore } from "@valet/workflo
 import type { AppDb } from "../lib/drizzle.js";
 import { ensureAssistantRuntime, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
-import { principalFromOwner, routeAttention, type AttentionChannelDeliverer } from "../orchestrator/attention.js";
+import { principalFromOwner, routeAttention, type AttentionChannelDeliverer, type AttentionDeps } from "../orchestrator/attention.js";
 import { sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
 
@@ -36,8 +36,10 @@ export function workflowApprovalHref(runId: string, nodeId: string): string {
 
 export interface RunSettledAttentionDeps {
   db: AppDb;
-  store: Pick<WorkflowStore, "getCheckpoints">;
+  store: Pick<WorkflowStore, "getCheckpoints" | "getRun">;
   channels?: AttentionChannelDeliverer[];
+  /** Credential access for a private Slack thread's membership check (`AttentionDeps.access`). */
+  access?: AttentionDeps["access"];
 }
 
 /** How many failed nodes the body names before it counts the rest. */
@@ -61,12 +63,16 @@ export function buildRunSettledAttention(deps: RunSettledAttentionDeps): OnRunSe
     try {
       const name = await workflowName(deps.db, info.workflowId);
       const checkpoints = await deps.store.getCheckpoints(info.runId);
+      // A run started from a thread is that thread's audience's
+      // (`thread-access.ts`): a private thread's run notifies only them.
+      const origin = (await deps.store.getRun(info.runId))?.params.origin;
       await routeAttention(
-        { db: deps.db, channels: deps.channels },
+        { db: deps.db, channels: deps.channels, ...(deps.access ? { access: deps.access } : {}) },
         {
           kind: "notification",
           urgency: "high",
           owner,
+          ...(origin ? { sessionId: origin.assistantSessionId, threadId: origin.threadId } : {}),
           title: `Workflow run failed: ${name}`,
           body: failedNodeSummary(checkpoints),
           href: `/workflows/runs/${info.runId}`,
