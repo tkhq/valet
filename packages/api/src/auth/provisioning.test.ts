@@ -82,6 +82,10 @@ describe("evaluateAdmission", () => {
     await seedUser(db, "existing", "existing@example.test");
     expect(await evaluateAdmission(db, baseConfig({ allowSignup: true }), "new@other.test")).toEqual({ allowed: true, role: "member" });
     expect(await evaluateAdmission(db, baseConfig(), "new@other.test")).toEqual({ allowed: false });
+    // A configured domain allow-list still fences signup.
+    const fenced = baseConfig({ allowSignup: true, allowedEmailDomains: ["corp.test"] });
+    expect(await evaluateAdmission(db, fenced, "new@other.test")).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, fenced, "new@corp.test")).toEqual({ allowed: true, role: "member" });
   });
 
   it("admits a matching email domain as member (case-insensitive, exact domain)", async () => {

@@ -37,7 +37,8 @@ function domainOf(email: string): string | undefined {
  * OAuth/SSO creation gate. Order (first match wins):
  *   1. zero users in the db → admin (bootstraps the first operator)
  *   2. a valid invite matching by code, else by email → the invite's role
- *   3. unrestricted signup enabled → member
+ *   3. unrestricted signup enabled AND no domain allow-list → member. A
+ *      configured allow-list is a fence that signup does not lift.
  *   4. email domain ∈ cfg.allowedEmailDomains (exact match, case-insensitive,
  *      no subdomain match) → member
  *   5. otherwise → denied
@@ -62,7 +63,7 @@ export async function evaluateAdmission(
     return { allowed: true, role: invite.role, inviteId: invite.id };
   }
 
-  if (cfg.allowSignup) {
+  if (cfg.allowSignup && cfg.allowedEmailDomains.length === 0) {
     return { allowed: true, role: "member" };
   }
 
