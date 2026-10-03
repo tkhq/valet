@@ -78,7 +78,7 @@ export function DecisionGateCard({
     <div
       className={cn(
         "border-t border-x mx-3 mt-3 rounded-md min-w-0",
-        "flex flex-col max-h-[min(28rem,40dvh)]",
+        "flex flex-col",
         "border-amber-300 dark:border-amber-700/60",
         "bg-amber-50/70 dark:bg-amber-950/40",
       )}
@@ -120,7 +120,7 @@ export function DecisionGateCard({
 
       {gate.body && (
         <div
-          className="min-h-0 overflow-y-auto overscroll-y-contain px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap [overflow-wrap:anywhere]"
+          className="max-h-[min(14rem,25dvh)] overflow-y-auto px-3.5 pb-2 text-xs text-muted whitespace-pre-wrap [overflow-wrap:anywhere]"
           data-testid="gate-body"
           role="region"
           tabIndex={0}

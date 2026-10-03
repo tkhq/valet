@@ -130,19 +130,23 @@ describe("DecisionGateCard — always_allow admin gate", () => {
 });
 
 describe("DecisionGateCard — long request layout", () => {
-  it("bounds a long unbroken request so the action controls remain reachable", () => {
+  it("bounds only a long request body while four actions keep their natural layout", () => {
     const body = "https://example.com/" + "a".repeat(10_000);
     const { container } = renderCard(gate({ body }));
 
     const card = container.querySelector('[role="dialog"]');
     const request = screen.getByRole("region", { name: "Request details" });
-    expect(card?.className).toContain("max-h-[min(28rem,40dvh)]");
     expect(card?.className).toContain("flex-col");
+    expect(card?.className).not.toContain("max-h-");
+    expect(request.className).toContain("max-h-[min(14rem,25dvh)]");
     expect(request.className).toContain("overflow-y-auto");
+    expect(request.className).not.toContain("overscroll-y-contain");
     expect(request.className).toContain("[overflow-wrap:anywhere]");
     expect(request.getAttribute("tabindex")).toBe("0");
     expect(request.getAttribute("aria-label")).toBe("Request details");
     expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Always allow" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
 
