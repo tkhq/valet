@@ -9,6 +9,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing, WorkspaceBriefingsResponse } from "../wire/types.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { isSharedThreadKey } from "../services/thread-read-state.js";
+import { keepVisibleThreads } from "./_thread-access.js";
 
 /** Dismissals stop mattering once their brief ids stop appearing. */
 const DISMISSAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -30,7 +31,13 @@ workspaceBriefingsRouter.get("/:workspace/briefings", async c => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const { db } = c.var.providers;
-  return c.json(await hideDismissedBriefings(db,c.var.user.id,owner,await getWorkspaceBriefings(db,c.var.user.orgId,owner,c.var.providers.engineCredentials)));
+  const response = await hideDismissedBriefings(db,c.var.user.id,owner,await getWorkspaceBriefings(db,c.var.user.orgId,owner,c.var.providers.engineCredentials));
+  // A team brief is cached once for everyone. Each viewer sees only briefs
+  // whose threads they may see now (`thread-access.ts`), so a channel made
+  // private, or a thread they lost access to, drops out at once.
+  const threads = response.briefings.flatMap(briefThreads);
+  const shown = new Set((await keepVisibleThreads(c, owner, threads)).map(t => `${t.sessionId}:${t.threadId}`));
+  return c.json({ ...response, briefings: response.briefings.filter(brief => briefThreads(brief).every(t => shown.has(`${t.sessionId}:${t.threadId}`))) });
 });
 
 /**

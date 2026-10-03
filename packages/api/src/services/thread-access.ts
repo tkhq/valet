@@ -63,8 +63,11 @@ export async function orgSlackCredential(deps: AccessDeps, orgId: string): Promi
 
 const botToken = (credential: StoredCredential | null) => credential?.accessToken ?? credential?.apiKey ?? null;
 
-/** A channel's privacy is rechecked after this long; it rarely changes. */
-const PRIVACY_TTL_MS = 60 * 60_000;
+/** A "public" answer grants access, so it is trusted only this long: a
+ * channel made private stops showing within the same window as a removed
+ * member. A "private" answer only denies, so it is kept longer. */
+const PUBLIC_TTL_MS = 5 * 60_000;
+const PRIVATE_TTL_MS = 60 * 60_000;
 /** A viewer's membership of a private channel is rechecked after this long. */
 const MEMBERSHIP_TTL_MS = 5 * 60_000;
 const privacyCache = new Map<string, { isPrivate: boolean | undefined; expiresAt: number }>();
@@ -72,8 +75,9 @@ const membershipCache = new Map<string, { allowed: boolean; expiresAt: number }>
 
 /**
  * Whether a Slack channel is private: from memory, then the stored answer
- * while it is fresh, then Slack, with the stored answer standing when Slack
- * cannot answer. Undefined only for a channel never classified.
+ * while it is fresh, then Slack. When Slack cannot answer, a stored "private"
+ * stands, but a stale "public" does not: it reads as unknown, which hides the
+ * channel, because a channel may have turned private since.
  */
 export async function slackChannelIsPrivate(
   deps: AccessDeps, orgId: string, channelId: string, token: () => Promise<string | null>,
@@ -84,8 +88,9 @@ export async function slackChannelIsPrivate(
   if (cached && cached.expiresAt > now) return cached.isPrivate;
   const [stored] = await deps.db.select().from(slackChannelPrivacy)
     .where(and(eq(slackChannelPrivacy.orgId, orgId), eq(slackChannelPrivacy.channelId, channelId))).limit(1);
-  let isPrivate = stored?.isPrivate;
-  if (!stored || stored.checkedAt + PRIVACY_TTL_MS <= now) {
+  let isPrivate: boolean | undefined = stored?.isPrivate;
+  const ttl = (value: boolean | undefined) => (value === false ? PUBLIC_TTL_MS : value === true ? PRIVATE_TTL_MS : MEMBERSHIP_TTL_MS);
+  if (!stored || stored.checkedAt + ttl(stored.isPrivate) <= now) {
     const bot = await token();
     // Privacy comes from `conversations.info`, which answers before any
     // membership check, so no viewer is needed here.
@@ -97,9 +102,11 @@ export async function slackChannelIsPrivate(
       isPrivate = info.isPrivate;
       await deps.db.insert(slackChannelPrivacy).values({ orgId, channelId, isPrivate, checkedAt: now })
         .onConflictDoUpdate({ target: [slackChannelPrivacy.orgId, slackChannelPrivacy.channelId], set: { isPrivate, checkedAt: now } });
+    } else if (isPrivate === false) {
+      isPrivate = undefined;
     }
   }
-  setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: now + (isPrivate === undefined ? MEMBERSHIP_TTL_MS : PRIVACY_TTL_MS) });
+  setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: now + ttl(isPrivate) });
   return isPrivate;
 }
 
