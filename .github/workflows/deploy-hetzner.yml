@@ -69,6 +69,9 @@ jobs:
           cache: pnpm
 
       - name: Build the API bundle
+        env:
+          # The workspace TypeScript build exceeds Node's default heap.
+          NODE_OPTIONS: --max-old-space-size=6144
         run: |
           pnpm install --frozen-lockfile
           pnpm typecheck

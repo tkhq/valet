@@ -95,3 +95,9 @@ PGlite dev store requires wiping the data dir (`make dev-clean`; see CLAUDE.md).
 The Cloudflare Worker + Modal deployment (`make deploy`, `packages/worker`,
 `backend/`) is frozen and kept only for the legacy production environment; it
 is not part of this deployment path.
+
+## XORS Hetzner build memory
+
+The Hetzner deployment workflow gives the API bundle build a 6 GiB Node heap with `NODE_OPTIONS=--max-old-space-size=6144`.
+The workspace TypeScript build exceeded the default heap before installation. This setting applies to the CI build step, including typecheck and web build.
+It does not change the server process memory limit. A successful local build does not confirm a successful deployment.
