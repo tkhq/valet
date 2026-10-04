@@ -448,3 +448,7 @@ The Docker row excludes files owned by the daemon-free row and dedicated DinD ro
 The Kubernetes cluster row runs only cluster files; the unit row owns the others.
 The live GitHub row runs only the App JWT check; integration-core owns the fixture loop.
 These changes remove repeated execution, not test cases.
+## XORS plugin coverage
+
+The `plugins-unit` step includes `@valet/plugin-xors-brain`. Its tests run with the other plugin suites.
+The runner list test checks that every plugin package with tests is included.

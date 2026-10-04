@@ -175,6 +175,7 @@ export const TESTED_PLUGINS = [
   "@valet/plugin-slack",
   "@valet/plugin-slack-user",
   "@valet/plugin-telegram",
+  "@valet/plugin-xors-brain",
 ];
 
 // No "--" before the file filters: vitest silently drops every argument
