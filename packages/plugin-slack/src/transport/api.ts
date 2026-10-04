@@ -468,25 +468,6 @@ export class SlackApi {
     return result;
   }
 
-  /** users.info for an authorization decision: never cached here, so a
-   *  member who became a guest is not still a member. `member` is false for a
-   *  deactivated account, a bot, a guest, or a Slack Connect user from another
-   *  workspace (`is_stranger`). Null when Slack cannot answer. */
-  async userStanding(userId: string): Promise<{ member: boolean; teamId?: string; email?: string } | null> {
-    let res: SlackResponse;
-    try {
-      res = await this.get("users.info", { user: userId });
-    } catch {
-      return null;
-    }
-    const user = rec(res.user);
-    if (!user) return null;
-    const member = !["deleted", "is_bot", "is_restricted", "is_ultra_restricted", "is_stranger"].some((flag) => user[flag] === true);
-    const teamId = str(user.team_id);
-    const email = str(rec(user.profile)?.email);
-    return { member, ...(teamId ? { teamId } : {}), ...(email ? { email } : {}) };
-  }
-
   async filesInfo(fileId: string): Promise<Record<string, unknown>> {
     const res = await this.get("files.info", { file: fileId });
     return rec(res.file) ?? {};

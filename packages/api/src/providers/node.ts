@@ -74,8 +74,7 @@ import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
-import { channelOriginResolver, channelMessageNormalizer, channelWorkspaceMember } from "../events/channel-origin.js";
-import { setSlackWorkspaceMemberCheck } from "../events/team-slack-gate.js";
+import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
@@ -799,10 +798,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // what an unauthenticated caller holding a leaked/guessed URL can force
   // us to start, without needing a shared rate-limit store.
   const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
-
-  // The team Slack gate answers unlinked senders only when they are full
-  // members of the connected Slack workspace (events/team-slack-gate.ts).
-  setSlackWorkspaceMemberCheck((userId) => channelWorkspaceMember(channelHost)("slack", userId));
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called

@@ -12,9 +12,9 @@ import { linkIdentity } from "./identity-links.js";
 import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 
 import { eq } from "drizzle-orm";
-import { eventSubscriptions, teams, teamMembers, orgMembers, users } from "../schema/index.js";
+import { eventSubscriptions, teams, teamMembers, orgMembers } from "../schema/index.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
-import { followedMessageActor, setSlackWorkspaceMemberCheck } from "../events/team-slack-gate.js";
+import { followedMessageActor } from "../events/team-slack-gate.js";
 
 const ORG = "org-1";
 const USER = "user-1";
@@ -77,7 +77,7 @@ describe("handleFollowedMessage", () => {
     });
   });
 
-  afterEach(async () => { setSlackWorkspaceMemberCheck(async () => null);
+  afterEach(async () => {
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
@@ -138,8 +138,7 @@ describe("handleFollowedMessage", () => {
     }, "U9")).toBe(USER);
   });
 
-  it("routes an unlinked Slack workspace member in an organization-wide team thread as the person who bound it", async () => {
-    setSlackWorkspaceMemberCheck(async (userId) => userId === "OTHER" ? { email: "newcomer@example.com" } : null);
+  it("requires a linked account even in an existing organization-wide team thread", async () => {
     await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
     await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
     // A thread a team-only rule bound does not answer someone with no Valet account.
@@ -151,18 +150,11 @@ describe("handleFollowedMessage", () => {
       enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
     });
     const follow = { ...teamOnly, subscriptionId: "org-wide-rule" };
-    expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBe(USER);
+    expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBeNull();
     // A guest or another organization's user does not route.
     expect(await followedMessageActor(testDb.appDb, follow, "GUEST")).toBeNull();
     // No sender (another app's post) does not route.
     expect(await followedMessageActor(testDb.appDb, follow, undefined)).toBeNull();
-    // On a team-only thread, an unlinked sender whose email belongs to an org
-    // member outside the team is refused as that member.
-    await testDb.appDb.insert(users).values({ id: "outsider-user", name: "Outsider", email: "outsider@example.com" }).onConflictDoNothing();
-    await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "outsider-user", role: "member" }).onConflictDoNothing();
-    setSlackWorkspaceMemberCheck(async () => ({ email: "outsider@example.com" }));
-    expect(await followedMessageActor(testDb.appDb, teamOnly, "WAS_LINKED")).toBeNull();
-    setSlackWorkspaceMemberCheck(async (userId) => userId === "OTHER" ? { email: "newcomer@example.com" } : null);
     // A personal thread never runs another person's message as its owner.
     expect(await followedMessageActor(testDb.appDb, { orgId: ORG, ownerType: "user", ownerId: USER, createdBy: USER }, "OTHER")).toBeNull();
     // Once the person who bound the thread loses access, nobody routes under it.
@@ -174,7 +166,6 @@ describe("handleFollowedMessage", () => {
   it.each(["non-member", "removed", "foreign-org"])(
     "does not route a linked %s sender under the binding actor's authority",
     async (mode) => {
-      setSlackWorkspaceMemberCheck(async () => ({ email: "other@example.com" }));
       await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
       await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
       await linkIdentity(testDb.appDb, { provider: "slack", externalId: "OTHER", userId: "other-user" });

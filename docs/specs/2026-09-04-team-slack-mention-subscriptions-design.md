@@ -176,3 +176,9 @@ rules, explicit assistant selection, and the saved channel and team target.
 Live acceptance still requires the organization bot: a linked member mentions
 Valet in a selected channel, gets one reply from the selected orchestrator, and
 continues the same thread. Nonmembers and removed members must not invoke it.
+
+## Release access policy (2026-10-04)
+
+The Threads and Events release preserves the existing invocation audience. Both team and organization mention rules require an explicit Slack identity link to a Valet account and current membership in the corresponding audience. Unlinked senders do not inherit the rule creator's authority, including in followed threads. Existing rules need no migration. Wider access for unlinked Slack workspace members is deferred to a separate, explicit opt-in feature.
+
+The unused Slack workspace membership lookup, transport extension, and authorization cache are removed. Restrictions on overheard messages and channel-triggered work remain: removing the invocation exception must not let another sender borrow the active actor's authority.

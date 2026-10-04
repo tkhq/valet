@@ -4,14 +4,14 @@ import type { RunHost } from "@valet/workflow";
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks, users } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
 import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
-import { authorizedSubscriptionMatchesEvent, channelMessageAuthor, newcomerAuthor, setSlackWorkspaceMemberCheck } from "./team-slack-gate.js";
+import { authorizedSubscriptionMatchesEvent, channelMessageAuthor, newcomerAuthor } from "./team-slack-gate.js";
 
 const ORG = "org-team-events";
 const channelFilter = { field: "channel", op: "eq", value: "C1" } as const;
@@ -103,35 +103,13 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ createdBy: "member-b", ownerId: "team-1" });
   });
 
-  it("answers an unlinked member of the Slack workspace as the rule's creator only on an organization rule, and still refuses a guest", async () => {
-    setSlackWorkspaceMemberCheck(async (userId) => userId === "U_UNLINKED" ? { email: "newcomer@example.com" } : null);
-    try {
-      // A team-only rule does not answer someone with no Valet account.
-      const teamOnly = await seed();
-      expect(await ingest(mention("U_UNLINKED"))).toMatchObject({ deliveries: 0, skipped: true });
-      await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, teamOnly.id));
-      const orgWide = await seed("team", false, false, "organization");
-      expect((await ingest(mention("U_UNLINKED"))).deliveries).toBe(1);
-      const { host, deliver } = dispatcher();
-      await host.pollOnce();
-      // It runs as the rule's creator, but the message names its real sender.
-      expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a",
-        author: expect.objectContaining({ id: "member-a", externalSender: true }) }));
-      expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
-      await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, orgWide.id));
-      await seed();
-      // A linked sender outside the team stays refused, even as a workspace member.
-      setSlackWorkspaceMemberCheck(async () => ({ email: "linked@example.com" }));
-      expect(await ingest(mention("U_X", "C1", "300.1"))).toMatchObject({ deliveries: 0, skipped: true });
-      // Only a Slack link proves who a sender is. An unlinked sender whose
-      // Slack email matches a team member does not act as that member, so a
-      // team-only rule refuses them like any other unlinked sender.
-      await tdb.appDb.insert(users).values([{ id: "member-b", name: "B", email: "b@example.com" }]).onConflictDoNothing();
-      setSlackWorkspaceMemberCheck(async () => ({ email: "b@example.com" }));
-      expect(await ingest(mention("U_WAS_B", "C1", "500.1"))).toMatchObject({ deliveries: 0, skipped: true });
-    } finally {
-      setSlackWorkspaceMemberCheck(async () => null);
-    }
+  it.each(["team", "organization"] as const)("keeps unlinked senders denied on an existing %s rule", async (audience) => {
+    await seed("team", false, false, audience);
+    expect(await ingest(mention("U_UNLINKED"))).toMatchObject({ deliveries: 0, skipped: true });
+    expect(await tdb.appDb.select().from(eventDeliveries)).toHaveLength(0);
+    expect(await tdb.appDb.select().from(eventDropLog)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: "unlinked_sender" }),
+    ]));
   });
 
   it.each([["U_X", "not_team_member"], ["U_UNLINKED", "unlinked_sender"]])("denies %s before event persistence", async (sender, reason) => {

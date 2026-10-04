@@ -962,21 +962,6 @@ describe("assistant thread controls", () => {
   });
 });
 
-describe("workspace membership", () => {
-  it("answers a full member of the connected team with their email, and nobody else", async () => {
-    const transport = makeTransport();
-    fake.setMembers([
-      { id: "UFULL", team_id: TEAM, name: "full", profile: { email: "full@example.com" } },
-      { id: "UGUEST", team_id: TEAM, name: "guest", is_restricted: true },
-      { id: "USINGLE", team_id: TEAM, name: "single", is_ultra_restricted: true },
-      { id: "UBOT2", team_id: TEAM, name: "bot", is_bot: true },
-      { id: "UEXT", team_id: "TOTHER", name: "external", is_stranger: true },
-    ]);
-    expect(await transport.workspaceMember("UFULL")).toEqual({ email: "full@example.com" });
-    for (const id of ["UGUEST", "USINGLE", "UBOT2", "UEXT", "UNKNOWN"]) expect(await transport.workspaceMember(id)).toBeNull();
-  });
-});
-
 describe("gate prompts", () => {
   it("escapes broadcasts in gate titles and bodies", async () => {
     const transport = makeTransport();

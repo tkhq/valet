@@ -3,24 +3,12 @@
 import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, PromptAuthor } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventSubscriptions, teams, teamMembers, orgMembers, users } from "../schema/index.js";
+import { eventSubscriptions, teams, teamMembers, orgMembers } from "../schema/index.js";
 import { identityForExternal } from "../channels/identity-links.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { resolvePath, subscriptionMatchesEvent } from "./match.js";
 import { isOrgMember } from "../services/org.js";
 import { isTeamMember } from "../services/teams.js";
-
-/**
- * A Slack sender who is a full member of the connected workspace, with their
- * email, or null. Boot sets it from the channel host
- * (`setSlackWorkspaceMemberCheck`); the gate is called from ingest, delivery
- * policy, the dispatcher, and the follow router, so one setter replaces a
- * dependency on each. Unset, no sender qualifies.
- */
-let slackWorkspaceMember: (userId: string) => Promise<{ email?: string } | null> = async () => null;
-export function setSlackWorkspaceMemberCheck(check: (userId: string) => Promise<{ email?: string } | null>): void {
-  slackWorkspaceMember = check;
-}
 
 /**
  * Who a Slack message shows as written by, when that is not the Valet user it
@@ -59,18 +47,6 @@ export async function channelMessageAuthor(
   const identity = await identityForExternal(db, "slack", externalId);
   if (identity && await isTeamMember(db, teamId, identity.userId)) return undefined;
   return { id: actorUserId, name: name || "Slack member", externalSender: true };
-}
-
-/**
- * Whether an unlinked Slack sender is a full member of the workspace, with an
- * email Slack verified. Guests, bots, and other organizations' users are not.
- * A sender never acts as a Valet member by email: a Slack admin can change a
- * profile email, so only an explicit Slack link proves who they are. An
- * unlinked member is a newcomer, whatever their email.
- */
-async function isWorkspaceNewcomer(externalId: string): Promise<boolean> {
-  const member = await slackWorkspaceMember(externalId);
-  return !!member?.email;
 }
 
 /**
@@ -164,15 +140,6 @@ export async function teamMentionActor(
     if (!(await isCurrentOrgActor(db, sub, identity.userId))) reason = "not_org_member";
   } else if (!(await isCurrentTeamActor(db, sub, identity.userId))) {
     reason = "not_team_member";
-  }
-  // An unlinked full Slack workspace member is answered only on a rule open
-  // to the whole organization, and runs as the person who set the channel up
-  // while that person still has access; approvals still apply. A team-only
-  // rule would otherwise answer someone outside the team. Guests and other
-  // organizations' users are refused.
-  if (reason === "unlinked_sender" && audience === "organization" && typeof externalId === "string"
-    && await isWorkspaceNewcomer(externalId) && sub.createdBy && await isCurrentOrgActor(db, sub, sub.createdBy)) {
-    return sub.createdBy;
   }
   if (reason) {
     if (logDenied) {
@@ -293,9 +260,8 @@ export async function followBindingAuthorized(
 
 /**
  * Who a message in a followed thread runs as: the sender when they are a
- * linked user the binding admits. In a team thread, an unlinked full member
- * of the Slack workspace runs as the person who bound the thread, while the
- * binding still admits them. Approvals still apply.
+ * linked user the binding admits. An unlinked sender never runs as the
+ * person who bound the thread.
  */
 export async function followedMessageActor(
   db: AppDb,
@@ -313,11 +279,5 @@ export async function followedMessageActor(
   if (!externalId) return null;
   const identity = await identityForExternal(db, "slack", externalId);
   if (identity) return await admits(identity.userId) ? identity.userId : null;
-  // Only a team thread answers an unlinked sender: a full Slack workspace
-  // member, in a thread its rule opened to the whole organization. They run
-  // as the person who bound the thread. A personal thread never runs another
-  // person's message as its owner.
-  if (follow.ownerType !== "team") return null;
-  if (await followedThreadAudience(db, follow) !== "organization" || !(await isWorkspaceNewcomer(externalId))) return null;
-  return await admits(follow.createdBy) ? follow.createdBy : null;
+  return null;
 }
