@@ -132,7 +132,6 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
-  await rekeyLegacyEditorThreads(db);
   await syncAssistantSessionStatus(db);
   await reportRetiredAssistantSettings(db);
   await reportOrganizationSlackRules(db);
@@ -155,47 +154,17 @@ export async function reportOrganizationSlackRules(db: PgDb): Promise<string | n
   return message;
 }
 
-/**
- * Gives each team workflow-editor thread from an earlier build its person.
- * Those threads were keyed `workflow:<id>` with no person, and thread access
- * shows a person's thread only to that person (`thread-access.ts`), so they
- * were hidden from everyone, approvals included. Each is re-keyed to the first
- * person who wrote in it. A thread nobody wrote in, or whose per-person key is
- * already taken, keeps its key and stays hidden. Idempotent.
- */
-export async function rekeyLegacyEditorThreads(db: PgDb): Promise<number> {
-  const tables = await db.query(`SELECT to_regclass('engine_threads') IS NOT NULL AND to_regclass('engine_entries') IS NOT NULL
-    AND to_regclass('engine_sessions') IS NOT NULL AS ready`);
-  if (tables.rows[0]?.ready !== true) return 0;
-  const result = await db.query(`UPDATE engine_threads t SET key = t.key || ':' || first.author_id
-    FROM (SELECT DISTINCT ON (e.session_id, e.thread_id) e.session_id, e.thread_id, e.author::jsonb->>'id' AS author_id
-            FROM engine_entries e WHERE e.author IS NOT NULL AND e.role = 'user'
-            ORDER BY e.session_id, e.thread_id, e.created_at, e.id) first,
-         engine_sessions s
-    WHERE t.key ~ '^workflow:[^:]+$' AND first.session_id = t.session_id AND first.thread_id = t.id
-      AND s.id = t.session_id AND s.owner_type = 'team'
-      AND first.author_id IS NOT NULL AND first.author_id <> '' AND first.author_id NOT LIKE 'slack:%'
-      AND NOT EXISTS (SELECT 1 FROM engine_threads o WHERE o.session_id = t.session_id AND o.key = t.key || ':' || first.author_id)`);
-  const count = result.rowCount;
-  if (count > 0) console.warn(`[migrations] gave ${count} team workflow editor thread(s) from an earlier build their person`);
-  return count;
-}
-
-/** The runtime no longer applies an assistant's stored model or reasoning;
- * those columns stay only for a rollback. A stored integration allow-list
- * keeps limiting its workspace until an admin clears it
- * (`assistants/integration-limit.ts`). Name each affected workspace once at
- * boot so an admin can review it. */
+/** A stored integration allow-list keeps limiting its workspace until an
+ * admin clears it (`assistants/integration-limit.ts`). Name each affected
+ * workspace once at boot so an admin can review it. */
 export async function reportRetiredAssistantSettings(db: PgDb): Promise<string | null> {
   const result = await db.query(
-    `SELECT owner_type, owner_id, behavior IS NOT NULL AS allow_list FROM assistants WHERE archived_at IS NULL
-      AND (behavior IS NOT NULL OR model IS NOT NULL OR reasoning IS NOT NULL) ORDER BY owner_type, owner_id`,
+    `SELECT owner_type, owner_id FROM assistants WHERE archived_at IS NULL AND behavior IS NOT NULL ORDER BY owner_type, owner_id`,
   );
   if (result.rows.length === 0) return null;
-  const names = result.rows.map((row) => `${String(row.owner_type)}:${String(row.owner_id)}${row.allow_list === true ? " (integration allow-list)" : ""}`);
-  const message = `[migrations] ${names.length} workspace assistant(s) carry settings from before one assistant per workspace: ${names.join(", ")}. `
-    + "An integration allow-list keeps limiting that workspace's assistant until an admin clears it on the Integrations page. "
-    + "Stored models and reasoning levels no longer apply; workspaces use the organization's model defaults and each thread's model.";
+  const names = result.rows.map((row) => `${String(row.owner_type)}:${String(row.owner_id)}`);
+  const message = `[migrations] ${names.length} workspace assistant(s) keep an integration allow-list from before one assistant per workspace: ${names.join(", ")}. `
+    + "It keeps limiting that workspace's assistant until an admin clears it on the Integrations page.";
   console.warn(message);
   return message;
 }
@@ -212,13 +181,6 @@ export async function reportRetiredAssistantSettings(db: PgDb): Promise<string |
  * too. Idempotent: rows already in line are untouched. */
 export async function syncAssistantSessionStatus(db: PgDb): Promise<void> {
   const now = Date.now();
-  // A live, non-retired assistant is its owner's default. An older pod can
-  // clear the legacy flag; after a rollback dev-v2 would then find no default
-  // and could not insert one under the unique index.
-  await db.query(
-    `UPDATE assistants SET is_default = true
-      WHERE archived_at IS NULL AND position(':retired:' in owner_id) = 0 AND NOT is_default`,
-  );
   await db.query(
     `UPDATE agent_sessions s SET status = 'active', updated_at = $1 FROM assistants a
       WHERE s.id = a.session_id AND a.archived_at IS NULL AND s.status = 'deleted'`,
@@ -231,17 +193,13 @@ export async function syncAssistantSessionStatus(db: PgDb): Promise<void> {
   );
 }
 
-/** Stored workflow JSON that the current validator rejects: a `thread` step
- * written by an earlier build of this branch (dev-v2 and this build store
- * `orchestrator`), or a top-level `assistantId` from before workspaces had
- * one assistant. Saved workflows, their versions, run snapshots, and saved
- * templates are rewritten with `normalizeLegacyDefinition`, so an older
- * binary can still read them after a rollback. Idempotent: the filter
- * selects only rows that still carry an old shape. */
+/** Stored workflow JSON that the current validator rejects: a top-level
+ * `assistantId` from before workspaces had one assistant. Saved workflows,
+ * their versions, run snapshots, and saved templates are rewritten with
+ * `normalizeLegacyDefinition`. Idempotent: the filter selects only rows that
+ * still carry the old shape. */
 export async function normalizeLegacyWorkflowDefinitions(db: PgDb): Promise<void> {
-  // Match a node whose type is "thread", not any text that says "thread", so
-  // prompt text does not select the same rows again on every boot.
-  const LEGACY = (col: string) => `(jsonb_path_exists(${col}, '$.** ? (@.type == "thread")') OR ${col} ? 'assistantId')`;
+  const LEGACY = (col: string) => `(${col} ? 'assistantId')`;
   // A settled run never executes again, so only unsettled run snapshots need
   // the rewrite; the run history stays out of every boot's scan.
   for (const [table, scope] of [["workflow_definitions", ""], ["workflow_versions", ""], ["workflow_runs", " AND status <> 'settled'"]] as const) {
@@ -455,19 +413,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
 )` },
   { describe: "event receipts page index", probe: { kind: "index", index: "event_receipts_page" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id")' },
-  // Retain retired fields for an older binary. Current application schemas
-  // deliberately omit them, so new code cannot change their saved values.
-  ...["name", "avatar_url", "personality", "behavior", "model", "reasoning"].map((column): SchemaRepair => ({
-    describe: `assistants.${column} rollback column`,
-    probe: { kind: "column", table: "assistants", column },
-    sql: `ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "${column}" text`,
-  })),
-  { describe: "assistants.is_default rollback column", probe: { kind: "column", table: "assistants", column: "is_default" }, sql: 'ALTER TABLE assistants ADD COLUMN IF NOT EXISTS is_default boolean NOT NULL DEFAULT true' },
-  ...["followed_threads", "workflow_schedules"].map((table): SchemaRepair => ({
-    describe: `${table}.assistant_id rollback column`,
-    probe: { kind: "column", table, column: "assistant_id" },
-    sql: `ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS assistant_id text`,
-  })),
   {
     describe: "workspace assistant singleton cutover",
     probe: { kind: "index", index: "assistants_workspace" },
@@ -482,7 +427,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     //      exists: that is a deleted profile, not a teardown. Team teardown
     //      removes the team row in the same transaction that archives its
     //      assistant, so a real teardown stays retired and keeps its slot.
-    // Legacy default flags and routing fields stay for a bounded rollback.
     sql: `DO $$ DECLARE now_ms bigint := (extract(epoch from clock_timestamp()) * 1000)::bigint; BEGIN
       WITH ranked AS (
         SELECT id, row_number() OVER (
@@ -493,22 +437,17 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       )
       UPDATE assistants a
         SET owner_id = a.owner_id || ':retired:' || a.id,
-            archived_at = COALESCE(a.archived_at, now_ms),
-            is_default = false
+            archived_at = COALESCE(a.archived_at, now_ms)
         FROM ranked r
         WHERE a.id = r.id AND r.rank > 1;
-      UPDATE assistants a SET archived_at = NULL, is_default = true
+      UPDATE assistants a SET archived_at = NULL
         WHERE a.archived_at IS NOT NULL AND position(':retired:' in a.owner_id) = 0 AND (
           (a.owner_type = 'user' AND EXISTS (SELECT 1 FROM "user" u WHERE u.id = a.owner_id)) OR
           (a.owner_type = 'team' AND EXISTS (SELECT 1 FROM teams t WHERE t.id = a.owner_id)) OR
           (a.owner_type = 'org' AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = a.owner_id)));
-      UPDATE assistants SET is_default = true
-        WHERE archived_at IS NULL AND position(':retired:' in owner_id) = 0;
       CREATE UNIQUE INDEX assistants_workspace ON assistants(org_id, owner_type, owner_id);
-      ALTER TABLE assistants ALTER COLUMN is_default SET DEFAULT true;
     END $$`,
   },
-  { describe: "assistants legacy default index", probe: { kind: "index", index: "assistants_default_owner" }, sql: 'CREATE UNIQUE INDEX assistants_default_owner ON assistants(org_id, owner_type, owner_id) WHERE is_default' },
   { describe: "teams.slack_home_channel_id column", probe: { kind: "column", table: "teams", column: "slack_home_channel_id" }, sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "slack_home_channel_id" text' },
   {
     describe: "teams_org_slack_home",

@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, rekeyLegacyEditorThreads, reportOrganizationSlackRules, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
+import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, reportOrganizationSlackRules, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
 
 describe("workspace singleton repair on an already migrated database", () => {
   const pglite = new PGlite();
@@ -10,41 +10,20 @@ describe("workspace singleton repair on an already migrated database", () => {
   beforeAll(async () => { await applyEngineMigrations(db); await applyAppMigrations(db); });
   afterAll(async () => { await db.close(); });
 
+  /** dev-v2's assistants table: several rows per owner, with a default flag. */
   async function restorePreviousSchema() {
     await db.query("DROP INDEX assistants_workspace");
-    await db.query("ALTER TABLE assistants ALTER COLUMN is_default SET DEFAULT false");
+    await db.query("ALTER TABLE assistants ADD COLUMN IF NOT EXISTS is_default boolean NOT NULL DEFAULT false");
   }
 
-  it("names each workspace whose retired assistant settings stop applying, and flags a lifted allow-list", async () => {
-    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, created_at, behavior, model)
-      VALUES ('limited', 'org-r', 'team', 'team-limited', 'limited-session', 1, '{"integrations":["github"]}', NULL),
-             ('modelled', 'org-r', 'user', 'user-modelled', 'modelled-session', 1, NULL, 'anthropic:claude-opus')`);
+  it("names each workspace that keeps an integration allow-list", async () => {
+    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, created_at, behavior)
+      VALUES ('limited', 'org-r', 'team', 'team-limited', 'limited-session', 1, '{"integrations":["github"]}'),
+             ('plain', 'org-r', 'user', 'user-plain', 'plain-session', 1, NULL)`);
     const message = await reportRetiredAssistantSettings(db);
-    expect(message).toContain("team:team-limited (integration allow-list)");
-    expect(message).toContain("user:user-modelled");
-    expect(message).not.toContain("user:user-modelled (");
-    await db.query("DELETE FROM assistants WHERE id IN ('limited', 'modelled')");
-  });
-
-  it("gives a team workflow editor thread from an earlier build its first author", async () => {
-    await db.query(`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
-      VALUES ('team-rt', 'team', 'team-x', 'u-first', 'org', '/', 'interactive', 'running', 1, 1),
-             ('user-rt', 'user', 'u-solo', 'u-solo', 'org', '/', 'interactive', 'running', 1, 1)`);
-    await db.query(`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
-      VALUES ('th-legacy', 'team-rt', 'workflow:wf_old', 'idle', 'steer', 1, 1),
-             ('th-empty', 'team-rt', 'workflow:wf_empty', 'idle', 'steer', 1, 1),
-             ('th-solo', 'user-rt', 'workflow:wf_solo', 'idle', 'steer', 1, 1)`);
-    await db.query(`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, author, created_at)
-      VALUES ('e-later', 'team-rt', 'th-legacy', 'message', 'user', '{"id":"u-second"}', 2),
-             ('e-first', 'team-rt', 'th-legacy', 'message', 'user', '{"id":"u-first"}', 1)`);
-    expect(await rekeyLegacyEditorThreads(db)).toBe(1);
-    const keys = await db.query("SELECT id, key FROM engine_threads WHERE id LIKE 'th-%' ORDER BY id");
-    expect(keys.rows).toEqual([
-      { id: "th-empty", key: "workflow:wf_empty" },
-      { id: "th-legacy", key: "workflow:wf_old:u-first" },
-      { id: "th-solo", key: "workflow:wf_solo" },
-    ]);
-    expect(await rekeyLegacyEditorThreads(db)).toBe(0);
+    expect(message).toContain("team:team-limited");
+    expect(message).not.toContain("user:user-plain");
+    await db.query("DELETE FROM assistants WHERE id IN ('limited', 'plain')");
   });
 
   it("names each enabled team Slack rule open to the whole organization", async () => {
@@ -89,11 +68,6 @@ describe("workspace singleton repair on an already migrated database", () => {
     // The migration tracker is already populated, so this exercises the same
     // repair query path used at restart, including prepared-statement limits.
     await expect(applyAppMigrations(db)).resolves.toBeUndefined();
-    const retained = await db.query(`SELECT table_name, column_name FROM information_schema.columns
-      WHERE table_schema = current_schema() AND
-      ((table_name = 'assistants' AND column_name IN ('is_default', 'name', 'avatar_url', 'personality', 'behavior', 'model', 'reasoning')) OR
-       (table_name IN ('followed_threads', 'workflow_schedules') AND column_name = 'assistant_id'))`);
-    expect(retained.rows).toHaveLength(9);
     const added = await db.query(`SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = current_schema() AND
       ((table_name = 'teams' AND column_name = 'slack_home_channel_id') OR
@@ -104,11 +78,6 @@ describe("workspace singleton repair on an already migrated database", () => {
       { table_name: "teams", column_name: "slack_home_channel_id" },
       { table_name: "user_notification_preferences", column_name: "team_dm" },
     ]);
-    const indexes = await db.query("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN ('assistants_workspace', 'assistants_default_owner')");
-    expect(indexes.rows).toHaveLength(2);
-    const singleton = indexes.rows.find(row => row.indexname === "assistants_workspace");
-    expect(singleton?.indexdef).toContain("UNIQUE INDEX");
-    expect(singleton?.indexdef).not.toContain("WHERE");
     await expect(db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, created_at)
       VALUES ('replacement', 'org', 'team', 'retired-owner', 'replacement-session', 3)`)).rejects.toThrow(/unique/i);
     const preserved = await db.query("SELECT id, session_id, archived_at FROM assistants WHERE org_id = 'org' ORDER BY id");
@@ -152,17 +121,9 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
   });
 
-  it("restores the legacy default flag an older pod cleared on a live assistant", async () => {
-    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, is_default, created_at, archived_at)
-      VALUES ('flag-cleared', 'org', 'team', 'flag-team', 'flag-session', false, 1, NULL)`);
-    await applyAppMigrations(db);
-    expect((await db.query("SELECT is_default FROM assistants WHERE id = 'flag-cleared'")).rows).toEqual([{ is_default: true }]);
-    await db.query("DELETE FROM assistants WHERE id = 'flag-cleared'");
-  });
-
-  it("rewrites stored workflows that use thread steps or assistantId", async () => {
+  it("drops assistantId from stored workflows", async () => {
     const legacy = JSON.stringify({ version: "dag/v1", assistantId: "asst_old",
-      nodes: [{ id: "o", type: "thread", prompt: "hi" }], edges: [] });
+      nodes: [{ id: "o", type: "orchestrator", prompt: "hi" }], edges: [] });
     const current = JSON.stringify({ version: "dag/v1", nodes: [{ id: "t", type: "orchestrator", prompt: "hi" }], edges: [] });
     await db.query(`INSERT INTO workflow_definitions(id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
       VALUES ('wf-legacy', 'wf-org', 'user', 'u', 'legacy', $1, 1, 1), ('wf-current', 'wf-org', 'user', 'u', 'current', $2, 1, 1)`, [legacy, current]);
@@ -237,14 +198,14 @@ describe("workspace singleton repair on an already migrated database", () => {
              ('lone-archived', 'dup-org', 'user', 'lone-owner', 'lone-session', false, 1, 5),
              ('gone-team', 'dup-org', 'team', 'deleted-team', 'gone-session', true, 1, 7)`);
     await expect(applyAppMigrations(db)).resolves.toBeUndefined();
-    const rows = await db.query(`SELECT id, owner_id, archived_at IS NULL AS live, is_default, session_id
+    const rows = await db.query(`SELECT id, owner_id, archived_at IS NULL AS live, session_id
       FROM assistants WHERE org_id = 'dup-org' ORDER BY id`);
     expect(rows.rows).toEqual([
-      { id: "archived-old", owner_id: "dup-owner:retired:archived-old", live: false, is_default: false, session_id: "old-session" },
-      { id: "gone-team", owner_id: "deleted-team", live: false, is_default: true, session_id: "gone-session" },
-      { id: "live-default", owner_id: "dup-owner", live: true, is_default: true, session_id: "default-session" },
-      { id: "live-extra", owner_id: "dup-owner:retired:live-extra", live: false, is_default: false, session_id: "extra-session" },
-      { id: "lone-archived", owner_id: "lone-owner", live: true, is_default: true, session_id: "lone-session" },
+      { id: "archived-old", owner_id: "dup-owner:retired:archived-old", live: false, session_id: "old-session" },
+      { id: "gone-team", owner_id: "deleted-team", live: false, session_id: "gone-session" },
+      { id: "live-default", owner_id: "dup-owner", live: true, session_id: "default-session" },
+      { id: "live-extra", owner_id: "dup-owner:retired:live-extra", live: false, session_id: "extra-session" },
+      { id: "lone-archived", owner_id: "lone-owner", live: true, session_id: "lone-session" },
     ]);
     expect(await missingSchemaRepairs(db)).toEqual([]);
     await db.query("DELETE FROM assistants WHERE org_id = 'dup-org'");

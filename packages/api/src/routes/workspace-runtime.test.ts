@@ -5,15 +5,12 @@ import { agentSessions, teams, teamMembers } from "../schema/index.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 describe("workspace runtime authorization", () => {
-  it("ensures personal runtime idempotently and answers the entry points older clients call", async () => {
+  it("ensures personal runtime idempotently and answers the entry point older clients call", async () => {
     api = await bootTestApi();
     const root = `${api.baseUrl}/api/workspaces/user/runtime`;
-    // The probe never creates a runtime.
-    expect(await (await fetch(`${api.baseUrl}/api/orchestrator`)).json()).toEqual({ sessionId: null, exists: false });
     const first = await (await fetch(root, { method: "POST" })).json() as { sessionId: string };
     expect(await (await fetch(root, { method: "POST" })).json()).toEqual(first);
     expect(await (await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" })).json()).toEqual(first);
-    expect(await (await fetch(`${api.baseUrl}/api/orchestrator`)).json()).toEqual({ sessionId: first.sessionId, exists: true });
     expect((await fetch(`${api.baseUrl}/api/teams/unknown/orchestrator`, { method: "POST" })).status).toBe(404);
   });
   it("reactivates the runtime session an older pod marked deleted", async () => {

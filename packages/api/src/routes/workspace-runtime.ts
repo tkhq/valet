@@ -99,14 +99,6 @@ legacyOrchestratorRouter.post("/orchestrator", async (c) => {
   return c.json(body);
 });
 
-legacyOrchestratorRouter.get("/orchestrator", async (c) => {
-  const owner = await authorizedWorkspaceOwner(c, "user");
-  if (!owner) return c.json({ error: "A team key has no personal runtime. Use /api/workspaces/<team id>/runtime." }, 404);
-  // A probe: it never creates the runtime.
-  const assistant = await findDefaultAssistant(c.var.providers.db, c.var.user.orgId, owner);
-  return c.json({ sessionId: assistant?.sessionId ?? null, exists: assistant !== undefined });
-});
-
 legacyOrchestratorRouter.post("/teams/:workspace/orchestrator", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);

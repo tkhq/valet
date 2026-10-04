@@ -1943,10 +1943,6 @@ export const followedThreads = pgTable(
      * overheard line after downtime arrives with the missed context. Null on
      * rows from before the column: the first delivery starts tracking. */
     lastSeenTs: text("last_seen_ts"),
-    /** The assistant that answered the mention this follow was bound from, so
-     * later messages in the thread reach the SAME assistant rather than the
-     * owner's default. Null on rows from before the column, and on any follow
-     * whose rule named no assistant — both read as "the owner's default". */
     /** The mention rule this thread was bound from. The follow router reads
      * that row's CURRENT invocation audience, because the audience is the
      * rule's state, not the conversation's: narrowing a rule back to the team
