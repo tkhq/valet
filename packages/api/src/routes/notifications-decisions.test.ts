@@ -2,6 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
+import { getWorkflowRunDetail } from "../workflows/service.js";
 import type { ListNotificationDecisionsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -91,4 +92,15 @@ it("keeps a team workflow's approvals with the private thread that started the r
   expect((await fetch(own.base)).status).toBe(200);
   // The member who started the run still answers it.
   expect((await fetch(theirs.base, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(200);
+  // The run record carries the private thread's input, so it follows the same rule.
+  expect((await fetch(`${api.baseUrl}/api/workflows/runs/run-theirs`)).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/workflows/runs/run-theirs`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(200);
+  expect((await fetch(`${api.baseUrl}/api/workflows/runs/run-own`)).status).toBe(200);
+  // A member acting through the team assistant's tools is that member
+  // (`ownerFromContext`); the team's own key sees only what the team shares.
+  const deps = { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore };
+  const asTool = (userId: string) => ({ userId, orgId: "local-org", principal: { type: "team" as const, id: "mine" }, requireTeamMembership: true });
+  expect(await getWorkflowRunDetail(deps, asTool("test-member"), "run-theirs")).not.toBeNull();
+  expect(await getWorkflowRunDetail(deps, asTool("local-user"), "run-theirs")).toBeNull();
+  expect(await getWorkflowRunDetail(deps, { userId: "team:mine", orgId: "local-org", principal: { type: "team", id: "mine" } }, "run-theirs")).toBeNull();
 });

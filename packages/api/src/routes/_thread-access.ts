@@ -1,10 +1,8 @@
 /** Thread access for a request's viewer (`services/thread-access.ts`). */
-import { eq } from "drizzle-orm";
 import type { Context } from "hono";
 import type { WorkflowRunOrigin } from "@valet/workflow";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
-import { channelVisibility, requestViewer, threadVisibility, visibleThreadIds, type ThreadViewer, type ThreadVisibility } from "../services/thread-access.js";
+import { channelVisibility, requestViewer, runOriginVisible as runOriginVisibleTo, threadVisibility, visibleThreadIds, type ThreadViewer, type ThreadVisibility } from "../services/thread-access.js";
 import type { ChannelVisibility } from "../services/channels.js";
 
 export function viewerOf(c: Context<AppEnv>): ThreadViewer {
@@ -40,17 +38,10 @@ export async function spawnedFromVisibleThread(c: Context<AppEnv>, session: { ow
   return session.ownerType !== "team" || threadsVisibleTo(c, session)(null);
 }
 
-/** Whether this request may see the thread a team workflow run started from.
- * A run started from a private thread belongs to that thread's audience, so
- * its approvals do too (`workflows/run-attention.ts`). A team run whose origin
- * thread is gone shows to nobody. A personal run has one viewer: its owner. */
-export async function runOriginVisible(
-  c: Context<AppEnv>, run: { ownerType: string; origin?: WorkflowRunOrigin | null },
+/** Whether this request may see the thread a team workflow run started from
+ * (`services/thread-access.ts#runOriginVisible`). */
+export function runOriginVisible(
+  c: Context<AppEnv>, run: { ownerType: string; origin?: WorkflowRunOrigin | null; actorUserId?: string | null },
 ): Promise<boolean> {
-  if (run.ownerType !== "team" || !run.origin) return true;
-  const { db, engineStore } = c.var.providers;
-  const [session] = await db.select({ ownerType: agentSessions.ownerType }).from(agentSessions)
-    .where(eq(agentSessions.id, run.origin.assistantSessionId)).limit(1);
-  const thread = session && await engineStore.getThread(run.origin.assistantSessionId, run.origin.threadId);
-  return !!thread && threadsVisibleTo(c, session)(thread.key);
+  return runOriginVisibleTo(c.var.providers, viewerOf(c), run);
 }

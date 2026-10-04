@@ -28,6 +28,7 @@ import {
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
+import { runOriginVisible } from "../services/thread-access.js";
 import {
   updateInvocationOutcome,
   writeExecutionGrant,
@@ -1638,6 +1639,13 @@ async function ownedRun(
   if (scope === "act" && run.owner.ownerType === "org") {
     if (!(await isOrgAdmin(deps.db, owner.orgId, owner.userId))) return null;
   }
+  // A team run started from a private thread is that thread's audience's. A
+  // team principal names a person only when a member is acting
+  // (`ownerFromContext`); a team key or a machine turn sees what the team shares.
+  const person = owner.principal?.type !== "team" || owner.requireTeamMembership === true;
+  const viewer = { orgId: owner.orgId, userId: person ? owner.userId : undefined };
+  const access = { db: deps.db, engineCredentials: deps.credentials, onePassword: deps.onePassword, engineStore: deps.engineStore };
+  if (!(await runOriginVisible(access, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))) return null;
   return run;
 }
 
@@ -1952,10 +1960,8 @@ export async function getWorkflowRunDetail(
   owner: WorkflowOwner,
   runId: string,
 ): Promise<GetWorkflowRunResponse | null> {
-  const run = await deps.workflowStore.getRun(runId);
-  if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
-    return null;
-  }
+  const run = await ownedRun(deps, owner, runId);
+  if (!run) return null;
 
   const [checkpoints, signals] = await Promise.all([
     deps.workflowStore.getCheckpoints(runId),

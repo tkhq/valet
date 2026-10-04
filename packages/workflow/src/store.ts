@@ -93,8 +93,10 @@ export interface WorkflowRun extends RunParkState {
    */
   owner?: WorkflowRunPrincipal;
   /**
-   * Who clicked Run. Display and audit only. Absent on a scheduled,
-   * event, or webhook start, and never used for credential resolution.
+   * Who clicked Run. Absent on a scheduled, event, or webhook start, and
+   * never used for credential resolution. Besides display and audit, it names
+   * the one member who may see a run whose private origin thread is gone
+   * (`runOriginVisible` in the api).
    */
   actorUserId?: string;
 }

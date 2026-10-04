@@ -26,11 +26,12 @@
  */
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { StoredCredential, ThreadAccessCheck } from "@valet/engine";
+import type { WorkflowRunOrigin } from "@valet/workflow";
 import { checkPrivateChannelAccess } from "@valet/plugin-slack/actions";
 import { identityForUser } from "../channels/identity-links.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { Providers } from "../providers/types.js";
-import { slackChannelPrivacy } from "../schema/index.js";
+import { agentSessions, slackChannelPrivacy } from "../schema/index.js";
 /** The Slack conversation a thread key names, DMs and group DMs included. */
 function slackConversation(key: string | null | undefined): { channelId: string } | null {
   const match = /^slack:([^:]+):[^:]+$/.exec(key ?? "");
@@ -115,26 +116,36 @@ export function resetThreadAccessCache(): void {
   membershipCache.clear();
 }
 
+/** A personal key that names nobody, so nobody else may see the thread. It
+ * stands in for a child's starting thread that no longer exists. */
+const UNKNOWN_THREAD_KEY = "app-assistant:";
+
 /**
  * SQL: the key of the thread that decides who may see a thread. A child
  * session's threads take the access of the thread that started the child,
  * followed up to the workspace runtime, so work spawned from a private thread
- * stays private. Any other thread decides by its own key.
+ * stays private. Any other thread decides by its own key. When the thread a
+ * child names as its start is gone, nobody can tell who it was shared with,
+ * so the answer is `UNKNOWN_THREAD_KEY`.
  */
-export function governingThreadKeySql(sessionId: SQL, threadId: SQL): SQL {
+export function governingThreadKeySql(sessionId: SQL, threadId: SQL, from: "thread" | "parent link" = "thread"): SQL {
   return sql`(WITH RECURSIVE up(sid, tid, depth) AS (
-      SELECT ${sessionId}::text, ${threadId}::text, 0
+      SELECT ${sessionId}::text, ${threadId}::text, ${sql.raw(from === "parent link" ? "1" : "0")}
       UNION ALL
       SELECT es.parent_session_id, es.parent_thread_id, up.depth + 1 FROM up
       JOIN engine_sessions es ON es.id = up.sid
       WHERE es.parent_session_id IS NOT NULL AND es.parent_thread_id IS NOT NULL AND up.depth < 8
-    ) SELECT et.key FROM up JOIN engine_threads et ON et.session_id = up.sid AND et.id = up.tid
+    ) SELECT CASE WHEN up.depth > 0 AND et.id IS NULL THEN ${UNKNOWN_THREAD_KEY} ELSE et.key END
+    FROM up LEFT JOIN engine_threads et ON et.session_id = up.sid AND et.id = up.tid
     ORDER BY up.depth DESC LIMIT 1)`;
 }
 
-/** `governingThreadKeySql` for one thread. */
-export async function governingThreadKey(db: Providers["db"], sessionId: string, threadId: string): Promise<string | null> {
-  const result = await db.execute(sql`SELECT ${governingThreadKeySql(sql`${sessionId}`, sql`${threadId}`)} AS key`) as { rows: Array<{ key: string | null }> };
+/** `governingThreadKeySql` for one thread. Pass "parent link" when the ids
+ * are a child's starting thread, so a missing one reads as private. */
+export async function governingThreadKey(
+  db: Providers["db"], sessionId: string, threadId: string, from: "thread" | "parent link" = "thread",
+): Promise<string | null> {
+  const result = await db.execute(sql`SELECT ${governingThreadKeySql(sql`${sessionId}`, sql`${threadId}`, from)} AS key`) as { rows: Array<{ key: string | null }> };
   return result.rows[0]?.key ?? null;
 }
 
@@ -230,7 +241,7 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string;
   const canSee = channelVisibility(deps, viewer);
   let inherited: Promise<string | null | undefined> | undefined;
   const governing = () => (inherited ??= session.id
-    ? spawningThread(deps.db, session.id).then((parent) => parent ? governingThreadKey(deps.db, parent.sessionId, parent.threadId) : undefined)
+    ? spawningThread(deps.db, session.id).then((parent) => parent ? governingThreadKey(deps.db, parent.sessionId, parent.threadId, "parent link") : undefined)
     : Promise.resolve(undefined));
   return async (ownKey) => {
     const parentKey = await governing();
@@ -306,4 +317,22 @@ export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
       () => (token ??= orgSlackCredential(deps, orgId).then(botToken)));
     return isPrivate === false;
   };
+}
+
+/** Whether the viewer may see the thread a team workflow run started from.
+ * A run started from a private thread belongs to that thread's audience: its
+ * record, input, and approvals (`workflows/run-attention.ts`). When the origin
+ * thread is gone, nobody can tell who it was shared with, so only the member
+ * who started the run sees it. A personal run has one viewer. */
+export async function runOriginVisible(
+  deps: AccessDeps & Pick<Providers, "engineStore">,
+  viewer: ThreadViewer,
+  run: { ownerType: string; origin?: WorkflowRunOrigin | null; actorUserId?: string | null },
+): Promise<boolean> {
+  if (run.ownerType !== "team" || !run.origin) return true;
+  const [session] = await deps.db.select({ ownerType: agentSessions.ownerType }).from(agentSessions)
+    .where(eq(agentSessions.id, run.origin.assistantSessionId)).limit(1);
+  const thread = session && await deps.engineStore.getThread(run.origin.assistantSessionId, run.origin.threadId);
+  if (!thread) return viewer.userId !== undefined && viewer.userId === run.actorUserId;
+  return threadVisibility(deps, session, viewer)(thread.key);
 }

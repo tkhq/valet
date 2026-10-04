@@ -300,7 +300,7 @@ describe("workflow workspace routing", () => {
       },
       created.definition,
       "v1",
-      { ownerType: "team", ownerId: "team-a" },
+      { ownerType: "team", ownerId: "team-a", actorUserId: owner.userId },
     );
     await p.workflowStore.settleRun(runId, "failed");
     vi.spyOn(p.workflowRunHost, "start").mockImplementation(async (id, params, definition, runOwner) => {

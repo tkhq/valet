@@ -71,7 +71,7 @@ notificationsRouter.get("/decisions", async (c) => {
   const workflowSessions = await db.selectDistinct({
     session_id: sql<string>`g.session_id`,
     owner_type: workflowRuns.ownerType, owner_id: workflowRuns.ownerId, title: workflowDefinitions.name,
-    origin: sql<WorkflowRunOrigin | null>`${workflowRuns.params}->'origin'`,
+    origin: sql<WorkflowRunOrigin | null>`${workflowRuns.params}->'origin'`, actor_user_id: workflowRuns.actorUserId,
   }).from(sql`engine_decision_gates g`)
     .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(g.session_id, ':', 2)`)
     .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
@@ -82,7 +82,7 @@ notificationsRouter.get("/decisions", async (c) => {
       ownerType: session.owner_type, ownerId: session.owner_id,
       userId: session.owner_type === "user" ? session.owner_id : "",
     }, c.var.principal)) continue;
-    if (!await runOriginVisible(c, { ownerType: session.owner_type, origin: session.origin })) continue;
+    if (!await runOriginVisible(c, { ownerType: session.owner_type, origin: session.origin, actorUserId: session.actor_user_id })) continue;
     const gates = await engineStore.listDecisionGates(session.session_id, undefined, "pending");
     for (const gate of gates) {
       if (!items.some(item => item.gate.id === gate.id)) {

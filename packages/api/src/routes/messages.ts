@@ -1213,7 +1213,7 @@ async function loadDecisionSession(c: Context<AppEnv>) {
     orgId: definition.orgId,
   };
   if (!(await canAnswerDecision(c, session))) return missing();
-  if (!(await runOriginVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin }))) return missing();
+  if (!(await runOriginVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))) return missing();
   // A guessed node ID must not materialize a new agent on a read request.
   if (!(await p.engineStore.getSession(id))) return missing();
   const engineSession = await ensureWorkflowSession({
