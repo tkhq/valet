@@ -49,6 +49,7 @@ export const qk = {
     ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
+  threadSearch: (id: string, query: string) => ["sessions", id, "threads", "search", query] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
   messages: (id: string, threadId?: string) =>
     threadId
@@ -79,6 +80,15 @@ export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsRespons
     queryFn: () => api.listThreads(id),
     enabled: !!id,
     ...opts,
+  });
+}
+
+export function useThreadSearch(id: string, query: string, enabled: boolean) {
+  return useQuery<ListThreadsResponse>({
+    queryKey: qk.threadSearch(id, query),
+    queryFn: () => api.listThreads(id, { q: query }),
+    enabled: enabled && !!id && !!query,
+    staleTime: 0,
   });
 }
 

@@ -838,10 +838,10 @@ export const api = {
     request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean }) =>
+  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string }) =>
     request<ListThreadsResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.archived ? "?archived=1" : ""}`,
+      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.q ? `?q=${encodeURIComponent(opts.q)}${opts.archived ? "&archived=1" : ""}` : opts?.archived ? "?archived=1" : ""}`,
     ),
   markThreadsRead: (sessionId: string, threadIds?: string[]) =>
     request<void>("POST", `/sessions/${encodeURIComponent(sessionId)}/threads/read`, threadIds ? { threadIds } : {}),

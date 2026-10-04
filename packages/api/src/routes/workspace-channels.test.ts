@@ -188,6 +188,14 @@ it("leaves another member's helper thread out of a team channel's conversations 
   const detail = await (await fetch(`${api.baseUrl}/api/workspaces/${owner}/channel?key=${encodeURIComponent("slack:CPUBLICENG")}`)).json() as ChannelDetailResponse;
   expect(detail.conversations.map((c) => c.threadId)).toEqual([shared.id]);
   expect(detail.messages.map((m) => m.text)).toEqual(["team update"]);
+  for (const thread of [theirs, shared]) {
+    await api.providers.db.execute(sql`insert into engine_entries (id, session_id, thread_id, entry_type, role, content, created_at)
+      values (${`search-${thread.id}`}, ${sessionId}, ${thread.id}, 'message', 'user', 'searchable needle', 1)`);
+  }
+  const searchResponse = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/threads?q=needle`);
+  expect(searchResponse.status).toBe(200);
+  const matches = await searchResponse.json() as { threads: { id: string }[] };
+  expect(matches.threads.map((t) => t.id)).toEqual([shared.id]);
   const list = await (await fetch(`${api.baseUrl}/api/workspaces/${owner}/channels`)).json() as ListChannelsResponse;
   expect(list.channels.find((c) => c.key === "slack:CPUBLICENG")).toMatchObject({ messageCount: 1, conversationCount: 1 });
 });

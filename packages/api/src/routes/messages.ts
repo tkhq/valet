@@ -12,7 +12,7 @@
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
 import { Hono, type Context } from "hono";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import {
   dispatchCommand,
   NotFoundError,
@@ -371,8 +371,21 @@ messagesRouter.get("/:id/threads", async (c) => {
   const visible = threadsVisibleTo(c, session);
   const shown = new Set<string>();
   for (const t of threads) if (await visible(t.key)) shown.add(t.id);
+  const query = c.req.query("q")?.trim().toLowerCase() ?? "";
+  if (query.length > 500) return c.json({ error: "Search is too long. Use at most 500 characters." }, 400);
+  // Search persisted chat text without downloading histories. The session was
+  // authorized above; the visibility filter below also excludes private threads.
+  const contentMatches = query
+    ? await db.selectDistinct({ threadId: sql<string>`thread_id` })
+        .from(sql`engine_entries`)
+        .where(sql`session_id = ${session.id} and entry_type = 'message'
+          and role in ('user', 'assistant')
+          and strpos(lower(content), ${query}) > 0`)
+    : [];
+  const matchingIds = new Set(contentMatches.map((row) => row.threadId));
   const summaries = threads
     .filter((t) => shown.has(t.id))
+    .filter((t) => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
     .filter((t) => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map((t) =>
       threadToSummary(

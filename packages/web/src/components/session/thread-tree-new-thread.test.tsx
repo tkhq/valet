@@ -33,6 +33,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
+    useThreadSearch: () => ({ data: { threads: [] }, isFetching: false, isError: false }),
     useThreads: () => ({
       data: { threads: [{ id: "thread-1", title: null, createdAt: Date.now() }] },
       isLoading: false,

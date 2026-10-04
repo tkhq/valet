@@ -1,5 +1,5 @@
 import type { CreateTeamResponse, CreateTeamApiKeyResponse } from "../wire/types.js";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { agentSessions, teams, teamMembers } from "../schema/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -108,5 +108,37 @@ describe("thread addressing compatibility", () => {
     expect(((await (await fetch(decisions, { headers })).json()) as { gates: Array<{ id: string }> }).gates.map((g) => g.id)).not.toContain("helper-gate");
     expect((await fetch(`${decisions}/helper-gate/resolve`, { method: "POST", headers, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
     expect((await api.providers.engineStore.getDecisionGate(first.sessionId, gate.id))?.status).toBe("resolved");
+  });
+});
+
+
+describe("thread content search", () => {
+  it("matches message content and titles, treats wildcards literally, and excludes other sessions", async () => {
+    api = await bootTestApi();
+    const create = async (title: string) => {
+      const response = await fetch(`${api!.baseUrl}/api/threads`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) });
+      expect(response.status).toBe(201);
+      return await response.json() as { id: string; sessionId: string };
+    };
+    const content = await create("Deployment discussion");
+    const title = await create("Linear planning");
+    await create("Unrelated chat");
+    for (const [id, sessionId, threadId, role, text] of [
+      ["search-user", content.sessionId, content.id, "user", "Fix the LINEAR webhook at 100%"],
+      ["search-assistant", content.sessionId, content.id, "assistant", "The receipt contains a signature mismatch"],
+      ["search-other", "other-session", title.id, "user", "private needle"],
+    ]) {
+      await api.providers.db.execute(sql`insert into engine_entries (id, session_id, thread_id, entry_type, role, content, created_at) values (${id}, ${sessionId}, ${threadId}, 'message', ${role}, ${text}, 1)`);
+    }
+    const search = async (q: string) => {
+      const response = await fetch(`${api!.baseUrl}/api/sessions/${encodeURIComponent(content.sessionId)}/threads?q=${encodeURIComponent(q)}`);
+      expect(response.status).toBe(200);
+      return (await response.json() as { threads: { id: string }[] }).threads.map(t => t.id).sort();
+    };
+    expect(await search("linear")).toEqual([content.id, title.id].sort());
+    expect(await search("signature")).toEqual([content.id]);
+    expect(await search("%")).toEqual([content.id]);
+    expect(await search("private needle")).toEqual([]);
+    expect(await search("absent")).toEqual([]);
   });
 });

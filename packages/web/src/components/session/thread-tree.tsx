@@ -1,3 +1,4 @@
+import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
@@ -49,6 +50,7 @@ import {
   useMarkThreadsRead,
   useSetThreadArchived,
   useThreads,
+  useThreadSearch,
 } from "~/api/queries";
 import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
@@ -333,12 +335,20 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchIndex, setSearchIndex] = useState(0);
+  const [searchSelectedId, setSearchSelectedId] = useState<string>();
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const debouncedSearch = useDebouncedValue(normalizedSearch, 250);
+  const contentSearch = useThreadSearch(sessionId, debouncedSearch, searchOpen);
+  const contentMatchIds = new Set(
+    debouncedSearch === normalizedSearch ? contentSearch.data?.threads.map((thread) => thread.id) : [],
+  );
+  const searching = !!normalizedSearch && (debouncedSearch !== normalizedSearch || contentSearch.isFetching);
   const searchResults = threads.filter((thread) => {
     const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
-    return `${thread.title ?? ""} ${project?.name ?? ""}`.toLowerCase().includes(searchQuery.trim().toLowerCase());
+    return contentMatchIds.has(thread.id) || `${thread.title ?? ""} ${project?.name ?? ""}`.toLowerCase().includes(normalizedSearch);
   });
-  function openSearch() { setSearchQuery(""); setSearchIndex(0); setSearchOpen(true); }
+  const searchIndex = Math.max(0, searchResults.findIndex((thread) => thread.id === searchSelectedId));
+  function openSearch() { setSearchQuery(""); setSearchSelectedId(undefined); setSearchOpen(true); }
   function selectSearchThread(threadId: string) {
     setSearchOpen(false);
     navigate({ search: (prev) => ({ ...prev, thread: threadId, child: undefined }) });
@@ -489,14 +499,14 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent hideClose className="max-w-2xl rounded-2xl p-2 gap-1" onOpenAutoFocus={(event) => { event.preventDefault(); searchInputRef.current?.focus(); }}>
           <DialogTitle className="sr-only">Search threads</DialogTitle>
-          <input ref={searchInputRef} value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0); }}
-            placeholder="Search threads" aria-label="Search threads" role="combobox" aria-expanded aria-controls="thread-search-results" aria-activedescendant={searchResults[searchIndex] ? `thread-search-${searchResults[searchIndex]!.id}` : undefined}
+          <input ref={searchInputRef} value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setSearchSelectedId(undefined); }}
+            placeholder="Search names and chat content" aria-label="Search threads" maxLength={500} role="combobox" aria-expanded aria-controls="thread-search-results" aria-activedescendant={searchResults[searchIndex] ? `thread-search-${searchResults[searchIndex]!.id}` : undefined}
             className="w-full bg-transparent px-4 py-4 text-lg outline-none placeholder:text-muted"
             onKeyDown={(event) => {
               if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                 event.preventDefault();
                 const next = Math.max(0, Math.min(searchResults.length - 1, searchIndex + (event.key === "ArrowDown" ? 1 : -1)));
-                setSearchIndex(next);
+                setSearchSelectedId(searchResults[next]?.id);
                 document.getElementById(`thread-search-${searchResults[next]?.id}`)?.scrollIntoView({ block: "nearest" });
               }
               if (event.key === "Enter" && searchResults[searchIndex]) { event.preventDefault(); selectSearchThread(searchResults[searchIndex]!.id); }
@@ -506,14 +516,16 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             {searchResults.map((thread, index) => {
               const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
               return <button key={thread.id} id={`thread-search-${thread.id}`} type="button" role="option" aria-selected={index === searchIndex}
-                onMouseMove={() => setSearchIndex(index)} onClick={() => selectSearchThread(thread.id)}
+                onMouseMove={() => setSearchSelectedId(thread.id)} onClick={() => selectSearchThread(thread.id)}
                 className={cn("flex w-full items-center gap-3 rounded-lg px-4 py-2.5 text-left text-sm", index === searchIndex && "bg-ink-wash")}>
                 <span className="flex h-5 w-5 shrink-0 items-center justify-center">{gatedThreadIds.has(thread.id) && <Bell className="h-4 w-4 text-amber-500" />}</span>
                 <span className="min-w-0 flex-1 truncate">{thread.title || untitledThreadLabel(thread, thread.id === defaultId)}</span>
                 {project && <span className="max-w-[30%] truncate text-muted">{project.name}</span>}
               </button>;
             })}
-            {searchResults.length === 0 && <p className="px-4 py-6 text-sm text-muted">No matching threads in this workspace.</p>}
+            {searching && <p role="status" className="px-4 py-2 text-sm text-muted">Searching chat content…</p>}
+            {normalizedSearch && contentSearch.isError && <p role="alert" className="px-4 py-2 text-sm text-muted">Could not search chat content. <button type="button" onClick={() => void contentSearch.refetch()} className="underline">Try again</button></p>}
+            {searchResults.length === 0 && !searching && !contentSearch.isError && <p className="px-4 py-6 text-sm text-muted">No matching threads in this workspace.</p>}
           </div>
           <div className="mt-2 border-t border-line pt-2">
             <button type="button" disabled={createThread.isPending} onClick={() => { setSearchOpen(false); void createAndNavigate(); }} className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm hover:bg-ink-wash"><Plus className="h-5 w-5" />New thread</button>

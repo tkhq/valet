@@ -8,7 +8,7 @@
  * this file checks the DOM wiring.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, within, fireEvent } from "@testing-library/react";
+import { render, screen, within, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
@@ -27,6 +27,7 @@ const dismissMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const renameMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 
 let threads: ThreadSummary[] = [];
+let searchMatches: ThreadSummary[] = [];
 let archivedThreads: ThreadSummary[] = [];
 let children: ChildWorkSummary[] = [];
 let hasNextPage = false;
@@ -50,6 +51,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
+    useThreadSearch: () => ({ data: { threads: searchMatches }, isFetching: false, isError: false }),
     useThreads: () => ({ data: { threads }, isLoading: false, error: null }),
     useSession: () => ({
       data: sessionModel ? { model: sessionModel } : undefined,
@@ -164,6 +166,7 @@ beforeEach(() => {
   renameMutateAsync.mockClear();
   threads = [thread()];
   archivedThreads = [];
+  searchMatches = [];
   children = [];
   hasNextPage = false;
   pendingGates = {};
@@ -652,4 +655,23 @@ it("loads the next page of child work from the thread tree", async () => {
   renderTree();
   await userEvent.setup().click(screen.getByRole("button", { name: "Load more work" }));
   expect(fetchNextPage).toHaveBeenCalledOnce();
+});
+
+
+it("keeps the selected search thread when content matches arrive", async () => {
+  threads = [thread({ id: "content", title: "Deployment notes", lastUserActivityAt: 3 }), thread({ id: "first", title: "Linear plans", lastUserActivityAt: 2 }), thread({ id: "chosen", title: "Linear receipts", lastUserActivityAt: 1 })];
+  const view = renderTree();
+  fireEvent.click(screen.getByRole("button", { name: "Search threads" }));
+  const input = screen.getByRole("combobox");
+  fireEvent.change(input, { target: { value: "Linear" } });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
+  // Mouse and keyboard selection share the same active-result state.
+  fireEvent.mouseMove(screen.getByRole("option", { name: "Linear receipts" }));
+  searchMatches = [threads[0]!];
+  view.rerender(<TooltipProvider><ThreadTree /></TooltipProvider>);
+  expect(screen.getByRole("option", { name: "Deployment notes" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Linear receipts" }).getAttribute("aria-selected")).toBe("true");
+  fireEvent.keyDown(input, { key: "Enter" });
+  const navigateOptions = navigate.mock.calls.at(-1)?.[0];
+  expect(navigateOptions.search({})).toMatchObject({ thread: "chosen" });
 });
