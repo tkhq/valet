@@ -221,7 +221,7 @@ describe("GET /api/usage/breakdown?scope=team&teamId=", () => {
 describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
   async function seedArtifact(
     target: TestApi,
-    opts: { id: string; ownerType: string; ownerId: string; title: string },
+    opts: { id: string; ownerType: string; ownerId: string; title: string; source?: { sessionId: string; threadId: string } },
   ): Promise<void> {
     const now = Date.now();
     await target.providers.db.insert(artifacts).values({
@@ -232,6 +232,7 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
       orgId: "local-org",
       actorUserId: "local-user",
       sourceMemoryPath: `notes/${opts.id}.md`,
+      ...(opts.source ? { sourceSessionId: opts.source.sessionId, sourceThreadId: opts.source.threadId } : {}),
       title: opts.title,
       content: "# hi",
       createdAt: now,
@@ -257,5 +258,23 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
 
     const malformed = await fetch(`${api.baseUrl}/api/artifacts?ownerType=user`);
     expect(malformed.status).toBe(400);
+  });
+
+  it("leaves out an artifact published from another member's helper thread", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await api.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    const open = async (asUser?: string) => await (await fetch(`${api!.baseUrl}/api/workspaces/team_1/conversation`, {
+      method: "POST", headers: asUser ? { "x-valet-test-user-id": asUser } : {},
+    })).json() as { sessionId: string; threadId: string };
+    await seedArtifact(api, { id: "art-theirs", ownerType: "team", ownerId: "team_1", title: "Theirs", source: await open("test-member") });
+    await seedArtifact(api, { id: "art-own", ownerType: "team", ownerId: "team_1", title: "Own", source: await open() });
+    await seedArtifact(api, { id: "art-shared", ownerType: "team", ownerId: "team_1", title: "Shared" });
+
+    const ids = async (query: string) => ((await (await fetch(`${api!.baseUrl}/api/artifacts${query}`)).json()) as ListArtifactsResponse)
+      .artifacts.map((a) => a.id).sort();
+    expect(await ids("?ownerType=team&ownerId=team_1")).toEqual(["art-own", "art-shared"]);
+    expect(await ids("?ownerType=team&ownerId=team_1&limit=10")).toEqual(["art-own", "art-shared"]);
+    expect(await ids("")).toEqual(["art-own", "art-shared"]);
   });
 });

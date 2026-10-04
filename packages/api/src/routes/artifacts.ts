@@ -40,7 +40,8 @@ import { isOrgAdmin } from "../services/org.js";
 import { canViewSession } from "../services/session-access.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
-import { threadVisibility } from "../services/thread-access.js";
+import { threadVisibility, visibleThreadIds } from "../services/thread-access.js";
+import { viewerOf } from "./_thread-access.js";
 import type { Providers } from "../providers/types.js";
 import {
   addArtifactComment,
@@ -611,6 +612,19 @@ function truthyQuery(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
+/** Drops the team artifacts published from a thread this request may not
+ * see, such as another member's helper thread or a private channel's thread
+ * (`services/thread-access.ts`). */
+async function keepVisibleSources<T extends { ownerType: string; sourceSessionId: string | null; sourceThreadId: string | null }>(
+  c: Context<AppEnv>, rows: T[],
+): Promise<T[]> {
+  const judged = rows.filter((row) => row.ownerType === "team" && row.sourceSessionId && row.sourceThreadId);
+  if (judged.length === 0) return rows;
+  const shown = await visibleThreadIds(c.var.providers, { ownerType: "team" }, viewerOf(c),
+    judged.map((row) => ({ sessionId: row.sourceSessionId!, threadId: row.sourceThreadId! })));
+  return rows.filter((row) => !judged.includes(row) || shown.has(`${row.sourceSessionId}:${row.sourceThreadId}`));
+}
+
 artifactsRouter.get("/", async (c) => {
   const user = requireActingUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
@@ -651,7 +665,7 @@ artifactsRouter.get("/", async (c) => {
     // filtering on `actorUserId` had the same intent but failed open: if
     // `/api/me` errored, the filter compared against `undefined` and every
     // row was dropped, showing a false empty state.
-    const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin: false });
+    const rows = await keepVisibleSources(c, await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin: false }));
     const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };
     return c.json(body);
   }
@@ -684,8 +698,9 @@ artifactsRouter.get("/", async (c) => {
     const rows = await listArtifactsForOwner(
       db, user.orgId, { type: ownerType, id: ownerId }, paged ? { limit, cursor, sourceSessionId, sourceThreadId } : undefined,
     );
-    const visible = paged ? rows.slice(0, limit) : rows;
-    const last = visible.at(-1);
+    const page = paged ? rows.slice(0, limit) : rows;
+    const last = page.at(-1);
+    const visible = await keepVisibleSources(c, page);
     const body: ListArtifactsResponse = { artifacts: visible.map((row) => toListItem(c, row)) };
     if (paged) {
       body.nextCursor = rows.length > limit && last
@@ -696,7 +711,7 @@ artifactsRouter.get("/", async (c) => {
   }
 
   const orgAdmin = await isOrgAdmin(db, user.orgId, user.id);
-  const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin });
+  const rows = await keepVisibleSources(c, await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin }));
   const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };
   return c.json(body);
 });
