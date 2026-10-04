@@ -469,6 +469,13 @@ function renderEntries(heading: string, entries: SessionEntry[]): string {
   return lines.join("\n");
 }
 
+/** A child runs as the session's user and does not carry the newcomer marker,
+ * so a turn from a channel sender with no Valet account may not start or
+ * steer one (`ToolContext.externalSender`). */
+const EXTERNAL_SENDER_CHILDREN = {
+  text: "[child_unavailable] Only a teammate with a linked Valet account can start or message background tasks. Answer directly, or ask a teammate.",
+};
+
 /**
  * Byte ceiling on one `child_read` result. Matches the api's
  * `CHILD_RESULT_MAX_CHARS` on the settled signal: the recovery path must
@@ -553,6 +560,7 @@ export const childSendTool = defineTool({
     ),
   }),
   execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
     // Same `toolConfig` passthrough convention as `task`'s childSpawner:
     // `ctx.config` is verbatim `Record<string, unknown>`, so a
     // sender-shaped value is known only by convention.
@@ -827,6 +835,7 @@ export const taskTool = defineTool({
     ),
   }),
   execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
     // ctx.config is `Record<string, unknown>` (verbatim toolConfig
     // passthrough, Phase 4 decision 7) — a spawner-shaped value is only
     // known by convention, hence the typeof guard before the single

@@ -1023,6 +1023,10 @@ export interface PolicyResolveInput {
   sessionId: string;
   threadId: string;
   appliesIn: "session" | "workflow";
+  /** The turn came from a channel sender with no Valet account
+   * (`ToolContext.externalSender`). A session-wide grant a teammate gave does
+   * not cover them. */
+  externalSender?: boolean;
 }
 
 /**

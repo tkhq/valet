@@ -91,6 +91,8 @@ export interface PolicyRowScope {
   userId?: string;
   sessionId?: string;
   workflowExecutionId?: string;
+  /** Leave out the session's grants: a newcomer's turn asks again. */
+  externalSender?: boolean;
 }
 
 /**
@@ -131,7 +133,7 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }));
 
   let grants: RuntimeGrantRow[] = [];
-  if (scope.sessionId) {
+  if (scope.sessionId && !scope.externalSender) {
     const rows = await db
       .select()
       .from(runtimeGrants)
@@ -221,6 +223,7 @@ export interface ResolveActionPolicyInput {
   workflowExecutionId?: string;
   pluginDefault: ApprovalMode | undefined;
   now: number;
+  externalSender?: boolean;
 }
 
 /**
@@ -235,6 +238,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
     userId: input.userId,
     sessionId: input.sessionId,
     workflowExecutionId: input.workflowExecutionId,
+    ...(input.externalSender ? { externalSender: true } : {}),
   });
   return resolvePolicyDecision(
     rows,
@@ -625,6 +629,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         sessionId: input.sessionId,
         pluginDefault: pluginDefaultFor(input.service),
         now: clock(),
+        ...(input.externalSender ? { externalSender: true } : {}),
       });
 
       if (decision.mode !== "require_approval") return decision;

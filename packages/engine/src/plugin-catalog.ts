@@ -559,6 +559,7 @@ export async function invokeAction(
     sessionId: ctx.sessionId,
     threadId: ctx.threadId,
     appliesIn: "session",
+    ...(ctx.externalSender ? { externalSender: true } : {}),
   };
   const baseRecord: BaseInvocationRecord = {
     service: entry.service,
