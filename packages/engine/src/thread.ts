@@ -742,7 +742,7 @@ export class Thread {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey, item.author?.id),
+          this.coalesceQueuedOverheard(coalesceKey, item.author),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
@@ -773,7 +773,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string, actorId?: string): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -783,7 +783,9 @@ export class Thread {
           i.status === "queued" &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
-          i.author?.id === actorId &&
+          i.author?.id === author?.id &&
+          // Unlinked senders can share the creator's ID, but not their authority.
+          Boolean(i.author?.externalSender) === Boolean(author?.externalSender) &&
           overheardCoalesceKey(i.content) === coalesceKey,
       )
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
