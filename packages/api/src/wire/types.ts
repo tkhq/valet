@@ -2047,6 +2047,8 @@ export interface WorkflowRunCheckpoint {
 
 /** One pending approval gate on a parked workflow run. */
 export interface WorkflowPendingGate {
+  /** The one member who may answer: the step would use their shared account. */
+  approver?: { userId: string; name?: string };
   /** Context supplied by the approval node in the run snapshot. */
   summary?: string;
   details?: unknown;

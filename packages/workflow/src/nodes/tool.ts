@@ -196,7 +196,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
         error: `approval was recorded but policy enforcement still requires approval for ${node.service}.${node.action} — the grant write may have failed; resolve the gate again or check org policies`,
       });
     }
-    return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance);
+    return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance, response.approver);
   }
 
   if (!response.ok) {
@@ -218,6 +218,7 @@ async function openGate(
   renderedParams: Record<string, unknown>,
   riskLevel: string | undefined,
   provenance: string | undefined,
+  approver: { userId: string; name?: string } | undefined,
 ): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock, onApprovalPending } = args;
   const suffix = iterationSuffix(iteration);
@@ -254,6 +255,7 @@ async function openGate(
     ...(gateItem !== undefined ? { gateItem } : {}),
     ...(riskLevel !== undefined ? { riskLevel } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
+    ...(approver !== undefined ? { approver } : {}),
     ...(timeoutAt !== undefined ? { timeoutAt } : {}),
   };
 
@@ -280,6 +282,7 @@ async function openGate(
     action: node.action,
     params: gp.value,
     ...(iteration > 0 ? { iteration } : {}),
+    ...(approver !== undefined ? { approver } : {}),
   });
 
   return park(node, signalType, timeoutAt);

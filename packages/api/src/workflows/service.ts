@@ -7,7 +7,8 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  */
 import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
-import { normalizeLegacyDefinition, type RunHost } from "@valet/workflow";
+import { normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
+import { writeBorrowGrant } from "../services/credential-borrow.js";
 import {
   resolveTriggerInput,
   triggerDataSchema,
@@ -1544,6 +1545,8 @@ export async function listWorkflowActionRequired(
     if (detail === null) continue;
     const trigger = workflowActionTrigger(detail.run.params);
     for (const gate of detail.pendingGates) {
+      // A gate asking to lend a member's account is that member's alone.
+      if (gate.approver && gate.approver.userId !== owner.userId) continue;
       const iteration = gate.iteration ?? 0;
       items.push({
         id: `${summary.runId}:${gate.nodeId}:${iteration}`,
@@ -1626,6 +1629,27 @@ function threadIdOf(effects: NodeCheckpoint["effects"]): string | undefined {
  * stamps the new run to the caller, so it resolves the caller's own
  * credentials and grants nothing a manual start would not.
  */
+/** The member a tool gate waits on, when the step would use their shared
+ * account (`plugins/action-invoker.ts#sharedAccountApprover`). */
+function approverFromEffects(effects: unknown): { userId: string; name?: string } | undefined {
+  if (!effects || typeof effects !== "object" || !("approver" in effects)) return undefined;
+  const raw = effects.approver;
+  if (!raw || typeof raw !== "object" || !("userId" in raw) || typeof raw.userId !== "string") return undefined;
+  return { userId: raw.userId, ...("name" in raw && typeof raw.name === "string" ? { name: raw.name } : {}) };
+}
+
+/** The members this parked run waits on to lend their accounts. */
+async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string }>> {
+  const waits = run.status === "parked" ? run.waitingOn.filter((w) => w.kind === "signal" && w.signalType.startsWith("approval:")) : [];
+  if (waits.length === 0) return new Map();
+  const found = new Map<string, { userId: string; name?: string }>();
+  for (const cp of await deps.workflowStore.getCheckpoints(run.runId)) {
+    const approver = cp.status === "intent" ? approverFromEffects(cp.effects) : undefined;
+    if (approver) found.set(`${cp.nodeId}:${cp.iteration}`, approver);
+  }
+  return found;
+}
+
 async function ownedRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
@@ -1645,13 +1669,19 @@ async function ownedRun(
   const person = owner.principal?.type !== "team" || owner.requireTeamMembership === true;
   const viewer = { orgId: owner.orgId, userId: person ? owner.userId : undefined };
   const access = { db: deps.db, engineCredentials: deps.credentials, onePassword: deps.onePassword, engineStore: deps.engineStore };
-  if (!(await runOriginVisible(access, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))) return null;
+  if (!(await runOriginVisible(access, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))) {
+    // A member the run asks to lend their account sees it while it waits on them.
+    const approvers = await pendingApprovers(deps, run);
+    if (![...approvers.values()].some((a) => a.userId === viewer.userId)) return null;
+  }
   return run;
 }
 
 export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
-  | "forbidden_always" | "forbidden_workflow" | "stale_workflow" | "org_mismatch" | "human_only";
+  | "forbidden_always" | "forbidden_workflow" | "stale_workflow" | "org_mismatch" | "human_only"
+  /** The gate asks to use another member's shared account; only they answer. */
+  | "not_approver";
 
 /** Scan `definition` (unknown at runtime) for the node with `nodeId`. Searches
  * `definition.nodes` directly and, for each `type === "foreach"` node, also checks
@@ -1828,6 +1858,12 @@ export async function resolveWorkflowApproval(
   const existing = await deps.workflowStore.listSignals(input.runId, { unconsumed: true });
   if (existing.some((s) => s.signalType === signalType)) return "already_resolved";
 
+  // A step that would use another member's account answers to them, and
+  // their approval covers this run only.
+  const approver = (await pendingApprovers(deps, run)).get(`${input.nodeId}:${iter}`);
+  if (approver && approver.userId !== owner.userId) return "not_approver";
+  if (approver && input.scope !== undefined && input.scope !== "once") input = { ...input, scope: undefined };
+
   const orgId = await definitionOrgId(deps.db, run.params.workflowId);
   if (orgId === null || !(await isOrgMember(deps.db, orgId, owner.userId))) return "org_mismatch";
 
@@ -1923,6 +1959,11 @@ export async function resolveWorkflowApproval(
     storedPayload?.scope !== submitted.scope
   ) {
     return "already_resolved";
+  }
+
+  if (input.approved && approver && node && typeof node.service === "string") {
+    const service = deps.actionPluginByService?.get(node.service)?.actionPlugin.credentialService ?? node.service;
+    await writeBorrowGrant(deps.db, orgId, { sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
   }
 
   if (input.approved && isPolicyGate) {
@@ -2029,6 +2070,8 @@ export async function getWorkflowRunDetail(
         if ("timeoutAt" in effects && typeof effects.timeoutAt === "number") {
           gate.timeoutAt = effects.timeoutAt;
         }
+        const approver = approverFromEffects(effects);
+        if (approver) gate.approver = approver;
       }
 
       pendingGates.push(gate);

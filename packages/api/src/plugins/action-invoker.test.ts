@@ -28,6 +28,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { shareCredential } from "../services/credential-shares.js";
+import { writeBorrowGrant } from "../services/credential-borrow.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -693,6 +694,25 @@ describe("buildActionInvoker", () => {
     expect(result.ok === false && "error" in result ? result.error : "").toBe(
       new CredentialReferenceBrokenError("demo").message,
     );
+  });
+
+  it("team-owned run: asks the member whose shared account a step would use, then uses it once they allow it", async () => {
+    const db = await makeDb();
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "demo", { type: "api_key", apiKey: "bea-key" });
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, workflowExecutionId: "run1" };
+    const req = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:run1:step" };
+
+    expect(await invoke(req, ctx)).toEqual({ ok: false, requiresApproval: true, provenance: "shared_account", approver: { userId: "bea" } });
+    expect(fixture.calls()).toBe(0);
+
+    await writeBorrowGrant(db, "org1", { sessionId: "wf:run1", service: "demo", memberId: "bea" });
+    expect((await invoke({ ...req, invocationId: "workflow:run1:step:again" }, ctx)).ok).toBe(true);
+    expect(fixture.calls()).toBe(1);
   });
 
   // Discovery reads the credential before any try/catch the invoker has. A

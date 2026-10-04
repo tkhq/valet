@@ -115,7 +115,9 @@ export interface WorkflowInvokeActionRequest {
 export type WorkflowInvokeActionResult =
   | { ok: true; result: unknown }
   | { ok: false; error: string }
-  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string };
+  /** `approver`: the one member who may answer, because the action would use
+   * their shared account. */
+  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string; approver?: { userId: string; name?: string } };
 
 /**
  * Engine surface available to node executors and the interpreter's cancel

@@ -10,11 +10,13 @@
 import { type ReactElement, useState } from "react";
 import { ChevronDown, ShieldAlert } from "lucide-react";
 import type { WorkflowPendingGate } from "@valet/api/wire";
+import { useMe } from "~/api/settings";
 import { useResolveApproval } from "~/api/workflows";
 import { ApiError } from "~/api/client";
 import { apiErrorMessage } from "~/api/policies";
 import {
   Button,
+  cardClass,
   ConfirmDialog,
   Spinner,
   DropdownMenu,
@@ -36,6 +38,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   const [busyScope, setBusyScope] = useState<"once" | "run" | "workflow" | "deny" | null>(null);
   const [confirmation, setConfirmation] = useState<"once" | "run" | "workflow" | "deny" | null>(null);
   const resolve = useResolveApproval(runId);
+  const me = useMe();
 
   const service = gate.service ?? "";
   const action = gate.action ?? "";
@@ -104,6 +107,19 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
     gate.onDeny === "skip"
       ? "Denying skips this node; downstream nodes can branch on the denial."
       : "Denying fails this node.";
+
+  // A step that would use a member's shared account answers to that member.
+  // Everyone else sees that the request went to them.
+  if (gate.approver && gate.approver.userId !== me.data?.id) {
+    return (
+      <div className={cn(cardClass, "p-4")} role="status">
+        <p className="text-sm font-medium text-ink">Asked {gate.approver.name ?? "a teammate"} for permission</p>
+        <p className="mt-1 text-xs text-muted">
+          {serviceAction} would use {gate.approver.name ? `${gate.approver.name}'s` : "a teammate's"} shared account. The run continues once they allow it.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-md border border-amber-300 bg-amber-50/70 dark:border-amber-700/60 dark:bg-amber-950/40 p-4 space-y-3">

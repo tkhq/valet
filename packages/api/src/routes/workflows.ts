@@ -912,6 +912,7 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (result === "stale_workflow") return c.json({ error: "This workflow's steps changed after this run started. Approve for this run only, or review the new steps and approve them on the workflow." }, 409);
   if (result === "org_mismatch") return c.json({ error: "not a member of this workflow's org" }, 403);
   if (result === "human_only") return c.json({ error: "policy gates must be resolved by a human from the run page" }, 403);
+  if (result === "not_approver") return c.json({ error: "This step would use another member's shared account. Only that member can answer it." }, 403);
 
   const resp: ResolveWorkflowApprovalResponse = { ok: true };
   return c.json(resp);

@@ -47,7 +47,7 @@ import { qualifiedActionId } from "./action-id.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
-import { actionInvocations } from "../schema/index.js";
+import { actionInvocations, users } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   isUsableGithubUserRow,
@@ -57,6 +57,7 @@ import {
 import {
   orgFallbackPolicy,
   resolveOrgCredentialRead,
+  readTeamCredential,
   resolveTeamCredentialRead,
   resolveUserCredentialRead,
   onePasswordScopesFor,
@@ -338,6 +339,12 @@ async function computeResult(
   // before discovery: discovery would only echo the plugin's own generic
   // "no credential connected" message, which names no fix.
   const teamGated = ctx.owner.type === "team" && declared !== null && mode !== "org";
+  // A team run that would use another member's shared account parks until
+  // that member approves (`services/credential-borrow.ts`).
+  if (ctx.owner.type === "team" && !req.approval) {
+    const approver = await sharedAccountApprover(opts, ctx, ctx.owner.id, credentialService);
+    if (approver) return { ok: false, requiresApproval: true, provenance: "shared_account", approver };
+  }
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
     if (teamGated) {
@@ -349,7 +356,9 @@ async function computeResult(
     // so it comes back as a failed result, the same way execute reports.
     let resolved: PluginAction[];
     try {
-      resolved = await entry.actionPlugin.resolveActions({ credentials });
+      resolved = await entry.actionPlugin.resolveActions({
+        credentials: { get: (service) => credentials.get(service, "discover"), request: (service, reason) => credentials.request(service, reason) },
+      });
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -682,7 +691,7 @@ function buildCredentialProvider(
   const mayBorrow = (svc: string) => async (memberId: string) =>
     ctx.workflowExecutionId ? hasBorrowGrant(opts.db, { sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
   return {
-    async get(service?: string): Promise<Credential | null> {
+    async get(service?: string, purpose?: "discover"): Promise<Credential | null> {
       const svc = service ?? defaultService;
       // Escalation applies to THIS provider's own service only. An incidental
       // read of some other service must not reach the org's credentials, even
@@ -706,7 +715,11 @@ function buildCredentialProvider(
           : owner.type === "team"
             ? await resolveTeamCredentialRead(
                 deps,
-                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id), mayBorrow: mayBorrow(svc) },
+                {
+                  orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
+                  // Listing a service's tools may use a shared account; running one asks first.
+                  mayBorrow: purpose === "discover" ? async () => true : mayBorrow(svc),
+                },
                 svc,
                 fallback,
               )
@@ -726,6 +739,39 @@ function buildCredentialProvider(
       return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));
     },
   };
+}
+
+/** The member whose shared account a team run would use for `service`, when
+ * no account of the run's actor or the team's own answers and that member
+ * has not yet approved this run. GitHub has the organization App behind the
+ * team's row, so it never borrows. */
+async function sharedAccountApprover(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  teamId: string,
+  service: string,
+): Promise<{ userId: string; name?: string } | undefined> {
+  if (service === "github" || !ctx.workflowExecutionId) return undefined;
+  const sharers = await membersSharing(opts.db, teamId, service);
+  if (sharers.length === 0) return undefined;
+  let approvalFrom: string | undefined;
+  try {
+    ({ approvalFrom } = await readTeamCredential(
+      { credentials: opts.credentials, onePassword: opts.onePassword, shares: async () => sharers },
+      {
+        orgId: ctx.orgId, teamId, userId: ctx.userId, scopes: onePasswordScopesFor("team", teamId),
+        mayBorrow: (memberId) => hasBorrowGrant(opts.db, { sessionId: `wf:${ctx.workflowExecutionId}`, service, memberId }),
+      },
+      service,
+      orgFallbackPolicy(registryOf(opts), service),
+    ));
+  } catch {
+    // A share that no longer resolves: the action itself reports that.
+    return undefined;
+  }
+  if (!approvalFrom) return undefined;
+  const [member] = await opts.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
+  return { userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
 }
 
 /**

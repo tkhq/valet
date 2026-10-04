@@ -576,6 +576,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
       if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
       if (result === "human_only") return { success: false, error: "A human must resolve this policy gate from the run page." };
+      if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };
       if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
       if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
       return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
