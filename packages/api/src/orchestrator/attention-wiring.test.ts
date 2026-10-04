@@ -231,6 +231,23 @@ describe("wireAttentionRouter", () => {
     expect(delivered[0]?.sessionId).toBe(sessionId);
   });
 
+  it("decision_gate on a workflow run a Slack channel's event started names that channel's audience", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream, workflowStore } = api.providers;
+    const seen: AttentionEvent[] = [];
+    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ deliver: async (_userId, event) => { seen.push(event); } }] });
+    const runId = `run-${randomUUID()}`;
+    await workflowStore.createRun(runId, {
+      workflowId: "wf-x", definitionVersionId: "v1",
+      input: { type: "event", timestamp: "2026-10-04T00:00:00.000Z", data: { key: "slack.message", refs: { channel: "CPRIV" }, payload: { channel: "CPRIV" } }, metadata: {} },
+    }, { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "local-user" });
+    const sessionId = `wf:${runId}:triage`;
+    await engineStore.saveSession(baseSession({ id: sessionId }));
+    await eventStream.append(gateEvent(sessionId, `gate-${randomUUID()}`, "Approve?"), `test-gate-${randomUUID()}`);
+    await waitFor(async () => seen.length > 0);
+    expect(seen[0]?.audienceKey).toBe("slack-events:CPRIV");
+  });
+
   it("decision_gate with tool context delivers a digested body and labeled fields, not raw JSON", async () => {
     api = await bootTestApi();
     const { db, engineStore, eventStream } = api.providers;

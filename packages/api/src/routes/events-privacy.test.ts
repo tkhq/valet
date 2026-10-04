@@ -3,6 +3,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { eventDeliveries, eventSubscriptions, events, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
+import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
@@ -102,4 +103,36 @@ it("leaves a private Slack channel's events out of a non-member's Log", async ()
     { headers: { "x-valet-test-user-id": "test-member" } })).json()) as { items: Array<{ id: string }>; nextCursor: string | null };
   expect(page.items.map((i) => i.id)).toEqual(["log-public"]);
   expect(page.nextCursor).toBeNull();
+});
+
+it("keeps a private Slack event's run gates with the channel's members", async () => {
+  api = await bootTestApi();
+  await connectSlack(api, { CPRIV: ["UMEMBER"] });
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UMEMBER", userId: "local-user" });
+  const p = api.providers;
+  await p.db.insert(teams).values({ id: "team-gate", orgId: "local-org", name: "Gates", createdAt: 1 });
+  await p.db.insert(teamMembers).values([
+    { teamId: "team-gate", userId: "local-user", role: "member" },
+    { teamId: "team-gate", userId: "test-member", role: "member" },
+  ]);
+  await p.db.insert(workflowDefinitions).values({ id: "wf-gate", orgId: "local-org", ownerType: "team", ownerId: "team-gate", name: "Triage", definition: {}, createdAt: 1, updatedAt: 1 });
+  await p.workflowStore.createRun("run-ev", {
+    workflowId: "wf-gate", definitionVersionId: "v1",
+    input: { type: "event", timestamp: "2026-10-04T00:00:00.000Z", data: { key: "slack.message", refs: { channel: "CPRIV" }, payload: { channel: "CPRIV", text: "secret" } }, metadata: {} },
+  }, { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "team-gate" });
+  const sessionId = "wf:run-ev:triage";
+  const session = await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+    host: p.engineHost, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, sessionId);
+  await p.engineStore.saveDecisionGate(sessionId, session.thread().id, {
+    id: "gate-ev", sessionId, threadId: session.thread().id, queueItemId: "q", resumeKey: "rk", ordinal: 0,
+    type: "approval", title: "Approve the secret plan?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+  });
+  const asOther = { "x-valet-test-user-id": "test-member" };
+  const inbox = async (headers?: Record<string, string>) => ((await (await fetch(`${api!.baseUrl}/api/notifications/decisions`, headers ? { headers } : {})).json()) as { items: Array<{ gate: { id: string } }> }).items.map((i) => i.gate.id);
+  expect(await inbox()).toEqual(["gate-ev"]);
+  expect(await inbox(asOther)).toEqual([]);
+  const decisions = `${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions`;
+  expect((await fetch(decisions)).status).toBe(200);
+  expect((await fetch(decisions, { headers: asOther })).status).toBe(404);
+  expect((await fetch(`${decisions}/gate-ev/resolve`, { method: "POST", headers: { ...asOther, "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
 });

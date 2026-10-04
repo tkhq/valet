@@ -13,6 +13,7 @@ import { workspaceSenderIdentity } from "../services/workspace-sender.js";
  * lands in Task 8; `start` here only resolves credentials and constructs
  * transports.
  */
+import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
 import {
   ConflictError,
   parseAssistantSessionId,
@@ -1597,6 +1598,16 @@ export class ChannelHost {
       ? await isOrgAdmin(this.deps.db, workflowOrgId, userId)
       : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
     if (!authorized) return { ok: false, reason: "unauthorized" };
+    // A run from a private thread or a private Slack channel's event is that
+    // audience's, so only they answer its gates (`routes/_thread-access.ts#runVisible`).
+    if (owner.ownerType === "team") {
+      const access = { db: this.deps.db, engineCredentials: this.deps.engineCredentials, onePassword: this.deps.onePassword, engineStore: this.deps.engineStore };
+      const viewer = { orgId: workflowOrgId, userId };
+      if (!(await runOriginVisible(access, viewer, { ownerType: "team", origin: run.params.origin, actorUserId: run.actorUserId }))
+        || !(await runEventVisible(access, viewer, run.params))) {
+        return { ok: false, reason: "unauthorized" };
+      }
+    }
     return { ok: true, owner, orgId: workflowOrgId };
   }
 

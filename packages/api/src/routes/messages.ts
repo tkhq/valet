@@ -55,7 +55,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
-import { runOriginVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
+import { runVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -1215,7 +1215,7 @@ async function loadDecisionSession(c: Context<AppEnv>) {
     orgId: definition.orgId,
   };
   if (!(await canAnswerDecision(c, session))) return missing();
-  if (!(await runOriginVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))) return missing();
+  if (!(await runVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId, params: run.params }))) return missing();
   // A guessed node ID must not materialize a new agent on a read request.
   if (!(await p.engineStore.getSession(id))) return missing();
   const engineSession = await ensureWorkflowSession({

@@ -34,8 +34,9 @@ import { parseAssistantSessionId } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { digestGate } from "../channels/gate-digest.js";
 import { gateApprover } from "../services/session-access.js";
+import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, workflowRuns } from "../schema/index.js";
 import {
   markGateNotificationsRead,
   routeAttention,
@@ -121,18 +122,40 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
   // alone. The thread may be private to the requester, so it carries no link
   // into it; the member answers from their inbox or the channel message.
   const approver = gateApprover(gate);
+  const audienceKey = await workflowGateAudience(deps, sessionId);
   await routeAttention(deps, {
     kind: "approval",
     urgency: "high",
     owner: approver ? { type: "user", id: approver.userId } : owner,
     sessionId,
     threadId: gate.threadId,
+    ...(audienceKey !== undefined ? { audienceKey } : {}),
     title: digest.title,
     body: digest.body,
     ...(approver ? {} : { href: attentionHref(sessionId, gate.threadId, sessionData.owner) }),
     dedupeKey: gate.id,
     gate: { id: gate.id, actions: gate.actions, fields: digest.fields },
   });
+}
+
+/**
+ * Who may see a workflow run's gate (a `wf:<runId>:<node>` session): the
+ * audience of the thread the run started from, or of the Slack channel whose
+ * event started it. A run neither started is the team's. The key stands in
+ * for the run's own session, which has no thread of its own to judge.
+ */
+async function workflowGateAudience(deps: AttentionWiringDeps, sessionId: string): Promise<string | undefined> {
+  if (!sessionId.startsWith("wf:")) return undefined;
+  const [run] = await deps.db.select({ params: workflowRuns.params }).from(workflowRuns)
+    .where(eq(workflowRuns.id, sessionId.split(":")[1] ?? "")).limit(1);
+  const params = run?.params as { origin?: { assistantSessionId: string; threadId: string }; input?: unknown } | undefined;
+  if (params?.origin) {
+    const thread = await deps.engineStore.getThread(params.origin.assistantSessionId, params.origin.threadId);
+    // A gone origin thread names nobody, so the gate reaches nobody else.
+    return thread ? thread.key ?? undefined : "app-assistant:";
+  }
+  const channel = params ? runEventChannel(params) : undefined;
+  return channel ? slackEventsThreadKey(channel) : undefined;
 }
 
 /**
