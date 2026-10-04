@@ -40,6 +40,7 @@ import {
   followBindingAuthorized,
   isTeamAssistantMention,
   mentionAudience,
+  channelMessageAuthor,
   newcomerAuthor,
   teamMentionActor,
 } from "./team-slack-gate.js";
@@ -332,7 +333,11 @@ export class EventDispatcher {
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
           : prThreadKey && prComment ? prComment.message : undefined;
-        const author = teamMention ? await newcomerAuthor(db, event.orgId, actorUserId, resolvePath(event.payload, "user"), attributes.sender) : undefined;
+        const author = teamMention
+          ? await newcomerAuthor(db, event.orgId, actorUserId, resolvePath(event.payload, "user"), attributes.sender)
+          : sub.ownerType === "team" && event.service === "slack"
+            ? await channelMessageAuthor(db, sub.ownerId, actorUserId, event.payload, attributes.sender)
+            : undefined;
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
           ownerType: sub.ownerType,

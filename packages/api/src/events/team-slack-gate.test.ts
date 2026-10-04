@@ -11,7 +11,7 @@ import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
 import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
-import { authorizedSubscriptionMatchesEvent, newcomerAuthor, setSlackWorkspaceMemberCheck } from "./team-slack-gate.js";
+import { authorizedSubscriptionMatchesEvent, channelMessageAuthor, newcomerAuthor, setSlackWorkspaceMemberCheck } from "./team-slack-gate.js";
 
 const ORG = "org-team-events";
 const channelFilter = { field: "channel", op: "eq", value: "C1" } as const;
@@ -339,5 +339,24 @@ describe("newcomerAuthor", () => {
     // after the actor was chosen): the turn keeps the limits.
     expect(await newcomerAuthor(tdb.appDb, ORG, "creator", "U_NEW", "Sam")).toEqual({ id: "creator", name: "Sam", externalSender: true });
     expect(await newcomerAuthor(tdb.appDb, ORG, "creator", "U_A")).toMatchObject({ id: "creator", externalSender: true });
+  });
+});
+
+describe("channelMessageAuthor", () => {
+  it("keeps the newcomer limits for a channel message from anyone who is not on the team", async () => {
+    const tdb = await freshTestPgDb();
+    await tdb.appDb.insert(teamMembers).values({ teamId: "team-msg", userId: "member-a", role: "member" });
+    await tdb.appDb.insert(userIdentityLinks).values([
+      { id: "link-a", provider: "slack", externalId: "U_A", userId: "member-a", createdAt: Date.now() },
+      { id: "link-x", provider: "slack", externalId: "U_X", userId: "outsider", createdAt: Date.now() },
+    ]);
+    const author = (payload: Record<string, unknown>) => channelMessageAuthor(tdb.appDb, "team-msg", "creator", payload, "Sam");
+    // A team member's message runs as the rule was set up.
+    expect(await author({ user: "U_A", text: "hi" })).toBeUndefined();
+    // So does a bot's post: the rule's creator chose to act on it.
+    expect(await author({ user: "U_BOT", bot_id: "B1", text: "alert" })).toBeUndefined();
+    // An unlinked sender, or one linked to someone off the team, does not lend the creator's authority.
+    expect(await author({ user: "U_NEW", text: "hi" })).toEqual({ id: "creator", name: "Sam", externalSender: true });
+    expect(await author({ user: "U_X", text: "hi" })).toMatchObject({ externalSender: true });
   });
 });
