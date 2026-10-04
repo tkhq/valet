@@ -43,7 +43,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={cn(
         // `touch-manipulation` removes the ~300ms tap delay mobile browsers
         // hold to see if the tap is a double-tap zoom.
-        "inline-flex items-center justify-center rounded font-medium transition-colors touch-manipulation",
+        "inline-flex items-center justify-center whitespace-nowrap rounded font-medium transition-colors touch-manipulation",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[--bg]",
         "disabled:pointer-events-none disabled:opacity-50",
         "max-sm:min-h-11 max-sm:min-w-11",

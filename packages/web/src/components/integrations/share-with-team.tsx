@@ -128,7 +128,8 @@ function TeamShareRow({
         // reaches `window.onunhandledrejection`, reporting it a second time.
         <Button
           size="sm"
-          variant="ghost"
+          variant="secondary"
+          className="shrink-0"
           disabled={pending}
           aria-label={`Stop sharing ${title} with ${team.name}`}
           onClick={() => revoke.mutate({ service, teamId: team.id })}
@@ -138,6 +139,7 @@ function TeamShareRow({
       ) : (
         <Button
           size="sm"
+          className="shrink-0"
           disabled={!acknowledged || pending || occupied || credsQ.isLoading || !!credsQ.error || !credsQ.data}
           aria-label={`Share ${title} with ${team.name}`}
           onClick={() => delegate.mutate({ service, body: { teamId: team.id } })}

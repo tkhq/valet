@@ -97,9 +97,14 @@ export function useDisconnectCredential() {
   });
 }
 
+/** Returned from `onSuccess`, so the mutation stays pending until the lists
+ * refetch. Settling first rendered the pre-change state for one round trip:
+ * Share → Stop sharing blinked back to Share before it stuck. */
 function invalidateCredentialCaches(qc: ReturnType<typeof useQueryClient>) {
-  qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
-  qc.invalidateQueries({ queryKey: ["credentials"] });
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() }),
+    qc.invalidateQueries({ queryKey: ["credentials"] }),
+  ]);
 }
 
 export function useDelegateCredential() {
