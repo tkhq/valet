@@ -15,6 +15,8 @@ const REASON_LABEL: Record<string, string> = {
   channel_reply_failed: "Reply not posted",
   duplicate: "Duplicate delivery",
   unsupported_kind: "Unsupported message",
+  unsupported_event: "Unhandled event type",
+  stale_delivery: "Delivery too old",
   verify_failed: "Verification failed",
   malformed_callback: "Malformed callback",
   unauthorized: "Not authorized",
@@ -30,7 +32,7 @@ export function problemStage(reason: string): string {
   if (reason === "filter_excluded") return "Subscription filter";
   if (reason === "no_subscription_match") return "Subscription match";
   if (reason.startsWith("workflow_")) return "Workflow routing";
-  if (["bad_signature", "foreign_workspace", "unknown_org", "slack_retry"].includes(reason)) return "Receipt and verification";
+  if (["bad_signature", "foreign_workspace", "unknown_org", "slack_retry", "unsupported_event", "stale_delivery"].includes(reason)) return "Receipt and verification";
   return "Delivery and authorization";
 }
 

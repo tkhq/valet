@@ -94,6 +94,14 @@ export interface VerifiedEvent {
   payload: unknown;
 }
 
+/** Why a trigger declined a request. Only `bad_signature` means the request
+ * may not come from the provider. `detail` names the delivery's type, action,
+ * and webhook, never its content. */
+export interface TriggerRejection {
+  reason: "bad_signature" | "stale_delivery" | "unsupported_event" | "malformed_callback";
+  detail: string;
+}
+
 /** A provider webhook normalized into the generic event pipeline. */
 export interface NormalizedEvent {
   /** Namespaced key, e.g. "github.pull_request.opened", "linear.issue.create". */
@@ -170,6 +178,16 @@ export interface TriggerDef {
     req: { headers: Record<string, string>; rawBody: Uint8Array },
     secrets: Record<string, string>,
   ): VerifiedEvent | null | Promise<VerifiedEvent | null>;
+  /**
+   * Says why no trigger of this service verified a request. The ingress
+   * acknowledges a correctly signed delivery it does not handle, so the
+   * provider does not retry it or disable the webhook, and answers a bad
+   * signature with an error. Without this, every rejection is a bad signature.
+   */
+  explainRejection?(
+    req: { headers: Record<string, string>; rawBody: Uint8Array },
+    secrets: Record<string, string>,
+  ): TriggerRejection | Promise<TriggerRejection>;
   /** Normalize a verified event for the generic event pipeline. */
   toEvent(event: VerifiedEvent): NormalizedEvent;
   /** Subscribable event keys this trigger can emit, with their filterable fields. */

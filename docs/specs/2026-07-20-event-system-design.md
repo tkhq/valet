@@ -165,10 +165,18 @@ Public route `POST /webhooks/events/:service`, mounted pre-auth (like
    `organizationId` from body → `linear_installations`; GitHub —
    `installation.id` → `github_installations`. Then run the plugin's
    `verify()` with that org's secret over the raw bytes.
-3. `toEvent()` → insert into `events`. Duplicate `dedupe_key` → 204 no-op.
+3. `toEvent()` → insert into `events`. Duplicate `dedupe_key` → 200 no-op.
 4. In the same transaction, match active subscriptions (indexed `org_id` +
    event-key match, filters evaluated in memory) and insert `event_deliveries`
-   rows. Nudge the in-process dispatcher (`dispatcher.nudge()`); return 204.
+   rows. Nudge the in-process dispatcher (`dispatcher.nudge()`); return 200.
+   Linear counts only HTTP 200 as delivered. It retries any other answer and
+   can disable a webhook that keeps failing.
+5. If no trigger verifies the request, the plugin's optional
+   `explainRejection()` says why. The ingress answers 200 to a correctly
+   signed delivery it does not handle (`unsupported_event`, `stale_delivery`,
+   `malformed_callback`) and 403 only to `bad_signature`. Each rejection is
+   drop-logged with the delivery's type, action, and webhook ID, never its
+   content.
 
 Matching inside the ingest transaction means an accepted event either has its
 delivery rows or doesn't exist — no persisted-but-never-matched window. Actual
@@ -301,7 +309,8 @@ overlap shows the same list as a warning before the dialog closes.
 ## Error handling
 
 - Rejected/unverifiable webhooks → `event_drop_log` with reason
-  (`bad_signature`, `unknown_org`, `oversized`), throttled logging (existing
+  (`bad_signature`, `unsupported_event`, `stale_delivery`, `unknown_org`,
+  `oversized`), throttled logging (existing
   GitHub-route pattern).
 - Delivery failures never lose events: the event row persists; the delivery
   row records attempts and last error and lands in `dead` after backoff is
@@ -509,4 +518,4 @@ Readiness requires the installation, the signing secret, and a matching workspac
 
 Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. App credentials stay excluded from agent and workflow credential resolution, and generic credential routes cannot change them.
 
-Known gaps: Linear sends an app-revoked event when a workspace removes the app. No trigger definition verifies it, so the ingress logs it as `bad_signature`. Valet does not revoke tokens with Linear on disconnect.
+Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.

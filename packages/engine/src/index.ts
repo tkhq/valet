@@ -184,6 +184,7 @@ export {
   type TokenInterpretation,
   type IdentityLinkDeclaration,
   type TriggerDef,
+  type TriggerRejection,
   type VerifiedEvent,
   type NormalizedEvent,
   type EventCatalogEntry,

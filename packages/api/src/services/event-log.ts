@@ -17,6 +17,7 @@ export const EVENT_LOG_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const REJECTED_REASONS = [
   "slack_classifier_rejected", "slack_interaction_unmatched", "bad_signature", "foreign_workspace", "unknown_org",
   "unlinked_sender", "unauthorized", "verify_failed", "malformed_callback", "duplicate", "unsupported_kind", "slack_retry",
+  "unsupported_event", "stale_delivery",
 ];
 /** Reasons only org admins see: they identify Slack form activity. */
 const ADMIN_ONLY_REASONS = ["slack_interaction_unmatched", "slack_classifier_rejected"];

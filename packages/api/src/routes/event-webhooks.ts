@@ -3,9 +3,9 @@
  * Auth is signature-level per service (plugin TriggerDef.verify over raw
  * bytes) — mounted before the auth middleware in app.ts.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { and, eq } from "drizzle-orm";
-import type { VerifiedEvent } from "@valet/engine";
+import type { TriggerRejection } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { credentials, linearInstallations } from "../schema/index.js";
 import { LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
@@ -16,6 +16,9 @@ import { ingestEvent } from "../events/ingest.js";
 /** Same rationale as `routes/github-app.ts`'s cap: bound what an
  * unauthenticated caller can force us to buffer/parse. */
 const MAX_BODY_BYTES = 1024 * 1024;
+
+/** Linear counts only HTTP 200 as delivered and retries anything else. */
+const ACK = (c: Context<AppEnv>) => c.body(null, 200);
 
 export const eventWebhooksRouter = new Hono<AppEnv>();
 
@@ -46,14 +49,14 @@ eventWebhooksRouter.post("/:service", async (c) => {
     } catch {
       return c.json({ error: "invalid JSON" }, 400);
     }
-    if (!organizationId) return c.body(null, 204);
+    if (!organizationId) return ACK(c);
     const rows = await db
       .select()
       .from(linearInstallations)
       .where(eq(linearInstallations.workspaceId, organizationId))
       .limit(1);
     const install = rows[0];
-    if (!install) return c.body(null, 204); // unknown workspace: ack, don't retry-loop Linear
+    if (!install) return ACK(c); // unknown workspace: ack, don't retry-loop Linear
     orgId = install.orgId;
     // Read the signing secret from the row, not through engineCredentials: its
     // Linear layer may request a new app token, and an unsigned request must
@@ -64,7 +67,7 @@ eventWebhooksRouter.post("/:service", async (c) => {
     const webhookSecret = typeof metadata.webhookSecret === "string" ? metadata.webhookSecret : undefined;
     if (!webhookSecret) {
       await writeDropLog(db, { orgId, reason: "unknown_org", detail: `linear webhook for ${organizationId}: no credential` });
-      return c.body(null, 204);
+      return ACK(c);
     }
     secrets = { webhookSecret };
   } else {
@@ -76,18 +79,24 @@ eventWebhooksRouter.post("/:service", async (c) => {
     headers[k] = v;
   });
 
-  let verified: VerifiedEvent | null = null;
   for (const def of triggerDefs) {
-    verified = await def.verify({ headers, rawBody }, secrets);
+    const verified = await def.verify({ headers, rawBody }, secrets);
     if (verified) {
       await ingestEvent(
         { db, plugins, onIngest: c.var.providers.eventDispatcher.nudge },
         { orgId, service, event: def.toEvent(verified) },
       );
-      return c.body(null, 204);
+      return ACK(c);
     }
   }
 
-  await writeDropLog(db, { orgId, reason: "bad_signature", detail: `service=${service}` });
+  // A correctly signed delivery Valet does not handle is acknowledged:
+  // Linear retries any other answer and can disable a webhook that keeps
+  // failing, which would stop the events Valet does handle.
+  const explainer = triggerDefs.find((def) => def.explainRejection);
+  const rejection: TriggerRejection = await explainer?.explainRejection?.({ headers, rawBody }, secrets)
+    ?? { reason: "bad_signature", detail: `service=${service}` };
+  await writeDropLog(db, { orgId, reason: rejection.reason, detail: rejection.detail });
+  if (rejection.reason !== "bad_signature") return ACK(c);
   return c.json({ error: "signature verification failed" }, 403);
 });
