@@ -18,6 +18,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
+import { governingThreadKeySql, sharedWithWholeTeamSql } from "../services/thread-access.js";
 import {
   PendingCapError,
   recordSandboxDestroyed,
@@ -28,6 +29,7 @@ import {
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
+  type EventStream,
   type Principal,
   type SessionStore,
   type SpawnChildRequest,
@@ -219,6 +221,15 @@ async function enforceLimits(
     await writeDropLog(db, { orgId, reason: "org_ceiling", conversationKey: parentSessionId, detail: message });
     throw new ChildLimitError("org_ceiling", message);
   }
+}
+
+/** The unsettled watch for a child session: its parent thread and the
+ * channel conversation that started the work. Undefined for any session that
+ * is not an unsettled child. */
+export async function activeChildWatch(db: AppDb, childSessionId: string): Promise<ArmArgs | undefined> {
+  const [row] = await db.select().from(childWatches)
+    .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.settled, false))).limit(1);
+  return row ? watchRowToArgs(row) : undefined;
 }
 
 function watchRowToArgs(row: ChildWatchRow): ArmArgs {
@@ -440,7 +451,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
   };
 }
 
-interface ArmArgs {
+export interface ArmArgs {
   childSessionId: string;
   queueItemId: string;
   parentSessionId: string;
@@ -524,6 +535,38 @@ export class ChildWatcher {
   constructor(private readonly deps: ChildrenDeps) {
     this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
     this.maxAttempts = deps.maxRetryAttempts ?? DEFAULT_WATCHER_MAX_ATTEMPTS;
+  }
+
+  /**
+   * Tells the parent thread that its child stopped at a gate (TKAI-564).
+   * Settlement reports only the end of the work, so without this the parent
+   * sees a silent child until someone answers. The approval itself already
+   * reaches the parent's owner through attention, and a channel-started
+   * child's card reaches the originating thread, so the signal carries the
+   * origin with manual replies: the parent can mention it, never auto-post.
+   * One signal per gate: the dispatchId makes a repeat a no-op.
+   */
+  async reportGateOpened(childSessionId: string, gate: { id: string; title: string; type: string }): Promise<void> {
+    const watch = await activeChildWatch(this.deps.db, childSessionId);
+    if (!watch) return;
+    const childData = await this.deps.engineStore.getSession(childSessionId);
+    if (!childData) return;
+    await admitSignal(this.deps, {
+      from: { sessionId: childSessionId, owner: childData.owner },
+      to: watch.parentSessionId,
+      threadKey: watch.parentThreadId,
+      content: {
+        kind: "signal",
+        signalType: "child.gate_opened",
+        body:
+          `Child ${childSessionId} is paused on a ${gate.type} request: "${gate.title}". ` +
+          "The request was sent to the person who can answer it. The child resumes when it is answered. " +
+          "Do not answer it for them; mention it only if the person is waiting on this work.",
+        attributes: { child_session_id: childSessionId, gate_id: gate.id, gate_type: gate.type },
+        ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
+      },
+      dispatchId: `gate-opened:${childSessionId}:${gate.id}`,
+    });
   }
 
   /** Fire-and-forget: arms `awaitResult` for one watch row. `attempt` is 1-based, reset to 1 on every `arm`/`rearm` call. */
@@ -952,10 +995,42 @@ const CHILD_READ_DEFAULT_LIMIT = 30;
  * readable, which is the point — the parent reads it after the truncated
  * result arrives.
  */
+/** Reports every gate a child opens to its parent thread (TKAI-564). Call
+ * once at boot, before restore work can open gates. Returns the unsubscribe. */
+export function wireChildGateReports(eventStream: EventStream, watcher: ChildWatcher): () => void {
+  return eventStream.subscribe({ eventTypes: ["decision_gate"] }, (delivered) => {
+    if (delivered.event.type !== "decision_gate") return;
+    watcher.reportGateOpened(delivered.sessionId, delivered.event.gate).catch((err) => {
+      console.error(`child gate report failed for ${delivered.sessionId}:`, err);
+    });
+  });
+}
+
+/**
+ * Whether a parent thread may reach a child: read it, check on it, or steer
+ * it. In a team runtime, a child started from a private thread (a person's
+ * helper, or a private Slack channel's) is reached only from that thread,
+ * so another thread cannot repeat or redirect its work for the whole team.
+ * Without a thread to check, the session-level edge decides.
+ */
+async function childReachableFrom(
+  db: AppDb,
+  watch: { parentThreadId: string; orgId: string },
+  parentSessionId: string,
+  readerThreadId: string | undefined,
+): Promise<boolean> {
+  if (readerThreadId === undefined || readerThreadId === watch.parentThreadId) return true;
+  const result = await db.execute(sql`SELECT s.owner_type, ${sharedWithWholeTeamSql(watch.orgId,
+    governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`))} AS shared
+    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; shared: boolean }> };
+  const parent = result.rows[0];
+  return parent?.owner_type !== "team" || parent.shared === true;
+}
+
 export function buildChildReader(deps: ChildrenDeps): ChildReader {
   return async (req, ctx) => {
     const rows = await deps.db
-      .select({ childSessionId: childWatches.childSessionId })
+      .select({ childSessionId: childWatches.childSessionId, parentThreadId: childWatches.parentThreadId, orgId: childWatches.orgId })
       .from(childWatches)
       .where(
         and(
@@ -967,7 +1042,9 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
     // No row means the caller does not own this child, or it does not
     // exist. Both answer `null`: telling them apart would confirm that
     // somebody else's session id is real.
-    if (rows.length === 0) return null;
+    const watch = rows[0];
+    if (!watch) return null;
+    if (!(await childReachableFrom(deps.db, watch, ctx.parentSessionId, ctx.readerThreadId))) return null;
 
     const childRows = await deps.db
       .select({ status: agentSessions.status })
@@ -1096,7 +1173,14 @@ export async function resolveChildSettlement(
  * reconcile, no engine rows for a deleted child).
  */
 export function buildChildStatusReader(deps: ChildrenDeps): ChildStatusReader {
-  return async (req, ctx) => resolveChildSettlement(deps, req.childSessionId, ctx.parentSessionId);
+  return async (req, ctx) => {
+    if (ctx.readerThreadId !== undefined) {
+      const [watch] = await deps.db.select({ parentThreadId: childWatches.parentThreadId, orgId: childWatches.orgId }).from(childWatches)
+        .where(and(eq(childWatches.childSessionId, req.childSessionId), eq(childWatches.parentSessionId, ctx.parentSessionId))).limit(1);
+      if (!watch || !(await childReachableFrom(deps.db, watch, ctx.parentSessionId, ctx.readerThreadId))) return null;
+    }
+    return resolveChildSettlement(deps, req.childSessionId, ctx.parentSessionId);
+  };
 }
 
 /**
@@ -1151,7 +1235,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // Same null contract as `buildChildReader`: "not yours" and "does not
     // exist" are indistinguishable, so foreign session ids stay unguessable.
     const watchRow = watchRows[0];
-    if (!watchRow) return null;
+    if (!watchRow || !(await childReachableFrom(deps.db, watchRow, ctx.parentSessionId, ctx.parentThreadId))) return null;
 
     const childRows = await deps.db
       .select({

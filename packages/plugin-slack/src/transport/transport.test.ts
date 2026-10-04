@@ -149,6 +149,15 @@ describe("send threads on the conversation key's thread root", () => {
   });
 });
 
+describe("home channel", () => {
+  it("starts a new top-level message", async () => {
+    const transport = makeTransport();
+    await transport.sendToChannel("C0123456789", { markdown: "Team update" });
+    expect(lastCall("chat.postMessage").channel).toBe("C0123456789");
+    expect(lastCall("chat.postMessage").thread_ts).toBeUndefined();
+  });
+});
+
 describe("threadKeyFromEvent", () => {
   it("builds a thread key from an app_mention payload", () => {
     const transport = makeTransport();
@@ -953,6 +962,21 @@ describe("assistant thread controls", () => {
   });
 });
 
+describe("workspace membership", () => {
+  it("answers a full member of the connected team with their email, and nobody else", async () => {
+    const transport = makeTransport();
+    fake.setMembers([
+      { id: "UFULL", team_id: TEAM, name: "full", profile: { email: "full@example.com" } },
+      { id: "UGUEST", team_id: TEAM, name: "guest", is_restricted: true },
+      { id: "USINGLE", team_id: TEAM, name: "single", is_ultra_restricted: true },
+      { id: "UBOT2", team_id: TEAM, name: "bot", is_bot: true },
+      { id: "UEXT", team_id: "TOTHER", name: "external", is_stranger: true },
+    ]);
+    expect(await transport.workspaceMember("UFULL")).toEqual({ email: "full@example.com" });
+    for (const id of ["UGUEST", "USINGLE", "UBOT2", "UEXT", "UNKNOWN"]) expect(await transport.workspaceMember(id)).toBeNull();
+  });
+});
+
 describe("gate prompts", () => {
   it("escapes broadcasts in gate titles and bodies", async () => {
     const transport = makeTransport();
@@ -968,6 +992,24 @@ describe("gate prompts", () => {
       type: "section",
       text: { type: "mrkdwn", text: "Ask &lt;!here> to review." },
     });
+  });
+
+  it("shortens a button label to Slack's 75-character limit, keeping the action id", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-long", title: "Pick one", actions: [{ id: "long", label: "x".repeat(80) }] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    const button = blocks.find((b: { type: string }) => b.type === "actions").elements[0];
+    expect(button.text.text.length).toBeLessThanOrEqual(75);
+    expect(button.action_id).toBe("long");
+  });
+
+  it("sends an open question with no actions block, which Slack would reject empty", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-open", title: "Which repo?", actions: [] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    expect(blocks.map((b: { type: string }) => b.type)).toEqual(["header"]);
   });
 
   it("posts the gate under the turn that raised it, with the gate id in the button", async () => {

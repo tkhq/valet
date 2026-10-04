@@ -1,3 +1,4 @@
+import { linearEventArmBlock } from "../linear-ingress.js";
 /**
  * Workflow definitions mirrored from a repository, on the rail
  * `content-sync/collector.ts` defines. Read that file first: it states the
@@ -52,6 +53,7 @@ import {
   hasUnsettledWorkflowRun,
   newWorkflowId,
   purgeWorkflowRows,
+  revokeWorkflowGrants,
 } from "../../workflows/service.js";
 import { nextFireAt } from "../../workflows/schedule-service.js";
 import {
@@ -63,7 +65,6 @@ import type { OnePasswordService } from "../onepassword.js";
 import { toolNodesOf, workflowCallsOf } from "../../workflows/tool-nodes.js";
 import { validateSubscriptionWrite } from "../../events/subscription-write.js";
 import type { SubscriptionFilter } from "../../events/match.js";
-import type { SkillTreeEntry } from "../skill-repo-reader.js";
 import type {
   CollectorDiscoverContext,
   CollectorNoticeContext,
@@ -258,6 +259,7 @@ class WorkflowPass implements CollectorPass {
     /** Files whose readiness check failed. Left as they were, and reported
      * deferred so the next poll checks them again at this commit. */
     const unchecked: string[] = [];
+    const ingressPending: string[] = [];
 
     const incoming = new Map<string, { file: WorkflowFile; plan: TriggerPlan }>();
     for (const candidate of this.candidates) {
@@ -303,6 +305,7 @@ class WorkflowPass implements CollectorPass {
       // it must not disarm a trigger that was armed: the file is left as it
       // was and deferred, so the next poll checks it again.
       let gated: string | null;
+      let ingressPlan = parsed.plan;
       try {
         gated = await teamTriggerGate(
           { db, credentials: this.credentials, plugins: this.plugins, onePassword: this.onePassword },
@@ -310,6 +313,16 @@ class WorkflowPass implements CollectorPass {
           parsed.file,
           definitions,
         );
+        if (gated === null) {
+          const ingressBlocked = await linearEventArmBlock(db,this.credentials,source.orgId,
+            parsed.plan.subscriptions.flatMap(subscription => subscription.eventKeys));
+          if (ingressBlocked) {
+            warnings.push(`${candidate.path}: Linear event triggers remain off. ${ingressBlocked} Valet checks again on the next sync.`);
+            ingressPending.push(candidate.path);
+            ingressPlan = { ...parsed.plan, subscriptions: parsed.plan.subscriptions.filter(subscription =>
+              !subscription.eventKeys.some(key => key.startsWith("linear."))) };
+          }
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         warnings.push(
@@ -320,7 +333,7 @@ class WorkflowPass implements CollectorPass {
       }
       if (gated !== null) warnings.push(`${candidate.path}: ${gated}`);
 
-      plans.set(candidate.path, gated === null ? parsed.plan : NO_TRIGGERS);
+      plans.set(candidate.path, gated === null ? ingressPlan : NO_TRIGGERS);
     }
 
     return async (db) => {
@@ -372,6 +385,11 @@ class WorkflowPass implements CollectorPass {
           );
         }
         if (row.contentSha === candidate.blobSha && row.name === name) continue;
+        const stepsChanged = canonicalJson(parsed.file.definition) !== canonicalJson(row.definition);
+        // A repository commit is not an approver's edit. Revoke before the
+        // write, as the product edit path does, so no run starts on the new
+        // steps under the old grant.
+        if (stepsChanged) await revokeWorkflowGrants(db, source.orgId, row.id);
         await db
           .update(workflowDefinitions)
           .set({
@@ -381,7 +399,7 @@ class WorkflowPass implements CollectorPass {
             updatedAt: now(),
           })
           .where(eq(workflowDefinitions.id, row.id));
-        if (canonicalJson(parsed.file.definition) !== canonicalJson(row.definition)) {
+        if (stepsChanged) {
           await snapshot(
             db,
             row.id,
@@ -406,7 +424,7 @@ class WorkflowPass implements CollectorPass {
           deleted: 0,
           keptStale: stale.map((row) => row.name),
           warnings,
-          deferred: unchecked,
+          deferred: [...unchecked, ...ingressPending],
         };
       }
 
@@ -460,7 +478,7 @@ class WorkflowPass implements CollectorPass {
         deleted,
         keptStale: [],
         warnings,
-        deferred: [...disarmed, ...unchecked],
+        deferred: [...disarmed, ...unchecked, ...ingressPending],
       };
     };
   }

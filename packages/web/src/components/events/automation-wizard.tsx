@@ -1,3 +1,6 @@
+import { AutomationReview } from "./automation-review";
+import { parseSlackThreadLink } from "./slack-thread-preset";
+import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
 /**
  * AutomationWizard — one flow for the creation surfaces that used to be
  * separate: an event subscription, a workflow event trigger, and a schedule.
@@ -29,8 +32,31 @@
  * rule needs no separate event-trigger endpoint.
  */
 import { Link } from "@tanstack/react-router";
+import type {
+  EventSubscriptionAudienceWire,
+  EventSubscriptionCollisionsWire,
+  EventSubscriptionFilterWire,
+} from "@valet/api/wire";
 import { useEffect, useRef, useState } from "react";
-import { useDebouncedValue } from "~/hooks/use-debounced-value";
+import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
+import { useIdentityLinks } from "~/api/queries";
+import { useTeams } from "~/api/settings";
+import { useCreateSchedule, useWorkflows } from "~/api/workflows";
+import { CollisionNotice, collisionsFromError } from "~/components/events/collision-notice";
+import {
+  FilterEditor,
+  incompleteFilterRow,
+  NO_CHANNEL_MATCH_HELP,
+  pruneFilterRows,
+  toWireFilters,
+  type FilterField,
+  type UiFilterRow,
+} from "~/components/events/filter-editor";
+import {
+  PromptFields,
+  promptFieldsToTarget,
+  type PromptFieldsValue,
+} from "~/components/events/prompt-fields";
 import {
   Button,
   Dialog,
@@ -41,38 +67,12 @@ import {
   Label,
   LoadingRow,
 } from "~/components/primitives";
-import type {
-  EventSubscriptionAudienceWire,
-  EventSubscriptionCollisionsWire,
-  EventSubscriptionFilterWire,
-} from "@valet/api/wire";
-import { CollisionNotice, collisionsFromError } from "~/components/events/collision-notice";
-import {
-  PromptFields,
-  promptFieldsToTarget,
-  type PromptFieldsValue,
-} from "~/components/events/prompt-fields";
-import {
-  FilterEditor,
-  incompleteFilterRow,
-  pruneFilterRows,
-  toWireFilters,
-  type FilterField,
-  type UiFilterRow,
-  NO_CHANNEL_MATCH_HELP,
-} from "~/components/events/filter-editor";
-import { useAssistants } from "~/api/assistants";
-import { assistantLabel } from "~/components/session/assistant-rail";
-import { orchestratorName } from "~/lib/assistant-name";
-import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
-import { useIdentityLinks } from "~/api/queries";
-import { useCreateSchedule, useWorkflows } from "~/api/workflows";
-import { useTeams } from "~/api/settings";
+import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
-import { hasChannelScopeFilter, SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { useActiveWorkspace } from "~/components/workspace-clause";
+import { hasChannelScopeFilter, SLACK_APP_MENTION } from "~/lib/slack-mention";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */
 interface SelectedChannel {
@@ -81,21 +81,13 @@ interface SelectedChannel {
 }
 
 /** The outcome the reader picks first. It decides the steps and the store. */
-type Outcome = "reply" | "workflow" | "notify" | "advanced" | "schedule";
+type Outcome = "reply" | "workflow" | "notify" | "advanced" | "schedule" | "thread";
 
-/**
- * `assistantId` names WHICH of the owner's assistants answers. Absent means
- * the owner's default, so a reader who never opens the picker gets exactly
- * the behavior the wizard had before it existed.
- *
- * The org branch carries no id: an org-owned assistant is not listable
- * (`canViewSession` admits nobody to an org-owned session), so the org choice
- * can only mean its default.
- */
+/** The workspace that owns the event rule or scheduled prompt. */
 type OrchestratorChoice =
-  | { kind: "orchestrator"; orchestrator: "user"; assistantId?: string }
+  | { kind: "orchestrator"; orchestrator: "user" }
   | { kind: "orchestrator"; orchestrator: "org" }
-  | { kind: "orchestrator"; orchestrator: "team"; teamId: string; assistantId?: string };
+  | { kind: "orchestrator"; orchestrator: "team"; teamId: string };
 
 type TargetChoice = OrchestratorChoice | { kind: "workflow"; workflowId: string };
 
@@ -114,69 +106,6 @@ function initialTarget(scopedTeamId: string | undefined): TargetChoice {
     : { kind: "orchestrator", orchestrator: "user" };
 }
 
-/**
- * The owner's assistants, as a dropdown, when the owner has more than one.
- *
- * Hidden for a single-assistant owner: with nothing to choose between, the
- * control would only ask the reader to confirm the one answer, and the wizard
- * already names that assistant in the radio beside it. Hidden for the org
- * choice too, which has no listable assistants.
- *
- * The empty option is not "none" — it is the owner's default, resolved at
- * delivery. Choosing it stores no id, which is what keeps a rule following a
- * later change of default.
- *
- * Each named row goes through the shared `assistantLabel`, so an unnamed
- * assistant reads here exactly as it reads in the rail, the chat header and
- * the team dashboard: a seeded default is "Default assistant", not "Untitled
- * assistant".
- */
-function AssistantSelect({
-  owner,
-  value,
-  onChange,
-  required = false,
-}: {
-  /** No id for the user case: the list route returns only the CALLER's own
-   * user-owned assistants, so `type === "user"` already names one person. */
-  owner: { type: "user" } | { type: "team"; id: string };
-  value: string | undefined;
-  onChange: (assistantId: string | undefined) => void;
-  required?: boolean;
-}) {
-  const assistantsQ = useAssistants();
-  const owned = (assistantsQ.data?.assistants ?? []).filter((a) =>
-    owner.type === "user" ? a.owner.type === "user" : a.owner.type === "team" && a.owner.id === owner.id,
-  );
-  if (required && assistantsQ.error) return <ErrorRow>Could not load assistants. Close setup and try again.</ErrorRow>;
-  if (required && !assistantsQ.data) return <LoadingRow />;
-  if (required && owned.length === 0) return <p className="text-sm text-muted">Create a team assistant on the Assistants page, then return here.</p>;
-  if (!required && owned.length < 2) return null;
-  return (
-    <div className="ml-6 mt-1">
-      <select
-        aria-label="Assistant"
-        value={value ?? ""}
-        onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value)}
-        className="w-full min-w-0 truncate min-h-11 rounded border border-line bg-paper px-2 py-1.5 sm:min-h-0 text-sm text-ink"
-      >
-        <option value="">
-          {required ? "Choose an assistant" : owned.find((a) => a.isDefault)?.name?.trim()
-            ? `Default (${owned.find((a) => a.isDefault)?.name})`
-            : orchestratorName(undefined)}
-        </option>
-        {owned.map((a) => (
-          <option key={a.id} value={a.id}>
-            {assistantLabel(a)}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-/** The step labels for one outcome. The reply outcome skips the separate Then
- * step: its single config step holds the assistant choice too. */
 function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
   if (outcome === "reply") {
     return { labels: ["What", "Reply", "Review"], count: 3 };
@@ -201,12 +130,13 @@ export function AutomationWizard({
   const createSchedule = useCreateSchedule();
   const ws = useActiveWorkspace();
   const teamsQ = useTeams();
-  const assistantsQ = useAssistants();
   const scopedTeam = replyTeam ?? (ws?.kind === "team" ? ws.team : undefined);
   const scopedTeamId = scopedTeam?.id;
 
   const [step, setStep] = useState<Step>(replyTeam ? 2 : 1);
   const [outcome, setOutcome] = useState<Outcome>("reply");
+  const [threadLink, setThreadLink] = useState("");
+  const threadPreset = parseSlackThreadLink(threadLink);
   const [name, setName] = useState("");
   const [keys, setKeys] = useState<Set<string>>(new Set());
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
@@ -235,6 +165,7 @@ export function AutomationWizard({
   // no audience at all.
   const [audience, setAudience] = useState<EventSubscriptionAudienceWire>("organization");
   const [follow, setFollow] = useState(true);
+  const [deliveryPreferences, setDeliveryPreferences] = useState<DeliveryPreferencesValue>({ deliveryPolicy: "always", pauseOnOverlap: true });
   const [error, setError] = useState<string | null>(null);
   // The collision report of the last create attempt (TKAI-294).
   // `committed: false` — the server refused (409): show the colliding rules
@@ -286,7 +217,7 @@ export function AutomationWizard({
   // Only the advanced outcome shows the raw multi-event picker. The workflow
   // and notify outcomes still pick one event, but never carry a target the
   // outcome forbids.
-  const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced";
+  const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced" || outcome === "thread";
 
   const filterFields = unionFilterFields(services, keys);
 
@@ -302,8 +233,7 @@ export function AutomationWizard({
 
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
   const targetReady = replyTeam
-    ? !assistantsQ.error && target.kind === "orchestrator" && target.orchestrator === "team" && target.teamId === replyTeam.id &&
-      (assistantsQ.data?.assistants.some((a) => a.id === target.assistantId && a.owner.type === "team" && a.owner.id === replyTeam.id) ?? false)
+    ? target.kind === "orchestrator" && target.orchestrator === "team" && target.teamId === replyTeam.id
     : target.kind === "orchestrator" || workflowChosen;
 
   // Which step the reader is on decides whether Next is allowed. Each gate
@@ -319,6 +249,7 @@ export function AutomationWizard({
       return step === 2 && replyScoped && (!replyTeam || targetReady);
     }
     if (step === 2) {
+      if (outcome === "thread") return threadPreset !== null;
       return isSchedule ? cron.trim().length > 0 : keys.size > 0;
     }
     if (step === 3) return targetReady;
@@ -332,6 +263,13 @@ export function AutomationWizard({
   function next() {
     setError(null);
     setCollisions(null);
+    if (step === 2 && outcome === "thread" && threadPreset) {
+      setKeys(new Set(["slack.message"]));
+      setFilterRows([
+        { id: "thread-channel", field: "channel", op: "eq", value: threadPreset.channel },
+        { id: "thread-timestamp", field: "thread_ts", op: "eq", value: threadPreset.threadTs },
+      ]);
+    }
     setStep((s) => (Math.min(s + 1, plan.count) as Step));
   }
   function back() {
@@ -399,7 +337,7 @@ export function AutomationWizard({
           // The reply step collects the same optional templates the Then step
           // collects for the other assistant outcomes. Empty fields are left
           // off, so the rule posts the target it always did.
-          target: { ...mentionTarget, follow, ...promptFieldsToTarget(promptTemplates) },
+          target: { ...mentionTarget, follow, ...promptFieldsToTarget(promptTemplates), ...(mentionTarget.orchestrator === "user" ? deliveryPreferences : {}) },
           // Only a team assistant has an audience; the server refuses one
           // on any other target.
           ...(mentionTarget.orchestrator === "team" ? { audience } : {}),
@@ -433,9 +371,9 @@ export function AutomationWizard({
       const templates = promptFieldsToTarget(promptTemplates);
       const eventTarget: EventSubscriptionTarget =
         outcome === "notify"
-          ? { ...orchestratorTargetFrom(target), follow: false, ...templates }
+          ? { ...orchestratorTargetFrom(target), follow: false, ...templates, ...(target.kind === "orchestrator" && target.orchestrator === "user" ? deliveryPreferences : {}) }
           : target.kind === "orchestrator"
-            ? { ...target, ...templates }
+            ? { ...target, ...(outcome === "thread" ? { follow: false } : {}), ...templates, ...(target.orchestrator === "user" ? deliveryPreferences : {}) }
             : target;
       createSubscription.mutate(
         {
@@ -469,8 +407,6 @@ export function AutomationWizard({
       // not the workspace. It used to follow the workspace, which quietly
       // overrode a reader who picked "your assistant" inside a team; the
       // wizard opens on the team radio there, so the default is unchanged.
-      // Sending both a team and a personal assistant is worse than quiet: the
-      // server resolves the owner to the team and refuses the assistant.
       // (The workflow target above needs no team: it follows the workflow's
       // own owner.)
       createSchedule.mutate(
@@ -479,10 +415,6 @@ export function AutomationWizard({
           target: {
             kind: "orchestrator",
             prompt: prompt.trim(),
-            // Only when the reader chose one; absent keeps the owner's default.
-            ...(target.orchestrator !== "org" && target.assistantId !== undefined
-              ? { assistantId: target.assistantId }
-              : {}),
           },
           ...(target.orchestrator === "team" ? { teamId: target.teamId } : {}),
         },
@@ -528,7 +460,13 @@ export function AutomationWizard({
             />
           )}
 
-          {step === 2 && isEventOutcome && (
+          {step === 2 && outcome === "thread" && <div className="space-y-2">
+            <Label htmlFor="slack-thread-link">Slack thread link</Label>
+            <Input id="slack-thread-link" value={threadLink} onChange={(event) => setThreadLink(event.target.value)} placeholder="https://your-team.slack.com/archives/…" />
+            <p className="text-xs text-muted">In Slack, copy a message link. Only future human replies in that thread will match. Valet must have access to the channel.</p>
+            {threadLink && !threadPreset && <p role="alert" className="text-xs text-danger-500">Paste a Slack message link from Copy link.</p>}
+          </div>}
+          {step === 2 && isEventOutcome && outcome !== "thread" && (
             <EventMatchStep
               services={services}
               catalogLoading={catalogQ.isLoading}
@@ -569,10 +507,20 @@ export function AutomationWizard({
             />
           )}
 
+          {isLastStep && !isSchedule && target.kind === "orchestrator" && target.orchestrator === "user" && (
+            <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />
+          )}
+
           {isLastStep && (
             <ReviewStep
               name={name}
               onNameChange={setName}
+              following={outcome === "reply" ? follow : outcome === "thread" ? false : undefined}
+              reviewAudience={outcome === "reply" && target.kind === "orchestrator" && target.orchestrator === "team" ? audience : undefined}
+              workflowId={target.kind === "workflow" ? target.workflowId : undefined}
+              when={isSchedule ? `${cron} (${timezone})` : outcome === "reply" ? "Slack @-mention" : [...keys].join(", ")}
+              scope={outcome === "reply" ? (anyChannel ? "Any accessible channel" : replyChannels.map(c => c.label).join(", ")) : isSchedule ? (scopedTeam?.name ?? "Personal") : describeFilters(filterRows) || "All matching events"}
+              destination={describeTarget(target, workflows, teams, scopedTeam)}
               summary={summarize({
                 outcome,
                 keys,
@@ -594,7 +542,7 @@ export function AutomationWizard({
           {collisions !== null && (
             <CollisionNotice report={collisions.report} committed={collisions.committed} />
           )}
-          {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">A matching rule already exists. <Link to="/events" className="underline">Open Events</Link> and select Subscriptions to manage it.</p>}
+          {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">A matching rule already exists. <Link to="/events" search={{ tab: "subscriptions" }} className="underline">Open Subscriptions</Link> to manage it.</p>}
           {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
         </div>
 
@@ -645,6 +593,8 @@ export function AutomationWizard({
 type EventSubscriptionTarget =
   | { kind: "workflow"; workflowId: string }
   | (OrchestratorChoice & {
+      deliveryPolicy?: DeliveryPreferencesValue["deliveryPolicy"];
+      pauseOnOverlap?: boolean;
       follow?: boolean;
       systemPrompt?: string;
       userPromptTemplate?: string;
@@ -659,6 +609,7 @@ function StepHeader({ step, plan }: { step: Step; plan: { labels: string[]; coun
 }
 
 const OUTCOMES: { value: Outcome; title: string; hint: string }[] = [
+  { value: "thread", title: "Subscribe to thread", hint: "Follow future replies in one Slack thread." },
   {
     value: "reply",
     title: "Reply to Slack mentions",
@@ -760,7 +711,7 @@ function ReplyStep({
     <div className="space-y-4">
       <p className="text-xs text-muted">
         {target.orchestrator === "team"
-          ? "This rule uses the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A sender with no linked Slack account is always denied."
+          ? "This rule uses the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A full member of your Slack workspace with no linked account runs as the person who set the rule up. Guests and people from other organizations are denied."
           : <>This rule fires only when <span className="text-ink">you</span> @-mention the app.
             Mentions by other people do not reach {reach}.</>}
       </p>
@@ -796,7 +747,7 @@ function ReplyStep({
       </div>
 
       <div>
-        <p className="mb-1.5 text-xs font-medium text-muted">Which assistant answers</p>
+        <p className="mb-1.5 text-xs font-medium text-muted">Workspace</p>
         <div className="space-y-1.5">
           {!fixedTeam && <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <input
@@ -805,29 +756,18 @@ function ReplyStep({
               checked={target.orchestrator === "user"}
               onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "user" })}
             />
-            Your assistant
+            Personal workspace
           </label>}
-          {target.orchestrator === "user" && (
-            <AssistantSelect
-              owner={{ type: "user" }}
-              value={target.assistantId}
-              onChange={(assistantId) =>
-                onTargetChange({ kind: "orchestrator", orchestrator: "user", assistantId })
-              }
-            />
-          )}
+
           {scopedTeam && (
             <div>
               <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
                 <input type="radio" name="automation-reply-target" disabled={fixedTeam}
                   checked={target.orchestrator === "team"}
                   onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })} />
-                {scopedTeam.name}&apos;s assistant
+                {scopedTeam.name}
               </label>
-              {target.orchestrator === "team" && (
-                <AssistantSelect required={fixedTeam} owner={{ type: "team", id: scopedTeam.id }} value={target.assistantId}
-                  onChange={(assistantId) => onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id, assistantId })} />
-              )}
+
             </div>
           )}
           {!fixedTeam && <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
@@ -869,7 +809,7 @@ function ReplyStep({
             Either way, the assistant answers explicit mentions in the selected channels, and
             everyone in those channels sees the replies. While it keeps following a thread, it
             also reads later messages in a thread it has answered, from anyone in that thread.
-            A sender outside the team cannot see or change the assistant's sessions, settings,
+            A sender outside the team cannot see or change the assistant's threads, settings,
             or credentials, but whatever they ask it to do runs with the team's access and
             tools. It answers questions and runs its tools. It does not run or change the
             team's workflows for senders outside the team.
@@ -1274,17 +1214,9 @@ function ThenStep({
               checked={target.kind === "orchestrator" && target.orchestrator === "user"}
               onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "user" })}
             />
-            Notify your assistant
+            Notify your personal workspace
           </label>
-          {target.kind === "orchestrator" && target.orchestrator === "user" && (
-            <AssistantSelect
-              owner={{ type: "user" }}
-              value={target.assistantId}
-              onChange={(assistantId) =>
-                onTargetChange({ kind: "orchestrator", orchestrator: "user", assistantId })
-              }
-            />
-          )}
+
           {/* Only the active workspace's team is offered. Targeting a different
               team is a workspace change, not a form field. */}
           {scopedTeam && (
@@ -1297,23 +1229,10 @@ function ThenStep({
                   onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })
                 }
               />
-              Notify {scopedTeam.name}&apos;s assistant
+              Notify {scopedTeam.name}
             </label>
           )}
-          {scopedTeam && target.kind === "orchestrator" && target.orchestrator === "team" && (
-            <AssistantSelect
-              owner={{ type: "team", id: scopedTeam.id }}
-              value={target.assistantId}
-              onChange={(assistantId) =>
-                onTargetChange({
-                  kind: "orchestrator",
-                  orchestrator: "team",
-                  teamId: scopedTeam.id,
-                  assistantId,
-                })
-              }
-            />
-          )}
+
           <label className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <input
               type="radio"
@@ -1321,7 +1240,7 @@ function ThenStep({
               checked={target.kind === "orchestrator" && target.orchestrator === "org"}
               onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "org" })}
             />
-            Notify the org assistant
+            Notify the organization
           </label>
         </>
       )}
@@ -1394,8 +1313,10 @@ function ThenStep({
 function ReviewStep({
   name,
   onNameChange,
-  summary,
+  summary, when, scope, destination, workflowId, following, reviewAudience,
 }: {
+  following?: boolean; reviewAudience?: string;
+  when: string; scope: string; destination: string; workflowId?: string;
   name: string;
   onNameChange: (v: string) => void;
   summary: string;
@@ -1412,10 +1333,7 @@ function ReviewStep({
           aria-label="Automation name"
         />
       </div>
-      <div className="rounded border border-line bg-ink-wash/40 px-3 py-2">
-        <p className="text-xs font-medium text-muted">Summary</p>
-        <p className="mt-1 text-sm text-ink">{summary}</p>
-      </div>
+      <AutomationReview follow={following} audience={reviewAudience} workflowId={workflowId} when={when} scope={scope} result={summary} destination={destination} />
     </div>
   );
 }

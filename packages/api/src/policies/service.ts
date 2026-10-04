@@ -35,8 +35,9 @@ import type {
   ValetPlugin,
 } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
+import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
+import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
   grantPolicyKey,
   resolvePolicyDecision,
@@ -84,11 +85,14 @@ export function alwaysAllowPolicyId(orgId: string, actionId: string): string {
 }
 
 export interface PolicyRowScope {
+  workflowId?: string;
   orgId: string;
   teamId?: string;
   userId?: string;
   sessionId?: string;
   workflowExecutionId?: string;
+  /** Leave out the session's grants: a newcomer's turn asks again. */
+  externalSender?: boolean;
 }
 
 /**
@@ -129,7 +133,7 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }));
 
   let grants: RuntimeGrantRow[] = [];
-  if (scope.sessionId) {
+  if (scope.sessionId && !scope.externalSender) {
     const rows = await db
       .select()
       .from(runtimeGrants)
@@ -172,7 +176,22 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
     }));
   }
 
-  return { policies, grants, overrides };
+  let workflowId = scope.workflowId;
+  if (!workflowId && scope.workflowExecutionId) {
+    const [run] = await db.select({ workflowId: workflowRuns.workflowId }).from(workflowRuns)
+      .innerJoin(workflowDefinitions, and(eq(workflowDefinitions.id, workflowRuns.workflowId), eq(workflowDefinitions.orgId, scope.orgId)))
+      .where(eq(workflowRuns.id, scope.workflowExecutionId)).limit(1);
+    workflowId = run?.workflowId;
+  }
+  const workflowGrants = workflowId ? await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId })
+    .from(workflowActionGrants)
+    .innerJoin(workflowDefinitions, and(eq(workflowDefinitions.id, workflowActionGrants.workflowId),
+      eq(workflowDefinitions.orgId, scope.orgId), eq(workflowDefinitions.ownerType, workflowActionGrants.ownerType),
+      eq(workflowDefinitions.ownerId, workflowActionGrants.ownerId)))
+    .where(and(eq(workflowActionGrants.orgId, scope.orgId), eq(workflowActionGrants.workflowId, workflowId),
+      eq(workflowActionGrants.ownerType, teamId ? "team" : "user"),
+      eq(workflowActionGrants.ownerId, teamId ?? scope.userId ?? ""))) : [];
+  return { policies, grants, overrides, workflowGrants };
 }
 
 function toGrantRow(r: {
@@ -204,6 +223,7 @@ export interface ResolveActionPolicyInput {
   workflowExecutionId?: string;
   pluginDefault: ApprovalMode | undefined;
   now: number;
+  externalSender?: boolean;
 }
 
 /**
@@ -218,6 +238,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
     userId: input.userId,
     sessionId: input.sessionId,
     workflowExecutionId: input.workflowExecutionId,
+    ...(input.externalSender ? { externalSender: true } : {}),
   });
   return resolvePolicyDecision(
     rows,
@@ -429,6 +450,7 @@ export interface AuditInvocationRow {
   matchedOverrideId?: string | null;
   status?: PolicyInvocationRecord["status"] | null;
   sessionId?: string | null;
+  threadId?: string | null;
   workflowExecutionId?: string | null;
   userId?: string | null;
   orgId?: string | null;
@@ -471,6 +493,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         matchedOverrideId: row.matchedOverrideId ?? null,
         status: row.status ?? null,
         sessionId: row.sessionId ?? null,
+        threadId: row.threadId ?? null,
         workflowExecutionId: row.workflowExecutionId ?? null,
         userId: row.userId ?? null,
         orgId: row.orgId ?? null,
@@ -606,6 +629,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         sessionId: input.sessionId,
         pluginDefault: pluginDefaultFor(input.service),
         now: clock(),
+        ...(input.externalSender ? { externalSender: true } : {}),
       });
 
       if (decision.mode !== "require_approval") return decision;
@@ -685,6 +709,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         matchedOverrideId: record.provenance.matchedOverrideId ?? null,
         status: record.status,
         sessionId: record.sessionId,
+        threadId: record.threadId,
         workflowExecutionId: null,
         userId: record.userId ?? null,
         orgId: record.orgId ?? null,
@@ -694,6 +719,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         durationMs,
         startedAt,
       });
+      await recordActionChannelMessage(deps.db, record);
     },
   };
 }

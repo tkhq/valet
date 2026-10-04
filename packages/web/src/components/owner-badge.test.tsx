@@ -10,41 +10,18 @@
  * has no reason to mount. `search` is serialized onto the stub so a test can
  * read the query the badge would navigate with.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import type { ListTeamsResponse } from "@valet/api/wire";
 import type { ReactNode } from "react";
-import type { ListAssistantsResponse, ListTeamsResponse } from "@valet/api/wire";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "~/components/primitives";
 
 let teamsData: ListTeamsResponse = { teams: [] };
-/** The badge links by assistant id, so it needs the list that maps an owner
- * to one. A team with no listed assistant has nothing to link to. */
-function teamAssistants(): ListAssistantsResponse {
-  return {
-    assistants: [
-      {
-        id: "asst_team_1",
-        owner: { type: "team", id: "team_1" },
-        sessionId: "assistant:asst_team_1",
-        isDefault: true,
-        createdAt: 1,
-      },
-    ],
-  };
-}
-let assistantsData: ListAssistantsResponse = teamAssistants();
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
 }));
 
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({ data: assistantsData, isLoading: false, error: null }),
-  };
-});
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
@@ -89,7 +66,6 @@ function show(ownerType: "user" | "team" | "org", ownerId: string) {
 
 beforeEach(() => {
   teamsData = { teams: [] };
-  assistantsData = teamAssistants();
 });
 
 describe("OwnerBadge", () => {
@@ -134,17 +110,16 @@ describe("OwnerBadge", () => {
     const link = container.querySelector("a");
     expect(link?.getAttribute("to")).toBe("/chat");
     expect(JSON.parse(link?.getAttribute("data-search") ?? "null")).toEqual({
-      assistant: "asst_team_1",
+      workspace: "team_1",
     });
   });
 
   it("still names the owner when the team has no assistant to link to", () => {
     teamsData = { teams: [team()] };
-    assistantsData = { assistants: [] };
     const { container } = show("team", "team_1");
 
     expect(screen.getByText("Design")).toBeTruthy();
-    expect(container.querySelector("a")).toBeNull();
+    expect(container.querySelector("a")?.getAttribute("to")).toBe("/chat");
   });
 
   it("names the destination on hover", () => {
@@ -155,6 +130,6 @@ describe("OwnerBadge", () => {
     expect(link).not.toBeNull();
     fireEvent.focus(link as HTMLAnchorElement);
 
-    expect(screen.getAllByText("Open Design's assistant").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Open Design's threads").length).toBeGreaterThan(0);
   });
 });

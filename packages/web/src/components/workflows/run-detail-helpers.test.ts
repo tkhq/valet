@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowPendingGate } from "@valet/api/wire";
 import {
+  runLabel,
   deriveRunResult,
   findApprovalPrompt,
   findPendingApproval,
@@ -382,5 +383,15 @@ describe("formatRunDuration", () => {
   it("returns undefined when the timestamps cannot give an answer", () => {
     expect(formatRunDuration(100, 50)).toBeUndefined();
     expect(formatRunDuration(Number.NaN, 50)).toBeUndefined();
+  });
+});
+
+describe("runLabel", () => {
+  const at = new Date(2026, 8, 30, 14, 2).getTime();
+  it("names what started the run instead of the raw id", () => {
+    expect(runLabel({ createdAt: at, actorUserId: "u1" })).toMatch(/^Manual run · /);
+    expect(runLabel({ createdAt: at })).toMatch(/^Automatic run · /);
+    expect(runLabel({ createdAt: at, parentRunId: "wfrun_parent", parentIteration: 2 })).toMatch(/^Batch run 3 · /);
+    expect(runLabel({ createdAt: at })).not.toContain("wfrun");
   });
 });

@@ -4,7 +4,7 @@ Do NOT add "Co-Authored-by" trailers mentioning AI models in commits, PRs, or co
 
 ## What this is
 
-Valet is a hosted background coding agent platform. The current (v2) stack: `packages/api` (Hono on Node) hosts `@valet/engine` (portable agent loop over pi-agent-core); sessions run in sandboxes via pluggable providers (docker in dev, kubernetes in the helm deploy, local/virtual in tests); state lives in Postgres (`store-postgres` — embedded PGlite in dev); `packages/web` is the client. Per-user orchestrators are themselves full agent sessions.
+Valet is a hosted background coding agent platform. The current (v2) stack: `packages/api` (Hono on Node) hosts `@valet/engine` (portable agent loop over pi-agent-core); sessions run in sandboxes via pluggable providers (docker in dev, kubernetes in the helm deploy, local/virtual in tests); state lives in Postgres (`store-postgres` — embedded PGlite in dev); `packages/web` is the client. Each personal or team workspace has one orchestrator, backed by a full agent session.
 
 The legacy stack (`packages/worker`/`client`/`runner`, `backend/`, Cloudflare + Modal) is frozen for the existing prod deploy and slated for deletion — don't build on it. Worker deploys pin commit `35b398e5`; `packages/worker` is excluded from root `pnpm typecheck` (check it in isolation if ever needed).
 
@@ -101,7 +101,7 @@ This section governs new and edited prose. Do not rewrite existing documents who
 2. **Pluggable providers** — `SessionStore` and `SandboxProvider` swap behind engine contracts with shared conformance suites.
 3. **REST is authoritative for thread history** — `GET /api/sessions/:id/messages`. The WS `init` event is metadata-only; never add messages back to it.
 4. **Plugins self-describe** — one `ValetPlugin` manifest per `packages/plugin-*`, exported from `./plugin`; `make generate-registries` regenerates `packages/api/src/plugins/registry.gen.ts` from `plugin.yaml` (`v2: true`).
-5. **Orchestrators are full agent sessions** — well-known id `orchestrator:{userId}`, spawning children through the same engine APIs.
+5. **Orchestrators are full agent sessions** — one runtime per personal or team workspace, resolved by workspace ownership, spawning children through the same engine APIs.
 6. **Auth is better-auth** — email/password + optional OIDC; `VALET_LOCAL_AUTH=1` is the dev stub (see `docs/specs/2026-07-14-auth-v2-design.md`).
 
 ## Rules learned the hard way
@@ -196,7 +196,7 @@ docs/plans/         # implementation plans
 docs/guides/        # contributor guides — read these before a first change
 ```
 
-- [docs/guides/](docs/guides/README.md) carries the conventions this file only summarizes: which package a new file belongs to, the build order for a change that cuts through the stack, and — for `packages/web` — data fetching, styling, and performance.
+- [docs/guides/](docs/guides/README.md) carries the conventions this file only summarizes: which package a new file belongs to, the build order for a change that cuts through the stack, and — for `packages/web` — data fetching, styling, component reuse, and performance. Before building a UI element, reuse or extend a primitive in `src/components/primitives/` ([components guide](docs/guides/components.md)), and delete the code a change replaces.
 - Web tool renderers (`packages/web/src/components/session/tool-renderers/`) are a registry — new renderer file + list it before the fallback in `index.ts`.
 - Optimistic UI messages must carry the active `threadId` (null + fallback matching leaked bubbles across threads).
 - Superpowers design specs → `docs/specs/YYYY-MM-DD-<topic>-design.md`; plans → `docs/plans/YYYY-MM-DD-<topic>.md`.

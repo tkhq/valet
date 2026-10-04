@@ -73,6 +73,8 @@ describe("buildRunSettledAttention", () => {
     getCheckpoints: async (): Promise<NodeCheckpoint[]> => [
       checkpoint({ nodeId: "call-api", status: "failed", error: "HTTP 500" }),
     ],
+    // No thread started these runs, so attention goes to the run's owner.
+    getRun: async () => null,
   };
 
   beforeAll(async () => {
@@ -158,6 +160,7 @@ describe("buildRunSettledAttention", () => {
       getCheckpoints: async (): Promise<NodeCheckpoint[]> => {
         throw new Error("store unreachable");
       },
+      getRun: async () => null,
     };
 
     await expect(buildRunSettledAttention({ db, store: brokenStore })(settled())).resolves.toBeUndefined();
@@ -300,9 +303,9 @@ describe("buildRunThreadArchive", () => {
 });
 
 describe("workflowApprovalHref", () => {
-  it("deep-links to the action-required tab and encodes the gate target", () => {
+  it("deep-links to the run and encodes the gate target", () => {
     expect(workflowApprovalHref("run/1", "approve me")).toBe(
-      "/workflows?tab=action-required&run=run%2F1&gate=approve%20me",
+      "/workflows/runs/run%2F1?gate=approve%20me",
     );
   });
 });

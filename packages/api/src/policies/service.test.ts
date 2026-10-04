@@ -469,6 +469,8 @@ describe("loadPolicyRows", () => {
     expect(rows.policies).toHaveLength(1);
     expect(rows.grants).toHaveLength(1);
     expect(rows.overrides).toHaveLength(1);
+    // A newcomer's turn is not covered by a teammate's session-wide approval.
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION, externalSender: true })).grants).toEqual([]);
   });
 });
 

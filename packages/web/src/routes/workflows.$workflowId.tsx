@@ -1,17 +1,16 @@
-import type { WorkflowDefinitionSummary } from "@valet/api/wire";
-import { blobUrl } from "~/lib/blob-url";
-import { useMemo, useState } from "react";
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
-import { MoreHorizontal, ShieldAlert } from "lucide-react";
-import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
+import { runLabel } from "~/components/workflows/run-detail-helpers";
 import type {
   GetWorkflowPermissionsResponse,
-  ListWorkflowRunsResponse,
-  WorkflowNodePermissionWire,
+  ListWorkflowRunsResponse, WorkflowDefinitionSummary, WorkflowNodePermissionWire
 } from "@valet/api/wire";
+import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
+import { MoreHorizontal } from "lucide-react";
+import { useMemo, useState } from "react";
 import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
+  useRevokeWorkflowPermissions,
   useCopyWorkflow,
   useStartRun,
   useUpdateWorkflow,
@@ -22,17 +21,6 @@ import {
   useWorkflowVersions,
   type UpdateWorkflowMutation,
 } from "~/api/workflows";
-import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
-import { ChangeOrchestratorDialog } from "~/components/workflows/change-orchestrator-dialog";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
-import { Editor } from "~/components/workflows/editor/editor";
-import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
-import { TriggersPanel } from "~/components/workflows/triggers-drawer";
-import { WorkflowPreview } from "~/components/workflows/preview";
-import { RiskBadge } from "~/components/workflows/risk-badge";
-import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
-import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import {
   Button,
   ConfirmDialog,
@@ -45,10 +33,22 @@ import {
   DropdownMenuTrigger,
   Spinner,
 } from "~/components/primitives";
+import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
+import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
+import { Editor } from "~/components/workflows/editor/editor";
+import { WorkflowPreview } from "~/components/workflows/preview";
+import { RiskBadge } from "~/components/workflows/risk-badge";
+import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
+import { TriggersPanel } from "~/components/workflows/triggers-drawer";
+import type { TriggerKind } from "~/components/workflows/trigger-dialog";
+import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
+import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
+import { blobUrl } from "~/lib/blob-url";
+import { cn } from "~/lib/cn";
 import { errorText, validationMessages } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { runCountLabel } from "~/lib/run-count";
-import { cn } from "~/lib/cn";
+import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 
 /**
  * `/workflows/$workflowId` — the visual editor page (plan decision 11):
@@ -59,19 +59,26 @@ import { cn } from "~/lib/cn";
  */
 export const Route = createFileRoute("/workflows/$workflowId")({
   component: WorkflowEditorRoute,
+  // `newTrigger` comes from the new-workflow dialog: the workflow was just
+  // created to run on a schedule or an event, so its trigger form opens next.
+  validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind } => ({
+    newTrigger: search.newTrigger === "schedule" || search.newTrigger === "event" ? search.newTrigger : undefined,
+  }),
 });
 
 function WorkflowEditorRoute() {
   const { workflowId } = Route.useParams();
-  return <WorkflowEditorPage workflowId={workflowId} />;
+  const { newTrigger } = Route.useSearch();
+  return <WorkflowEditorPage workflowId={workflowId} newTrigger={newTrigger} />;
 }
 
-export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
+export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: string; newTrigger?: TriggerKind }) {
   const { data, isLoading, error } = useWorkflow(workflowId);
+  useAdoptWorkspaceScope(data ? { type: data.ownerType, id: data.ownerId } : undefined);
   const update = useUpdateWorkflow(workflowId);
   const startRun = useStartRun(workflowId);
   const runsQ = useWorkflowRuns(workflowId);
-  const permissionsQ = useWorkflowPermissions(workflowId);
+  const permissionsQ = useWorkflowPermissions(workflowId, { refetchInterval: 3000 });
   const allowPermissions = useAllowWorkflowPermissions(workflowId);
   const navigate = useNavigate();
 
@@ -111,8 +118,10 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
       startRun={startRun}
       runsQuery={runsQ}
       permissions={permissionsQ.data}
+      permissionsError={permissionsQ.error}
       allowPermissions={allowPermissions}
       navigate={navigate}
+      newTrigger={newTrigger}
     />
   );
 }
@@ -134,9 +143,13 @@ function WorkflowEditorPane({
   startRun,
   runsQuery,
   permissions,
+  permissionsError,
   allowPermissions,
   navigate,
+  newTrigger,
 }: {
+  /** Open the Triggers drawer on a new trigger of this kind (from the create dialog). */
+  newTrigger?: TriggerKind;
   workflowId: string;
   initialName: string;
   initialDefinition: WorkflowDefinition;
@@ -152,22 +165,22 @@ function WorkflowEditorPane({
     error: unknown;
   };
   permissions?: GetWorkflowPermissionsResponse;
+  permissionsError?: unknown;
   allowPermissions: ReturnType<typeof useAllowWorkflowPermissions>;
   navigate: ReturnType<typeof useNavigate>;
 }) {
   // Right-side drawer: runs list / version history / triggers. Header
   // buttons toggle it — the old bottom collapsible was invisible under a
   // full-height canvas ("no way to view the list of runs").
-  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(null);
+  const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(newTrigger ? "triggers" : null);
   // The assistant is the editor's right-hand column, not one of the overlay
   // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
   // its own: describing a change is the primary way to edit a workflow, so
   // the conversation is on screen from the moment the editor is.
-  const scope = useWorkspaceScope();
-  const [changeOrchestrator, setChangeOrchestrator] = useState(false);
+  const revokePermissions = useRevokeWorkflowPermissions(workflowId);
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
-  const assistant = useWorkflowAssistant(workflowId, initialName, { assistantId: initialDefinition.assistantId, ownerType, ownerId });
+  const assistant = useWorkflowAssistant(workflowId, initialName, { ownerType, ownerId });
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
   useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
@@ -184,6 +197,7 @@ function WorkflowEditorPane({
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
   const [preapproveOpen, setPreapproveOpen] = useState(false);
+  const [reviewedActions, setReviewedActions] = useState<WorkflowNodePermissionWire[]>([]);
   // The last pre-approval's leftovers: gating actions an org policy keeps
   // gated, which only an org admin can change. Shown until the next attempt.
   const [blockedActions, setBlockedActions] = useState<{ actionId: string; reason: string }[]>([]);
@@ -261,13 +275,13 @@ function WorkflowEditorPane({
     // Reopening starts a fresh attempt: drop the previous attempt's blocked
     // notice, or it reads as this attempt's result. Clearing on CLOSE would
     // never show the notice at all — a confirm sets it and then closes.
-    if (open) setBlockedActions([]);
+    if (open) { setBlockedActions([]); setReviewedActions(gatingActions); }
   }
 
   async function handlePreapprove() {
     let result;
     try {
-      result = await allowPermissions.mutateAsync();
+      result = await allowPermissions.mutateAsync(reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []));
     } catch {
       // `allowPermissions.error` renders the message inside the dialog.
       return;
@@ -307,33 +321,9 @@ function WorkflowEditorPane({
           >
             Triggers
           </Button>
-          {gatingActions.length > 0 && (ownerType === "team" ? (
-            <Link to="/settings/policies" onClick={() => scope.setKey(ownerId)} className="text-xs underline" title="A team admin can change approval rules in Team Policies.">Team Policies · {gatingActions.length} actions need approval (team admin manages rules)</Link>
-          ) : (
-            <button
-              type="button"
-              data-testid="workflow-gate-badge"
-              onClick={() => setPreapproveDialog(true)}
-              title="Some actions pause a run for approval. Pre-approve them to run this workflow unattended."
-              className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-full sm:min-h-0 bg-warning-wash px-2.5 py-1 text-xs font-medium text-warning-fg hover:opacity-80 focus-visible:ring-2 focus-visible:ring-accent-500/40"
-            >
-              <ShieldAlert className="h-3.5 w-3.5" aria-hidden />
-              {gatingActions.length === 1
-                ? "1 action needs approval"
-                : `${gatingActions.length} actions need approval`}
-            </button>
-          ))}
-          {changeOrchestrator && (
-            <ChangeOrchestratorDialog
-              key={`${workflowId}:${ownerType}:${ownerId}`}
-              definition={initialDefinition}
-              ownerType={ownerType}
-              ownerId={ownerId}
-              save={async (definition) => { await update.mutateAsync({ definition }); }}
-              close={() => setChangeOrchestrator(false)}
-            />
-          )}
-          {mirrored && (
+
+
+      {mirrored && (
             <Button
               size="sm"
               variant="secondary"
@@ -361,7 +351,6 @@ function WorkflowEditorPane({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {!mirrored && <DropdownMenuItem disabled={unsaved || update.isPending} onSelect={() => setChangeOrchestrator(true)}>Change orchestrator{unsaved ? " (save or cancel edits first)" : ""}</DropdownMenuItem>}
               <DropdownMenuItem onSelect={() => setDrawer((d) => (d === "history" ? null : "history"))}>
                 Version history
               </DropdownMenuItem>
@@ -378,6 +367,27 @@ function WorkflowEditorPane({
           </DropdownMenu>
         </div>
       </div>
+
+      <details className="shrink-0 border-b border-line px-3 py-2 lg:px-6">
+        <summary className="cursor-pointer text-sm text-muted">
+          Permissions · {permissionsError ? "Unable to check" : !permissions ? "Checking…" : `${gatingActions.length} need approval · ${permissions.nodes.filter((node) => node.mode === "deny").length} blocked · ${permissions.nodes.filter((node) => node.mode === "unknown").length} checked at runtime`}
+        </summary>
+        <div className="mt-2 space-y-2 text-xs">
+          {permissionsError ? <p role="alert">Could not check permissions. Refresh before running.</p> : !permissions ? <p>Checking workflow actions…</p> : <>
+            {permissions.nodes.length === 0 && <p>No direct tool permissions detected. Agent and nested workflow actions are checked when they run.</p>}
+            <ul className="max-h-48 overflow-auto divide-y divide-line">{permissions.nodes.map((node) => <li key={`${node.nodeId}:${node.actionId ?? node.action}`} className="flex justify-between gap-3 py-2">
+              <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
+              <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
+            </li>)}</ul>
+            <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
+            <div className="flex flex-wrap gap-2">
+              {gatingActions.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              <Button size="sm" variant="ghost" disabled={revokePermissions.isPending} onClick={() => revokePermissions.mutate()}>Reset saved permissions</Button>
+            </div>
+            {revokePermissions.error && <p role="alert">{revokePermissions.error.message}</p>}
+          </>}
+        </div>
+      </details>
 
       {mirrored && (
         <div
@@ -423,18 +433,16 @@ function WorkflowEditorPane({
         />
       )}
 
-      <Dialog open={ownerType !== "team" && preapproveOpen} onOpenChange={setPreapproveDialog}>
+      <Dialog open={preapproveOpen} onOpenChange={setPreapproveDialog}>
         <DialogContent
           title="Pre-approve actions"
           description={
-            "Each action below pauses a run until someone approves it. " +
-            "Pre-approving writes an allow override for your user. The override applies to " +
-            "every workflow and session you run, not only this workflow. Remove it any time " +
-            "under Settings → Policy overrides."
+            "Allow these actions for future runs of this workflow. Other workflows and chats keep their permissions. " +
+            "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
         >
           <ul className="flex flex-col gap-1.5 py-1" data-testid="preapprove-actions">
-            {gatingActions.map((action) => (
+            {reviewedActions.map((action) => (
               <li key={action.actionId} className="flex items-center gap-2 text-sm text-ink">
                 <span className="truncate font-mono text-xs">{action.actionId}</span>
                 {action.riskLevel && <RiskBadge level={action.riskLevel} />}
@@ -453,9 +461,9 @@ function WorkflowEditorPane({
             >
               {allowPermissions.isPending
                 ? "Pre-approving…"
-                : gatingActions.length === 1
+                : reviewedActions.length === 1
                   ? "Pre-approve 1 action"
-                  : `Pre-approve ${gatingActions.length} actions`}
+                  : `Pre-approve ${reviewedActions.length} actions`}
             </Button>
           </DialogFooter>
           {allowPermissions.error != null && (
@@ -492,7 +500,7 @@ function WorkflowEditorPane({
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
         {drawer === "triggers" && (
           <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
-            <TriggersPanel workflowId={workflowId} />
+            <TriggersPanel workflowId={workflowId} startNew={newTrigger} />
           </DrawerShell>
         )}
         {drawer === "history" && (
@@ -591,7 +599,7 @@ function RunsDrawer({
               >
                 {r.needsApproval ? "needs approval" : (r.outcome ?? r.status)}
               </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">{r.runId}</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-ink" title={r.runId}>{runLabel(r)}</span>
               <span className="shrink-0 text-[10px] text-muted">{relativeTime(r.createdAt)}</span>
             </Link>
           </li>

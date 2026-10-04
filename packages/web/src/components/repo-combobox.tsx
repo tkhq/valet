@@ -1,8 +1,6 @@
 /**
  * The GitHub repo picker: a filter-as-you-type combobox over `GET /api/repos`
- * (`useRepos` in `~/api/repos`). Extracted from `new-session-dialog.tsx` so
- * the security hub's "New review" card and the new-session dialog share one
- * picker instead of two drifting copies.
+ * (`useRepos` in `~/api/repos`), used by the security hub's "New review" card.
  */
 import { useEffect, useRef, useState } from "react";
 import type { GetReposResponse } from "@valet/api/wire";

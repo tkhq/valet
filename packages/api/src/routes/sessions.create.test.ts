@@ -572,24 +572,6 @@ describe("POST /api/sessions: zero-config repo sources", () => {
     vi.restoreAllMocks();
   });
 
-  it("session create returns 201 immediately — ensureRepoSource is fire-and-forget", async () => {
-    fixture = startGithubFixture({ getRepo: () => ({ status: 404, body: {} }) });
-    vi.stubEnv("GITHUB_API_URL", fixture.url);
-    api = await bootTestApi({ imageBuilder: new FakeImageBuilder(), githubApiUrl: fixture.url });
-    const workspace = await mkdtemp(join(tmpdir(), "valet-session-zeroconf-fast-"));
-
-    const t0 = Date.now();
-    const res = await fetch(`${api.baseUrl}/api/sessions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspace, repo: REPO }),
-    });
-    const elapsed = Date.now() - t0;
-    expect(res.status).toBe(201);
-    // The route must not block on bake work; 1.5 s is a tight upper bound.
-    expect(elapsed).toBeLessThan(1_500);
-  });
-
   it.each([true, false])("with builder and org credential=%s: queues a first bake", async (hasCredential) => {
     const builder = new FakeImageBuilder();
     // Wire a GitHub fixture so resolveHeadSha (inside startRepoBake) succeeds

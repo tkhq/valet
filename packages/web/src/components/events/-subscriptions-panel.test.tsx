@@ -1,24 +1,21 @@
 // @vitest-environment jsdom
 /**
- * The subscriptions panel and the activity feed both ask for the workspace
- * the nav's switcher names (small-fixes design, decisions 1 and 2). These
- * cases pin the OWNER each list requests, which is the whole of the change:
- * the panel scopes hard, and the feed scopes only while its filter reads
- * "This workspace".
+ * The subscriptions panel asks for the workspace the nav's switcher names
+ * (small-fixes design, decisions 1 and 2). These cases pin the OWNER the list
+ * requests. The Log's own scope cases live in `event-log.test.tsx`.
  *
  * `~/api/events` is mocked to record the arguments its hooks receive,
  * following the same isolate-from-the-network pattern as the page suite in
  * `routes/-events.test.tsx`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
 import type {
   EventSubscriptionWire,
-  ListAssistantsResponse,
   TeamSummary,
   WorkflowDefinitionSummary,
 } from "@valet/api/wire";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OwnerFilter } from "~/api/client";
 import { TooltipProvider } from "~/components/primitives";
 
@@ -69,37 +66,18 @@ const catalogData = {
   ],
 };
 
-const eventsData = { events: [] };
 
 /** The owner each hook was last called with. `undefined` is a real answer
  * here — it is what an unscoped list sends — so a separate "was it called"
  * flag keeps the two apart. */
 let subscriptionsOwner: OwnerFilter | undefined;
-let feedOwner: OwnerFilter | undefined;
-let feedCalls = 0;
-/** Whether each query was allowed to run on the last render. */
-let feedEnabled: boolean | undefined;
+/** Whether the subscriptions query was allowed to run on the last render. */
 let subscriptionsEnabled: boolean | undefined;
-/** One stable spy, so a case can assert that Refresh did NOT fetch. */
-const feedRefetch = vi.fn();
+const openAssistant = vi.fn();
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }) }));
 
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
-  useEvents: (_params: unknown, owner?: OwnerFilter, opts?: { enabled?: boolean }) => {
-    feedOwner = owner;
-    feedCalls += 1;
-    feedEnabled = opts?.enabled;
-    // A held query has no data, which is what react-query answers while
-    // `enabled` is false.
-    const held = opts?.enabled === false;
-    return {
-      data: held ? undefined : eventsData,
-      isPending: held,
-      isFetching: false,
-      error: null,
-      refetch: feedRefetch,
-    };
-  },
   useEventSubscriptions: (owner?: OwnerFilter, opts?: { enabled?: boolean }) => {
     subscriptionsOwner = owner;
     subscriptionsEnabled = opts?.enabled;
@@ -124,17 +102,6 @@ vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
 }));
 
-/** The assistants the caller can see. A row badges one of these, so an empty
- * list is the unresolved case. Mutable per case, reset in `beforeEach`. */
-let assistantsData: ListAssistantsResponse = { assistants: [] };
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({ data: assistantsData, isLoading: false, error: null }),
-  };
-});
-
 // The assistant badge links to the assistant editor, and the real `Link`
 // wants a router this suite has no reason to mount. `params` is serialized
 // so a case can read the assistant a badge navigates to.
@@ -148,14 +115,14 @@ vi.mock("@tanstack/react-router", () => ({
     params?: unknown;
     [key: string]: unknown;
   }) => (
-    <a data-params={JSON.stringify(params)} {...rest}>
+    <a data-params={JSON.stringify(params)} data-search={JSON.stringify(rest.search)} {...rest}>
       {children}
     </a>
   ),
 }));
 
 // The caller's identity, mutable per case: undefined is the frame before
-// `useMe` lands, which is what the feed's scope gate has to survive.
+// `useMe` lands, which is what the panel's scope gate has to survive.
 let meId: string | undefined = "u1";
 // Whether `useMe` has FAILED rather than being in flight. `useListOwner`
 // answers undefined for both, so this flag is the only thing that tells a
@@ -190,18 +157,14 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   };
 });
 
-import { EventFeed, type FeedScope } from "./feed";
 import { SubscriptionsPanel } from "./subscriptions-panel";
 
 beforeEach(() => {
   subscriptionsOwner = undefined;
-  feedOwner = undefined;
-  feedCalls = 0;
   subscriptionsData = { subscriptions: [subscription()] };
   workflowsData = { workflows: [] };
-  assistantsData = { assistants: [] };
   teamsData = { teams: [] };
-  feedRefetch.mockClear();
+  openAssistant.mockClear();
 });
 
 afterEach(() => {
@@ -211,6 +174,33 @@ afterEach(() => {
 });
 
 describe("SubscriptionsPanel", () => {
+  it("opens assistant setup with a paused proposal request", () => {
+    render(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Create with Valet" }));
+    expect(openAssistant).toHaveBeenCalledTimes(1);
+    expect(openAssistant).toHaveBeenCalledWith(expect.stringContaining("save a paused proposal for me to review before enabling it"));
+  });
+
+  it("resets the organization filter when the workspace changes", () => {
+    subscriptionsData = { subscriptions: [
+      subscription({ id: "org", name: "Org watch", ownerType: "org", ownerId: "org_1" }),
+      subscription({ id: "team", name: "Team watch", ownerType: "team", ownerId: "t_eng" }),
+      subscription(),
+    ] };
+    const view = render(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    expect(screen.getByText("PR alerts")).toBeTruthy();
+    expect(screen.queryByText("Team watch")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
+    expect(screen.getByText("Org watch")).toBeTruthy();
+    expect(screen.queryByText("PR alerts")).toBeNull();
+    scopeTeamId = "t_eng";
+    view.rerender(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    expect((screen.getByLabelText("Subscription scope") as HTMLSelectElement).value).toBe("workspace");
+    expect(screen.getByText("Team watch")).toBeTruthy();
+    expect(screen.queryByText("Org watch")).toBeNull();
+    expect(screen.queryByText("PR alerts")).toBeNull();
+  });
+
   it("asks for the caller's own subscriptions in the personal workspace", () => {
     render(
       <TooltipProvider>
@@ -265,7 +255,7 @@ describe("SubscriptionsPanel", () => {
   });
 
   // The header names the active workspace, so the list must not show the
-  // whole org for the frame before `useMe` lands. Same gate as the feed.
+  // whole org for the frame before `useMe` lands. The Log holds the same way.
   it("holds the list until the workspace owner resolves", () => {
     meId = undefined;
     render(
@@ -298,10 +288,9 @@ describe("SubscriptionsPanel", () => {
     ).toBeTruthy();
   });
 
-  // An org-owned subscription belongs to no single workspace. The route
-  // returns it beside every workspace's own rows, and the panel must render
-  // it as manageable in each — it is the only off-switch such a row has.
-  it("lists an org-owned subscription in the personal workspace", () => {
+  // The API includes organization rules. The explicit filter keeps them
+  // manageable without mixing them into workspace-owned rules.
+  it("shows an org-owned subscription only after selecting Organization rules in the personal workspace", () => {
     subscriptionsData = {
       subscriptions: [subscription({ id: "sub_org", name: "Org watch", ownerType: "org", ownerId: "org_1" })],
     };
@@ -310,13 +299,15 @@ describe("SubscriptionsPanel", () => {
         <SubscriptionsPanel />
       </TooltipProvider>,
     );
+    expect(screen.queryByText("Org watch")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
     expect(screen.getByText("Org watch")).toBeTruthy();
     expect(screen.getByText("Org")).toBeTruthy();
     const toggle = screen.getByRole("switch", { name: "Disable Org watch" }) as HTMLButtonElement;
     expect(toggle.disabled).toBe(false);
   });
 
-  it("lists an org-owned subscription in a team workspace too", () => {
+  it("shows an org-owned subscription only after selecting Organization rules in a team workspace", () => {
     scopeTeamId = "t_eng";
     subscriptionsData = {
       subscriptions: [subscription({ id: "sub_org", name: "Org watch", ownerType: "org", ownerId: "org_1" })],
@@ -326,6 +317,8 @@ describe("SubscriptionsPanel", () => {
         <SubscriptionsPanel />
       </TooltipProvider>,
     );
+    expect(screen.queryByText("Org watch")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
     expect(screen.getByText("Org watch")).toBeTruthy();
     expect(screen.getByText("Org")).toBeTruthy();
     const toggle = screen.getByRole("switch", { name: "Disable Org watch" }) as HTMLButtonElement;
@@ -366,20 +359,9 @@ describe("SubscriptionsPanel", () => {
   // The row badges the assistant that answers the event, not the team that
   // owns the rule: a team has many assistants, and the badge is the way in
   // to the one this rule uses.
-  it("badges a team orchestrator target with its assistant, linked to the editor", () => {
+  it("links a team target to its workspace conversation", () => {
+    scopeTeamId = "t_eng";
     teamsData = { teams: [teamFixture()] };
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_eng",
-          owner: { type: "team", id: "t_eng" },
-          sessionId: "assistant:asst_eng",
-          name: "Release Captain",
-          isDefault: true,
-          createdAt: 1,
-        },
-      ],
-    };
     subscriptionsData = {
       subscriptions: [
         subscription({
@@ -395,57 +377,15 @@ describe("SubscriptionsPanel", () => {
       </TooltipProvider>,
     );
 
-    const link = screen.getByText("Release Captain").closest("a");
-    expect(link?.getAttribute("to")).toBe("/assistants/$assistantId");
-    expect(JSON.parse(link?.getAttribute("data-params") ?? "null")).toEqual({
-      assistantId: "asst_eng",
+    const link = screen.getByText("Engineering").closest("a");
+    expect(link?.getAttribute("to")).toBe("/chat");
+    expect(JSON.parse(link?.getAttribute("data-search") ?? "null")).toEqual({
+      workspace: "t_eng",
     });
     // The badge names the assistant, not the owning team it used to name.
     // "Engineering" survives in the target clause, which is a sentence, not
     // a badge.
-    expect(screen.queryByText("Engineering")).toBeNull();
-  });
-
-  // A workflow target runs as the workflow's assistant, so the row resolves
-  // the definition's pinned one rather than the rule owner's default.
-  it("badges a workflow target with the assistant its definition pins", () => {
-    workflowsData = {
-      workflows: [
-        {
-          id: "wf_1",
-          name: "Deploy pipeline",
-          definition: { version: "dag/v1", assistantId: "asst_scribe", nodes: [], edges: [] },
-          createdAt: 1,
-          updatedAt: 1,
-          ownerType: "user",
-          ownerId: "u1",
-        },
-      ],
-    };
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_scribe",
-          owner: { type: "user", id: "u1" },
-          sessionId: "assistant:asst_scribe",
-          name: "Scribe",
-          isDefault: false,
-          createdAt: 1,
-        },
-      ],
-    };
-    subscriptionsData = {
-      subscriptions: [subscription({ target: { kind: "workflow", workflowId: "wf_1" } })],
-    };
-    render(
-      <TooltipProvider>
-        <SubscriptionsPanel />
-      </TooltipProvider>,
-    );
-
-    expect(screen.getByText("Scribe").closest("a")?.getAttribute("to")).toBe(
-      "/assistants/$assistantId",
-    );
+    expect(screen.queryByText("Release Captain")).toBeNull();
   });
 
   // `GET /api/assistants` does not list org-owned assistants today, so the
@@ -453,17 +393,6 @@ describe("SubscriptionsPanel", () => {
   // badge names the org and the plain word must step aside: one "Org", not
   // two.
   it("prints one Org label when the org's assistant resolves (forward guard)", () => {
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_org",
-          owner: { type: "org", id: "org_1" },
-          sessionId: "assistant:asst_org",
-          isDefault: true,
-          createdAt: 1,
-        },
-      ],
-    };
     subscriptionsData = {
       subscriptions: [
         subscription({
@@ -479,25 +408,15 @@ describe("SubscriptionsPanel", () => {
       </TooltipProvider>,
     );
 
+    fireEvent.change(screen.getByLabelText("Subscription scope"), { target: { value: "organization" } });
     const labels = screen.getAllByText("Org");
     expect(labels).toHaveLength(1);
-    expect(labels[0].closest("a")?.getAttribute("to")).toBe("/assistants/$assistantId");
+    expect(labels[0].closest("a")).toBeNull();
   });
 
   // Everything on a personal page belongs to the reader, so a badge naming
   // their own default assistant carries no information.
   it("says nothing about a personal rule its reader's default assistant answers", () => {
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_mine",
-          owner: { type: "user", id: "u1" },
-          sessionId: "assistant:asst_mine",
-          isDefault: true,
-          createdAt: 1,
-        },
-      ],
-    };
     const { container } = render(
       <TooltipProvider>
         <SubscriptionsPanel />
@@ -506,95 +425,5 @@ describe("SubscriptionsPanel", () => {
 
     expect(screen.getByText("PR alerts")).toBeTruthy();
     expect(container.querySelector('a[to="/assistants/$assistantId"]')).toBeNull();
-  });
-});
-
-/** The route owns the scope now, so the cases pass it in and read back
- * what the control reports. */
-function renderFeed(scope: FeedScope = "workspace") {
-  const onScopeChange = vi.fn();
-  render(<EventFeed scope={scope} onScopeChange={onScopeChange} />);
-  return onScopeChange;
-}
-
-describe("EventFeed scope control", () => {
-  it("starts on the workspace and asks for the switcher's owner", () => {
-    renderFeed();
-    expect(feedCalls).toBeGreaterThan(0);
-    expect(feedOwner).toEqual({ ownerType: "user", ownerId: "u1" });
-    expect(feedEnabled).toBe(true);
-    expect(screen.getByRole("button", { name: "Scope: This workspace" })).toBeTruthy();
-  });
-
-  it("holds the workspace-scoped query until the owner resolves", () => {
-    meId = undefined;
-    renderFeed();
-    // An owner-less request is the org-wide feed, so a control that reads
-    // "This workspace" must ask for nothing until the owner is known.
-    expect(feedOwner).toBeUndefined();
-    expect(feedEnabled).toBe(false);
-  });
-
-  it("reports a failed identity and names the All control", () => {
-    meId = undefined;
-    meFailed = true;
-    renderFeed();
-    expect(screen.queryByText("Loading events…")).toBeNull();
-    expect(screen.getByText(/this feed cannot narrow to it\. Select All/)).toBeTruthy();
-  });
-
-  it("reports All to the route instead of keeping it locally", async () => {
-    const onScopeChange = renderFeed();
-    // Radix dropdown triggers do not open from jsdom's plain click; the
-    // keyboard path (Enter) is the reliable way to open one in tests.
-    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), { key: "Enter" });
-    fireEvent.click(await screen.findByText("All"));
-
-    expect(onScopeChange).toHaveBeenCalledWith("all");
-  });
-
-  it("drops the owner on All", () => {
-    renderFeed("all");
-    expect(feedOwner).toBeUndefined();
-    // The org-wide state must be reachable AND legible: the trigger reads
-    // All, so a reader can tell which feed they are looking at.
-    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
-  });
-
-  it("scopes to the team in a team workspace", () => {
-    scopeTeamId = "t_eng";
-    renderFeed();
-    expect(feedOwner).toEqual({ ownerType: "team", ownerId: "t_eng" });
-  });
-
-  // The route bounds the owner-filtered query to a window, so an empty
-  // scoped feed must not read as "nothing ever matched".
-  it("names the window when the scoped feed is empty", () => {
-    renderFeed();
-    expect(screen.getByText(/in the last 30 days/)).toBeTruthy();
-  });
-
-  it("claims no window on All", () => {
-    renderFeed("all");
-    expect(screen.queryByText(/last 30 days/)).toBeNull();
-  });
-
-  // `refetch()` ignores `enabled`, so the hold is only as good as the
-  // control that can trigger one.
-  it("refuses to refresh while the owner is unresolved", () => {
-    meId = undefined;
-    renderFeed();
-    const refresh = screen.getByRole("button", { name: "Refresh events" }) as HTMLButtonElement;
-    expect(refresh.disabled).toBe(true);
-    fireEvent.click(refresh);
-    expect(feedRefetch).not.toHaveBeenCalled();
-  });
-
-  it("refreshes once the owner has resolved", () => {
-    renderFeed();
-    const refresh = screen.getByRole("button", { name: "Refresh events" }) as HTMLButtonElement;
-    expect(refresh.disabled).toBe(false);
-    fireEvent.click(refresh);
-    expect(feedRefetch).toHaveBeenCalledTimes(1);
   });
 });

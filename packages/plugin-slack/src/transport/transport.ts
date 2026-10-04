@@ -43,6 +43,7 @@ import {
 import {
   buildContentBlocks,
   needsContentBlocks,
+  SLACK_BUTTON_LABEL_LIMIT,
   SLACK_HEADER_LIMIT,
   SLACK_MAX_BLOCKS,
   SLACK_SECTION_FIELD_LIMIT,
@@ -305,6 +306,7 @@ export class SlackTransport implements ChannelTransport {
     private readonly signingSecret?: string,
     private readonly botUserId?: string,
     appToken?: string,
+    private readonly botId?: string,
   ) {
     if (appToken !== undefined) {
       this.poll = (signal) => this.socketModePoll(appToken, signal);
@@ -836,6 +838,13 @@ export class SlackTransport implements ChannelTransport {
     }
   }
 
+  async sendToChannel(channelId: string, message: OutboundChannelMessage): Promise<SendRef> {
+    if (!/^[CG][A-Z0-9]{2,}$/.test(channelId)) throw new Error("Choose a Slack channel ID starting with C or G.");
+    const key = conversationKeyFor(this.teamId, channelId, `${Math.floor(Date.now() / 1000)}.${String(this.syntheticTsCounter++ % 1_000_000).padStart(6, "0")}`);
+    this.remember(this.syntheticKeys, key, true);
+    return this.send(key, message);
+  }
+
   async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
     const target = this.mustParse(conversationKey);
     const threadTs = this.replyThreadTs(conversationKey);
@@ -915,11 +924,13 @@ export class SlackTransport implements ChannelTransport {
     for (let i = 0; i < fieldTexts.length; i += SLACK_SECTION_FIELD_LIMIT) {
       blocks.push({ type: "section", fields: fieldTexts.slice(i, i + SLACK_SECTION_FIELD_LIMIT) });
     }
-    blocks.push({
+    // An open question has no buttons, and Slack rejects an actions block
+    // with no elements. The host's body tells the reader where to answer.
+    if (gate.actions.length > 0) blocks.push({
       type: "actions",
       elements: gate.actions.map((action) => ({
         type: "button",
-        text: { type: "plain_text", text: action.label },
+        text: { type: "plain_text", text: truncatePlain(action.label, SLACK_BUTTON_LABEL_LIMIT) },
         action_id: action.id,
         // Slack allows 2,000-char values, so the real gate id rides along
         // instead of being looked up by message reference (Telegram's
@@ -1062,13 +1073,13 @@ export class SlackTransport implements ChannelTransport {
   /** Prior thread messages as an attributed transcript — see `ChannelTransport`.
    *  `selfUserId` strips the bot's own mention from the seeded trigger line. */
   async fetchThreadContext(channelId: string, threadTs: string): Promise<string | null> {
-    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId });
+    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId });
   }
 
   /** The thread's messages strictly between two ts values, minus the bot's own
    *  posts — the follow-router's gap re-hydration. See `ChannelTransport`. */
   async fetchThreadWindow(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null> {
-    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, afterTs, beforeTs });
+    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, selfBotId: this.botId, afterTs, beforeTs });
   }
 
   /** Normalize an inbound message for an agent — see `ChannelTransport`. Resolves
@@ -1078,6 +1089,22 @@ export class SlackTransport implements ChannelTransport {
     const senderName = msg.userId ? (await this.api.usersInfo(msg.userId).catch(() => null))?.displayName : undefined;
     const text = await enrichSlackText(this.api, msg.text, this.botUserId);
     return { senderName, text };
+  }
+
+  /** Authorization answers last five minutes, so a member made a guest
+   *  loses access within that window, not at the next restart. */
+  private readonly standing = new Map<string, { value: { email?: string } | null; expiresAt: number }>();
+
+  /** A full member of this Slack workspace, with their email — see `ChannelTransport`. */
+  async workspaceMember(userId: string): Promise<{ email?: string } | null> {
+    const cached = this.standing.get(userId);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const user = await this.api.userStanding(userId);
+    // A failed lookup is not cached, so the next message asks again.
+    if (user === null) return null;
+    const value = user.member && user.teamId === this.teamId ? { ...(user.email ? { email: user.email } : {}) } : null;
+    this.standing.set(userId, { value, expiresAt: Date.now() + 5 * 60_000 });
+    return value;
   }
 
   /** The triggering message's own ts, so `react_to_origin` has a target — see
@@ -1427,6 +1454,7 @@ export const slackTransportFactory: ChannelTransportFactory = {
       signingSecret,
       botUserId,
       appToken,
+      typeof metadata.botId === "string" ? metadata.botId : undefined,
     );
   },
 };

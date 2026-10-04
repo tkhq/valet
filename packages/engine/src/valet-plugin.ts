@@ -366,6 +366,8 @@ export interface ChannelTransport {
   /** Normalize one raw update. `null` = not something we handle. */
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
   send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
+  /** Start a new message in a provider channel, without changing inbound subscriptions. */
+  sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
   sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef>;
   sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef>;
   updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void>;
@@ -440,6 +442,10 @@ export interface ChannelTransport {
    * omitted or names nobody. Optional: a transport without a directory omits it.
    */
   normalizeForAgent?(msg: { userId?: string; text: string }): Promise<{ senderName?: string; text: string }>;
+  /** A sender who is a full member of the connected workspace (not a guest,
+   *  a bot, or a user from another organization), with their email when the
+   *  provider gives one; null otherwise. */
+  workspaceMember?(userId: string): Promise<{ email?: string } | null>;
   /**
    * The ts of the specific message that triggered a channel event, so a reply
    * turn can `react_to_origin` to it. Distinct from the thread key's `threadTs`,

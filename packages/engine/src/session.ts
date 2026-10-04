@@ -1,4 +1,5 @@
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
+import { uid } from "./ids.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
@@ -67,10 +68,6 @@ import type {
 } from "./types.js";
 import { credentialSecret } from "./types.js";
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 function submissionsByThread(items: readonly QueueItem[]): Map<string, QueueItem[]> {
   const grouped = new Map<string, QueueItem[]>();
@@ -259,6 +256,7 @@ export class Session {
   readonly skills = new Map<string, SkillSource>();
   private threads = new Map<string, Thread>();
   private threadsByKey = new Map<string, Thread>();
+  private creatingThreads = new Map<string, Promise<Thread>>();
   /** Lazily-built slash-command registry; invalidated by refreshCommandRegistry(). */
   private commandRegistryCache: CommandRegistry | null = null;
   /**
@@ -799,8 +797,28 @@ export class Session {
   async createThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
     const existing = this.threadsByKey.get(key);
     if (existing) return existing;
-    const data = this.buildThreadData(key, initial);
-    await this.providers.store.saveThread(this.id, data);
+    const pending = this.creatingThreads.get(key);
+    if (pending) return pending;
+    const creating = this.createKeyedThread(key, initial);
+    this.creatingThreads.set(key, creating);
+    try {
+      return await creating;
+    } finally {
+      this.creatingThreads.delete(key);
+    }
+  }
+
+  private async createKeyedThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
+    let data = this.buildThreadData(key, initial);
+    try {
+      await this.providers.store.saveThread(this.id, data);
+    } catch (error) {
+      // A different host can win the durable (session_id, key) constraint.
+      // Recover only when that winner exists; preserve unrelated failures.
+      const winner = (await this.providers.store.listThreads(this.id)).find(thread => thread.key === key);
+      if (!winner) throw error;
+      data = winner;
+    }
     const thread = new Thread(this, data);
     this.attachThread(thread);
     return thread;
@@ -1106,9 +1124,9 @@ export class Session {
         // `resolveDecision`, same as every other gate.
         return this.awaitCommandGate(thread, req);
       },
-      threadRead: (key, opts) => this.readEntries(key, opts),
+      threadRead: (key, opts) => this.readEntries(key, opts, thread),
       listThreads: async () => {
-        const datas = await this.providers.store.listThreads(this.id);
+        const datas = await this.readableThreads(thread);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
@@ -1480,10 +1498,29 @@ export class Session {
     return this.providers.store.listDecisionGates(this.id);
   }
 
-  async readEntries(threadKey: string, opts?: MessageQuery): Promise<SessionEntry[]> {
-    const t = await this.threadByKey(threadKey);
-    if (!t) return [];
+  /** Reads a thread by key, or by id when no thread has that key. */
+  /** A thread's entries by key or id. With `reader`, only a thread that
+   * reader may see (`CreateSessionOptions.threadAccess`); any other reads as
+   * missing. */
+  async readEntries(threadKey: string, opts?: MessageQuery, reader?: { id: string; key: string }): Promise<SessionEntry[]> {
+    const t = (await this.threadByKey(threadKey)) ?? this.threadById(threadKey);
+    if (!t || (reader && !(await this.threadReadable(reader, t)))) return [];
     return t.readEntries(opts);
+  }
+
+  /** Whether `reader` may see `target` (`CreateSessionOptions.threadAccess`). */
+  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string }): Promise<boolean> {
+    const check = this.options.threadAccess;
+    if (!check || reader.id === target.id) return true;
+    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key } })
+      .catch(() => false);
+  }
+
+  /** The stored threads `reader` may see, for `list_threads`. */
+  async readableThreads(reader: { id: string; key: string }): Promise<ThreadData[]> {
+    const datas = await this.providers.store.listThreads(this.id);
+    const shown = await Promise.all(datas.map((d) => this.threadReadable(reader, d)));
+    return datas.filter((_, i) => shown[i]);
   }
 
   /** Owning principal (Phase 4 decision 8). See `principal` field doc. */

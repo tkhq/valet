@@ -345,13 +345,35 @@ export const bashTool = defineTool({
   },
 });
 
+/**
+ * The thread a `thread_read` argument names. A person points at a thread by
+ * pasting its link: the web app links `/threads/<id>`, and older chat links
+ * carry `?thread=<id>`. Anything that is not an http(s) URL is a key or an id
+ * as given; `web:default` parses as a URL, so the scheme check matters.
+ */
+export function threadReference(value: string): string {
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  let url: URL;
+  try { url = new URL(trimmed); } catch { return trimmed; }
+  const fromPath = /\/threads\/([^/]+)/.exec(url.pathname)?.[1];
+  if (fromPath) {
+    // A malformed escape in a pasted link is not a thread id; keep the link so
+    // the lookup reports it as not found instead of throwing.
+    try { return decodeURIComponent(fromPath); } catch { return trimmed; }
+  }
+  // URLSearchParams has already decoded the value.
+  return url.searchParams.get("thread") || trimmed;
+}
+
 export const threadReadTool = defineTool({
   name: "thread_read",
   concurrencySafe: true,
   description:
-    "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done).",
+    "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done). " +
+    "Accepts a thread key, a thread id, or a Valet thread link a person pasted (`/threads/<id>`, or a chat link with `?thread=<id>`).",
   parameters: Type.Object({
-    key: Type.String({ description: "Thread key to read from (e.g. 'web:default', 'task:research')." }),
+    key: Type.String({ description: "Thread key (e.g. 'web:default', 'task:research'), thread id, or a pasted Valet thread link." }),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     includeCompacted: Type.Optional(Type.Boolean()),
   }),
@@ -360,9 +382,10 @@ export const threadReadTool = defineTool({
       limit: args.limit ?? 30,
       includeCompacted: args.includeCompacted ?? true,
     };
-    const entries = await ctx.threadRead(args.key, opts);
-    if (entries.length === 0) return { text: `(thread "${args.key}" has no messages)` };
-    return { text: renderEntries(`thread:${args.key}`, entries) };
+    const ref = threadReference(args.key);
+    const entries = await ctx.threadRead(ref, opts);
+    if (entries.length === 0) return { text: `(thread "${ref}" has no messages, or is not a thread in this session)` };
+    return { text: renderEntries(`thread:${ref}`, entries) };
   },
 });
 
@@ -446,6 +469,13 @@ function renderEntries(heading: string, entries: SessionEntry[]): string {
   return lines.join("\n");
 }
 
+/** A child runs as the session's user and does not carry the newcomer marker,
+ * so a turn from a channel sender with no Valet account may not start or
+ * steer one (`ToolContext.externalSender`). */
+const EXTERNAL_SENDER_CHILDREN = {
+  text: "[child_unavailable] Only a teammate with a linked Valet account can start or message background tasks. Answer directly, or ask a teammate.",
+};
+
 /**
  * Byte ceiling on one `child_read` result. Matches the api's
  * `CHILD_RESULT_MAX_CHARS` on the settled signal: the recovery path must
@@ -477,7 +507,7 @@ export const childReadTool = defineTool({
 
     const entries = await reader(
       { childSessionId: args.child_session_id, limit: args.limit },
-      { parentSessionId: ctx.sessionId },
+      { parentSessionId: ctx.sessionId, readerThreadId: ctx.threadId },
     );
     if (entries === null) {
       return {
@@ -530,6 +560,7 @@ export const childSendTool = defineTool({
     ),
   }),
   execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
     // Same `toolConfig` passthrough convention as `task`'s childSpawner:
     // `ctx.config` is verbatim `Record<string, unknown>`, so a
     // sender-shaped value is known only by convention.
@@ -590,7 +621,7 @@ export const childStatusTool = defineTool({
 
     const status = await reader(
       { childSessionId: args.child_session_id },
-      { parentSessionId: ctx.sessionId },
+      { parentSessionId: ctx.sessionId, readerThreadId: ctx.threadId },
     );
     if (status === null) {
       return {
@@ -716,6 +747,50 @@ export const askApprovalTool = defineTool({
   },
 });
 
+export const askQuestionTool = defineTool({
+  name: "ask_question",
+  description:
+    "Ask the person a question and wait for the answer. Use it when a decision or a missing " +
+    "fact blocks the work, not to confirm something you can check yourself. Give `options` " +
+    "when the answer is one of a few choices: each becomes a button, in the app and in Slack. " +
+    "In the app the person can also type a different answer. Blocks until someone answers " +
+    "or the question expires.",
+  parameters: Type.Object({
+    question: Type.String({ minLength: 1, maxLength: 300, description: "One question, e.g. 'Which workflow should I build first?'" }),
+    options: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), {
+      maxItems: 6, description: "Up to six short answers to choose from.",
+    })),
+    detail: Type.Optional(Type.String({ maxLength: 2000, description: "Context the person needs to answer." })),
+  }),
+  execute: async (args, ctx) => {
+    const options = args.options ?? [];
+    let resolution;
+    try {
+      resolution = await ctx.requestDecision({
+        type: "question",
+        title: args.question,
+        body: args.detail,
+        actions: options.map((label, index) => ({ id: `option-${index}`, label })),
+        resumeKey: `ask_question:${args.question}`,
+      });
+    } catch (err) {
+      if (isDecisionGateExpired(err)) {
+        return {
+          text:
+            `question expired: "${args.question}". Nobody answered before the deadline. ` +
+            "Do not ask again in this turn. Continue without the answer if you can, and say what you assumed.",
+        };
+      }
+      throw err;
+    }
+    const picked = resolution.actionId?.startsWith("option-") ? options[Number(resolution.actionId.slice("option-".length))] : undefined;
+    // The host checks the type, but a resolution is stored data: narrow it here too.
+    const typed = typeof resolution.value === "string" ? resolution.value.trim() : "";
+    const answer = typed || picked;
+    return { text: answer ? `answer to "${args.question}": ${answer}` : `the question "${args.question}" was closed without an answer.` };
+  },
+});
+
 export const taskTool = defineTool({
   name: "task",
   description:
@@ -760,6 +835,7 @@ export const taskTool = defineTool({
     ),
   }),
   execute: async (args, ctx) => {
+    if (ctx.externalSender) return EXTERNAL_SENDER_CHILDREN;
     // ctx.config is `Record<string, unknown>` (verbatim toolConfig
     // passthrough, Phase 4 decision 7) — a spawner-shaped value is only
     // known by convention, hence the typeof guard before the single
@@ -839,6 +915,7 @@ export const builtinTools: ToolDef[] = [
   listThreadsTool,
   switchModelTool,
   askApprovalTool,
+  askQuestionTool,
   taskTool,
   childReadTool,
   childSendTool,

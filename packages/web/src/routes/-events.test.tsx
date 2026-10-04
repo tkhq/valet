@@ -11,11 +11,13 @@
  * so mutate controls render by default; one test flips ownership to prove
  * they gate on it.
  */
-import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import type { ReactNode } from "react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { EventSubscriptionWire, TeamSummary } from "@valet/api/wire";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "~/components/primitives";
+
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: vi.fn() }) }));
 
 const catalogData = {
   services: [
@@ -33,65 +35,8 @@ const catalogData = {
   ],
 };
 
-const eventsData = {
-  events: [
-    {
-      id: "evt_1",
-      service: "github",
-      eventKey: "github.pr.opened",
-      summary: "PR #7 opened: fix login",
-      refs: { repo: "acme/app" },
-      actor: { externalId: "u-ext", login: "octocat" },
-      occurredAt: 1_723_200_000_000,
-      receivedAt: 1_723_200_000_000,
-    },
-  ],
-};
-
 /** A long error, so a truncation regression shows up as a failed substring
  * match rather than a passing prefix match. */
-const LONG_ERROR =
-  "Error: workflow wf_1 not found in org acme — the definition was deleted while the delivery was in flight";
-
-const eventDetailData = {
-  event: { ...eventsData.events[0], payload: { action: "opened", number: 7 } },
-  deliveries: [
-    {
-      id: "d1",
-      subscriptionId: "sub_1",
-      subscriptionName: "PR alerts",
-      status: "delivered" as const,
-      attempts: 1,
-      lastError: null,
-      deliveredAt: 1_723_200_001_000,
-      nextAttemptAt: null,
-    },
-    {
-      id: "d2",
-      subscriptionId: "sub_2",
-      subscriptionName: "Deploy watcher",
-      status: "failed" as const,
-      attempts: 2,
-      lastError: LONG_ERROR,
-      deliveredAt: null,
-      // Eight minutes out, with 30s of slack: the countdown rounds DOWN, so
-      // the assertion stays "in 8 minutes" however long the suite takes to
-      // reach this file.
-      nextAttemptAt: Date.now() + 8 * 60_000 + 30_000,
-    },
-    {
-      id: "d3",
-      subscriptionId: "sub_3",
-      subscriptionName: "Nightly triage",
-      status: "dead" as const,
-      attempts: 4,
-      lastError: "Error: connect ECONNREFUSED 127.0.0.1:8788",
-      deliveredAt: null,
-      nextAttemptAt: null,
-    },
-  ],
-};
-
 const subscriptionsData: { subscriptions: EventSubscriptionWire[] } = {
   subscriptions: [
     {
@@ -141,6 +86,7 @@ const deleteMutate = vi.fn();
  * writes. Mutating it does NOT re-render — nothing subscribes — so a case
  * that needs the new value on screen must cause a render of its own, which
  * is what a tab click does. Reset in `afterEach`. */
+let orgRole = "member";
 let searchState: Record<string, unknown> = {};
 type NavigateSearch = Record<string, unknown> | ((previous: Record<string, unknown>) => Record<string, unknown>);
 const navigateCalls: { search?: NavigateSearch }[] = [];
@@ -169,21 +115,19 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
+vi.mock("~/components/channels/channels-panel", () => ({ ChannelsPanel: () => <p>Channels list</p> }));
+
+/** The props the page last gave the Log. Its own behaviour is `event-log.test.tsx`'s. */
+let logProps: { filter: string; query: string; onFilterChange: (next: string) => void } | undefined;
+vi.mock("~/components/events/event-log", () => ({
+  EventLog: (props: { filter: string; query: string; onFilterChange: (next: string) => void }) => {
+    logProps = props;
+    return <p>Log list</p>;
+  },
+}));
+
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
-  useEvents: () => ({
-    data: eventsData,
-    isPending: false,
-    isFetching: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
-  useEventDrops: () => ({
-    data: { lastEventAt: null, drops: [] },
-    isPending: false,
-    error: null,
-  }),
-  useEvent: () => ({ data: eventDetailData, isLoading: false, error: null }),
   useEventSubscriptions: () => ({ data: subscriptionsData, isPending: false, error: null }),
   usePatchEventSubscription: () => ({ mutate: patchMutate, isPending: false }),
   useCreateEventSubscription: () => ({ mutate: createMutate, isPending: false }),
@@ -204,7 +148,7 @@ vi.mock("~/api/settings", () => ({
   // `isError` is read by both events surfaces: it is what separates an
   // owner that has not resolved YET from one that never will.
   useMe: () => ({
-    data: { id: "u1", orgRole: "member" },
+    data: { id: "u1", orgId: "org_1", orgRole },
     isLoading: false,
     isError: false,
     error: null,
@@ -220,13 +164,6 @@ vi.mock("~/api/settings", () => ({
 // `OwnerBadge` reads the assistants list to link a team badge to the team's
 // assistant; no assistant fixtures needed — an unlinked badge still names
 // the owner.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({ data: { assistants: [] }, isLoading: false, error: null }),
-  };
-});
 
 // The create dialog inherits the switcher's workspace. Mutable for the
 // team-scope case; reset in afterEach (isolate: false shares the registry).
@@ -244,7 +181,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
   };
 });
 
-import { EventsPage } from "./events.index";
+import { EventsPage, readEventsSearch } from "./events.index";
 
 function team(id: string, name: string, callerRole: "admin" | "member" | null): TeamSummary {
   return {
@@ -261,6 +198,7 @@ function team(id: string, name: string, callerRole: "admin" | "member" | null): 
 }
 
 beforeEach(() => {
+  orgRole = "member";
   patchMutate.mockClear();
   createMutate.mockClear();
   deleteMutate.mockClear();
@@ -273,125 +211,46 @@ afterEach(() => {
   navigateCalls.length = 0;
 });
 
-describe("EventsPage — Activity", () => {
-  it("renders the feed with service, key, summary, and actor", () => {
+describe("EventsPage — Channels", () => {
+  it("opens on Channels when the URL names no tab", () => {
     render(<EventsPage />);
-    expect(screen.getByText("PR #7 opened: fix login")).toBeTruthy();
-    expect(screen.getByText("github.pr.opened")).toBeTruthy();
-    expect(screen.getByText("octocat")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Channels" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("Channels list")).toBeTruthy();
+  });
+});
+
+describe("EventsPage — Log", () => {
+  it("opens the Log from the old Activity, Event Logs, and Problems links", () => {
+    for (const tab of ["activity", "logs", "problems"]) {
+      expect(readEventsSearch({ tab }).tab).toBe("log");
+    }
+    expect(readEventsSearch({ tab: "problems", problemsQ: "signature" })).toEqual({ tab: "log", status: "problems", q: "signature" });
+    expect(readEventsSearch({ tab: "receipts" })).toEqual({ tab: "log", status: "receipts" });
   });
 
-  it("links each row to the event's own URL", () => {
+  it("passes the URL's filter and search to the Log", () => {
+    searchState = { tab: "log", status: "problems", q: "slack" };
     render(<EventsPage />);
-    const link = screen.getByRole("link", { name: /Open PR #7/ }) as HTMLAnchorElement;
-    expect(link.getAttribute("href")).toBe("/events/$eventId");
+    expect(screen.getByRole("tab", { name: "Log" }).getAttribute("aria-selected")).toBe("true");
+    expect(logProps).toMatchObject({ filter: "problems", query: "slack" });
   });
 
-  it("expands an event into its deliveries and payload", () => {
+  it("writes a filter change to the URL and keeps the search", () => {
+    searchState = { tab: "log", q: "slack" };
     render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText("delivered")).toBeTruthy();
-    expect(screen.getByText(/"action": "opened"/)).toBeTruthy();
-  });
-
-  it("names the subscription each delivery was trying to reach", () => {
-    render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText("PR alerts")).toBeTruthy();
-    expect(screen.getByText("Deploy watcher")).toBeTruthy();
-  });
-
-  it("separates a delivery that retries from one that gave up", () => {
-    render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText(/Retries in 8 minutes/)).toBeTruthy();
-    expect(screen.getByText(/Gave up after 4 attempts\. To send it again, press Redeliver\./)).toBeTruthy();
-  });
-
-  it("shows the whole error string, never a truncated one", () => {
-    render(<EventsPage />);
-    fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
-    expect(screen.getByText(LONG_ERROR)).toBeTruthy();
-  });
-
-  it("says how far back the workspace-scoped feed reaches", () => {
-    render(<EventsPage />);
-    expect(screen.getByText(/covers the last 30 days/)).toBeTruthy();
-  });
-
-  it("drops that note on All, which has no window", () => {
-    searchState = { scope: "all" };
-    render(<EventsPage />);
-    expect(screen.queryByText(/covers the last 30 days/)).toBeNull();
-  });
-
-  // The diagnosis this page exists for is a round trip: select All to find
-  // an event that matched nothing, open Subscriptions to read the rule,
-  // come back. The tabs unmount each other, so a local-state scope would
-  // hide the event again on the way back.
-  it("keeps an explicit All across a tab round trip", async () => {
-    render(<EventsPage />);
-    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), {
-      key: "Enter",
-    });
-    fireEvent.click(await screen.findByText("All"));
-    // The choice went to the URL, not into the component.
-    expect(searchState).toEqual({ scope: "all" });
-
-    fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
-    expect(screen.queryByRole("button", { name: /^Scope: / })).toBeNull();
-
-    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
-    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
-  });
-
-  it("starts a fresh mount from the scope the URL carries", () => {
-    searchState = { scope: "all" };
-    render(<EventsPage />);
-    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
-  });
-
-  it("opens Problems from a shared Problems URL", () => {
-    searchState = {
-      tab: "problems",
-      problemsQ: "signature",
-      problemsCursor: "cursor_2",
-      problemsDirection: "previous",
-    };
-    render(<EventsPage />);
-
-    expect(screen.getByRole("tab", { name: "Problems" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("searchbox", { name: "Search problems" })).toBeTruthy();
+    logProps?.onFilterChange("problems");
+    expect(searchState).toEqual({ tab: "log", status: "problems", q: "slack" });
+    logProps?.onFilterChange("all");
+    expect(searchState).toEqual({ tab: "log", q: "slack" });
   });
 
   it("writes tab changes to the URL so history restores the selected tab", async () => {
     const page = render(<EventsPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Problems" }));
-    expect(searchState).toEqual({ tab: "problems" });
-    expect(screen.getByRole("tab", { name: "Problems" }).getAttribute("aria-selected")).toBe("true");
-
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
+    expect(searchState).toEqual({ tab: "log" });
     searchState = {};
     page.rerender(<EventsPage />);
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Activity" }).getAttribute("aria-selected")).toBe("true"));
-
-    searchState = { tab: "problems" };
-    page.rerender(<EventsPage />);
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Problems" }).getAttribute("aria-selected")).toBe("true"));
-  });
-
-  it("keeps a Problems backward cursor when Activity scope changes", async () => {
-    searchState = { problemsQ: "signature", problemsCursor: "cursor_2", problemsDirection: "previous" };
-    render(<EventsPage />);
-
-    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), { key: "Enter" });
-    fireEvent.click(await screen.findByText("All"));
-
-    expect(searchState).toEqual({
-      scope: "all",
-      problemsQ: "signature",
-      problemsCursor: "cursor_2",
-      problemsDirection: "previous",
-    });
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Channels" }).getAttribute("aria-selected")).toBe("true"));
   });
 });
 
@@ -417,7 +276,7 @@ describe("EventsPage — Subscriptions", () => {
    * Review. The advanced outcome is the raw event + filter + target flow.
    */
   function openWizardToTargetStep(eventKey: string) {
-    fireEvent.click(screen.getByRole("button", { name: /New automation/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Manual setup/ }));
     fireEvent.click(screen.getByLabelText(/Advanced \/ custom trigger/)); // What: raw event flow
     clickNext(); // What → Match
     fireEvent.click(screen.getByText(eventKey)); // pick the event key
@@ -439,16 +298,13 @@ describe("EventsPage — Subscriptions", () => {
     );
   });
 
-  it("hides the actions menu and disables the switch for another user's personal subscription", () => {
+  it("hides another user's personal subscription outside the selected workspace", () => {
     subscriptionsData.subscriptions[0].ownerId = "someone-else";
     try {
       openSubscriptionsTab();
       expect(screen.queryByRole("button", { name: "PR alerts actions" })).toBeNull();
-      const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
-      expect(toggle.disabled).toBe(true);
-      // The list carries every subscription in the org, so a colleague's
-      // personal row is badged — an unbadged row must mean the viewer's own.
-      expect(screen.getByText("Personal")).toBeTruthy();
+      expect(screen.queryByRole("switch", { name: "Disable PR alerts" })).toBeNull();
+      expect(screen.queryByText("PR alerts")).toBeNull();
     } finally {
       subscriptionsData.subscriptions[0].ownerId = "u1";
     }
@@ -477,7 +333,7 @@ describe("EventsPage — Subscriptions", () => {
           name: "Merged PRs",
           eventKeys: ["github.pr.merged"],
           filters: [],
-          target: { kind: "orchestrator", orchestrator: "user" },
+          target: { kind: "orchestrator", orchestrator: "user", deliveryPolicy: "always", pauseOnOverlap: true },
         },
         expect.anything(),
       ),
@@ -486,11 +342,12 @@ describe("EventsPage — Subscriptions", () => {
 
   it("badges a team-owned subscription with the team's name and lets a member manage it", () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    scopeTeamId = "t_eng";
     subscriptionsData.subscriptions[0].ownerType = "team";
     subscriptionsData.subscriptions[0].ownerId = "t_eng";
     try {
       openSubscriptionsTab();
-      expect(screen.getByText("Engineering")).toBeTruthy();
+      expect(screen.getAllByText("Engineering").length).toBeGreaterThan(0);
       const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
       expect(toggle.disabled).toBe(false);
     } finally {
@@ -505,8 +362,7 @@ describe("EventsPage — Subscriptions", () => {
     subscriptionsData.subscriptions[0].ownerId = "t_eng";
     try {
       openSubscriptionsTab();
-      const toggle = screen.getByRole("switch", { name: "Disable PR alerts" }) as HTMLButtonElement;
-      expect(toggle.disabled).toBe(true);
+      expect(screen.queryByRole("switch", { name: "Disable PR alerts" })).toBeNull();
       expect(screen.queryByRole("button", { name: "PR alerts actions" })).toBeNull();
     } finally {
       subscriptionsData.subscriptions[0].ownerType = "user";
@@ -522,7 +378,7 @@ describe("EventsPage — Subscriptions", () => {
 
     // On the Then step, the team option exists and is preselected.
     const teamRadio = screen.getByRole("radio", {
-      name: /Notify Engineering's assistant/,
+      name: /Notify Engineering/,
     }) as HTMLInputElement;
     expect(teamRadio.checked).toBe(true);
 
@@ -568,12 +424,12 @@ describe("EventsPage — Subscriptions", () => {
 
       // The team target is the default.
       const teamRadio = screen.getByRole("radio", {
-        name: /Notify Engineering's assistant/,
+        name: /Notify Engineering/,
       }) as HTMLInputElement;
       expect(teamRadio.checked).toBe(true);
 
       // The reader can switch to the personal, org, and workflow targets.
-      const userRadio = screen.getByRole("radio", { name: /Notify your assistant/ });
+      const userRadio = screen.getByRole("radio", { name: /Notify your personal workspace/ });
       fireEvent.click(userRadio);
       expect((userRadio as HTMLInputElement).checked).toBe(true);
 
@@ -581,7 +437,7 @@ describe("EventsPage — Subscriptions", () => {
       fireEvent.click(workflowRadio);
       expect((workflowRadio as HTMLInputElement).checked).toBe(true);
 
-      const orgRadio = screen.getByRole("radio", { name: /Notify the org assistant/ });
+      const orgRadio = screen.getByRole("radio", { name: /Notify the organization/ });
       fireEvent.click(orgRadio);
       expect((orgRadio as HTMLInputElement).checked).toBe(true);
     } finally {
@@ -595,7 +451,7 @@ describe("EventsPage — Subscriptions", () => {
     // The wizard names the target plainly; it prints no "ownership follows the
     // target" note (the old dialog's copy is gone).
     expect(screen.queryByText(/Ownership follows the target/)).toBeNull();
-    expect(screen.getByRole("radio", { name: /Notify your assistant/ })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Notify your personal workspace/ })).toBeTruthy();
   });
 
   // A workflow target is chosen through the wizard's plain Workflow select.
@@ -633,7 +489,7 @@ describe("EventsPage — Subscriptions", () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
     openSubscriptionsTab();
     openWizardToTargetStep("github.pr.merged");
-    expect(screen.queryByRole("radio", { name: /Engineering's assistant/ })).toBeNull();
+    expect(screen.queryByRole("radio", { name: /Engineering/ })).toBeNull();
   });
 
   it("deletes a subscription after the confirm dialog", async () => {

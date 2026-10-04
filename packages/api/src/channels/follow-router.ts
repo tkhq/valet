@@ -7,11 +7,12 @@
  * message on an unfollowed thread is ignored and never stored.
  */
 import { ConflictError } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { findFollowedThread, touchFollowedThread } from "../events/followed-threads.js";
-import { followBindingAuthorized, followedMessageActor } from "../events/team-slack-gate.js";
+import { followBindingAuthorized, followedMessageActor, newcomerAuthor } from "../events/team-slack-gate.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { inboundSlackMessage } from "../services/channel-messages.js";
 
 export interface FollowRouterDeps {
   /** Bot identity from the verified org credential. */
@@ -157,6 +158,8 @@ async function routeFollowedMessage(
       attributes.rehydrated = "true";
     }
   }
+  const inbound = inboundSlackMessage(threadKey, f.ts, sender, normalized.text);
+  const author = follow.ownerType === "team" ? actorUserId ? await newcomerAuthor(deps.db, orgId, actorUserId, f.user, sender) : undefined : undefined;
   try {
     await deliverToAssistantThread(deps, {
       orgId,
@@ -171,12 +174,10 @@ async function routeFollowedMessage(
         // Overheard: the assistant observes it and replies only if it acts.
         origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
       },
+      ...(author ? { author } : {}),
       dispatchId: `slack:follow:${f.eventId}`,
-      // The assistant that answered the binding mention. Null on a follow bound
-      // before the column, and on one whose rule named none — both mean the
-      // owner's default, the behavior those follows already had.
-      assistantId: follow.assistantId ?? undefined,
       mismatchReason: "followed_target_mismatch",
+      ...(inbound ? { inbound } : {}),
     });
   } catch (err) {
     // A Slack retry of an event whose FIRST delivery carried a hydration

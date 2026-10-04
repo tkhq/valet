@@ -1,3 +1,4 @@
+import { visibleWorkOrigin } from "../services/work-origin.js";
 import { Hono } from "hono";
 import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
@@ -7,7 +8,6 @@ import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
-import { autoTitle } from "../sessions/auto-title.js";
 import {
   deriveRunFields,
   groupSubmissionsBySession,
@@ -18,7 +18,7 @@ import { canAdministerSession, canViewSession, isSessionDirectOwner } from "../s
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import { loadAssistantBySessionId, retireAssistant } from "../assistants/service.js";
+import { loadAssistantBySessionId } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
   type SecurityConfigContext,
@@ -66,6 +66,8 @@ import type {
   SessionStatus,
   SessionSummary,
 } from "../wire/types.js";
+import { spawnedFromVisibleThread } from "./_thread-access.js";
+
 
 export const sessionsRouter = new Hono<AppEnv>();
 
@@ -160,17 +162,8 @@ function runStateRow(row: typeof agentSessions.$inferSelect): RunStateRow {
 
 // ── List ──────────────────────────────────────────────────────────────────
 
-// Standalone-only (assistant-centered web UI decision 8): excludes
-// ASSISTANT ids and child ids, server-side, so the client just renders what
-// it gets. Every assistant is excluded, not only a principal's default —
-// assistants are listed by `GET /api/assistants`, and a principal that owns
-// several would otherwise fill this list with them. Assistant-derived
-// children nest inline in the assistant's chat page (via
-// GET /api/orchestrator/children) instead.
-//
-// Exported so other mounts needing the same "this user's standalone
-// sessions" view (e.g. the MCP `list_sessions` tool, Task 9) reuse the exact
-// query instead of re-deriving it.
+// Standalone work excludes workspace runtimes and spawned children. Threads
+// discovers child work through the parent-scoped children endpoint.
 export async function listStandaloneSessions(db: AppDb, userId: string, owner?: Principal) {
   // Own rows plus every team you are on — the same union `listWorkflowDefinitions`
   // and `listSkills` use, so one workspace's sessions read like its workflows.
@@ -882,7 +875,7 @@ sessionsRouter.get("/:id", async (c) => {
   // other session route in this file stays direct-owner-only.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, c.var.principal))) {
+  if (!row || !(await canViewSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -910,7 +903,9 @@ sessionsRouter.get("/:id", async (c) => {
   const unsettled = await engineStore.listUnsettledSubmissions(id);
 
   const detail: GetSessionResponse = {
+    isWorkspaceRuntime: (await loadAssistantBySessionId(db, id)) !== undefined,
     ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
+    parentWork: await visibleWorkOrigin(db, row),
     messageCount: Number(n ?? 0),
     model,
     reasoning,
@@ -948,7 +943,7 @@ sessionsRouter.patch("/:id", async (c) => {
   // an unauthorized caller still gets the same 404 a missing id gets.
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1215,7 +1210,9 @@ sessionsRouter.patch("/:id", async (c) => {
     .where(eq(messagesTable.sessionId, id));
   const unsettled = await engineStore.listUnsettledSubmissions(id);
   const detail: GetSessionResponse = {
+    isWorkspaceRuntime: (await loadAssistantBySessionId(db, id)) !== undefined,
     ...rowToSummary(effectiveRow, deriveRunFields(runStateRow(effectiveRow), unsettled)),
+    parentWork: await visibleWorkOrigin(db, effectiveRow),
     messageCount: Number(n ?? 0),
     model,
     reasoning,
@@ -1223,67 +1220,6 @@ sessionsRouter.patch("/:id", async (c) => {
     docker: effectiveRow.docker,
   };
   return c.json(detail);
-});
-
-// ── Auto-title ────────────────────────────────────────────────────────────
-
-/**
- * Generate + persist a title for this session (and optionally a thread)
- * from the opening messages. The server normally starts naming from the
- * completed-submission event; this route remains an idempotent retry seam.
- * Returns 200 with `{ sessionTitle, threadTitle }` even in the "nothing to
- * do" cases (`already_titled`, `no_messages`) — the client just treats
- * null title fields as "leave the row alone".
- */
-sessionsRouter.post("/:id/auto-title", async (c) => {
-  const { db, engineHost } = c.var.providers;
-  const id = c.req.param("id");
-  const userId = c.var.user.id;
-
-  const url = new URL(c.req.url);
-  const threadId = url.searchParams.get("threadId") ?? undefined;
-
-  // The persistent `messages` table isn't the source of truth today — the
-  // engine owns entries. Route the loader through the same engine session
-  // the messages GET endpoint uses so we see what the UI sees.
-  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
-  const sessionRow = rows[0];
-  // Session-not-found is handled inside `autoTitle` too, but bail early
-  // here so we don't pay the cost of a sessionFor call on a bad id.
-  if (!sessionRow) return c.json({ error: "session not found" }, 404);
-  // Titling a thread is part of prompting, not administering — anyone who
-  // can read and reply may title what they said. Gating this on ownership
-  // left a team member's threads permanently untitled.
-  if (!(await canViewSession(db, sessionRow, c.var.principal))) {
-    return c.json({ error: "session not found" }, 404);
-  }
-
-  const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, sessionRow));
-  const defaultThread = await engineSession.ensureDefaultThread();
-
-  const result = await autoTitle(
-    {
-      db,
-      loadMessages: async (_sid, tid) => {
-        const thread = tid ? engineSession.threadById(tid) ?? defaultThread : defaultThread;
-        const entries = await thread.readEntries({ limit: 4 });
-        const out: { role: string; content: string }[] = [];
-        for (const e of entries) {
-          if (e.type !== "message") continue;
-          if (e.role !== "user" && e.role !== "assistant") continue;
-          out.push({ role: e.role, content: e.content ?? "" });
-        }
-        return out;
-      },
-    },
-    { sessionId: id, threadId },
-  );
-  if (!result.ok) {
-    if (result.reason === "session_not_found") return c.json({ error: "session not found" }, 404);
-    // already_titled / no_messages → 200 with nulls; client no-ops.
-    return c.json({ sessionTitle: null, threadTitle: null });
-  }
-  return c.json({ sessionTitle: result.sessionTitle, threadTitle: result.threadTitle });
 });
 
 // ── Sandbox JWT ───────────────────────────────────────────────────────────
@@ -1343,7 +1279,7 @@ sessionsRouter.post("/:id/pause", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
@@ -1455,44 +1391,13 @@ sessionsRouter.delete("/:id", async (c) => {
 
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canAdministerSession(db, row, c.var.principal))) {
+  if (!row || !(await canAdministerSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) {
     return c.json({ error: "session not found" }, 404);
   }
 
-  // A user's own assistant session is not deletable (TKAI-253): deleting
-  // it destroyed the orchestrator and every thread it held, and sandbox
-  // replace covers the reset. The web UI hides the action; the API is the
-  // contract, so it refuses too — the same rule as the move refusal above.
-  // A TEAM's assistant stays deletable: the session header menu is a team
-  // admin's only surface for that.
-  // Looked up by the `session_id` COLUMN, not `parseAssistantSessionId`:
-  // rows migrated from orchestrator_identities keep legacy `orchestrator:*`
-  // ids the prefix parse cannot recognize, and those must get the same
-  // refusal and the same retire.
+  // The workspace runtime is permanent; users archive conversations instead.
   const assistant = await loadAssistantBySessionId(db, id);
-  if (assistant && assistant.ownerType !== "team") {
-    return c.json(
-      {
-        error:
-          "your assistant's session cannot be deleted. Use Replace sandbox to reset its workspace.",
-      },
-      400,
-    );
-  }
-
-  // Explicit operator cleanup only. The actor stamp identifies pre-update
-  // team assistants; a child with the same stamp is not an assistant.
-  if (c.req.query("retireLegacyTeam") === "true") {
-    if (
-      row.ownerType !== "team" || row.credentialOwnerMode !== "actor" ||
-      assistant?.ownerType !== "team" || assistant.ownerId !== row.ownerId
-    ) {
-      return c.json({ error: "not a legacy team assistant. Choose a session from the cleanup inventory." }, 400);
-    }
-    if ((await c.var.providers.engineStore.listUnsettledSubmissions(id)).length > 0) {
-      return c.json({ error: "a turn is running. Pause the assistant and wait for it to finish, then retry." }, 409);
-    }
-  }
+  if (assistant) return c.json({ error: "The workspace assistant cannot be deleted. Archive individual threads instead." }, 409);
 
   // Keep the owning session visible until required teardown succeeds.
   try {
@@ -1502,22 +1407,15 @@ sessionsRouter.delete("/:id", async (c) => {
     return c.json({ error: err instanceof Error ? err.message : "Session teardown failed. Restore the sandbox connection, then retry deletion." }, 503);
   }
 
-  // Deleting a team assistant's session IS removing the assistant — the
-  // header item is labeled "Delete this team's assistant". Retire the row
-  // in the same transaction as the soft-delete (TKAI-296): a live row kept
-  // the assistant in every teammate's rail, pointing at a dead session.
+  // Mark standalone execution deleted only after resource teardown succeeds.
   await db.transaction(async (tx) => {
     await tx
       .update(agentSessions)
       .set({ status: "deleted", updatedAt: Date.now() })
       .where(eq(agentSessions.id, id));
-    if (assistant) await retireAssistant(tx, assistant.id);
   });
 
-  // Destroy again after the commit: a wake racing the window between the
-  // destroy above and this transaction rebuilds from the not-yet-retired
-  // row and re-caches — and cache hits bypass the archived-wake guard.
-  // Now the row is retired, so a torn-down ghost cannot rebuild.
+  // Clear any runtime that was reopened between teardown and the row update.
   try {
     await engineHost.destroy(id);
   } catch (err) {

@@ -186,6 +186,8 @@ export function pluginSessionExtras(
   extraSkills: SkillSource[] = [],
   pins: readonly PinnedActionSpec[] = [],
   catalogOptions: Omit<PluginCatalogOptions, "plugins" | "pins" | "reservedToolNames"> = {},
+  /** Re-reads the owner's skills, so the `skill` tool finds one saved after the build. */
+  reloadSkills?: () => Promise<SkillSource[]>,
 ): PluginSessionExtras {
   const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
   const tools = pluginCatalogTools({
@@ -207,7 +209,7 @@ export function pluginSessionExtras(
   // The `skill` tool is what makes these skills reachable — without it the
   // markdown is inert. Appended after the catalog tools so `list_tools`/
   // `call_tool` keep their positions.
-  const skillTool = buildSkillTool(skills);
+  const skillTool = buildSkillTool(skills, reloadSkills);
   if (skillTool) tools.push(skillTool);
 
   return { tools, skills, roles, pluginCatalog, shadowedSkills: shadowed };

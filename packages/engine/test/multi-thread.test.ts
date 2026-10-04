@@ -5,6 +5,7 @@ import {
   InMemoryEventStream,
   InMemorySessionStore,
   VirtualSandboxProvider,
+  threadReference,
   type BusEvent,
 } from "../src/index.js";
 
@@ -197,6 +198,86 @@ describe("thread_read built-in tool", () => {
     expect(result).toContain("hello B");
     expect(result).toContain("B-said-this");
 
+    faux.unregister();
+  });
+});
+
+describe("thread_read in an agent turn", () => {
+  it("reads a sibling thread from a pasted Valet link, not only a key", async () => {
+    const faux = registerFauxProvider({ provider: "thread-read-link-turn" });
+    faux.setResponses([fauxAssistantMessage("B-said-this")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const tB = session.thread("task:B");
+    await tB.submitPrompt("hello B", {});
+    await waitFor(() => events.some((e) => e.threadId === tB.id && e.event.type === "turn_end"));
+
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("thread_read", { key: `https://valet.example.com/threads/${tB.id}` }, { id: "tr-link" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("A read B"),
+    ]);
+    const tA = session.thread("task:A");
+    await tA.submitPrompt("read the linked thread", {});
+    await waitFor(() => events.some((e) => e.threadId === tA.id && e.event.type === "turn_end"
+      && (e.event as { reason: string }).reason === "end_turn"));
+    const toolEnd = events.filter((e) => e.threadId === tA.id && e.event.type === "tool_end").at(-1);
+    expect((toolEnd!.event as { result: string }).result).toContain("B-said-this");
+    faux.unregister();
+  });
+});
+
+describe("thread_read references (TKAI-394)", () => {
+  it("resolves a thread id and a pasted Valet thread link, not only a key", async () => {
+    const faux = registerFauxProvider({ provider: "thread-read-ref" });
+    faux.setResponses([fauxAssistantMessage("B-said-this")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const tB = session.thread("task:B");
+    await tB.submitPrompt("hello B", {});
+    await waitFor(() => events.some((e) => e.threadId === tB.id && e.event.type === "turn_end"));
+
+    // The web app links a thread as /threads/<id>, and older chat links
+    // carry ?thread=<id>. A person pastes either one to point at a thread.
+    for (const ref of ["task:B", tB.id, `https://valet.example.com/threads/${tB.id}`, `https://valet.example.com/chat?thread=${tB.id}`]) {
+      const entries = await session.readEntries(threadReference(ref));
+      expect(entries.length, ref).toBeGreaterThan(0);
+    }
+    expect(threadReference("web:default")).toBe("web:default");
+    // A malformed escape does not throw; the link is kept and finds nothing.
+    const malformed = "https://valet.example/threads/%E0%A4%A";
+    expect(threadReference(malformed)).toBe(malformed);
+    expect(threadReference("https://valet.example/chat?thread=a%2520b")).toBe("a%20b");
+    faux.unregister();
+  });
+});
+
+describe("thread_read access", () => {
+  it("reads only the threads the host lets the reading thread see", async () => {
+    const faux = registerFauxProvider({ provider: "thread-read-access" });
+    faux.setResponses([fauxAssistantMessage("private-B")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      threadAccess: async ({ target }) => target.key !== "task:B",
+    });
+    const tB = session.thread("task:B");
+    await tB.submitPrompt("hello B", {});
+    await waitFor(() => events.some((e) => e.threadId === tB.id && e.event.type === "turn_end"));
+
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("thread_read", { key: "task:B" }, { id: "tr-denied" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const tA = session.thread("task:A");
+    await tA.submitPrompt("read B", {});
+    await waitFor(() => events.some((e) => e.threadId === tA.id && e.event.type === "turn_end"
+      && (e.event as { reason: string }).reason === "end_turn"));
+    const toolEnd = events.filter((e) => e.threadId === tA.id && e.event.type === "tool_end").at(-1);
+    expect((toolEnd!.event as { result: string }).result).not.toContain("private-B");
+    // A host read without a reader is not narrowed, and a thread reads itself.
+    expect((await session.readEntries("task:B")).length).toBeGreaterThan(0);
+    expect((await session.readableThreads(tA)).map((t) => t.key)).not.toContain("task:B");
+    expect((await session.readEntries("task:B", undefined, tB)).length).toBeGreaterThan(0);
     faux.unregister();
   });
 });

@@ -1,6 +1,7 @@
 import { Navigate, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { SettingsRail, TEAM_SETTINGS_PATH } from "~/components/settings/settings-rail";
+import { pageClass } from "~/components/primitives";
 
 /**
  * `/settings` layout shell (split-settings design, decision 1): left rail +
@@ -22,7 +23,7 @@ export function SettingsLayout() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-4 py-5 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <h1 className="mb-4 sm:mb-8 font-display text-2xl text-ink">Settings</h1>
         <div className="flex flex-col gap-4 sm:flex-row sm:gap-12">
           <SettingsRail />

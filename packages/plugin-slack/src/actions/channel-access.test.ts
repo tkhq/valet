@@ -34,7 +34,7 @@ describe('checkPrivateChannelAccess', () => {
     );
 
     const result = await checkPrivateChannelAccess('xoxb-token', 'D123', 'U999');
-    expect(result).toEqual({ allowed: true, isPrivate: false });
+    expect(result).toEqual({ allowed: true, isPrivate: false, direct: 'im' });
     expect(slackGetMock).toHaveBeenCalledTimes(1);
   });
 
@@ -44,8 +44,17 @@ describe('checkPrivateChannelAccess', () => {
     );
 
     const result = await checkPrivateChannelAccess('xoxb-token', 'G123', 'U999');
-    expect(result).toEqual({ allowed: true, isPrivate: false });
+    expect(result).toEqual({ allowed: true, isPrivate: false, direct: 'mpim' });
     expect(slackGetMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('checks a group DM by membership when the caller treats DMs as private', async () => {
+    slackGetMock
+      .mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'G123', is_private: true, is_im: false, is_mpim: true } }))
+      .mockResolvedValueOnce(mockSlackResponse({ members: ['U111'] }));
+
+    const result = await checkPrivateChannelAccess('xoxb-token', 'G123', 'U999', { directIsPrivate: true });
+    expect(result).toMatchObject({ allowed: false, isPrivate: true });
   });
 
   it('denies private channels when ownerSlackUserId is undefined', async () => {

@@ -8,7 +8,6 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
-  type QueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -16,13 +15,16 @@ import type {
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  DeliverIdentityLinkFallback,
+  DeliverIdentityLinkRequest,
+  DeliverIdentityLinkResponse,
   GetSessionResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
+  ListLinkMembersResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
-  ListSessionsResponse,
   ListThreadsResponse,
   PatchIdentityLinkRequest,
   PatchSessionResponse,
@@ -33,15 +35,9 @@ import type {
   ResolveDecisionRequest,
   SandboxJwtResponse,
   SandboxProfile,
-  SessionRunState,
   SetNotificationPreferenceRequest,
-  DeliverIdentityLinkFallback,
-  DeliverIdentityLinkRequest,
-  DeliverIdentityLinkResponse,
-  ListLinkMembersResponse,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
-import { useLiveQuery } from "~/lib/use-live-query";
 import { api, type OwnerFilter } from "./client";
 
 // ── Query key factory ────────────────────────────────────────────────────
@@ -60,10 +56,6 @@ export const qk = {
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
   ratings: (id: string) => ["sessions", id, "ratings"] as const,
-  /** Spelled here (not in assistants.ts's `qkAssistants`) so useDeleteSession
-   * below can invalidate it without an import cycle — assistants.ts already
-   * imports this factory and derives `qkAssistants.list` from it. */
-  assistants: () => ["assistants"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
@@ -71,67 +63,6 @@ export const qk = {
 };
 
 // ── Reads ────────────────────────────────────────────────────────────────
-
-/**
- * The run states that keep the sessions list polling.
- *
- * `working` changes on its own — that is the whole reason the page is open.
- * `needs_you` changes when a person answers the gate, and the person can
- * answer from a chat channel or a second tab, so this page has to follow
- * that too. The rest are quiet: `failed`, `sleeping` and `idle` only move
- * when someone sends new work, and every path that sends work already
- * invalidates this query.
- */
-const LIVE_SESSION_STATES: ReadonlySet<SessionRunState> = new Set<SessionRunState>([
-  "working",
-  "needs_you",
-]);
-
-/** The "is anything moving?" rule for the sessions list. Exported because
- * the poll cost of the page depends on it, so it gets its own test. */
-export function sessionsAreLive(data: ListSessionsResponse): boolean {
-  return data.sessions.some((s) => LIVE_SESSION_STATES.has(s.runState));
-}
-
-/**
- * Polls while any session is working or blocked on a person, and stops when
- * none are. See `lib/use-live-query.ts` for the policy.
- */
-/** The sessions of one workspace, or of everything the caller can reach.
- * `owner` MUST reach the query key, or switching answers from the previous
- * workspace's cache. */
-export function useSessions(
-  owner?: OwnerFilter,
-  opts?: UseQueryOptions<ListSessionsResponse>,
-) {
-  return useLiveQuery<ListSessionsResponse>({
-    queryKey: qk.sessions(owner),
-    queryFn: () => api.listSessions(owner),
-    isLive: sessionsAreLive,
-    ...opts,
-  });
-}
-
-/**
- * Re-reads a session whose row the caller has just created.
- *
- * `invalidateQueries` alone does not do it. A read that started before the
- * row existed may still be in flight, and a query with no data yet keeps
- * its running attempt when asked to refetch (query-core only cancels a
- * refetch over existing data), so that attempt's 404 lands after the
- * invalidation and stays. Cancelling first discards the stale attempt; the
- * invalidation then starts a fresh one. `qk.session(id)` prefixes every read
- * under the session — `qk.threads(id)`, messages and decisions included —
- * so one call covers them all.
- *
- * Resolves once the active reads have answered again, so a caller that
- * awaits it mounts on fresh data rather than on the error the reads held.
- */
-export async function refetchSessionReads(qc: QueryClient, sessionId: string): Promise<void> {
-  const queryKey = qk.session(sessionId);
-  await qc.cancelQueries({ queryKey });
-  await qc.invalidateQueries({ queryKey });
-}
 
 export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {
   return useQuery<GetSessionResponse>({
@@ -200,12 +131,6 @@ export function useDeleteSession() {
     mutationFn: (id) => api.deleteSession(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.sessions() });
-      // Deleting a team assistant's session retires the assistant row
-      // server-side (TKAI-296) — refresh the rail so it drops right away
-      // instead of on the next focus refetch. Unconditional on purpose:
-      // migrated assistants keep legacy non-`assistant:`-prefixed session
-      // ids, so the id alone cannot say whether a retire happened.
-      qc.invalidateQueries({ queryKey: qk.assistants() });
     },
   });
 }
@@ -285,16 +210,6 @@ export function useSessionRatings(sessionId: string) {
   });
 }
 
-/** Session-level 👍/👎. `null` clears the rating. */
-export function useRateSession(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<PutRatingResponse, Error, RatingValue | null>({
-    mutationFn: (rating) => api.rateSession(sessionId, { rating }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.ratings(sessionId) });
-    },
-  });
-}
 
 /** Message-level 👍/👎 on one assistant entry. `null` clears the rating. */
 export function useRateMessage(sessionId: string) {
@@ -377,6 +292,26 @@ export function useSetThreadReasoning(sessionId: string) {
   });
 }
 
+/** Marks threads read for the viewer; with no ids, every thread in the session.
+ * The list shows them read at once; the server keeps the later timestamp. */
+export function useMarkThreadsRead(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { threadIds?: string[] }>({
+    mutationFn: ({ threadIds }) => api.markThreadsRead(sessionId, threadIds),
+    onMutate: ({ threadIds }) => {
+      const at = Date.now();
+      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+        ...current,
+        threads: current.threads.map((thread) =>
+          !threadIds || threadIds.includes(thread.id) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread),
+      }));
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["workspace-waiting"] });
+    },
+  });
+}
+
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
@@ -414,6 +349,10 @@ export function useDecisions(
   });
 }
 
+export function useNotificationDecisions() {
+  return useQuery({ queryKey: ["notification-decisions"], queryFn: api.listNotificationDecisions, refetchInterval: 5000 });
+}
+
 export function useResolveDecision(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
@@ -423,7 +362,10 @@ export function useResolveDecision(sessionId: string) {
   >({
     mutationFn: ({ gateId, body }) => api.resolveDecision(sessionId, gateId, body),
     // Approval-only views poll this query without a session stream.
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+    },
   });
 }
 
@@ -432,7 +374,10 @@ export function useWithdrawDecision(sessionId: string) {
   return useMutation<{ ok: true }, Error, { gateId: string }>({
     mutationFn: ({ gateId }) =>
       api.withdrawDecision(sessionId, gateId, { reason: "cancel" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+    },
   });
 }
 

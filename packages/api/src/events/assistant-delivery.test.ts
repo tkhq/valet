@@ -1,15 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
-import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { EngineHost } from "../engine/host.js";
-import { PgCredentialStore } from "../plugins/credential-store.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
-import { createAssistant, loadAssistant } from "../assistants/service.js";
+import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
-import { assistants, users, eventDropLog } from "../schema/index.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { EngineHost } from "../engine/host.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { assistants, teams, users } from "../schema/index.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 
 const ORG = "org-1";
@@ -83,31 +84,31 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(session.owner).toEqual(OWNER);
   });
 
-  it("uses the current assistant default for new Slack threads after restore", async () => {
+  it("uses the current team defaults for new Slack threads after restore", async () => {
     const deps = { db: testDb.appDb, engineHost };
-    const assistant = await createAssistant(testDb.appDb, ORG, OWNER, "Channel assistant");
-    await testDb.appDb.update(assistants).set({ model: "claude-opus-4-5", reasoning: "high" }).where(eq(assistants.id, assistant.id));
-    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const owner = { type: "team", id: "team-defaults" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Defaults", createdAt: Date.now(), defaultModel: "claude-opus-4-5", defaultReasoning: "high" });
+    const session = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
     const oldThread = await session.createThread("slack:C1:old", { model: "claude-sonnet-4-5", reasoning: "low" });
-    await testDb.appDb.update(assistants).set({ model: "m", reasoning: "low" }).where(eq(assistants.id, assistant.id));
-    // An org assistant must not inherit the member who delivered the event.
+    await testDb.appDb.update(teams).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(teams.id, owner.id));
+    // A team runtime must not inherit the member who delivered the event.
     await testDb.appDb.insert(users).values({ id: USER, email: "event-model@example.com", name: "Event user", defaultModel: "l" });
     engineHost.evictAll();
 
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER,
+      orgId: ORG, owner: owner, actorUserId: USER,
       threadKey: "slack:C1:1.2", signal: channelSignal("first"),
       dispatchId: "model-first", mismatchReason: "event_target_mismatch",
     });
-    const restored = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const restored = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
     expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
     expect((await restored.threadByKey("slack:C1:1.2"))?.reasoning()).toBe("low");
     expect(restored.threadById(oldThread.id)?.modelId()).toBe("claude-sonnet-4-5");
     expect(restored.options.modelSpec).toBe("claude-opus-4-5");
 
-    await testDb.appDb.update(assistants).set({ model: null, reasoning: null }).where(eq(assistants.id, assistant.id));
+    await testDb.appDb.update(teams).set({ defaultModel: null, defaultReasoning: null }).where(eq(teams.id, owner.id));
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER,
+      orgId: ORG, owner: owner, actorUserId: USER,
       threadKey: "slack:C1:next", signal: channelSignal("next"),
       dispatchId: "model-next", mismatchReason: "event_target_mismatch",
     });
@@ -264,102 +265,15 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     attributes: {},
   });
 
-  /** A second, non-default assistant for `OWNER`. The first call for a
-   * principal takes the default slot, so seed that one first. */
-  async function secondAssistant(): Promise<string> {
-    await createAssistant(testDb.appDb, ORG, OWNER, "Primary");
-    const created = await createAssistant(testDb.appDb, ORG, OWNER, "Ops");
-    return created.id;
-  }
-
-  it("routes to the NAMED assistant, not the owner's default", async () => {
-    const assistantId = await secondAssistant();
-    await deliverToAssistantThread(
-      { db: testDb.appDb, engineHost },
-      {
-        orgId: ORG,
-        owner: OWNER,
-        actorUserId: USER,
-        threadKey: "events",
-        signal: signal("go"),
-        dispatchId: "d1",
-        assistantId,
-        mismatchReason: "event_target_mismatch",
-      },
-    );
-
-    // The named assistant's own session holds it...
-    const row = await loadAssistant(testDb.appDb, assistantId);
-    const named = await engineHost.assistantSessionFor(
-      assistantId,
-      { actorUserId: USER, orgId: ORG },
-      { sessionId: row!.sessionId },
-    );
-    const namedThread = named.thread("events").id;
-    let landed: string | undefined;
-    for (let i = 0; i < 100; i++) {
-      const entries = await named.providers.store.getEntries(named.id, namedThread);
-      const entry = entries.find((e) => e.type === "message" && e.role === "user") as
-        | MessageEntry
-        | undefined;
-      if (entry) {
-        landed = entry.content ?? "";
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    expect(landed).toBe("go");
-
-    // ...and the default's does NOT. Without the routing, this is where it went.
-    const fallback = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, OWNER, {
-      actorUserId: USER,
-      orgId: ORG,
+  it("delivers into the owner's singleton and persists the initiating actor", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+      signal: signal("go"), dispatchId: "d1", mismatchReason: "event_target_mismatch",
     });
-    const defaultEntries = await fallback.providers.store.getEntries(
-      fallback.id,
-      fallback.thread("events").id,
-    );
-    expect(defaultEntries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(0);
-  });
-
-  it("refuses an assistant that does not exist, and drop-logs it", async () => {
-    await expect(
-      deliverToAssistantThread(
-        { db: testDb.appDb, engineHost },
-        {
-          orgId: ORG,
-          owner: OWNER,
-          actorUserId: USER,
-          threadKey: "events",
-          signal: signal("go"),
-          dispatchId: "d-missing",
-          assistantId: "no-such-assistant",
-          mismatchReason: "event_target_mismatch",
-        },
-      ),
-    ).rejects.toThrow(/no such assistant/);
-
-    const drops = await testDb.appDb.select().from(eventDropLog);
-    expect(drops.map((d) => d.reason)).toContain("event_target_assistant_invalid");
-  });
-
-  it("refuses an assistant owned by a different principal", async () => {
-    // Live and in-org, but owned by a user rather than by the delivery's org.
-    const other = await createAssistant(testDb.appDb, ORG, { type: "user", id: USER }, "Someone else's");
-    await expect(
-      deliverToAssistantThread(
-        { db: testDb.appDb, engineHost },
-        {
-          orgId: ORG,
-          owner: OWNER,
-          actorUserId: USER,
-          threadKey: "events",
-          signal: signal("go"),
-          dispatchId: "d-foreign",
-          assistantId: other.id,
-          mismatchReason: "event_target_mismatch",
-        },
-      ),
-    ).rejects.toThrow(/owned by user:/);
+    expect(await firstUserEntry(deps, "events")).toMatchObject({ content: "go", author: { id: USER } });
+    const rows = await testDb.appDb.select().from(assistants);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ownerType: OWNER.type, ownerId: OWNER.id });
   });
 });

@@ -1,10 +1,12 @@
+// @vitest-environment jsdom
 /**
  * Draft-store unit tests: per-thread slot isolation, empty-slot GC, and the
  * orphan-adoption rule that carries a pre-threads draft (typed or prefilled
- * while the threads query loaded) into the real thread.
+ * while the threads query loaded) into the real thread, and draft text that
+ * survives a reload.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import { draftKey, EMPTY_DRAFT, useComposerDraftStore } from "./composer-drafts";
+import { draftKey, EMPTY_DRAFT, useComposerDraftStore, prefillComposerDraft } from "./composer-drafts";
 
 const SESSION = "sess-1";
 const THREAD = "thread-1";
@@ -75,5 +77,39 @@ describe("composer draft store", () => {
     // the stable fallback value.
     expect(store().byKey["nope"]).toBeUndefined();
     expect(EMPTY_DRAFT.text).toBe("");
+  });
+});
+
+describe("starter drafts", () => {
+  it("does not append repeated starters and repairs identical legacy copies", () => {
+    const key = draftKey(SESSION, THREAD);
+    store().setText(key, "Create a workflow\n\nCreate a workflow");
+    prefillComposerDraft(SESSION, THREAD, "Create a workflow");
+    prefillComposerDraft(SESSION, THREAD, "Create a workflow");
+    expect(store().byKey[key]?.text).toBe("Create a workflow");
+  });
+  it("preserves user text and keeps workspace drafts separate", () => {
+    const key = draftKey(SESSION, THREAD);
+    store().setText(key, "My unfinished request");
+    prefillComposerDraft(SESSION, THREAD, "Create a workflow");
+    prefillComposerDraft("another-workspace", THREAD, "Create a workflow");
+    expect(store().byKey[key]?.text).toBe("My unfinished request");
+    expect(store().byKey[draftKey("another-workspace", THREAD)]?.text).toBe("Create a workflow");
+  });
+
+  it("restores draft text after a reload and keeps attachments in memory", async () => {
+    const key = draftKey(SESSION, THREAD);
+    store().setText(key, "typed before reload");
+    store().setFileErrors(key, ["too large"]);
+    // A reload starts from an empty store and the saved text.
+    const saved = localStorage.getItem("valet:composer-drafts") ?? "";
+    useComposerDraftStore.setState({ byKey: {} });
+    localStorage.setItem("valet:composer-drafts", saved);
+    await useComposerDraftStore.persist.rehydrate();
+    expect(store().byKey[key]).toEqual({ ...EMPTY_DRAFT, text: "typed before reload" });
+
+    store().clear(key);
+    await useComposerDraftStore.persist.rehydrate();
+    expect(store().byKey[key]).toBeUndefined();
   });
 });

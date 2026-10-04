@@ -58,7 +58,7 @@ Node types:
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
 - `approval` — park until a human approves/denies (`prompt`, optional `summary`, `details`, `timeout`, `onDeny`)
 - `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`)
-- `orchestrator` — prompt the user's orchestrator (optional `outputSchema`, `wait`)
+- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `wait`). The app labels this step "Thread".
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
 - `foreach` — iterate `items` over `body` nodes (optional `maxItems`, `concurrency`)
@@ -68,7 +68,7 @@ Edges may carry `"when"` (an expression) to gate a branch.
 
 ## Model selection
 
-Use a size tier (`xs`, `s`, `m`, `l`, or `xl`) when the org should control the concrete model. Use an approved catalog id when the workflow needs a fixed model. An `llm` node requires `model`. A `session` node uses its `model` when set and otherwise uses the session default. An `orchestrator` node has no model field. It uses the selected assistant's saved model. `update_model` changes `llm` and `session` nodes only, including a `foreach` body.
+Use a size tier (`xs`, `s`, `m`, `l`, or `xl`) when the org should control the concrete model. Use an approved catalog id when the workflow needs a fixed model. An `llm` node requires `model`. A `session` node uses its `model` when set and otherwise uses the session default. An `orchestrator` node has no model field. It uses the workspace assistant's saved model. Its result includes `threadId` in both dispatch-only and settled modes. `update_model` changes `llm` and `session` nodes only, including a `foreach` body.
 
 ## Templates: reading data between nodes
 

@@ -35,7 +35,7 @@ import {
   type ForeachNode,
   type IfNode,
   type LlmNode,
-  type OrchestratorNode,
+  type ThreadNode,
   type SessionNode,
   type SetNode,
   type StopNode,
@@ -157,8 +157,8 @@ export const NODE_META: Record<DagNodeType, NodeMeta> = {
     defaultNode: (id): ApprovalNode => ({ id, type: 'approval', prompt: '' }),
   },
   session: {
-    label: 'Session',
-    description: 'Start a coding session',
+    label: 'Runtime',
+    description: 'Start a coding runtime',
     defaultNode: (id): SessionNode => ({ id, type: 'session', mode: 'start', prompt: '' }),
   },
   stop: {
@@ -182,9 +182,9 @@ export const NODE_META: Record<DagNodeType, NodeMeta> = {
     defaultNode: (id): LlmNode => ({ id, type: 'llm', model: '', prompt: '' }),
   },
   orchestrator: {
-    label: 'Orchestrator',
-    description: 'Ask the workflow’s selected orchestrator to do work',
-    defaultNode: (id): OrchestratorNode => ({ id, type: 'orchestrator', prompt: '' }),
+    label: 'Thread',
+    description: 'Ask the workspace assistant to work in this workflow’s thread',
+    defaultNode: (id): ThreadNode => ({ id, type: 'orchestrator', prompt: '' }),
   },
   tool: {
     label: 'Tool',
@@ -247,7 +247,7 @@ export function toFlow(definition: WorkflowDefinition): WorkflowFlowState {
 
 export function fromFlow(
   flow: WorkflowFlowState,
-  previous?: Pick<WorkflowDefinition, 'policy' | 'assistantId' | 'ui'>,
+  previous?: Pick<WorkflowDefinition, 'policy' | 'ui'>,
 ): WorkflowDefinition {
   const ui: WorkflowEditorState = {
     nodes: Object.fromEntries(flow.nodes.map((node) => [node.id, { position: node.position }])),
@@ -260,7 +260,6 @@ export function fromFlow(
     nodes: flow.nodes.map((node) => node.data.node),
     edges: flow.edges.map(flowEdgeToWorkflowEdge),
     ...(previous?.policy ? { policy: previous.policy } : {}),
-    ...(previous?.assistantId ? { assistantId: previous.assistantId } : {}),
     ui,
   };
 }
@@ -300,7 +299,6 @@ export function graphSignature(definition: WorkflowDefinition): string {
     nodes: definition.nodes,
     edges: definition.edges,
     policy: definition.policy ?? null,
-    assistantId: definition.assistantId ?? null,
   });
 }
 

@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -23,7 +23,10 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowSignals,
+  assistants,
+  threadPullRequests,
 } from "../schema/index.js";
+import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
 import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 
 const ORG = "org-1";
@@ -114,6 +117,53 @@ describe("EventDispatcher", () => {
     if (!row) throw new Error(`delivery ${id} vanished`);
     return row;
   }
+
+  it.each([
+    { policy: "always", member: true, enabled: true, sameOrg: true, expected: "delivered" },
+    { policy: "ignoreIfMyTeamSubscribed", member: true, enabled: true, sameOrg: true, expected: "skipped" },
+    { policy: "ignoreIfMyTeamSubscribed", member: false, enabled: true, sameOrg: true, expected: "delivered" },
+    { policy: "ignoreIfAnyTeamSubscribed", member: false, enabled: true, sameOrg: true, expected: "skipped" },
+    { policy: "ignoreIfAnyTeamSubscribed", member: true, enabled: false, sameOrg: true, expected: "delivered" },
+    { policy: "ignoreIfAnyTeamSubscribed", member: true, enabled: true, sameOrg: false, expected: "delivered" },
+  ])("evaluates current team coverage: $policy member=$member enabled=$enabled sameOrg=$sameOrg", async ({ policy, member, enabled, sameOrg, expected }) => {
+    const db = tdb.appDb;
+    const { deliveryId, subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: policy, pauseOnOverlap: true } });
+    const teamOrg = sameOrg ? ORG : "other-org";
+    await db.insert(teams).values({ id: "coverage-team", orgId: teamOrg, name: "Coverage", createdAt: Date.now() });
+    if (member) await db.insert(teamMembers).values({ teamId: "coverage-team", userId: "user-1", role: "member" });
+    await db.insert(eventSubscriptions).values({
+      id: "coverage-rule", orgId: teamOrg, ownerType: "team", ownerId: "coverage-team", name: "Team coverage",
+      eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
+      enabled, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe(expected);
+    expect(deliver).toHaveBeenCalledTimes(expected === "delivered" ? 1 : 0);
+    const [personal] = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
+    expect(personal!.enabled).toBe(expected !== "skipped");
+    await dispatcher.pollOnce();
+    expect(deliver).toHaveBeenCalledTimes(expected === "delivered" ? 1 : 0);
+  });
+
+  it("skips only matching events without pausing and respects a later disabled team rule on retry", async () => {
+    const db = tdb.appDb;
+    const { deliveryId, subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, status: "failed", attempts: 1 });
+    await db.insert(teams).values({ id: "retry-team", orgId: ORG, name: "Retry", createdAt: Date.now() });
+    await db.insert(eventSubscriptions).values({ id: "retry-rule", orgId: ORG, ownerType: "team", ownerId: "retry-team", name: "Coverage", eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "retry-team" }, enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now() });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("skipped");
+    const [personal] = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
+    expect(personal!.enabled).toBe(true);
+    await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "retry-rule"));
+    // A deliberately redelivered event re-evaluates current coverage.
+    await db.update(eventDeliveries).set({ status: "pending", nextAttemptAt: 0 }).where(eq(eventDeliveries.id, deliveryId));
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("delivered");
+  });
 
   it("delivers a workflow-target delivery: RunHost.start gets the event trigger payload; row -> delivered", async () => {
     const db = tdb.appDb;
@@ -213,6 +263,42 @@ describe("EventDispatcher", () => {
     expect(runHost.start).not.toHaveBeenCalled();
     const row = await getDelivery(deliveryId);
     expect(row.status).toBe("delivered");
+  });
+
+  it("holds a fresh pull request comment until Valet's own write is recorded, then keeps it off the thread that posted it", async () => {
+    const db = tdb.appDb;
+    const url = "https://github.com/acme/app/pull/12";
+    await db.insert(assistants).values({ id: "asst-1", orgId: ORG, ownerType: "user", ownerId: "user-1", sessionId: "sess-1", createdAt: 1 });
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('thr-1', 'sess-1', 'web:pr-thread', 'idle', 'steer', 1, 1)`);
+    await db.insert(threadPullRequests).values({
+      sessionId: "sess-1", threadId: "thr-1", url, repo: "acme/app", number: 12, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1,
+    });
+    const postedAt = Date.now();
+    const { deliveryId } = await seedDelivery({
+      target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
+      payload: { issue: { pull_request: { html_url: url } }, comment: { id: 501, body: "Done.", created_at: new Date(postedAt).toISOString(), user: { login: "me", type: "User" } } },
+    });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({
+      db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver,
+    });
+
+    // The webhook beat the write record: the delivery waits, uncounted.
+    await dispatcher.pollOnce();
+    expect(deliver).not.toHaveBeenCalled();
+    const held = await getDelivery(deliveryId);
+    expect(held).toMatchObject({ status: "pending", attempts: 0, nextAttemptAt: postedAt + OWN_WRITE_SETTLE_MS });
+
+    // The record lands, so the comment is Valet's own and stays on the events thread.
+    await recordChannelMessage(db, {
+      orgId: ORG, sessionId: "sess-1", threadId: "thr-1", channelKey: "github:acme/app#12", conversationKey: "github:acme/app#12",
+      providerMessageId: "501", direction: "out", text: "Done.",
+    });
+    await db.update(eventDeliveries).set({ nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+    await dispatcher.pollOnce();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver.mock.calls[0]![0]).not.toHaveProperty("threadKey");
   });
 
   it("delivers an orchestrator-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
@@ -425,6 +511,25 @@ describe("EventDispatcher", () => {
     expect(row?.ownerType).toBe("team");
     expect(row?.ownerId).toBe("team-x");
     expect(row?.createdBy).toBe("member-9");
+  });
+
+  it("does not create a second follow path for a message subscription", async () => {
+    const { deliveryId } = await seedDelivery({
+      target: { kind: "orchestrator", follow: true }, service: "slack",
+      eventKey: "slack.message", eventKeys: ["slack.message"],
+      refs: { channel: "C1" }, summary: "Reply",
+      payload: { type: "message", channel: "C1", user: "U9", text: "reply", ts: "1.3", thread_ts: "1.2" },
+    });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({
+      db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToOrchestrator: deliver,
+      resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2" }),
+    });
+    await dispatcher.pollOnce();
+    expect(deliver).toHaveBeenCalledOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    expect(await findFollowedThread(tdb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" })).toBeNull();
   });
 
   it("signal target: inserts workflow_signals for org runs parked on event:<key> and wakes them", async () => {

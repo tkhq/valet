@@ -11,7 +11,7 @@
  *     — specifically, that `ctx.body`'s `inviteCode` survives into the
  *     `databaseHooks.user.create.before` layer for a code-only invite.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { users, invites } from "../schema/index.js";
@@ -23,6 +23,7 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
 
 /** Pulls the `better-auth.session_token` cookie pair out of a `set-cookie`
@@ -117,4 +118,21 @@ describe("real better-auth instance + mounting", () => {
       expect(inviteRows[0]?.acceptedBy).toBe(invitedUser!.id);
     },
   );
+});
+
+it("unrestricted signup creates a member without an invitation", async () => {
+  vi.stubEnv("AUTH_ALLOW_SIGNUP", "1");
+  api = await bootTestApi({ auth: true });
+  await api.providers.db.insert(users).values({ id: "existing-admin", email: "owner@example.test", name: "Owner", role: "admin" });
+  const response = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "New member", email: "new@unlisted.test", password: "valid-password-for-test" }),
+  });
+  expect(response.status).toBe(200);
+  const [created] = await api.providers.db.select().from(users).where(eq(users.email, "new@unlisted.test"));
+  expect(created?.role).toBe("member");
+  const cookie = extractSessionCookie(response.headers.get("set-cookie"));
+  const session = await fetch(`${api.baseUrl}/api/auth/get-session`, { headers: { cookie } });
+  expect(session.status).toBe(200);
+  expect(await session.json()).toMatchObject({ user: { id: created!.id, role: "member" } });
 });

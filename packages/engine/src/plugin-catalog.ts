@@ -170,7 +170,7 @@ export type ServiceAvailabilityState =
   | "not_connected"
   | "deployment_unconfigured"
   | "disabled_by_org"
-  | "excluded_by_assistant"
+  | "limited_by_workspace"
   | "load_failed";
 
 export interface ServiceAvailability {
@@ -559,6 +559,7 @@ export async function invokeAction(
     sessionId: ctx.sessionId,
     threadId: ctx.threadId,
     appliesIn: "session",
+    ...(ctx.externalSender ? { externalSender: true } : {}),
   };
   const baseRecord: BaseInvocationRecord = {
     service: entry.service,
@@ -1616,10 +1617,14 @@ function actionResultToToolResult(
       ok: true,
     };
   }
+  const createdPullRequest = /^github[.:]create_pull_request$/.test(toolId) && typeof result.data === "object" && result.data !== null
+    && "url" in result.data && typeof result.data.url === "string" ? result.data.url : undefined;
   return {
     text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
+    // Usage counts terminal PRs from bash parts only; the action has its own fact.
+    ...(createdPullRequest ? { outcome: { kind: "pull_request_created" as const, url: createdPullRequest } } : {}),
   };
 }
 

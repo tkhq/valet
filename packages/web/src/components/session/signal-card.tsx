@@ -15,7 +15,7 @@ export function truncateBody(text: string, max = BODY_PREVIEW_LEN): string {
 
 /** Pure: child card title — `attributes.title`, falling back to the child id. */
 export function childCardTitle(signal: MessageSignal): string {
-  return signal.attributes?.title || signal.senderSessionId || "child session";
+  return signal.attributes?.title || signal.senderSessionId || "child runtime";
 }
 
 /**
@@ -111,13 +111,14 @@ function ChildSettledCard({
  * `attributes.runId` (`api/src/workflows/engine-deps.ts`); a signal that
  * predates that still renders through the envelope below.
  */
-function WorkflowRequestCard({ message, runId }: { message: Message; runId: string }) {
+function WorkflowRequestCard({ message, runId, outcome }: { message: Message; runId: string; outcome?: string }) {
   return (
     <CardShell>
       <div className="flex items-center gap-2">
         <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
           workflow
         </span>
+        {outcome && <OutcomeBadge outcome={outcome} />}
         <Link
           to="/workflows/runs/$runId"
           params={{ runId }}
@@ -136,8 +137,10 @@ function WorkflowRequestCard({ message, runId }: { message: Message; runId: stri
 }
 
 function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSignal }) {
-  const runId = signal.signalType === "workflow.request" ? signal.attributes?.runId : undefined;
-  if (runId) return <WorkflowRequestCard message={message} runId={runId} />;
+  // A run's report (`workflow.request`) and its settle report back to the
+  // thread that started it (`workflow.settled`, `run-attention.ts`).
+  const runId = signal.signalType === "workflow.request" || signal.signalType === "workflow.settled" ? signal.attributes?.runId : undefined;
+  if (runId) return <WorkflowRequestCard message={message} runId={runId} outcome={signal.attributes?.outcome} />;
   return (
     <CardShell>
       <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">

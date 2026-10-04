@@ -1722,6 +1722,36 @@ describe("resultBody", () => {
 // gets a truncated result has no other way to reach the rest, because
 // `thread_read` stays inside one session.
 describe("buildChildReader", () => {
+  it("reads a child of a private team thread only from that thread", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const reader = buildChildReader(childrenDeps(api));
+    await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at) VALUES
+      ('team-runtime', 'team', 'team-1', 'local-user', 'local-org', '/', 'interactive', 'running', NULL, NULL, 1, 1),
+      ('private-child', 'team', 'team-1', 'local-user', 'local-org', '/', 'child', 'running', 'team-runtime', 'thr-helper', 1, 1),
+      ('shared-child', 'team', 'team-1', 'local-user', 'local-org', '/', 'child', 'running', 'team-runtime', 'thr-shared', 1, 1)`);
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+      ('thr-helper', 'team-runtime', 'app-assistant:local-user', 'idle', 'steer', 1, 1),
+      ('thr-shared', 'team-runtime', 'web:default', 'idle', 'steer', 1, 1)`);
+    for (const [child, parentThreadId] of [["private-child", "thr-helper"], ["shared-child", "thr-shared"]] as const) {
+      await db.insert(agentSessions).values({ id: child, userId: "local-user", orgId: "local-org", workspace: "/", ownerType: "team", ownerId: "team-1", createdAt: 1, updatedAt: 1 });
+      await db.insert(childWatches).values({ childSessionId: child, queueItemId: `q-${child}`, parentSessionId: "team-runtime", parentThreadId,
+        actorUserId: "local-user", orgId: "local-org", createdAt: 1 });
+    }
+    // The helper thread that started it reads it; a shared thread does not.
+    expect(await reader({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-helper" })).toEqual([]);
+    expect(await reader({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();
+    // A child of a shared thread is readable from any thread.
+    expect(await reader({ childSessionId: "shared-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-helper" })).toEqual([]);
+    // child_status and child_send apply the same rule.
+    const status = buildChildStatusReader(childrenDeps(api));
+    expect(await status({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();
+    const deps = childrenDeps(api);
+    const sender = buildChildSender(deps, new ChildWatcher(deps));
+    expect(await sender({ childSessionId: "private-child", message: "redirect" },
+      { parentSessionId: "team-runtime", parentThreadId: "thr-shared", actorUserId: "local-user" })).toBeNull();
+  });
+
   it("returns the child's messages to the parent that spawned it", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

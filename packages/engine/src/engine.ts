@@ -1,4 +1,5 @@
 import { VirtualSandboxProvider } from "./providers/sandbox/virtual.js";
+import { uid } from "./ids.js";
 import { Session } from "./session.js";
 import { SandboxAttachment } from "./sandbox/attachment.js";
 import { PolicySandbox } from "./sandbox/policy.js";
@@ -11,10 +12,6 @@ import type {
   SpecProvider,
 } from "./types.js";
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 export class Engine {
   private sessions = new Map<string, Session>();

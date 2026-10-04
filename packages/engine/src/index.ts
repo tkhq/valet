@@ -136,6 +136,7 @@ export {
   editTool,
   bashTool,
   threadReadTool,
+  threadReference,
   JOB_MODE_THRESHOLD_MS,
   JOB_POLL_INTERVAL_MS,
   BASH_DEFAULT_TIMEOUT_S,

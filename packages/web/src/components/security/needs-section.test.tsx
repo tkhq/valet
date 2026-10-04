@@ -8,7 +8,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
 import type { SecurityNeedWire } from "@valet/api/wire";
 
 const resolveMock = vi.fn(

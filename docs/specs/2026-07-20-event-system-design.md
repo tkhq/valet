@@ -240,28 +240,7 @@ implemented in `packages/api/src/events/dispatcher.ts`:
 
 ## Linear installation flow
 
-New `linear-connect` routes (mirroring `github-connect` / `github-app`):
-
-1. Admin OAuth authorize → callback stores an org-level `linear` credential
-   (workspace access token) in `credentials`. One workspace per org: the org
-   credential holds exactly one token, so connecting a second, different
-   workspace is rejected (409) until the first is disconnected — otherwise
-   the first workspace's webhook could never be deleted again.
-2. On callback: persist the credential (with the generated signing secret in
-   `metadata.webhookSecret`) and the `linear_installations` row FIRST, then
-   call Linear GraphQL `webhookCreate` (resource types: Issue, Comment,
-   Project, Cycle, IssueLabel, Reaction) pointing at
-   `{API_PUBLIC_URL}/webhooks/events/linear`, then patch `webhook_id` onto
-   the install row. Order matters: Linear can deliver the moment the webhook
-   exists, and a delivery the ingress can't resolve is 204'd and never
-   retried. A failed `webhookCreate` leaves a repairable half-connected
-   state (`webhookConfigured: false`), not a delivery gap.
-3. Verification: `Linear-Signature` header (HMAC-SHA256 over raw body) +
-   `webhookTimestamp` replay check, implemented in `plugin-linear`'s new
-   `triggers.ts` (`verify` + `toEvent` + catalog: `linear.issue.create`,
-   `linear.issue.update`, `linear.comment.create`, `linear.project.update`, …
-   — keys use Linear's own action verbs, `create`/`update`/`remove`).
-4. Disconnect: `webhookDelete` via API; remove installation + credential rows.
+Superseded on 2026-09-29 by "Organization Linear application setup" below. The original flow ran an admin OAuth authorization with the `admin` scope and created the workspace webhook through `webhookCreate` with a generated secret. Linear's `actor=app` installations cannot hold `admin`, and Linear access tokens from that flow expire after 24 hours. Signature verification is unchanged: the `Linear-Signature` header (HMAC-SHA256 over the raw body) plus the `webhookTimestamp` replay check in `plugin-linear`'s `triggers.ts`.
 
 ## API surface
 
@@ -489,3 +468,45 @@ that thread reach the assistant through the follow router
 the default body. Only the deliveries the subscription matches render its
 templates. The form states this where a rule follows a thread, so a reader
 does not expect an instruction to hold for the whole conversation.
+
+### Linear event connection readiness
+
+Personal Linear OAuth enables MCP tools, including `linear.save_issue`. It does
+not install a webhook. Events such as `linear.issue.update` require the separate
+organization connection. Organization settings expose the existing Linear OAuth
+setup, which registers that webhook. The callback returns to this settings page.
+
+Trigger catalogs show incoming event labels and organization readiness. Readiness
+requires an installation, an organization credential with a signing secret, and a
+registered webhook ID. It does not prove that Linear delivered a particular event.
+Creation and activation report missing setup instead of accepting an event source
+that cannot receive events. Template installation uses the same check. Repository
+imports keep workflow definitions but leave missing-ingress triggers unarmed with
+a setup warning. Existing rules can still be disabled. Non-admins get
+an instruction to ask an organization admin; credentials remain admin-only.
+
+Linear's Integrations entry is an ordinary integration card: Connect Linear adds a
+personal or team credential for its tools. The organization's native Linear
+connection lives only in Organization settings, as Slack's and GitHub's do.
+Removing the personal or team credential does not disconnect the organization's native webhook.
+Native event authorization does not currently replace MCP-backed action tools.
+
+## Organization Linear application setup (2026-09-29)
+
+The organization's Linear connection follows the Slack model: paste, verify, store. The settings page is named Linear, because it holds the organization's native Linear integration.
+
+Linear issues three credentials for an OAuth app: a client ID, a client secret, and a webhook signing secret (https://linear.app/developers/oauth-2-0-authentication). The admin pastes all three.
+
+1. Step one links to Linear's prefilled app creation form (https://linear.app/developers/oauth-app-manifests). It sets the app name, redirect URI, private distribution, both `authorization_code` and `client_credentials` grants, and the app's webhook: `{public URL}/webhooks/events/linear` with the resource types in `LINEAR_WEBHOOK_RESOURCE_TYPES`. Linear accepts only a public HTTPS webhook URL, so without `VALET_PUBLIC_URL` the form omits the webhook and the page warns.
+2. `PUT /api/org/linear` takes the three values. Before it stores anything, the server requests a `client_credentials` token (scope `read,write`) and reads the Linear workspace with it, the way the Slack save runs `auth.test`. A refused grant returns 400 with the fix (turn on Client credentials, or recopy the ID and secret). On success it stores `linear_app` (client ID in metadata, secret encrypted), the org `linear` row (token, `webhookSecret`, `workspaceId`, `grant`, `tokenExpiresAt`), and the `linear_installations` row. One Linear workspace per org still applies (409).
+3. There is no browser approval. Linear installs a private app in its own workspace when it issues the `client_credentials` token. A live test on 2026-09-29 showed the approval screen reporting "already installed" with no way back to Valet. Linear requires a redirect URI on every app, so the form registers `{public URL}/api/org/linear/callback`, but Valet never redirects to it.
+
+No `admin` scope is requested: `actor=app` installations cannot hold it. Valet no longer calls `webhookCreate`.
+
+`client_credentials` tokens last 30 days and have no refresh token. `LinearAppTokenStore` (a credential store decorator) mints a replacement on read when the org token is within a day of `tokenExpiresAt`, using the saved client ID and secret. A failed renewal stamps `metadata.refreshFailedAt`. The scope string stays constant, because Linear revokes an app's other tokens when a different scope set is requested.
+
+Readiness requires the installation, the signing secret, and a matching workspace. `DELETE /api/org/linear` removes such a legacy webhook best effort, then deletes the installation, the org `linear` row, and `linear_app`. The app itself stays in Linear.
+
+Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. App credentials stay excluded from agent and workflow credential resolution, and generic credential routes cannot change them.
+
+Known gaps: Linear sends an app-revoked event when a workspace removes the app. No trigger definition verifies it, so the ingress logs it as `bad_signature`. Valet does not revoke tokens with Linear on disconnect.

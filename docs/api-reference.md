@@ -47,13 +47,12 @@ The WebSocket `init` frame is metadata-only. History always loads over REST.
 Wire event types are listed in
 [architecture.md](architecture.md#websocket-and-wire-protocol).
 
-## Orchestrator
+## Workspace runtime
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/orchestrator` | POST / GET | Ensure / get the caller's orchestrator session |
-| `/api/orchestrator/info` | GET / PATCH | Orchestrator identity (handle etc.) |
-| `/api/orchestrator/children` | GET | Child sessions it has spawned |
+| `/api/workspaces/:workspace/runtime` | POST | Ensure the workspace's runtime session (`user` or a team id) |
+| `/api/workspaces/:workspace/runtime/info` | GET | Runtime session id, presence, and active child count |
 
 ## Workflows
 
@@ -92,7 +91,6 @@ Wire event types are listed in
 | `/api/org/github-app` | — | GitHub App manifest setup (admin) |
 | `/api/org/sources/health` | GET | Org cache bytes, registry capacity, reserve status, and recent push failures (admin) |
 | `/api/org/sources` | GET / POST / PATCH / DELETE | Sandbox image sources and their bakes (admin) |
-| `/api/sources/for-repo` | GET | Newest repo image bake for a repo (member) |
 | `/api/admin` | — | Operator submission surface (admin) |
 
 ## System

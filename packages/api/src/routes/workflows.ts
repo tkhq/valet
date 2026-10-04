@@ -37,6 +37,7 @@ import {
   listRunsForOwner,
   listWorkflowActionRequired,
   listWorkflowDefinitions,
+  dismissWorkflowRun,
   listWorkflowRuns,
   listWorkflowVersions,
   parseWorkflowOwnerFilter,
@@ -67,7 +68,7 @@ import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workfl
 import { applyWorkflowModelPatch } from "../workflows/patch.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
-import { allowWorkflowPermissions, analyzeWorkflowPermissions } from "../workflows/permissions.js";
+import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions } from "../workflows/permissions.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
   GitHubSkillRepoReader,
@@ -675,6 +676,12 @@ workflowsRouter.get("/:id/permissions", async (c) => {
   return c.json(resp);
 });
 
+workflowsRouter.delete("/:id/permissions/allow", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  if (!(await revokeWorkflowPermissions(deps, owner, c.req.param("id")))) return c.json({ error: "Workflow not found or permission management is not allowed." }, 404);
+  return c.json({ ok: true });
+});
+
 workflowsRouter.post("/:id/permissions/allow", async (c) => {
   const { deps, owner } = serviceCtx(c);
 
@@ -879,8 +886,8 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if ("grantActions" in body) {
     return c.json({ error: "grantActions is no longer supported; use scope instead" }, 400);
   }
-  if (body.scope !== undefined && !["once", "run", "always"].includes(body.scope)) {
-    return c.json({ error: "scope must be one of: once, run, always" }, 400);
+  if (body.scope !== undefined && !["once", "run", "always", "workflow"].includes(body.scope)) {
+    return c.json({ error: "scope must be one of: once, run, always, workflow" }, 400);
   }
   if (body.iteration !== undefined && (!Number.isInteger(body.iteration) || body.iteration < 0)) {
     return c.json({ error: "iteration must be a non-negative integer" }, 400);
@@ -900,12 +907,22 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (result === "not_parked") return c.json({ error: "run is not parked on this approval gate" }, 409);
   if (result === "already_resolved") return c.json({ error: "this approval gate has already been resolved" }, 409);
   if (result === "timed_out") return c.json({ error: "this approval gate has timed out" }, 409);
+  if (result === "forbidden_workflow") return c.json({ error: "This workflow permission cannot be saved. Its owner or team admin must review the current workflow and any policy restrictions." }, 403);
   if (result === "forbidden_always") return c.json({ error: "Always allow requires an org admin. Ask an org admin, or approve for the rest of this run." }, 403);
+  if (result === "stale_workflow") return c.json({ error: "This workflow's steps changed after this run started. Approve for this run only, or review the new steps and approve them on the workflow." }, 409);
   if (result === "org_mismatch") return c.json({ error: "not a member of this workflow's org" }, 403);
   if (result === "human_only") return c.json({ error: "policy gates must be resolved by a human from the run page" }, 403);
 
   const resp: ResolveWorkflowApprovalResponse = { ok: true };
   return c.json(resp);
+});
+
+workflowsRouter.post("/runs/:runId/dismiss", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const result = await dismissWorkflowRun(deps, owner, c.req.param("runId"));
+  if (result === "not_found") return c.json({ error: "run not found" }, 404);
+  if (result === "not_failed") return c.json({ error: "Only a failed run can be dismissed." }, 409);
+  return c.json({ ok: true });
 });
 
 workflowsRouter.post("/runs/:runId/cancel", async (c) => {

@@ -4,10 +4,12 @@
  * bytes) — mounted before the auth middleware in app.ts.
  */
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { VerifiedEvent } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { linearInstallations } from "../schema/index.js";
+import { credentials, linearInstallations } from "../schema/index.js";
+import { LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
+import { isRecord } from "../lib/oauth-state.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { ingestEvent } from "../events/ingest.js";
 
@@ -19,7 +21,7 @@ export const eventWebhooksRouter = new Hono<AppEnv>();
 
 eventWebhooksRouter.post("/:service", async (c) => {
   const service = c.req.param("service");
-  const { db, plugins, engineCredentials } = c.var.providers;
+  const { db, plugins } = c.var.providers;
 
   const triggerDefs = plugins.flatMap((p) => p.triggers ?? []).filter((t) => t.service === service);
   if (triggerDefs.length === 0) return c.json({ error: "unknown service" }, 404);
@@ -53,8 +55,13 @@ eventWebhooksRouter.post("/:service", async (c) => {
     const install = rows[0];
     if (!install) return c.body(null, 204); // unknown workspace: ack, don't retry-loop Linear
     orgId = install.orgId;
-    const cred = await engineCredentials.get({ type: "org", id: orgId }, "linear");
-    const webhookSecret = typeof cred?.metadata?.webhookSecret === "string" ? cred.metadata.webhookSecret : undefined;
+    // Read the signing secret from the row, not through engineCredentials: its
+    // Linear layer may request a new app token, and an unsigned request must
+    // not cause outbound work. The secret sits in plain metadata.
+    const [cred] = await db.select({ metadata: credentials.metadata }).from(credentials)
+      .where(and(eq(credentials.ownerType, "org"), eq(credentials.ownerId, orgId), eq(credentials.service, LINEAR_CREDENTIAL_SERVICE))).limit(1);
+    const metadata = isRecord(cred?.metadata) ? cred.metadata : {};
+    const webhookSecret = typeof metadata.webhookSecret === "string" ? metadata.webhookSecret : undefined;
     if (!webhookSecret) {
       await writeDropLog(db, { orgId, reason: "unknown_org", detail: `linear webhook for ${organizationId}: no credential` });
       return c.body(null, 204);

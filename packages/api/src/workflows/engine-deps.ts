@@ -31,14 +31,8 @@
  * than assuming the session `createSession` warmed is still cached.
  */
 
-import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { eq } from "drizzle-orm";
-import { definitionVersionId } from "./definition-version.js";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import { bundledModel } from "@valet/engine/model-catalog";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
   parseAssistantSessionId,
   parsePrincipal,
@@ -49,6 +43,7 @@ import {
   type SignalContent,
   type ValetPlugin,
 } from "@valet/engine";
+import { bundledModel } from "@valet/engine/model-catalog";
 import type {
   WorkflowAwaitResultOptions,
   WorkflowCreateSessionOptions,
@@ -65,20 +60,26 @@ import type {
   WorkflowRunOrigin,
   WorkflowStore,
 } from "@valet/workflow";
-import { isTeamMember } from "../services/teams.js";
-import type { AppDb } from "../lib/drizzle.js";
-import type { EngineHost } from "../engine/host.js";
-import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   ArchivedAssistantError,
+  ensureAssistantRuntime,
   loadAssistant,
   loadAssistantBySessionId,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
-import type { OnePasswordService } from "../services/onepassword.js";
-import { workflowAssistantId } from "./service.js";
+import type { EngineHost } from "../engine/host.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
+import { workflowDefinitions } from "../schema/index.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
+import { workflowReasoningLevel } from "../services/reasoning.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { isTeamMember } from "../services/teams.js";
+import { definitionVersionId } from "./definition-version.js";
 
 export interface WorkflowEngineDepsOpts {
   host: EngineHost;
@@ -180,7 +181,6 @@ interface RunContext {
   orgId: string;
   actorUserId: string;
   owner: Principal;
-  assistantId?: string;
   origin?: WorkflowRunOrigin;
 }
 
@@ -207,7 +207,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   }
 
   return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
-    assistantId: workflowAssistantId(run.definition), origin: run.params.origin };
+    origin: run.params.origin };
 }
 
 /**
@@ -430,6 +430,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       if (!resolved) {
         throw new Error(`workflow engine-deps: unknown or unavailable model "${req.model}"`);
       }
+      // Without a level, a reasoning model runs with reasoning off, so a review
+      // step reasoned less than the same model does in a chat thread.
+      const reasoning = await workflowReasoningLevel(opts.db, ctx.orgId, ctx.owner, req.reasoning);
       const result = await completeSimple(
         resolved.model,
         {
@@ -440,8 +443,12 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           apiKey: resolved.apiKey,
           temperature: req.temperature,
           maxTokens: req.maxOutputTokens,
+          ...(reasoning ? { reasoning } : {}),
         },
       );
+      if (result.stopReason === "error" || result.stopReason === "aborted") {
+        throw new Error(`Workflow model "${req.model}" ${result.stopReason}: ${result.errorMessage || "The provider did not complete the request."}`);
+      }
       const text = result.content
         .filter((b): b is { type: "text"; text: string } => b.type === "text")
         .map((b) => b.text)
@@ -490,26 +497,35 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // here failed every orchestrator node of every run such a thread
       // started. The lookup is by session id, so the loaded row always
       // carries the origin's own session id.
-      const assistant = ctx.origin
+      //
+      // An origin whose assistant is archived cannot take the report. The
+      // singleton cutover archives every extra assistant a dev-v2 owner had,
+      // and a run started from one of those chats is still in flight. The
+      // run reports on its own thread in the workspace runtime instead, the
+      // same fallback `activeWorkflowOrigin` applies when a run starts.
+      const originAssistant = ctx.origin
         ? await loadAssistantBySessionId(opts.db, ctx.origin.assistantSessionId)
-        : ctx.assistantId
-          ? await loadAssistant(opts.db, ctx.assistantId)
-          : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+        : undefined;
+      const origin = originAssistant?.archivedAt === null ? ctx.origin : undefined;
+      const assistant = origin ? originAssistant : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
       const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
       const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
       if (!assistant || assistant.orgId !== ctx.orgId ||
-          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor))) {
-        throw new Error("Workflow orchestrator is unavailable. Select an orchestrator owned by this workflow's workspace.");
+          (!assistantOwnsRun && !(origin && assistantOwnsActor))) {
+        throw new Error("The workspace assistant is unavailable. Open the workflow from its owning workspace and retry.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
-      if (ctx.origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
+      if (origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
           !(await isTeamMember(opts.db, principal.id, ctx.actorUserId))) {
         throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
       }
-      const session = await opts.host.assistantSessionFor(
-        assistant.id,
+      // Through the shared helper, so a runtime first woken by a workflow
+      // gets the same API session record as one opened by a person. Without
+      // it, the run's threads and artifact publishing report "not found".
+      const { session } = await ensureAssistantRuntime(
+        { db: opts.db, engineHost: opts.host },
+        assistant,
         { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
-        { sessionId: assistant.sessionId },
       );
       // One thread per run. A thread is the engine's unit of serial
       // execution and of abort: a shared thread makes one run's approval
@@ -518,12 +534,12 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // archives the thread when the run settles, so the sidebar does not
       // fill up. An attended run reports into the thread it was started
       // from instead.
-      const thread = ctx.origin
-        ? session.threadById(ctx.origin.threadId)
+      const thread = origin
+        ? session.threadById(origin.threadId)
         : session.thread(workflowRunThreadKey(runId));
       if (!thread) {
         throw new Error(
-          `Workflow origin thread ${ctx.origin?.threadId} is missing from session ${session.id}. ` +
+          `Workflow origin thread ${origin?.threadId} is missing from session ${session.id}. ` +
             "Start a new run from an active assistant thread.",
         );
       }

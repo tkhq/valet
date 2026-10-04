@@ -7,7 +7,7 @@
  * `plugin-linear`'s TriggerDefs — without them the route 404s every
  * `/webhooks/events/linear` POST before org/signature resolution runs.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
@@ -68,9 +68,9 @@ async function seedSubscription(a: TestApi, eventKeys: string[]): Promise<void> 
   });
 }
 
-function linearIssueCreateBody(): string {
+function linearIssueBody(action: "create" | "update" = "create"): string {
   return JSON.stringify({
-    action: "create",
+    action,
     type: "Issue",
     organizationId: "lin-org-1",
     webhookTimestamp: Date.now(),
@@ -117,7 +117,7 @@ describe("POST /webhooks/events/:service", () => {
   });
 
   describe("linear ingress", () => {
-    it("ingests a signed linear webhook: event row + matched delivery row", async () => {
+    it.each(["create", "update"] as const)("ingests a signed Linear issue %s: event and matched delivery", async (action) => {
       api = await bootTestApi({ plugins: [linearPlugin] });
       // This test asserts the delivery row as ingest wrote it (status
       // "pending"). The ingest path nudges the dispatcher, which delivers
@@ -126,16 +126,16 @@ describe("POST /webhooks/events/:service", () => {
       // no-op; dispatch itself is covered by events/dispatcher.test.ts.
       await api.providers.eventDispatcher.stop();
       await seedLinearOrg(api);
-      await seedSubscription(api, ["linear.issue.create"]);
+      await seedSubscription(api, [`linear.issue.${action}`]);
 
-      const body = linearIssueCreateBody();
+      const body = linearIssueBody(action);
       const res = await postLinear(api.baseUrl, body, linearSig(body, WEBHOOK_SECRET));
       expect(res.status).toBe(204);
 
       const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
       expect(eventRows).toHaveLength(1);
       expect(eventRows[0].service).toBe("linear");
-      expect(eventRows[0].eventKey).toBe("linear.issue.create");
+      expect(eventRows[0].eventKey).toBe(`linear.issue.${action}`);
 
       const deliveryRows = await api.providers.db
         .select()
@@ -151,7 +151,7 @@ describe("POST /webhooks/events/:service", () => {
       await seedLinearOrg(api);
       await seedSubscription(api, ["linear.issue.create"]);
 
-      const body = linearIssueCreateBody();
+      const body = linearIssueBody();
       const sig = linearSig(body, WEBHOOK_SECRET);
       const first = await postLinear(api.baseUrl, body, sig);
       expect(first.status).toBe(204);
@@ -171,7 +171,7 @@ describe("POST /webhooks/events/:service", () => {
       api = await bootTestApi({ plugins: [linearPlugin] });
       await seedLinearOrg(api);
 
-      const body = linearIssueCreateBody();
+      const body = linearIssueBody();
       const res = await postLinear(api.baseUrl, body, linearSig(body, `${WEBHOOK_SECRET}-wrong`));
       expect(res.status).toBe(403);
 
@@ -181,10 +181,23 @@ describe("POST /webhooks/events/:service", () => {
       expect(drops.some((d) => d.reason === "bad_signature")).toBe(true);
     });
 
+    it("verifies the signature without reading the renewing credential store", async () => {
+      // Production wraps engineCredentials in LinearAppTokenStore, which can
+      // call Linear's token endpoint on read. An unsigned request must not
+      // reach it, so the route reads the signing secret from the row itself.
+      api = await bootTestApi({ plugins: [linearPlugin] });
+      await seedLinearOrg(api);
+      const get = vi.spyOn(api.providers.engineCredentials, "get");
+      const body = linearIssueBody();
+      const res = await postLinear(api.baseUrl, body, linearSig(body, `${WEBHOOK_SECRET}-wrong`));
+      expect(res.status).toBe(403);
+      expect(get).not.toHaveBeenCalled();
+    });
+
     it("unknown organizationId -> 204 no-op (no installation row, no event)", async () => {
       api = await bootTestApi({ plugins: [linearPlugin] });
       // No installation row at all — the workspace can't be mapped to an org.
-      const body = linearIssueCreateBody();
+      const body = linearIssueBody();
       const res = await postLinear(api.baseUrl, body, linearSig(body, WEBHOOK_SECRET));
       expect(res.status).toBe(204);
 
@@ -206,7 +219,7 @@ describe("POST /webhooks/events/:service", () => {
         updatedAt: now,
       });
 
-      const body = linearIssueCreateBody();
+      const body = linearIssueBody();
       const res = await postLinear(api.baseUrl, body, linearSig(body, WEBHOOK_SECRET));
       expect(res.status).toBe(204);
 

@@ -1,4 +1,5 @@
 import { Agent } from "@earendil-works/pi-agent-core";
+import { uid } from "./ids.js";
 import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
@@ -133,6 +134,7 @@ import type {
   ThreadData,
   ToolContext,
   ToolDef,
+  ToolResult,
   WriteFence,
 } from "./types.js";
 
@@ -175,7 +177,7 @@ const AUTO_CONTINUE_PROMPT =
  * instruction does not claim to provide it. */
 const SLACK_OVERHEARD_REPLY_GUIDANCE = `## Slack overheard delivery
 
-This Slack turn has manual delivery. Manual delivery prevents automatic posting. It does not by itself mean the message is unaddressed. Default to silence for overheard content. Never reply merely because the content is relevant, general, or solicits an update. Reply only to an explicit @mention, a direct request, or a follow-up from the only other participant in the thread. When the conversation context shows you are the only other participant, treat that person's follow-up as addressed and use reply_to_origin. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
+This Slack turn has manual delivery. Manual delivery prevents automatic posting. Decide whether the message is meant for you: a follow-up without an @mention often is. Reply with reply_to_origin when it asks you something, asks you to do something, names you, or follows up on your last reply. Stay silent when people are talking to each other, when it needs nothing from you, or when someone already answered it. Do not reply only because the content is relevant to you. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
 
 /** Proactive compaction stops retrying after this many consecutive failures (TKAI-306). */
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
@@ -337,10 +339,6 @@ export function formatTransientRetryMessage(args: {
   return primary + detail;
 }
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
 function delay(ms: number): Promise<void> {
@@ -4926,7 +4924,8 @@ export class Thread {
    * overlays" ordering; do not "fix" it.
    */
   private buildBaseSystemPrompt(): string {
-    const base = this.session.options.systemPrompt ?? "";
+    const threadContext = this.session.options.threadSystemContext?.({ id: this.id, key: this.key });
+    const base = [this.session.options.systemPrompt, threadContext].filter(Boolean).join("\n\n");
     const fragments = this.session.options.systemContext ?? [];
     if (fragments.length === 0) return base;
     const sorted = [...fragments].sort((a, b) => {
@@ -4963,6 +4962,7 @@ export class Thread {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       userId: this.runningItem?.author?.id ?? session.options.userId,
+      ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,
       threadId: this.id,
@@ -5033,15 +5033,13 @@ export class Thread {
           releaseCycle();
         }
       },
-      threadRead: async (key, opts) => {
-        const sibling = await this.session.threadByKey(key);
-        if (!sibling) return [];
-        return sibling.readEntries(opts);
-      },
+      // The same lookup slash commands use: a key, or a thread id (a pasted
+      // link reaches here as its id).
+      threadRead: (key, opts) => this.session.readEntries(key, opts, this),
       listThreads: async () => {
         // Pull from the store so paused/archived threads not currently
         // hydrated in memory still surface.
-        const datas = await session.providers.store.listThreads(session.id);
+        const datas = await session.readableThreads(this);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
@@ -5291,6 +5289,7 @@ export class Thread {
             result: resultText,
             ...(toolResultImages(event.result).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : event.result } : {}),
             isError: event.isError,
+            ...(event.isError ? {} : toolOutcome(event.result)),
           },
           { queueItemId: this.runningItem?.id },
         );
@@ -6250,4 +6249,20 @@ export function entriesToAgentMessages(
     }
   }
   return out;
+}
+
+/** The confirmed side effect a tool reported in its result details, if any. */
+const TOOL_OUTCOME_KINDS: ReadonlyArray<NonNullable<ToolResult["outcome"]>["kind"]> = ["pull_request_created", "review_submitted", "pull_request_comment"];
+
+/** The outcome a tool's result reports, for `tool_end`. Exported for tests. */
+export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] } {
+  if (typeof result !== "object" || result === null || !("details" in result)) return {};
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("outcome" in details)) return {};
+  const outcome = details.outcome;
+  if (typeof outcome !== "object" || outcome === null || !("kind" in outcome)) return {};
+  const kind = TOOL_OUTCOME_KINDS.find((known) => known === outcome.kind);
+  if (!kind) return {};
+  const url = "url" in outcome && typeof outcome.url === "string" ? outcome.url : undefined;
+  return { outcome: { kind, ...(url ? { url } : {}) } };
 }

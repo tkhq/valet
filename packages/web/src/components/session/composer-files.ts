@@ -13,7 +13,7 @@
  */
 
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
-import { formatSize, readFailure } from "./composer-images";
+import { formatSize } from "./composer-images";
 
 export {
   filesFromClipboard,

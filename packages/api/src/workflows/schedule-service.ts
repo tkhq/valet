@@ -4,34 +4,31 @@
  * runs; this module owns validation and the cron math so both the loop and
  * the agent tools share one implementation.
  */
-import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
-import { CronExpressionParser } from "cron-parser";
 import type { WorkflowDefinition } from "@valet/workflow";
+import { CronExpressionParser } from "cron-parser";
+import { and, eq } from "drizzle-orm";
+import { proposalId } from "../events/proposals.js";
+import { randomUUID } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
-import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
+import { withAuthorizedTeamOwnership } from "../services/teams.js";
 import {
+  armableDefinitionRow,
   canAccessTriggerRow,
   canAccessTriggerRowInScope,
-  armableDefinitionRow,
   scopedTriggerAccess,
   triggerAccessSets,
   type TriggerAccessSets,
   type WorkflowOwner,
   type WorkflowOwnerRef,
 } from "./service.js";
-import { checkAssistantForOwner } from "../assistants/service.js";
-import { withAuthorizedTeamOwnership } from "../services/teams.js";
+import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
   targetKind: "workflow" | "orchestrator";
   workflowId?: string;
   prompt?: string;
-  /** Which of the owner's assistants an orchestrator schedule prompts.
-   * Absent → the owner's default. */
-  assistantId?: string;
   name: string;
   cron: string;
   timezone: string;
@@ -78,7 +75,6 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
     targetKind: row.targetKind,
     workflowId: row.workflowId ?? undefined,
     prompt: row.prompt ?? undefined,
-    assistantId: row.assistantId ?? undefined,
     name: row.name,
     cron: row.cron,
     timezone: row.timezone,
@@ -115,12 +111,7 @@ export async function createWorkflowSchedule(
      * workflow target (owner follows the workflow).
      */
     teamId?: string;
-    /**
-     * Which of the owner's assistants the prompt goes to. Absent → the
-     * owner's default. Only meaningful with `prompt`; the caller checks that
-     * the assistant belongs to the resolved owner.
-     */
-    assistantId?: string;
+    proposalKey?: string;
   },
   now = Date.now(),
 ): Promise<{ ok: true; schedule: WorkflowScheduleSummary } | { ok: false; error: string }> {
@@ -134,7 +125,7 @@ export async function createWorkflowSchedule(
   if (hasWorkflow === hasPrompt) {
     return {
       ok: false,
-      error: "provide exactly one of workflow_id (start a workflow run) or prompt (prompt the orchestrator)",
+      error: "provide exactly one of workflow_id (start a workflow run) or prompt (prompt the workspace assistant)",
     };
   }
 
@@ -196,34 +187,23 @@ export async function createWorkflowSchedule(
     scheduleOwner = { ownerType: "team", ownerId: input.teamId };
   }
 
-  // The owner is only settled above, so the assistant pairing is checked here
-  // rather than in the route. Same rule the event subscriptions use.
-  if (hasPrompt && input.assistantId !== undefined) {
-    const bad = await checkAssistantForOwner(
-      db,
-      owner.orgId,
-      { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId },
-      input.assistantId,
-    );
-    if (bad) return { ok: false, error: bad };
+  if ("assistantId" in input) {
+    return { ok: false, error: "Assistant selection is not supported. Choose the schedule workspace instead." };
   }
 
   const values = {
-    id: randomUUID(),
+    id: input.proposalKey ? proposalId("schedule", owner.orgId, scheduleOwner.ownerType, scheduleOwner.ownerId, input.proposalKey, hasWorkflow ? input.workflowId : undefined) : randomUUID(),
     orgId: owner.orgId,
     ownerType: scheduleOwner.ownerType,
     ownerId: scheduleOwner.ownerId,
     targetKind: hasWorkflow ? "workflow" as const : "orchestrator" as const,
     workflowId: hasWorkflow ? input.workflowId! : null,
     prompt: hasPrompt ? input.prompt! : null,
-    // A workflow target has no assistant to name, so the column stays null
-    // there whatever the caller sent.
-    assistantId: hasPrompt ? (input.assistantId ?? null) : null,
     name: input.name,
     cron: input.cron,
     timezone,
     input: input.input ?? null,
-    enabled: true,
+    enabled: !input.proposalKey,
     nextFireAt: next.at,
     createdBy: owner.userId,
     createdAt: now,
@@ -252,18 +232,17 @@ export async function createWorkflowSchedule(
             ));
           if (!target) return [];
         }
-        if (values.assistantId && await checkAssistantForOwner(
-          tx, owner.orgId, { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId }, values.assistantId,
-        )) return [];
-        return tx.insert(workflowSchedules).values(values).returning();
+        const inserted = await tx.insert(workflowSchedules).values(values).onConflictDoNothing().returning();
+        return inserted.length ? inserted : tx.select().from(workflowSchedules).where(eq(workflowSchedules.id, values.id));
       },
     );
     if (!inserted?.[0]) return { ok: false, error: "Team or schedule target is no longer available. Refresh and select an active target." };
     return { ok: true, schedule: rowToSummary(inserted[0]) };
   }
 
-  const inserted = await db.insert(workflowSchedules).values(values).returning();
-  return { ok: true, schedule: rowToSummary(inserted[0]!) };
+  const inserted = await db.insert(workflowSchedules).values(values).onConflictDoNothing().returning();
+  const row = inserted[0] ?? (await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, values.id)))[0]!;
+  return { ok: true, schedule: rowToSummary(row) };
 }
 
 /** Pass `sets` when the caller already holds this request's
@@ -346,7 +325,7 @@ export async function updateWorkflowSchedule(
     return {
       ok: false,
       status: 400,
-      error: "prompt only applies to orchestrator-target schedules. Delete this schedule and create an orchestrator one to switch.",
+      error: "prompt only applies to assistant-prompt schedules. Delete this schedule and create an assistant-prompt one to switch.",
     };
   }
   if (patch.input !== undefined && row.targetKind !== "workflow") {
@@ -357,7 +336,7 @@ export async function updateWorkflowSchedule(
     };
   }
   if (patch.prompt !== undefined && patch.prompt.trim() === "") {
-    return { ok: false, status: 400, error: "prompt must not be empty. Provide the text to send to the orchestrator." };
+    return { ok: false, status: 400, error: "prompt must not be empty. Provide the text to send to the workspace assistant." };
   }
 
   const cron = patch.cron ?? row.cron;

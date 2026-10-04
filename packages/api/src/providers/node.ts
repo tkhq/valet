@@ -40,7 +40,6 @@ import { assemblePlugins } from "../plugins/assemble.js";
 import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
-import { assistantsActionPlugin } from "../assistants/actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
@@ -54,6 +53,7 @@ import { skillRepoReaderFactory } from "../services/content-source-credential.js
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { LinearAppTokenStore } from "../plugins/linear-app-token-store.js";
 import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
@@ -63,7 +63,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
+import { buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -73,7 +73,8 @@ import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
-import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
+import { channelOriginResolver, channelMessageNormalizer, channelWorkspaceMember } from "../events/channel-origin.js";
+import { setSlackWorkspaceMemberCheck } from "../events/team-slack-gate.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
@@ -381,29 +382,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
-  // Assistant-profile actions (the tool mirror of routes/assistants.ts).
-  // A persona write must evict the cached session, and the EngineHost does
-  // not exist yet — same one-slot indirection as the workflows deps above.
-  const evictRef: { current: ((sessionId: string) => void) | null } = { current: null };
   const eventsActions: ValetPlugin = {
     name: "events-actions",
     version: "0.1.0",
     description: "Agent-facing received event diagnostics.",
-    actions: [eventsActionPlugin(db)],
+    actions: [eventsActionPlugin(db, () => plugins)],
   };
-  const assistantsActions: ValetPlugin = {
-    name: "assistants-actions",
-    version: "0.1.0",
-    description: "Agent-facing assistant profile management actions.",
-    actions: [
-      assistantsActionPlugin(db, (sessionId) => {
-        if (!evictRef.current) {
-          throw new Error("assistants actions invoked before provider wiring completed");
-        }
-        evictRef.current(sessionId);
-      }),
-    ],
-  };
+
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
   // the operator must remove one to avoid ambiguity.
@@ -432,7 +417,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, eventsActions, assistantsActions],
+        [workflowsActions, skillsActions, eventsActions],
       ]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),
@@ -455,9 +440,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     env: process.env,
   });
+  // The org Linear connection's client_credentials token has no refresh
+  // token; this layer mints a replacement before it expires.
+  const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
   // Team references wrap outside refresh: a followed user row refreshes
   // under that user, a direct team row refreshes under the team.
-  const engineCredentials = new TeamCredentialStore(refreshingCredentials, {
+  const engineCredentials = new TeamCredentialStore(linearAppCredentials, {
     isMember: (teamId, userId) => isTeamMember(db, teamId, userId),
   });
 
@@ -528,7 +516,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Arm the capacity gate now that the host exists — creates admitted
   // before this line (none happen during construction) pass ungated.
   gateHostRef.current = engineHost;
-  evictRef.current = (sessionId) => engineHost.evictCache(sessionId);
 
   // Naming listens to the engine's origin-neutral settlement event. Start it
   // in main before boot restore, because restored work can settle there.
@@ -672,10 +659,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!owner) return; // no recorded owner: nothing to notify
       const isPolicyGate = info.kind === "policy_gate";
       await routeAttention(
-        { db },
+        { db, channels: [channelHost.attentionDeliverer()], access: { engineCredentials, onePassword } },
         {
           kind: "approval",
           owner,
+          // A run started from a thread is that thread's audience's
+          // (`thread-access.ts`): a private thread's run notifies only them.
+          ...(run?.params.origin ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
           title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
           body: isPolicyGate
             ? `Workflow run ${info.runId} is paused on ${info.nodeId}.`
@@ -754,8 +744,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     store: workflowStore,
   });
-  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: [channelHost.attentionDeliverer()], access: { engineCredentials, onePassword } });
   const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore });
+  const runOriginReport = buildRunOriginReport({ db, engineHost, store: workflowStore });
 
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
@@ -774,6 +765,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       // The run's own assistant thread leaves the sidebar here, and only
       // here: no sweep archives it later (`run-attention.ts`).
       await runThreadArchive(info);
+      // A run a thread started reports back to it, so the thread continues
+      // from the result instead of waiting for someone to ask.
+      await runOriginReport(info);
       await workflowSandboxReclaimer.reclaimRun(info.runId);
     },
     crashAt: opts.workflowCrashAt,
@@ -805,6 +799,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // what an unauthenticated caller holding a leaked/guessed URL can force
   // us to start, without needing a shared rate-limit store.
   const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
+
+  // The team Slack gate answers unlinked senders only when they are full
+  // members of the connected Slack workspace (events/team-slack-gate.ts).
+  setSlackWorkspaceMemberCheck((userId) => channelWorkspaceMember(channelHost)("slack", userId));
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
   // into workflow/orchestrator/signal targets. `start()`/`stop()` are called

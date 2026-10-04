@@ -163,6 +163,7 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
         prompt: promptText,
         temperature: node.temperature,
         maxOutputTokens,
+        ...(node.reasoning ? { reasoning: node.reasoning } : {}),
       });
     } catch (err) {
       // No completion happened — nothing was billed, nothing to report.
@@ -212,6 +213,7 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
       prompt: repairPrompt,
       temperature: node.temperature,
       maxOutputTokens,
+      ...(node.reasoning ? { reasoning: node.reasoning } : {}),
     });
   } catch (err) {
     // The repair call itself never returned, but the FIRST call (if this

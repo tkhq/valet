@@ -1,3 +1,4 @@
+import linearEventPlugin from "@valet/plugin-linear/plugin";
 /**
  * The workflow collector, driven through `syncOnce` — the same entry point
  * the skills collector runs under, against the same GitHub fixture.
@@ -19,6 +20,7 @@ import {
   type GithubFixture,
 } from "../../test-helpers/github-fixture.js";
 import {
+  linearInstallations,
   contentSources,
   eventSubscriptions,
   orgMembers,
@@ -26,6 +28,7 @@ import {
   teamMembers,
   teams,
   users,
+  workflowActionGrants,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
@@ -381,11 +384,18 @@ describe("workflow collector", () => {
     const id = await teamSource();
     await serviceFor(f).syncOnce(id);
 
+    // An admin allowed an action for this workflow.
+    const [synced] = await db.select().from(workflowDefinitions);
+    await db.insert(workflowActionGrants).values({ id: "grant", orgId: synced!.orgId, workflowId: synced!.id,
+      ownerType: synced!.ownerType, ownerId: synced!.ownerId, actionId: "slack.post_message", grantedBy: "admin", createdAt: 1 });
+
     repo.sha = "c2";
     // A different graph, still valid: the stop node is renamed, which moves
     // the definition hash and so mints a version.
     repo.files[".valet/workflows/nightly.yaml"] = workflowYaml("Nightly", "done");
     const outcome = await serviceFor(f).syncOnce(id);
+    // A repository commit is not an approver's edit, so the grant goes.
+    expect(await db.select().from(workflowActionGrants)).toHaveLength(0);
     expect(outcome?.warnings).toEqual([]);
     expect(outcome?.status).toBe("ok");
 
@@ -755,6 +765,23 @@ describe("workflow collector", () => {
         "      to: stop",
         "",
       ].join("\n");
+
+    it("mirrors disconnected Linear workflows without arming events and preserves their schedule", async () => {
+      const path = ".valet/workflows/linear.yaml";
+      const repo: FakeRepo = { sha: "c1", files: { [path]: scheduled("0 3 * * *") + "\nevents:\n  - eventKeys: [linear.issue.update]\n" } };
+      const f = serve(repo);
+      const id = await teamSource();
+      const outcome = await serviceFor(f,[linearEventPlugin]).syncOnce(id);
+      expect(outcome?.warnings.join(" ")).toContain("Linear event triggers remain off");
+      expect(await mirrored()).toHaveLength(1);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+      await db.insert(linearInstallations).values({ id: "repo-install", orgId: ORG, workspaceId: "linear-org", workspaceName: "Linear", webhookId: "webhook", connectedBy: "u1", createdAt: 1, updatedAt: 1 });
+      await credentials.save({ type: "org", id: ORG },"linear",{ type: "oauth2", accessToken: "token", metadata: { webhookSecret: "secret" } });
+      // Connecting ingress must arm the same repository commit on the next sync.
+      await serviceFor(f,[linearEventPlugin]).syncOnce(id);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+    });
 
     it("arms a schedule, rewrites it when the cron moves, and disarms it when the block goes", async () => {
       const repo: FakeRepo = {

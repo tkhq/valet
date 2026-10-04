@@ -1,13 +1,13 @@
+import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
  * routes (`routes/workflows.ts`) and the agent-facing action plugin
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
-import { lockTeamDeletionAccess, TeamAdminRequiredError } from "../services/team-deletion-access.js";
-import { checkAssistantForOwner, resolveDefaultAssistant } from "../assistants/service.js";
-import type { OnePasswordService } from "../services/onepassword.js";
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
+import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
+import { normalizeLegacyDefinition, type RunHost } from "@valet/workflow";
 import {
   resolveTriggerInput,
   triggerDataSchema,
@@ -25,23 +25,31 @@ import {
   type WorkflowStore,
   type WorkflowTriggerPayload,
 } from "@valet/workflow";
-import type { RunHost } from "@valet/workflow";
-import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
-import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import type { RequestPrincipal } from "../lib/request-principal.js";
+import {
+  updateInvocationOutcome,
+  writeExecutionGrant,
+} from "../policies/service.js";
 import {
   actionInvocations,
   assistants,
+  briefingDismissals,
   contentSources,
   eventSubscriptions,
   sessionThreads,
+  workflowActionGrants,
   workflowDefinitions,
+  workflowSignals,
   workflowRuns,
   workflowSchedules,
   workflowVersions,
   workflowWebhooks,
 } from "../schema/index.js";
-import { definitionVersionId } from "./definition-version.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { isOrgAdmin, isOrgMember } from "../services/org.js";
+import { lockTeamDeletionAccess, TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import {
   getTeamInOrg,
   isTeamMember,
@@ -50,14 +58,6 @@ import {
   TeamHasActiveRunsError,
   withAuthorizedTeamOwnership,
 } from "../services/teams.js";
-import type { RequestPrincipal } from "../lib/request-principal.js";
-import { isOrgAdmin, isOrgMember } from "../services/org.js";
-import {
-  writeExecutionGrant,
-  writeAlwaysAllowPolicy,
-  AlwaysAllowNotAdminError,
-  updateInvocationOutcome,
-} from "../policies/service.js";
 import type {
   GetWorkflowRunResponse,
   GlobalWorkflowRunSummary,
@@ -71,6 +71,7 @@ import type {
   WorkflowRunStatus,
   WorkflowRunSummary,
 } from "../wire/types.js";
+import { definitionVersionId, sameWorkflowSteps } from "./definition-version.js";
 
 export interface WorkflowServiceDeps {
   db: AppDb;
@@ -165,6 +166,9 @@ export function validateDefinitionInput(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { ok: false, errors: ["definition must be an object"] };
   }
+  if ("assistantId" in value) {
+    return { ok: false, errors: ["Assistant selection is not supported. Remove assistantId from the workflow definition."] };
+  }
   const obj = value as Record<string, unknown>;
   if (!Array.isArray(obj.nodes)) {
     return { ok: false, errors: ["definition.nodes must be an array"] };
@@ -184,7 +188,9 @@ function rowToDefinition(row: WorkflowRow, source?: { repoFullName: string; ref:
   const summary: WorkflowDefinitionSummary = {
     id: row.id,
     name: row.name,
-    definition: row.definition,
+    // The boot sweep normalizes stored rows, but an older pod can still write
+    // the legacy shape during a rolling deploy. Every read normalizes too.
+    definition: normalizeLegacyDefinition(row.definition),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ownerType: row.ownerType,
@@ -327,7 +333,7 @@ export async function ownedDefinitionRow(
   const rows = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
-  return (await isAuthorizedFor(db, owner, row)) ? row : null;
+  return (await isAuthorizedFor(db, owner, row)) ? { ...row, definition: normalizeLegacyDefinition(row.definition) } : null;
 }
 
 /**
@@ -539,10 +545,48 @@ export async function listWorkflowDefinitions(
   const rows = await deps.db
     .select()
     .from(workflowDefinitions)
-    .where(where)
+    .where(and(eq(workflowDefinitions.orgId, owner.orgId), where))
     .orderBy(desc(workflowDefinitions.updatedAt));
   const names = await repoNamesFor(deps.db, rows);
-  return rows.map((row) => rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined));
+  const latestRuns = rows.length === 0 ? [] : await deps.db
+    .selectDistinctOn([workflowRuns.workflowId], {
+      workflowId: workflowRuns.workflowId,
+      runId: workflowRuns.id,
+      failedAt: workflowRuns.updatedAt,
+      status: workflowRuns.status,
+      createdAt: workflowRuns.createdAt,
+      updatedAt: workflowRuns.updatedAt,
+      outcome: workflowRuns.outcome,
+    })
+    .from(workflowRuns)
+    .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+    .where(and(
+      inArray(workflowRuns.workflowId, rows.map((row) => row.id)),
+      eq(workflowDefinitions.orgId, owner.orgId),
+      eq(workflowRuns.ownerType, workflowDefinitions.ownerType),
+      eq(workflowRuns.ownerId, workflowDefinitions.ownerId),
+    ))
+    .orderBy(workflowRuns.workflowId, desc(workflowRuns.createdAt), desc(workflowRuns.id));
+  const failedIds = latestRuns.filter((run) => run.outcome === "failed").map((run) => dismissedRunKey(run.runId));
+  // A dismissal is the workspace's: one person acknowledging a failure clears
+  // it for everyone, so one person's debugging does not fill every list.
+  const dismissed = new Set(failedIds.length === 0 ? [] : (await deps.db.select({ id: briefingDismissals.briefingId })
+    .from(briefingDismissals)
+    .where(inArray(briefingDismissals.briefingId, failedIds))).map((row) => row.id));
+  const latestByWorkflow = new Map(latestRuns.map((run) => [run.workflowId, {
+    runId: run.runId, workflowId: run.workflowId, status: run.status, outcome: run.outcome ?? undefined, createdAt: run.createdAt, updatedAt: run.updatedAt,
+    ...(dismissed.has(dismissedRunKey(run.runId)) ? { dismissed: true } : {}),
+  }]));
+  const failureByWorkflow = new Map(
+    latestRuns.filter((run) => run.outcome === "failed").map((run) => [
+      run.workflowId, { runId: run.runId, failedAt: run.failedAt },
+    ]),
+  );
+  return rows.map((row) => ({
+    ...rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined),
+    latestFailedRun: failureByWorkflow.get(row.id),
+    latestRun: latestByWorkflow.get(row.id),
+  }));
 }
 
 export async function getWorkflowDefinition(
@@ -610,33 +654,25 @@ export async function createWorkflowDefinition(
   return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
 }
 
-/** Read routing from the definition so each run uses its immutable snapshot. */
-export function workflowAssistantId(definition: unknown): string | undefined {
-  if (!definition || typeof definition !== "object" || !("assistantId" in definition)) return undefined;
-  if (typeof definition.assistantId !== "string" || !definition.assistantId.trim()) {
-    throw new ValidationError("Select a valid orchestrator for this workflow.");
+/** Definitions use workspace ownership rather than assistant routing. */
+function rejectAssistantRouting(definition: unknown): void {
+  if (definition && typeof definition === "object" && "assistantId" in definition) {
+    throw new ValidationError("Assistant selection is not supported. Remove assistantId from the workflow definition.");
   }
-  return definition.assistantId;
 }
 
 async function validateWorkflowAssistant(
-  db: AppQueryable, orgId: string, owner: { type: WorkflowOwnerType; id: string }, definition: unknown,
+  _db: AppQueryable, _orgId: string, _owner: { type: WorkflowOwnerType; id: string }, definition: unknown,
 ) {
-  const assistantId = workflowAssistantId(definition);
-  if (assistantId && await checkAssistantForOwner(db, orgId, owner, assistantId)) {
-    throw new NotFoundError("assistant", assistantId);
-  }
+  rejectAssistantRouting(definition);
 }
 
-/** Cross-workspace copies must not retain routing into the source workspace. */
+/** A copied definition is portable because it contains no assistant identity. */
 async function copiedDefinitionForOwner(
-  db: AppDb, orgId: string, definition: unknown, owner: { type: "user" | "team"; id: string },
+  _db: AppDb, _orgId: string, definition: unknown, _owner: { type: "user" | "team"; id: string },
 ): Promise<unknown> {
-  const assistantId = workflowAssistantId(definition);
-  if (!assistantId || !definition || typeof definition !== "object") return definition;
-  if (!(await checkAssistantForOwner(db, orgId, owner, assistantId))) return definition;
-  const assistant = await resolveDefaultAssistant(db, orgId, owner);
-  return { ...definition, assistantId: assistant.id };
+  rejectAssistantRouting(definition);
+  return definition;
 }
 
 /** Immutable per-save snapshot backing the UI's version history. */
@@ -714,7 +750,7 @@ export async function getWorkflowVersion(
     .limit(1);
   const v = rows[0];
   if (!v) return null;
-  return { version: v.version, name: v.name, createdAt: v.createdAt, definition: v.definition };
+  return { version: v.version, name: v.name, createdAt: v.createdAt, definition: normalizeLegacyDefinition(v.definition) };
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned). */
@@ -730,12 +766,16 @@ export async function updateWorkflowDefinition(
 
   const now = Date.now();
   if (input.definition !== undefined) {
-    const assistantId = workflowAssistantId(row.definition);
-    if (assistantId && workflowAssistantId(input.definition) === undefined && input.definition && typeof input.definition === "object") {
-      input = { ...input, definition: { ...input.definition, assistantId } };
-    }
     await validateWorkflowAssistant(deps.db, owner.orgId, { type: row.ownerType, id: row.ownerId }, input.definition);
   }
+  const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
+  // A grant approves the steps as they were. When someone who could not have
+  // granted it changes them, an approver must look again. Revoke before the
+  // write, so no run can start on the new steps under the old grant, and
+  // again after it: an approval that read the old steps can land between the
+  // two, and its grant must not outlive them.
+  const revokeGrants = stepsChange && !(await canGrantWorkflowPermissions(deps, owner, row));
+  if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
   // definition at run-start time (plan decision 17), so updating the
   // definitions row here never reaches back into a running/parked run.
@@ -747,13 +787,11 @@ export async function updateWorkflowDefinition(
       updatedAt: now,
     })
     .where(eq(workflowDefinitions.id, id));
+  if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
 
   // Version history: snapshot only when the definition actually changed —
   // a rename alone shouldn't mint a version.
-  if (
-    input.definition !== undefined &&
-    definitionVersionId(input.definition) !== definitionVersionId(row.definition)
-  ) {
+  if (stepsChange) {
     await snapshotVersion(
       deps,
       id,
@@ -1157,11 +1195,18 @@ export async function disarmWorkflowTriggers(
 
 /** The definition, its version history, and everything that could start it.
  * Settled runs are kept: they are history, reachable by their run id. */
+/** Removes every workflow-scoped action grant. A grant approves the steps as
+ * they were; any change to them outside an approver's own edit ends it. */
+export async function revokeWorkflowGrants(db: AppQueryable, orgId: string, workflowId: string): Promise<void> {
+  await db.delete(workflowActionGrants).where(and(eq(workflowActionGrants.orgId, orgId), eq(workflowActionGrants.workflowId, workflowId)));
+}
+
 export async function purgeWorkflowRows(
   db: AppQueryable,
   orgId: string,
   workflowId: string,
 ): Promise<void> {
+  await revokeWorkflowGrants(db, orgId, workflowId);
   await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
   await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, workflowId));
   await disarmWorkflowTriggers(db, orgId, workflowId);
@@ -1497,7 +1542,6 @@ export async function listWorkflowActionRequired(
     const detail = await getWorkflowRunDetail(deps, owner, summary.runId);
     if (detail === null) continue;
     const trigger = workflowActionTrigger(detail.run.params);
-    const assistantId = parkedRunAssistantId(detail.run.definition);
     for (const gate of detail.pendingGates) {
       const iteration = gate.iteration ?? 0;
       items.push({
@@ -1507,7 +1551,6 @@ export async function listWorkflowActionRequired(
         workflowName: summary.workflowName,
         runCreatedAt: summary.createdAt,
         owner: detail.owner,
-        ...(assistantId === undefined ? {} : { assistantId }),
         trigger,
         gate,
       });
@@ -1515,20 +1558,6 @@ export async function listWorkflowActionRequired(
   }
   items.sort((a, b) => (a.gate.waitingSince ?? a.runCreatedAt) - (b.gate.waitingSince ?? b.runCreatedAt));
   return { items, count: items.length };
-}
-
-/**
- * The assistant a parked run executes as. `workflowAssistantId` throws on a
- * malformed id because it guards writes and dispatch; this list only
- * reports, and a run with a broken snapshot still needs its approval to be
- * reachable. Such a run reports no assistant instead of failing the list.
- */
-function parkedRunAssistantId(definition: unknown): string | undefined {
-  try {
-    return workflowAssistantId(definition);
-  } catch {
-    return undefined;
-  }
 }
 
 function workflowActionTrigger(params: unknown): ListWorkflowActionRequiredResponse["items"][number]["trigger"] {
@@ -1614,7 +1643,7 @@ async function ownedRun(
 
 export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
-  | "forbidden_always" | "org_mismatch" | "human_only";
+  | "forbidden_always" | "forbidden_workflow" | "stale_workflow" | "org_mismatch" | "human_only";
 
 /** Scan `definition` (unknown at runtime) for the node with `nodeId`. Searches
  * `definition.nodes` directly and, for each `type === "foreach"` node, also checks
@@ -1646,6 +1675,31 @@ async function definitionOrgId(db: AppDb, workflowId: string): Promise<string | 
 }
 
 /** Terminates a run. `not_found` covers unknown AND un-owned run ids. */
+/** A failed run one person dismissed is kept with dismissed briefs: both are
+ * that person's "seen it" on an item of a workspace. */
+export const dismissedRunKey = (runId: string) => `run:${runId}`;
+
+/**
+ * Takes a failed run out of Needs attention for everyone in its workspace.
+ * The run, its failure, and the workflow's state are unchanged, and a later
+ * failed run needs attention again. Only someone who can open the run can
+ * dismiss it.
+ */
+export async function dismissWorkflowRun(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  runId: string,
+): Promise<"ok" | "not_found" | "not_failed"> {
+  const run = await ownedRun(deps, owner, runId);
+  if (!run?.owner) return "not_found";
+  if (run.outcome !== "failed") return "not_failed";
+  await deps.db.insert(briefingDismissals).values({
+    userId: owner.userId, orgId: owner.orgId, ownerType: run.owner.ownerType, ownerId: run.owner.ownerId,
+    briefingId: dismissedRunKey(runId), dismissedAt: Date.now(),
+  }).onConflictDoNothing();
+  return "ok";
+}
+
 export async function cancelWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
@@ -1735,6 +1789,9 @@ function triggerData(input: unknown): Record<string, unknown> | undefined {
 /** Resolves an approval gate: validates the run is parked on the right signal,
  * writes any policy grants requested, inserts the resolution signal, and wakes
  * the run. Returns a rich outcome so callers can map to appropriate HTTP codes. */
+/** The workflow's steps changed while an approval was being granted. */
+class StaleWorkflowError extends Error {}
+
 export async function resolveWorkflowApproval(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
@@ -1743,7 +1800,7 @@ export async function resolveWorkflowApproval(
     nodeId: string;
     approved: boolean;
     note?: string;
-    scope?: "once" | "run" | "always";
+    scope?: "once" | "run" | "always" | "workflow";
     iteration?: number;
     via: "web" | "agent";
   },
@@ -1768,13 +1825,24 @@ export async function resolveWorkflowApproval(
 
   const node = findNodeInDefinition(run.definition, input.nodeId);
   const isPolicyGate = node?.type === "tool";
+  // Older clients send "always" for org-wide approval. On a policy gate it now
+  // means this workflow. A human approval never took a scope, so it is dropped,
+  // as the previous server ignored it.
+  if (input.scope === "always") input = { ...input, scope: isPolicyGate ? "workflow" : undefined };
   if (isPolicyGate && input.via === "agent") return "human_only";
 
-  // Auth check for "always" scope must happen BEFORE the signal insert so a
-  // forbidden_always response never writes anything (no signal, no grant).
-  if (input.approved && input.scope === "always" && isPolicyGate) {
-    const adminOk = await isOrgAdmin(deps.db, orgId, owner.userId);
-    if (!adminOk) return "forbidden_always";
+  let workflowPermission: Awaited<ReturnType<typeof prepareWorkflowPermissions>> = null;
+  if (input.approved && input.scope === "workflow") {
+    if (!isPolicyGate || !node || typeof node.service !== "string" || typeof node.action !== "string") return "forbidden_workflow";
+    // A workflow grant covers the current steps. This run was parked on the
+    // steps it started with; when they changed since, approving its card must
+    // not grant the new steps nobody reviewed. Approving this run still works.
+    const [current] = await deps.db.select({ definition: workflowDefinitions.definition }).from(workflowDefinitions)
+      .where(eq(workflowDefinitions.id, run.params.workflowId)).limit(1);
+    if (!current || !sameWorkflowSteps(current.definition, run.definition)) return "stale_workflow";
+    const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
+    workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
+    if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
   }
 
   // insertSignal is first-write-wins (ON CONFLICT DO NOTHING). Insert the signal
@@ -1790,7 +1858,7 @@ export async function resolveWorkflowApproval(
     scope: input.scope,
   };
   const signalId = `approval:${input.nodeId}${suffix}:resolution`;
-  const stored = await deps.workflowStore.insertSignal({
+  const signal = {
     runId: input.runId,
     signalId,
     signalType,
@@ -1802,7 +1870,42 @@ export async function resolveWorkflowApproval(
       resolvedVia: input.via,
     },
     createdAt: Date.now(),
-  });
+  };
+  const prepared = workflowPermission;
+  // The app and workflow store share Postgres. Commit the permanent grant,
+  // resolution, audit, and durable wake flag together so crash recovery cannot
+  // consume the approval without the permission it promised.
+  let stored;
+  try {
+    stored = prepared?.ok ? await deps.db.transaction(async (tx) => {
+    // Lock the definition and compare the steps again here: an edit that
+    // landed after the check above must not keep a grant for steps nobody
+    // reviewed. An edit that comes after waits on this lock, and its
+    // revoke-after-write then removes the grant.
+    if (input.scope === "workflow") {
+      const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions
+        WHERE id = ${run.params.workflowId} FOR UPDATE`) as { rows: Array<{ definition: unknown }> };
+      if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, run.definition)) throw new StaleWorkflowError();
+    }
+    const [inserted] = await tx.insert(workflowSignals).values(signal)
+      .onConflictDoNothing({ target: [workflowSignals.runId, workflowSignals.signalId] }).returning();
+    if (!inserted) {
+      // As the store's insertSignal does: return the existing row, so an
+      // identical retry after a lost response reads as success, not a conflict.
+      const [existing] = await tx.select().from(workflowSignals)
+        .where(and(eq(workflowSignals.runId, input.runId), eq(workflowSignals.signalId, signalId))).limit(1);
+      return existing ?? { payload: null };
+    }
+    await persistWorkflowPermissions(tx, prepared.grants);
+    await tx.update(actionInvocations).set({ status: "approved", resolvedBy: owner.userId })
+      .where(and(eq(actionInvocations.orgId, orgId), eq(actionInvocations.invocationId, `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`)));
+    await tx.update(workflowRuns).set({ wakeRequested: true }).where(eq(workflowRuns.id, input.runId));
+    return inserted;
+  }) : await deps.workflowStore.insertSignal(signal);
+  } catch (err) {
+    if (err instanceof StaleWorkflowError) return "stale_workflow";
+    throw err;
+  }
   // Compare the returned row's payload to what we submitted. If another caller
   // won the race the stored payload will differ — do not stamp audit for the loser.
   const storedPayload = stored.payload as { approved?: boolean; resolvedBy?: string; scope?: string } | undefined;
@@ -1820,18 +1923,7 @@ export async function resolveWorkflowApproval(
     const action = typeof n.action === "string" ? n.action : "";
     const actionId = action.includes(".") ? action : `${service}.${action}`;
     const now = Date.now();
-    if (input.scope === "always") {
-      // Admin eligibility was already checked above (before the signal insert).
-      // AlwaysAllowNotAdminError should not fire here, but re-throw defensively
-      // for unexpected cases.
-      try {
-        await writeAlwaysAllowPolicy(deps.db, { orgId, actionId, grantedBy: owner.userId, now });
-      } catch (err) {
-        if (err instanceof AlwaysAllowNotAdminError) return "forbidden_always";
-        throw err;
-      }
-    }
-    if (input.scope === "always" || input.scope === "run") {
+    if (input.scope === "run") {
       await writeExecutionGrant(deps.db, input.runId, {
         orgId,
         service,
@@ -1842,7 +1934,7 @@ export async function resolveWorkflowApproval(
     }
   }
 
-  if (isPolicyGate) {
+  if (isPolicyGate && !prepared?.ok) {
     await updateInvocationOutcome(
       deps.db,
       `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`,
@@ -1946,6 +2038,8 @@ export async function getWorkflowRunDetail(
       };
       if (iteration !== undefined) gate.iteration = iteration;
       if (node && typeof node.prompt === "string") gate.prompt = node.prompt;
+      if (node && typeof node.summary === "string") gate.summary = node.summary;
+      if (node && node.details !== undefined) gate.details = node.details;
       if (node && (node.onDeny === "fail" || node.onDeny === "skip")) gate.onDeny = node.onDeny;
       if (typeof w.timeoutAt === "number") gate.timeoutAt = w.timeoutAt;
       pendingGates.push(gate);

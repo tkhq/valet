@@ -1,17 +1,17 @@
+import type { NormalizedEvent } from "@valet/engine";
+import slackPlugin from "@valet/plugin-slack/plugin";
+import type { RunHost } from "@valet/workflow";
+import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
-import slackPlugin from "@valet/plugin-slack/plugin";
-import type { NormalizedEvent } from "@valet/engine";
-import type { RunHost } from "@valet/workflow";
+import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks, users } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
-import { __resetIngestDropThrottle, ingestEvent, catalogForService } from "./ingest.js";
-import { authorizedSubscriptionMatchesEvent } from "./team-slack-gate.js";
-import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
+import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
+import { authorizedSubscriptionMatchesEvent, setSlackWorkspaceMemberCheck } from "./team-slack-gate.js";
 
 const ORG = "org-team-events";
 const channelFilter = { field: "channel", op: "eq", value: "C1" } as const;
@@ -58,7 +58,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       id: randomUUID(), orgId: ORG, ownerType, ownerId: ownerType === "team" ? "team-1" : "member-a",
       createdBy: "member-a", name: "Team replies", eventKeys: ["slack.app_mention"],
       filters: legacy || ownerType === "user" || workflow ? [channelFilter, creatorFilter] : [channelFilter],
-      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "orchestrator", assistantId: "team-assistant", follow: true },
+      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "orchestrator", follow: true },
       audience,
       enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
     }).returning();
@@ -91,15 +91,47 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     const { host, deliver } = dispatcher();
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
-      orgId: ORG, ownerType: "team", ownerId: "team-1", actorUserId: "member-b", assistantId: "team-assistant",
+      orgId: ORG, ownerType: "team", ownerId: "team-1", actorUserId: "member-b",
       signal: expect.objectContaining({ body: "Help us", origin: { channelType: "slack", threadKey: "slack:C1:100.2", messageTs: "100.2" } }),
     }));
     const key = { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "100.2" };
-    expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ ownerType: "team", ownerId: "team-1", createdBy: "member-b", assistantId: "team-assistant" });
+    expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ ownerType: "team", ownerId: "team-1", createdBy: "member-b" });
     await ingest(mention("U_A", "C1", "100.2"));
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls[0][0]).not.toHaveProperty("assistantId");
     expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ createdBy: "member-b", ownerId: "team-1" });
+  });
+
+  it("answers an unlinked member of the Slack workspace as the rule's creator only on an organization rule, and still refuses a guest", async () => {
+    setSlackWorkspaceMemberCheck(async (userId) => userId === "U_UNLINKED" ? { email: "newcomer@example.com" } : null);
+    try {
+      // A team-only rule does not answer someone with no Valet account.
+      const teamOnly = await seed();
+      expect(await ingest(mention("U_UNLINKED"))).toMatchObject({ deliveries: 0, skipped: true });
+      await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, teamOnly.id));
+      const orgWide = await seed("team", false, false, "organization");
+      expect((await ingest(mention("U_UNLINKED"))).deliveries).toBe(1);
+      const { host, deliver } = dispatcher();
+      await host.pollOnce();
+      // It runs as the rule's creator, but the message names its real sender.
+      expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ ownerType: "team", ownerId: "team-1", actorUserId: "member-a",
+        author: expect.objectContaining({ id: "member-a", externalSender: true }) }));
+      expect(await ingest(mention("U_GUEST", "C1", "200.1"))).toMatchObject({ deliveries: 0, skipped: true });
+      await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, orgWide.id));
+      await seed();
+      // A linked sender outside the team stays refused, even as a workspace member.
+      setSlackWorkspaceMemberCheck(async () => ({ email: "linked@example.com" }));
+      expect(await ingest(mention("U_X", "C1", "300.1"))).toMatchObject({ deliveries: 0, skipped: true });
+      // Only a Slack link proves who a sender is. An unlinked sender whose
+      // Slack email matches a team member does not act as that member, so a
+      // team-only rule refuses them like any other unlinked sender.
+      await tdb.appDb.insert(users).values([{ id: "member-b", name: "B", email: "b@example.com" }]).onConflictDoNothing();
+      setSlackWorkspaceMemberCheck(async () => ({ email: "b@example.com" }));
+      expect(await ingest(mention("U_WAS_B", "C1", "500.1"))).toMatchObject({ deliveries: 0, skipped: true });
+    } finally {
+      setSlackWorkspaceMemberCheck(async () => null);
+    }
   });
 
   it.each([["U_X", "not_team_member"], ["U_UNLINKED", "unlinked_sender"]])("denies %s before event persistence", async (sender, reason) => {
@@ -119,6 +151,11 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(rows).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: "filter_excluded" })]));
     expect(JSON.stringify(rows)).not.toContain("Help us");
     expect(JSON.stringify(rows)).not.toContain("C1");
+    const [receipt] = await tdb.appDb.select().from(eventReceipts);
+    expect(receipt.stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "subscription_match", outcome: "authorization_denied" })]));
+    expect(receipt.subscriptions).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "authorization_denied" })]));
+    expect(JSON.stringify(receipt)).not.toContain("Help us");
+    expect(JSON.stringify(receipt)).not.toContain("U_X");
   });
 
   it("redacts an unauthorized sender from a team-only filter miss", async () => {
@@ -139,7 +176,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     const rows = await tdb.appDb.select().from(eventDropLog);
     expect(rows).toEqual([expect.objectContaining({
       reason: "filter_excluded",
-      eventMetadata: expect.objectContaining({ channel: "C2", text: "Help us" }),
+      eventMetadata: expect.objectContaining({ channel: "C2" }),
     })]);
     expect(rows).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: "not_team_member" })]));
   });
@@ -158,7 +195,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     const { host, deliver } = dispatcher();
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
-      ownerType: "team", ownerId: "team-1", actorUserId: "member-c", assistantId: "team-assistant",
+      ownerType: "team", ownerId: "team-1", actorUserId: "member-c",
     }));
     // The follow names the rule it came from, or the router would re-check
     // team membership and drop every later message in the thread.

@@ -38,8 +38,7 @@ function queueState(mode: WireQueueState["mode"]): WireQueueState {
   };
 }
 
-// importOriginal: see -new-session-dialog.test.tsx for why a bare
-// replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
@@ -487,10 +486,9 @@ describe("Composer — mid-turn submit affordance", () => {
     await userEvent.type(textarea, text);
   }
 
-  it("labels the button Send and shows no queue hint while the agent is idle", () => {
+  it("labels the button Send while the agent is idle", () => {
     renderComposer("idle");
     expect(screen.getByRole("button", { name: /^send$/i })).toBeDefined();
-    expect(screen.queryByText(/current turn/i)).toBeNull();
   });
 
   it("labels the button Queue while the agent works and nothing is self-queued", () => {
@@ -498,7 +496,6 @@ describe("Composer — mid-turn submit affordance", () => {
     renderComposer("streaming");
 
     expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
-    expect(screen.getByText(/completes the current turn/i)).toBeDefined();
     expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
   });
 
@@ -507,7 +504,6 @@ describe("Composer — mid-turn submit affordance", () => {
     renderComposer("streaming");
 
     expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
-    expect(screen.getByText(/completes the current turn/i)).toBeDefined();
     expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
   });
 

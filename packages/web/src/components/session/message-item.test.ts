@@ -97,6 +97,10 @@ describe("messageCopyText", () => {
 });
 
 describe("senderLabel", () => {
+  it("names a Slack sender who ran as the viewer, instead of 'You'", () => {
+    expect(senderLabel({ id: "viewer", name: "Sam from Slack", externalSender: true }, "viewer")).toBe("Sam from Slack");
+  });
+
   it("is undefined for the viewer's own messages (renders as 'You')", () => {
     expect(senderLabel({ id: "u1", name: "Alice" }, "u1")).toBeUndefined();
   });

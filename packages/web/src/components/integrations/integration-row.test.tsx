@@ -49,6 +49,8 @@ vi.mock("~/api/queries", () => ({
   useLinkMembers: () => ({ data: undefined, isLoading: false }),
 }));
 
+vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
+
 import { IntegrationRow } from "./integration-row";
 
 const SERVICE: PluginServiceSummary = {
@@ -111,7 +113,6 @@ describe("IntegrationRow disconnect", () => {
     const dialog = screen.getByRole("dialog");
     expect(screen.getByText("Disconnect Linear?")).toBeTruthy();
     expect(dialog.textContent).toContain("deletes the saved Linear credential");
-    expect(dialog.textContent).toContain("until you connect it again");
     expect(disconnectMutate).not.toHaveBeenCalled();
     expect(confirmSpy).not.toHaveBeenCalled();
   });

@@ -24,6 +24,7 @@ vi.mock("~/api/settings", async (importOriginal) => ({
     data: {
       teams: [
         { id: "a", name: "Alpha", callerRole: state.member ? "member" : null },
+        { id: "b", name: "Design", callerRole: null },
       ],
     },
   }),
@@ -48,32 +49,28 @@ vi.mock("~/api/integrations", async (importOriginal) => ({
     error: state.failed ? new Error("offline") : null,
   }),
 }));
+const createMutate = vi.fn();
+const patchMutate = vi.fn();
+const deleteMutate = vi.fn();
+function mentionRule(id: string, ownerId: string, channel: string, enabled = true) {
+  return {
+    id, name: `${ownerId} replies`, enabled, ownerType: "team", ownerId, createdBy: "u", createdAt: 1, updatedAt: 1,
+    eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: channel, label: channel === "C1" ? "#general" : "#design" }],
+    target: { kind: "orchestrator", orchestrator: "team", teamId: ownerId },
+  };
+}
 vi.mock("~/api/events", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/api/events")>(),
-  useEventSubscriptions: (owner: { ownerId: string }) => {
-    expect(owner).toEqual({ ownerType: "team", ownerId: "a" });
-    return {
-      data: {
-        subscriptions: state.existing
-          ? [
-              {
-                id: "existing",
-                name: "Alpha replies",
-                enabled: false,
-                ownerType: "team",
-                ownerId: "a",
-                eventKeys: ["slack.app_mention"],
-                target: {
-                  kind: "orchestrator",
-                  orchestrator: "team",
-                  teamId: "a",
-                },
-              },
-            ]
-          : [],
-      },
-    };
-  },
+  useEventSubscriptions: () => ({
+    data: { subscriptions: state.existing ? [mentionRule("mine", "a", "C1"), mentionRule("theirs", "b", "C2")] : [] },
+  }),
+  useFilterOptions: () => ({
+    isPending: false,
+    data: { options: [{ id: "C1", label: "#general" }, { id: "C2", label: "#design" }, { id: "C3", label: "#launch" }] },
+  }),
+  useCreateEventSubscription: () => ({ mutate: createMutate, isPending: false, error: null }),
+  usePatchEventSubscription: () => ({ mutate: patchMutate, isPending: false, error: null }),
+  useDeleteEventSubscription: () => ({ mutate: deleteMutate, isPending: false, error: null }),
 }));
 vi.mock("./automation-wizard", () => ({
   AutomationWizard: ({
@@ -86,7 +83,7 @@ vi.mock("./automation-wizard", () => ({
     </div>
   ),
 }));
-import { TeamSlackSetupCard } from "./team-slack-setup";
+import { ListenButton, TeamSlackSetupCard } from "./team-slack-setup";
 
 beforeEach(() =>
   Object.assign(state, {
@@ -99,15 +96,55 @@ beforeEach(() =>
   }),
 );
 function open() {
-  render(<TeamSlackSetupCard teamId="a" />);
-  fireEvent.click(screen.getByRole("button", { name: "Set up Slack replies" }));
+  if (state.existing) render(<ListenButton teamId="a">Listen in channels</ListenButton>);
+  else render(<TeamSlackSetupCard teamId="a" />);
+  fireEvent.click(screen.getByRole("button", { name: state.existing ? "Listen in channels" : "Choose channels" }));
 }
 describe("team homepage Slack setup", () => {
-  it("opens the existing reply flow for a team member", () => {
+  it("hides the homepage prompt once the team listens, and adds channels to its one rule", () => {
+    state.existing = true;
+    patchMutate.mockClear(); createMutate.mockClear();
+    // Once the team listens, the homepage prompt steps aside for the Events page.
+    const card = render(<TeamSlackSetupCard teamId="a" />);
+    expect(card.container.textContent).toBe("");
+    card.unmount();
     open();
-    expect(screen.getByRole("dialog").textContent).toBe(
-      "Reply setup for Alpha (a)",
-    );
+    expect(screen.getByRole("dialog", { name: "Where should Valet listen?" })).toBeTruthy();
+    const general = screen.getByRole("checkbox", { name: /general/ });
+    expect(general).toHaveProperty("checked", true);
+    expect(general).toHaveProperty("disabled", false);
+    expect(screen.getByRole("checkbox", { name: /design/ })).toHaveProperty("disabled", true);
+    expect(screen.getByText("Taken by Design's Valet")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /launch/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Listen in 2 channels" }));
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(patchMutate).toHaveBeenCalledWith({ id: "mine", body: { filters: [
+      { field: "channel", op: "in", value: ["C1", "C3"], labels: ["#general", "#launch"] },
+    ] } }, expect.anything());
+  });
+  it("stops listening when every channel is unchecked", () => {
+    state.existing = true;
+    deleteMutate.mockClear();
+    open();
+    fireEvent.click(screen.getByRole("checkbox", { name: /general/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop listening" }));
+    expect(deleteMutate).toHaveBeenCalledWith("mine", expect.anything());
+  });
+  it("creates the team's rule for its first channels", () => {
+    createMutate.mockClear();
+    open();
+    fireEvent.click(screen.getByRole("checkbox", { name: /launch/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Listen in 1 channel" }));
+    expect(createMutate).toHaveBeenCalledWith(expect.objectContaining({
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C3", label: "#launch" }],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "a", follow: true },
+    }), expect.anything());
+  });
+  it("keeps the full reply setup behind Advanced setup", () => {
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Advanced setup" }));
+    expect(screen.getByRole("dialog").textContent).toBe("Reply setup for Alpha (a)");
   });
   it("links missing bot setup to organization Slack settings", () => {
     state.connected = false;
@@ -130,25 +167,15 @@ describe("team homepage Slack setup", () => {
     state.connected = false;
     open();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Set up Slack replies" })));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Choose channels" })));
   });
 
-  it("shows existing disabled rules before offering another", () => {
-    state.existing = true;
-    open();
-    expect(screen.getByText("Alpha replies (disabled)")).toBeTruthy();
-    expect(screen.queryByText(/Reply setup for/)).toBeNull();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Add another reply rule" }),
-    );
-    expect(screen.getByText(/Reply setup for Alpha/)).toBeTruthy();
-  });
   it.each(["failed", "loading", "member"] as const)(
     "holds setup when %s is unresolved or refused",
     (field) => {
       state[field] = field !== "member";
       open();
-      expect(screen.queryByText(/Reply setup for/)).toBeNull();
+      expect(screen.queryByRole("list", { name: "Slack channels" })).toBeNull();
       expect(
         screen.getByRole(field === "loading" ? "status" : "alert"),
       ).toBeTruthy();

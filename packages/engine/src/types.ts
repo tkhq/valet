@@ -13,6 +13,10 @@ export interface PromptAuthor {
   name?: string;
   avatarUrl?: string;
   externalId?: string;
+  /** A channel sender with no Valet account wrote this. `id` is the person
+   * the turn runs as; `name` is the sender. Tools the sender may not use on
+   * their own refuse such a turn (`ToolContext.externalSender`). */
+  externalSender?: boolean;
 }
 
 export interface ChannelTarget {
@@ -642,7 +646,7 @@ export interface ToolResult {
   text: string;
   attachments?: ToolAttachment[];
   /** Confirmed side effect from a successful, recognized terminal command. */
-  outcome?: { kind: "pull_request_created" | "review_submitted"; url?: string };
+  outcome?: { kind: "pull_request_created" | "review_submitted" | "pull_request_comment"; url?: string };
   /**
    * Action-level outcome, set by action-backed tools (`call_tool`): `false`
    * when the action reported failure without throwing. An action failure is
@@ -673,6 +677,9 @@ export interface ToolContext {
   threadId: string;
   sessionPurpose?: SessionPurpose;
   actor?: { id: string; name?: string; email?: string };
+  /** This turn came from a channel sender with no Valet account, running as
+   * `userId` (`PromptAuthor.externalSender`). */
+  externalSender?: boolean;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;
@@ -1016,6 +1023,10 @@ export interface PolicyResolveInput {
   sessionId: string;
   threadId: string;
   appliesIn: "session" | "workflow";
+  /** The turn came from a channel sender with no Valet account
+   * (`ToolContext.externalSender`). A session-wide grant a teammate gave does
+   * not cover them. */
+  externalSender?: boolean;
 }
 
 /**
@@ -1031,6 +1042,7 @@ export type PolicyProvenanceSource =
   | "org_policy"
   | "team_policy"
   | "runtime_grant"
+  | "workflow_grant"
   | "override"
   | "plugin_default"
   | "risk_default"
@@ -1629,7 +1641,7 @@ export type EngineEvent =
       reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean }
+  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"] }
   | {
       type: "turn_end";
       threadId: string;
@@ -2286,6 +2298,13 @@ export interface ResolvedModel {
   canonicalId?: string;
 }
 
+export type ThreadAccessCheck = (req: {
+  owner: Principal;
+  orgId: string;
+  reader: { id: string; key: string };
+  target: { id: string; key: string };
+}) => Promise<boolean>;
+
 export interface CreateSessionOptions {
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
@@ -2300,6 +2319,13 @@ export interface CreateSessionOptions {
   parentThreadId?: string;
   /** A channel-originated ancestor makes every child turn's transcript shared. */
   sharedTranscript?: boolean;
+  /**
+   * Whether one thread may read another thread of this session through
+   * `thread_read`, `list_threads`, or a slash command. Absent, every thread
+   * reads every other. A host narrows it where threads have different
+   * audiences, such as a team runtime's private threads.
+   */
+  threadAccess?: ThreadAccessCheck;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
   /**
@@ -2496,6 +2522,8 @@ export interface CreateSessionOptions {
    * ordering; do not "fix" it back.
    */
   systemContext?: Array<{ name: string; content: string; order?: number }>;
+  /** Host context for one thread, assembled with the session system context. */
+  threadSystemContext?: (thread: { id: string; key: string }) => string | undefined;
   /**
    * Host-supplied, session-scoped config surfaced verbatim as
    * `ToolContext.config` inside every tool execution (Phase 4 decision 7).
@@ -2723,7 +2751,9 @@ export type ChildSpawner = (
  */
 export type ChildReader = (
   req: { childSessionId: string; limit?: number },
-  ctx: { parentSessionId: string },
+  /** `readerThreadId` is the parent thread asking, so a host can keep a
+   * child of a private thread to the people that thread belongs to. */
+  ctx: { parentSessionId: string; readerThreadId?: string },
 ) => Promise<SessionEntry[] | null>;
 
 /**
@@ -2740,7 +2770,8 @@ export type ChildReader = (
  */
 export type ChildStatusReader = (
   req: { childSessionId: string },
-  ctx: { parentSessionId: string },
+  /** `readerThreadId`: the parent thread asking (`ChildReader`). */
+  ctx: { parentSessionId: string; readerThreadId?: string },
 ) => Promise<{ settled: boolean; lastActivityAt: number | null } | null>;
 
 /**

@@ -550,9 +550,9 @@ describe("pluginCatalogTools: capability boundaries", () => {
     const { plugin } = makeMockPlugin();
     const unavailable = [{
       service: "github",
-      state: "excluded_by_assistant" as const,
-      reason: "this assistant excludes the service",
-      fix: "This assistant's configuration excludes github; edit the assistant's Integrations settings on its editor page (/assistants/$assistantId).",
+      state: "disabled_by_org" as const,
+      reason: "the organization disabled this service",
+      fix: "Ask an organization administrator to enable github.",
     }];
     const [listTool] = pluginCatalogTools({
       plugins: [plugin],
@@ -568,7 +568,7 @@ describe("pluginCatalogTools: capability boundaries", () => {
     expect(payload.tools).toEqual([]);
     expect(payload.warnings).toContainEqual(expect.objectContaining({
       service: "github",
-      state: "excluded_by_assistant",
+      state: "disabled_by_org",
     }));
     expect(result.text).not.toContain("github.create_issue");
   });
@@ -1272,6 +1272,26 @@ describe("pluginCatalogTools: approval gate terminal outcomes", () => {
   });
 });
 
+describe("call_tool pull request outcome", () => {
+  function githubPlugin(): ActionPlugin {
+    const action = (id: string, data: unknown) => ({
+      id, name: id, description: id, riskLevel: "low" as const, parameters: Type.Object({}),
+      execute: async () => ({ success: true, data }),
+    });
+    return { service: "github", actions: [
+      action("github.create_pull_request", { number: 7, url: "https://github.com/acme/app/pull/7", state: "open" }),
+      action("github.get_pull_request", { number: 7, url: "https://github.com/acme/app/pull/7", state: "open" }),
+    ] };
+  }
+  it("reports a created pull request, but not one the action only read", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [githubPlugin()] });
+    const created = await callTool.execute({ tool_id: "github.create_pull_request", params: {}, summary: "open it" }, makeCtx({}));
+    expect(created.outcome).toEqual({ kind: "pull_request_created", url: "https://github.com/acme/app/pull/7" });
+    const read = await callTool.execute({ tool_id: "github.get_pull_request", params: {}, summary: "read it" }, makeCtx({}));
+    expect(read.outcome).toBeUndefined();
+  });
+});
+
 describe("prepareActionArgs", () => {
   it("does not mutate the caller's params object when applying defaults", () => {
     const schema = Type.Object({ n: Type.Optional(Type.Number({ default: 25 })) });
@@ -1943,7 +1963,7 @@ describe("pluginCatalogTools: availability failure containment", () => {
     const { plugin } = makeMockPlugin();
     const other: ActionPlugin = { ...plugin, service: "linear", actions: plugin.actions.map((action) => ({ ...action, id: action.id.replace("github", "linear") })) };
     const [listTool] = pluginCatalogTools({ plugins: [plugin, other], serviceAvailability: [
-      { service: "github", state: "excluded_by_assistant", reason: "excluded" },
+      { service: "github", state: "disabled_by_org", reason: "excluded" },
       { service: "linear", state: "load_failed", reason: "failed" },
     ] });
     const payload = decode((await listTool.execute({ service: "github" }, makeCtx())).text) as { warnings: Array<{ service: string }> };

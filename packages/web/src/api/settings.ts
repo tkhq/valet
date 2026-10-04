@@ -1,4 +1,3 @@
-import { qkTemplates } from "./templates";
 /**
  * TanStack Query hooks for the settings shell's data surface (split-settings
  * design, Task 5). Mirrors the factory idiom in `src/api/queries.ts`:
@@ -28,7 +27,6 @@ import type {
   GetOrgReasoningResponse,
   GetSlackAppResponse,
   JoinSuggestedTeamResponse,
-  ListAssistantsResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
   ListSuggestedTeamsResponse,
@@ -68,7 +66,6 @@ import type {
   TestLlmProviderRequest,
   TestLlmProviderResponse,
 } from "@valet/api/wire";
-import { qkAssistants } from "./assistants";
 import { api } from "./client";
 import { qkIntegrations } from "./integrations";
 import { qkRepos } from "./repos";
@@ -482,7 +479,7 @@ export function usePatchOrgReasoning() {
  * or `/chat` treats the new team as empty until the next list fetch.
  */
 export function teamCreateQueryKeys() {
-  return [qkSettings.teams(), qkAssistants.list()] as const;
+  return [qkSettings.teams()] as const;
 }
 
 export function useJoinSuggestedTeam() {
@@ -492,7 +489,6 @@ export function useJoinSuggestedTeam() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.suggestedTeams() });
       qc.invalidateQueries({ queryKey: qkSettings.teams() });
-      qc.invalidateQueries({ queryKey: qkAssistants.list() });
     },
   });
 }
@@ -502,17 +498,6 @@ export function useCreateTeam() {
   return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
     mutationFn: (body) => api.createTeam(body),
     onSuccess: (created) => {
-      // Write the seeded row into a WARM cache only, same as
-      // `usePatchAssistant`. A cold cache stays cold and the invalidation
-      // below fetches the real list: a one-row list seeded here would
-      // satisfy every "list resolved" gate with the caller's own
-      // assistants missing until the refetch landed.
-      qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) => {
-        if (prev === undefined) return prev;
-        const row = created.defaultAssistant;
-        if (prev.assistants.some((a) => a.id === row.id)) return prev;
-        return { assistants: [...prev.assistants, row] };
-      });
       for (const queryKey of teamCreateQueryKeys()) {
         qc.invalidateQueries({ queryKey });
       }
@@ -638,7 +623,6 @@ export function useSaveGithubAppCredential() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -650,7 +634,6 @@ export function useRefreshGithubApp() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }
@@ -662,7 +645,6 @@ export function useDeleteGithubApp() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
       qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
-      qc.invalidateQueries({ queryKey: qkTemplates.all() });
     },
   });
 }

@@ -340,10 +340,10 @@ RUN --mount=type=secret,id=git-token sh -c '\\
   printf "#!/bin/sh\\ncase \\"\\$1\\" in\\n  *[Uu]sername*) echo x-access-token ;;\\n  *) cat /run/secrets/git-token ;;\\nesac\\n" > /tmp/valet-git-askpass.sh && \\
   chmod +x /tmp/valet-git-askpass.sh && \\
   GIT_ASKPASS=/tmp/valet-git-askpass.sh git clone "https://github.com/acme/widgets.git" /prebuilt/repo && \\
+  git -C /prebuilt/repo checkout a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 && \\
   rm -f /tmp/valet-git-askpass.sh'
 
 WORKDIR /prebuilt/repo
-RUN git checkout a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
 
 RUN command -v pnpm >/dev/null 2>&1 && pnpm install --frozen-lockfile || echo "prebuild: no pnpm in this image, skipping pnpm-install"
 

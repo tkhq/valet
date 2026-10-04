@@ -73,7 +73,7 @@ describe("Slack overheard delivery prompt", () => {
 
     expect(prompt).toContain(GUIDANCE);
     expect(prompt).toContain("Manual delivery prevents automatic posting.");
-    expect(prompt).toContain("follow-up from the only other participant in the thread");
+    expect(prompt).toContain("follows up on your last reply");
   });
 
   it("does not add the no-reply default to an addressed Slack signal", async () => {

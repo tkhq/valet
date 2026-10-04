@@ -114,6 +114,11 @@ export function validateSubscription(
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
     return "workflow target requires workflowId";
   }
+  if (target.deliveryPolicy !== undefined || target.pauseOnOverlap !== undefined) {
+    if (target.kind !== "orchestrator" || (target.orchestrator !== undefined && target.orchestrator !== "user")) return "Delivery preferences apply only to personal assistant subscriptions.";
+    if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown delivery policy.";
+    if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be a boolean.";
+  }
   if (target.kind === "orchestrator") {
     const who = target.orchestrator;
     if (who !== undefined && who !== "user" && who !== "team" && who !== "org") {
@@ -129,11 +134,8 @@ export function validateSubscription(
     if (who !== "team" && target.teamId !== undefined) {
       return "teamId is only valid when orchestrator is team";
     }
-    // Shape only. That the id names a LIVE assistant of the owner this target
-    // resolves to is a database question, checked in the route once the owner
-    // is known (`checkAssistantForOwner`).
-    if (target.assistantId !== undefined && (typeof target.assistantId !== "string" || target.assistantId.length === 0)) {
-      return "assistantId must be a non-empty string";
+    if (target.assistantId !== undefined) {
+      return "Assistant selection is not supported. Choose the personal or team workspace instead.";
     }
     // Both prompt templates are validated against the SELECTED catalog
     // entries, the same set a filter field is held to: a template addresses
@@ -147,7 +149,7 @@ export function validateSubscription(
   }
   if (target.kind === "workflow") {
     if (target.assistantId !== undefined) {
-      return "assistantId is only valid on an orchestrator target";
+      return "Assistant selection is not supported. Choose the personal or team workspace instead.";
     }
     // A workflow keeps its own prompt configuration on its llm and session
     // nodes. A prompt field here would name a prompt nothing renders.
@@ -197,6 +199,8 @@ export async function validateSubscriptionWrite(
 > {
   const error = validateSubscription(plugins, body);
   if (error) return { ok: false, error };
+  if (scope.ownerType && scope.ownerType !== "user" && typeof body.target === "object" && body.target !== null &&
+      ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Delivery preferences apply only to personal assistant subscriptions." };
   const filters = body.filters as SubscriptionFilter[];
   // The audience is read on every write, including one that changes nothing
   // about the match: a patch may set it alone.

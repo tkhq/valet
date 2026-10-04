@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
-import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch, StatusDot } from "~/components/primitives";
 import { BakeQueuePanel } from "~/components/settings/bake-queue-panel";
 import { Section } from "~/components/settings/section";
 import { RepoSandboxResourcesForm } from "~/components/settings/repo-sandbox-resources-form";
@@ -55,7 +55,7 @@ export function SourcesSection() {
       {/* ── Base image ─────────────────────────────────────────────────── */}
       <Section
         title="Base image"
-        description="Commands that install tools every sandbox needs. The base image is built once and shared across sessions."
+        description="Commands that install tools every sandbox needs. The base image is built once and shared across runtimes."
       >
         {sourcesQ.isLoading && (
           <div className="flex items-center gap-2 py-4 text-sm text-muted">
@@ -73,7 +73,7 @@ export function SourcesSection() {
       {/* ── Repository images ───────────────────────────────────────────── */}
       <Section
         title="Repository images"
-        description="Per-repo images pre-built from a repo's dependencies. Sessions boot without a cold install."
+        description="Per-repo images pre-built from a repo's dependencies. Runtimes boot without a cold install."
       >
         {sourcesQ.data && (
           <div className="space-y-3">
@@ -105,7 +105,7 @@ export function SourcesSection() {
             )}
             {repoSources.length === 0 ? (
               <p className="py-4 text-sm text-muted">
-                Repository images appear automatically when a session binds a repo.
+                Repository images appear automatically when a runtime binds a repo.
               </p>
             ) : (
               <>
@@ -351,7 +351,7 @@ function RepoSourceRow({
               {source.repoFullName ?? source.name}
             </span>
             <Badge variant={status.variant} className="shrink-0 gap-1.5 rounded-full px-2" role="status">
-              <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+              <StatusDot tone="current" size="sm" />
               {status.label}
             </Badge>
           </div>
@@ -538,7 +538,7 @@ function ExternalSourceRow({ source }: { source: SourceSummary }) {
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent
           title={`Delete ${source.name}?`}
-          description="Sessions using this image will fall back to the stock sandbox image on their next start."
+          description="Runtimes using this image will fall back to the stock sandbox image on their next start."
         >
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => setConfirmDelete(false)}>

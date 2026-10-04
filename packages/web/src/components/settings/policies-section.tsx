@@ -324,32 +324,6 @@ function NewPolicyForm({ plugins, teamId }: { plugins: PluginSummary[]; teamId?:
   const [matchers, setMatchers] = useState<MatcherRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const serviceOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const plugin of plugins) {
-      for (const svc of plugin.services) {
-        if (!seen.has(svc.service)) {
-          seen.add(svc.service);
-          out.push(svc.service);
-        }
-      }
-    }
-    return out;
-  }, [plugins]);
-
-  const actionOptions = useMemo(() => {
-    const out: { id: string; name: string }[] = [];
-    for (const plugin of plugins) {
-      for (const svc of plugin.services) {
-        for (const a of svc.actions) {
-          out.push({ id: a.id, name: a.name });
-        }
-      }
-    }
-    return out;
-  }, [plugins]);
-
   function addMatcherRow() {
     setMatchers([...matchers, { key: crypto.randomUUID(), path: "", op: "eq", value: "" }]);
   }

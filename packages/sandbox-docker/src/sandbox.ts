@@ -568,7 +568,7 @@ export class DockerSandbox implements Sandbox {
       if (typeof value !== "object" || value === null || !("isFile" in value) || typeof value.isFile !== "boolean" || !("isDirectory" in value) || typeof value.isDirectory !== "boolean" || !("size" in value) || typeof value.size !== "number") throw new Error("Invalid file metadata response. Inspect the sandbox runtime.");
       return { isFile: value.isFile, isDirectory: value.isDirectory, size: value.size };
     }
-    const output = await this.containerFile(path, quoted => `if [ -d ${quoted} ]; then printf 'd 0'; elif [ -f ${quoted} ]; then printf 'f '; wc -c < ${quoted}; elif [ -e ${quoted} ]; then printf 'o 0'; else exit 2; fi`);
+    const output = await this.containerFile(path, quoted => `if [ -d ${quoted} ]; then printf 'd 0'; elif [ -f ${quoted} ]; then printf 'f '; wc -c < ${quoted}; elif [ -e ${quoted} ]; then printf 'o 0'; else exit 2; fi`, undefined, 2);
     const match = /^([dfo])\s+(\d+)$/.exec(output.trim());
     if (!match) throw new Error("Invalid file metadata response. Inspect the sandbox runtime.");
     return { isFile: match[1] === "f", isDirectory: match[1] === "d", size: Number(match[2]) };
@@ -585,9 +585,15 @@ export class DockerSandbox implements Sandbox {
   }
 
   /** Generic file operations resolve symlinks only within this container's mount view. */
-  private async containerFile(path: string, command: (quotedPath: string) => string, stdin?: string): Promise<string> {
+  /** `notFoundExit` is the exit code the command uses for a missing path. It
+   * becomes an `ENOENT` error, the code callers test to tell absence from a
+   * failed operation (the upload route writes only after stat says absent). */
+  private async containerFile(path: string, command: (quotedPath: string) => string, stdin?: string, notFoundExit?: number): Promise<string> {
     this.resolveHostPath(path);
     const result = await this.exec(command(shQuote(this.resolveContainerPath(path))), { stdin, maxOutputBytes: 150 * 1024 * 1024 });
+    if (notFoundExit !== undefined && result.exitCode === notFoundExit) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, ${path}`), { code: "ENOENT" });
+    }
     if (result.exitCode !== 0 || result.truncated) throw new Error(`${result.stderr.trim() || "The sandbox file operation failed"}. Use an accessible file in the session working directory.`);
     return result.stdout;
   }

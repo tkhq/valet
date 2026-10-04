@@ -120,7 +120,7 @@ describe('NODE_META default nodes', () => {
     });
   });
 
-  it('orchestrator default node fails validation on empty prompt only', () => {
+  it('thread default node fails validation on empty prompt only', () => {
     const definition: WorkflowDefinition = {
       version: 'dag/v1',
       nodes: [{ id: 'trigger', type: 'trigger' }, NODE_META.orchestrator.defaultNode('x')],
@@ -713,8 +713,7 @@ describe('positionNewNodes', () => {
   });
 });
 
-it('preserves explicit assistant routing through canvas saves and detects external routing changes', () => {
+it('does not propagate obsolete assistant routing through canvas saves', () => {
   const definition = { ...baseDefinition(), assistantId: 'chosen' };
-  expect(fromFlow(toFlow(definition), definition).assistantId).toBe('chosen');
-  expect(graphSignature(definition)).not.toBe(graphSignature({ ...definition, assistantId: 'other' }));
+  expect(fromFlow(toFlow(definition), definition)).not.toHaveProperty('assistantId');
 });

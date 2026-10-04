@@ -108,7 +108,11 @@ it("lets current team members reach an existing workflow agent gate without an a
   const outsider = { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" };
   expect((await fetch(base, { headers: outsider })).status).toBe(404);
   expect((await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: outsider, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
-  const approved = await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
+  const threadBase = `${api.baseUrl}/api/threads/${threadId}/decisions`;
+  expect((await fetch(threadBase)).status).toBe(200);
+  expect((await fetch(threadBase, { headers: outsider })).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/threads/${threadId}/messages`)).status).toBe(404);
+  const approved = await fetch(`${threadBase}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
   expect(approved.status).toBe(200);
   expect(await p.engineStore.getDecisionGate(sessionId, "join-channel")).toMatchObject({ status: "resolved", resolution: { actionId: "approve", resolvedBy: "local-user" } });
   const guessed = "wf:approval-run:never-created";
@@ -125,4 +129,18 @@ it("lets current team members reach an existing workflow agent gate without an a
   expect(await orgResolve.json()).toEqual({ error: "gate not pending" });
   await p.db.delete(teamMembers).where(eq(teamMembers.teamId, "approval-team"));
   expect((await fetch(base)).status).toBe(404);
+});
+
+describe("POST /decisions/:gateId/resolve — answer types", () => {
+  it("refuses a non-text answer before it can resolve a gate", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/decisions/nonexistent-gate/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 123 }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toContain("as text");
+  });
 });

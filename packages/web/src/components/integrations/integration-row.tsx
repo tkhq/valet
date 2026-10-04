@@ -13,6 +13,7 @@
  * carries identity only — a badge, the fix, and a Reconnect control. See
  * `service-health.ts` for the states and `ServiceIcon` for the marks.
  *
+ * Linear presents the organization's native connection before its optional MCP tool connection.
  * GitHub carries a second line for the half its organisation owns — the
  * GitHub App, which the personal credential depends on to sign in and which
  * reaches repositories on its own. See `github-org-app.ts`.
@@ -36,7 +37,6 @@ import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
 import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
-import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
@@ -118,9 +118,7 @@ function EnvNames({ names }: { names: string[] }) {
   );
 }
 
-/** GitHub is the only service whose organisation owns a second, separate
- * way in. Keyed on the credential service, the same key `connectPath` reads
- * to route GitHub through the org App's OAuth client. */
+/** GitHub personal access depends on its organization App. */
 function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
   return service.service === "github" ? <GithubOrgAppLine /> : undefined;
 }
@@ -169,25 +167,6 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
         </>
       )}
     </IntegrationCard>
-  );
-}
-
-export function BuiltInRow({ plugin }: { plugin: PluginSummary }) {
-  return (
-    <div className="flex items-start gap-3 rounded-lg bg-ink-wash p-4">
-      <ServiceIcon slug={iconSlug(plugin)} label={pluginDisplayName(plugin)} tone="quiet" />
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium text-ink">{pluginDisplayName(plugin)}</div>
-        {plugin.description && (
-          <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">
-            {plugin.description}
-          </p>
-        )}
-      </div>
-      <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-muted">
-        built in
-      </span>
-    </div>
   );
 }
 
@@ -245,7 +224,7 @@ function ServiceBlock({
   // The visible label stays one word, but the grid holds a dozen identical
   // "Connect" buttons — so each one names its service to a screen reader.
   const connectControl = (
-    <Button size="sm" aria-label={`${connectLabel} ${title}`} onClick={() => setConnecting(true)}>
+    <Button variant="primary" size="sm" aria-label={`${connectLabel} ${title}`} onClick={() => setConnecting(true)}>
       {connectLabel}
     </Button>
   );
@@ -322,14 +301,7 @@ function ServiceBlock({
       </p>
     ) : undefined;
 
-  return (
-    <>
-      <CardHeading
-        title={title}
-        slug={slug}
-        description={description}
-        state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
-      />
+  const connectionDetails = <>
       {/* The org note reads on a disconnected card too — "your organisation
           has no GitHub App" is the reason Connect is about to fail — so the
           stack no longer hangs off `service.connected` alone. */}
@@ -354,6 +326,17 @@ function ServiceBlock({
           {orgNote}
         </div>
       )}
+  </>;
+
+  return (
+    <>
+      <CardHeading
+        title={title}
+        slug={slug}
+        description={description}
+        state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
+      />
+      {connectionDetails}
       <CardFooter meta={meta} right={controls} />
       <ConnectDialog
         service={service}

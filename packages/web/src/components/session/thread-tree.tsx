@@ -1,15 +1,32 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
+import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
+import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   Archive,
   ArchiveRestore,
   ArrowDownUp,
+  Bot,
+  Filter,
+  Hash,
+  Slack,
+  Zap,
+  Folder,
+  FolderOpen,
+  PanelLeft,
   Bell,
   Check,
+  CheckCheck,
   ChevronDown,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
   MessageSquare,
   MoreHorizontal,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Search,
@@ -19,7 +36,8 @@ import type {
   DecisionGate,
   GetModelTiersResponse,
   ModelInfo,
-  OrchestratorChildSummary,
+  ChildWorkSummary,
+  ThreadPullRequest,
   ThreadSummary,
 } from "@valet/api/wire";
 import {
@@ -28,30 +46,36 @@ import {
   useRenameThread,
   useReplaceSandbox,
   useSession,
+  useMarkThreadsRead,
   useSetThreadArchived,
   useThreads,
 } from "~/api/queries";
+import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
-import { useDismissChild, useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
-import { useModels, useModelTiers } from "~/api/settings";
+import { useThreadProjects } from "~/lib/thread-projects";
+import { useMe, useModels, useModelTiers } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { useStreamStore } from "~/stores/stream";
+import { ThreadStatusIcon } from "./thread-status-icon";
+import { useStreamStore, useThreadLiveStatus, useQueueStateForThread, queueBusy } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
 import { formatChord } from "~/lib/chat-keybindings";
 import {
-  bucketCounts,
-  filterThreads,
-  THREAD_ORIGIN_FILTERS,
-  threadOriginBucket,
-  type ThreadOriginBucket,
-} from "~/lib/thread-origin";
-import {
+  Button,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  Input,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuSeparator,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
   Spinner,
+  StatusDot,
   Tooltip,
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
@@ -59,15 +83,59 @@ import { cn } from "~/lib/cn";
 import { sameModelSpec } from "~/lib/models";
 import { isSizeTier, selectionLabel, tierSubtitle, TIER_LABELS } from "~/lib/model-tiers";
 import { getSubconversationsCollapsed, setSubconversationsCollapsed } from "~/lib/preferences";
-import { defaultThreadId } from "~/lib/thread-default";
+import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 
 /** Creation order, not the current sidebar order, determines this label. */
 export function untitledThreadLabel(thread: ThreadSummary, isNewestCreated: boolean): string {
   return isNewestCreated ? "New thread" : formatWhen(thread.createdAt);
 }
 
-const BUCKET_STORAGE_KEY = "valet:thread-bucket";
+const THREAD_DRAG_TYPE = "application/x-valet-thread";
 const THREAD_SORT_STORAGE_KEY = "valet:thread-sort";
+const THREAD_ORIGIN_STORAGE_KEY = "valet:thread-origin";
+
+function loadStoredOriginFilter(): ThreadOriginBucket {
+  try {
+    const raw = window.localStorage.getItem(THREAD_ORIGIN_STORAGE_KEY);
+    const match = THREAD_ORIGIN_FILTERS.find((candidate) => candidate.id === raw);
+    if (match) return match.id;
+  } catch {
+    // Fall through.
+  }
+  return "all";
+}
+
+const PR_ICONS = {
+  open: { Icon: GitPullRequest, label: "Pull request open", className: "text-emerald-600" },
+  merged: { Icon: GitMerge, label: "Pull request merged", className: "text-violet-500" },
+  closed: { Icon: GitPullRequestClosed, label: "Pull request closed", className: "text-muted" },
+} as const;
+
+/** The state of the pull request this thread created: open, merged, or closed. */
+export function ThreadPullRequestIcon({ pr, count }: { pr: ThreadPullRequest; count: number }) {
+  const { Icon, label, className } = PR_ICONS[pr.state];
+  const text = `${label}: ${pr.repo}#${pr.number}${count > 1 ? ` (${count} pull requests)` : ""}`;
+  return (
+    <Tooltip content={text}>
+      <span role="img" aria-label={text} className="ml-1 inline-flex h-5 w-5 shrink-0 items-center justify-center">
+        <Icon aria-hidden className={cn("h-3.5 w-3.5", className)} />
+      </span>
+    </Tooltip>
+  );
+}
+
+/** Where a thread came from, as a small row icon: Slack, another channel,
+ * web chat, an automation, or another agent. */
+export function ThreadOriginIcon({ thread }: { thread: Pick<ThreadSummary, "key"> }) {
+  const bucket = threadOriginBucket(thread);
+  const channel = threadChannelType(thread);
+  const [Icon, label] = bucket === "channel"
+    ? channel === "slack" ? [Slack, "From Slack"] as const : [Hash, `From ${channel ?? "a channel"}`] as const
+    : bucket === "auto" ? [Zap, "From an automation"] as const
+    : bucket === "other" ? [Bot, "From another agent"] as const
+    : [MessageSquare, "From web chat"] as const;
+  return <Icon role="img" aria-label={label} className="mr-2 h-3.5 w-3.5 shrink-0 text-muted"><title>{label}</title></Icon>;
+}
 
 export const THREAD_SORT_MODES = [
   { id: "last-user-activity", label: "Last user activity" },
@@ -95,16 +163,6 @@ export function sortThreads(threads: ThreadSummary[], mode: ThreadSortMode): Thr
   });
 }
 
-function loadStoredBucket(): ThreadOriginBucket {
-  try {
-    const raw = window.localStorage.getItem(BUCKET_STORAGE_KEY);
-    if (raw && THREAD_ORIGIN_FILTERS.some((f) => f.id === raw)) return raw as ThreadOriginBucket;
-  } catch {
-    // Fall through.
-  }
-  return "all";
-}
-
 const CHILDREN_POLL_MS = 30_000;
 const CHILDREN_INVALIDATE_DEBOUNCE_MS = 500;
 
@@ -114,9 +172,9 @@ const NO_REFETCH = () => {};
 
 /** Pure: groups children by the thread that spawned them. */
 export function groupChildrenByThread(
-  children: OrchestratorChildSummary[],
-): Map<string, OrchestratorChildSummary[]> {
-  const map = new Map<string, OrchestratorChildSummary[]>();
+  children: ChildWorkSummary[],
+): Map<string, ChildWorkSummary[]> {
+  const map = new Map<string, ChildWorkSummary[]>();
   for (const c of children) {
     const list = map.get(c.parentThreadId);
     if (list) list.push(c);
@@ -140,23 +198,6 @@ export function threadIdsWithPendingGates(
 }
 
 /**
- * Pure: the rows the tree renders. Applies the origin-bucket and search
- * filters, but a thread with a pending gate is exempt from both — hiding
- * the row would hide the only in-session surface for its gate.
- */
-export function visibleThreads(
-  threads: ThreadSummary[],
-  bucket: ThreadOriginBucket,
-  query: string,
-  gatedThreadIds: Set<string>,
-): ThreadSummary[] {
-  const filtered = filterThreads(threads, bucket, query);
-  if (gatedThreadIds.size === 0) return filtered;
-  const shown = new Set(filtered.map((t) => t.id));
-  return threads.filter((t) => shown.has(t.id) || gatedThreadIds.has(t.id));
-}
-
-/**
  * Pure: true when a pending gate sits on a thread that is NOT in the
  * active-thread list — an archived thread. Marks the "Show archived"
  * toggle so the gate has a surface while the section is closed.
@@ -175,7 +216,7 @@ export function hasGateOutsideList(
 
 /** Pure: status-dot class for a child row. Calm-companion visual language —
  * running is moss with a subtle pulse, settled is a muted checkmark. */
-export function childStatusDotClassName(status: OrchestratorChildSummary["status"]): string {
+export function childStatusDotClassName(status: ChildWorkSummary["status"]): string {
   return status === "running"
     ? "bg-moss animate-pulse motion-reduce:animate-none"
     : "bg-muted";
@@ -192,7 +233,7 @@ export function childStatusDotClassName(status: OrchestratorChildSummary["status
  * recoverable via hover tooltip when truncated.
  */
 export function ThreadTree({ sessionId: override, showChildren = true }: ThreadTreeProps = {}) {
-  const info = useOrchestratorInfo();
+  const info = useWorkspaceRuntimeInfo(override ? undefined : "user");
   // No `override` means the caller's own assistant — the original and still
   // the default behavior.
   const sessionId = override ?? info.data?.sessionId;
@@ -221,7 +262,7 @@ export interface ThreadTreeProps {
   sessionId?: string;
   /**
    * Nest child sessions under the thread that spawned them. Safe for any
-   * assistant the caller can view: `GET /api/orchestrator/children?sessionId=`
+   * assistant the caller can view: `GET /api/sessions/:sessionId/children`
    * scopes the list to THIS `sessionId` (access-checked), so a team
    * assistant's runs nest under its own threads rather than borrowing the
    * caller's personal children.
@@ -230,7 +271,24 @@ export interface ThreadTreeProps {
 }
 
 function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
+  const viewer = useMe();
+  const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
+  const [projectDialog, setProjectDialog] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [projectError, setProjectError] = useState<string>();
+  function createProject() {
+    const name = projectName.trim();
+    if (!name) return;
+    if (projects.value.projects.some((project) => project.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setProjectError("A project with this name already exists.");
+      return;
+    }
+    projects.update((current) => ({ ...current, grouped: true, collapsed: false, projects: [...current.projects, { id: crypto.randomUUID(), name, collapsed: false }] }));
+    setProjectDialog(false);
+    setProjectName("");
+  }
   const threadsQ = useThreads(sessionId);
+  const markRead = useMarkThreadsRead(sessionId);
   // Session default model, for the pin chip: a chip renders only on threads
   // whose pin DIVERGES from it (every new thread pins at creation, so an
   // always-on chip would just be noise).
@@ -238,7 +296,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const sessionModel = sessionQ.data?.model;
   const modelsQ = useModels();
   const tierMapQ = useModelTiers();
-  const childrenQ = useOrchestratorChildren(sessionId, {
+  const childrenQ = useChildWork(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
     enabled: showChildren,
   });
@@ -257,13 +315,13 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
   const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
   const threads = useMemo(
-    () => sortThreads(threadsQ.data?.threads ?? [], sortMode),
+    () => sortThreads((threadsQ.data?.threads ?? []).filter((thread) => !isAppAssistantThread(thread)), sortMode),
     [threadsQ.data, sortMode],
   );
   // Both the sidebar and SessionView use this creation-order default. Sort only changes row order.
   const defaultId = defaultThreadId(threads);
   const activeThreadId = search.thread ?? defaultId;
-  const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
+  const grouped = groupChildrenByThread(showChildren ? (childrenQ.error ? [] : flattenChildWork(childrenQ.data)) : []);
 
   // Seed pending gates from REST for ourselves — the tree must not depend
   // on a SessionView being mounted for the same session. Live updates
@@ -273,33 +331,32 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
   const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
 
-  const [bucket, setBucket] = useState<ThreadOriginBucket>(() => loadStoredBucket());
-  const [query, setQuery] = useState("");
-  const counts = useMemo(() => bucketCounts(threads), [threads]);
-  // Chips earn their row only when threads actually span buckets — a
-  // chat-only session keeps the sidebar clean.
-  const bucketsInUse = THREAD_ORIGIN_FILTERS.filter((f) => f.id !== "all" && counts[f.id] > 0);
-  const showFilters = bucketsInUse.length > 1;
-  const effectiveBucket = showFilters ? bucket : "all";
-  const visible = useMemo(
-    () => visibleThreads(threads, effectiveBucket, query, gatedThreadIds),
-    [threads, effectiveBucket, query, gatedThreadIds],
-  );
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchIndex, setSearchIndex] = useState(0);
+  const searchResults = threads.filter((thread) => {
+    const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
+    return `${thread.title ?? ""} ${project?.name ?? ""}`.toLowerCase().includes(searchQuery.trim().toLowerCase());
+  });
+  function openSearch() { setSearchQuery(""); setSearchIndex(0); setSearchOpen(true); }
+  function selectSearchThread(threadId: string) {
+    setSearchOpen(false);
+    navigate({ search: (prev) => ({ ...prev, thread: threadId, child: undefined }) });
+  }
+  const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
+  const originCounts = useMemo(() => bucketCounts(threads), [threads]);
+  const visible = originFilter === "all" ? threads : threads.filter((thread) => threadOriginBucket(thread) === originFilter);
+  function selectOriginFilter(next: ThreadOriginBucket) {
+    setOriginFilter(next);
+    try {
+      window.localStorage.setItem(THREAD_ORIGIN_STORAGE_KEY, next);
+    } catch {
+      // In-session only when storage is unavailable.
+    }
+  }
   // A gate on an archived thread has no row in `visible`; without this the
   // gate would be invisible while the archived section is closed.
-  const archivedGated = threadsQ.data !== undefined && hasGateOutsideList(threads, gatedThreadIds);
-
-  // Auto-switch when the ACTIVE thread would be filtered out (deep link
-  // into an automation thread while the chip says Chat) — the selection
-  // must always be visible in the list.
-  useEffect(() => {
-    if (!showFilters || bucket === "all") return;
-    const active = threads.find((t) => t.id === activeThreadId);
-    if (active && threadOriginBucket(active) !== bucket) {
-      setBucket("all");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeThreadId, threads, showFilters]);
+  const archivedGated = threadsQ.data !== undefined && hasGateOutsideList(threadsQ.data?.threads ?? [], gatedThreadIds);
 
   function selectThreadSort(next: ThreadSortMode) {
     setSortMode(next);
@@ -310,21 +367,10 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     }
   }
 
-  function selectBucket(next: ThreadOriginBucket) {
-    setBucket(next);
-    try {
-      window.localStorage.setItem(BUCKET_STORAGE_KEY, next);
-    } catch {
-      // In-session only when storage is unavailable.
-    }
-  }
-
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   async function createAndNavigate() {
-    // A sidebar "New thread" starts a separate top-level conversation.
-    // Omit sourceThreadId so the server resolves current defaults instead of
-    // applying the explicit continuation/fork behavior.
+    // A new top-level thread uses current defaults, not the active thread's settings.
     const thread = await createThread.mutateAsync();
     navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
     // Land the cursor in the composer — a fresh thread exists to be
@@ -333,22 +379,94 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   }
 
   const archiveActive = useCallback(() => {
-    if (!activeThreadId) return;
+    if (!activeThreadId || isAppAssistantThread(threadsQ.data?.threads.find((thread) => thread.id === activeThreadId) ?? {})) return;
     void setArchived.mutateAsync({ threadId: activeThreadId, archived: true });
     navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-  }, [activeThreadId, navigate, setArchived]);
+  }, [activeThreadId, navigate, setArchived, threadsQ.data]);
 
   // Register this surface's hotkey targets for the global listener.
   useEffect(() => {
     return useChatHotkeysStore.getState().register({
       newThread: () => void createAndNavigate(),
       archiveActiveThread: archiveActive,
-      focusThreadSearch: () => searchInputRef.current?.focus(),
+      focusThreadSearch: openSearch,
     });
     // createAndNavigate closes over createThread/navigate; re-register when
     // those identities change so the hotkey never calls a stale mutator.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [archiveActive, createThread, navigate]);
+
+  const [dropTarget, setDropTarget] = useState<string>();
+  function moveThread(threadId: string, projectId?: string) {
+    projects.update((current) => {
+      const assignments = { ...current.assignments };
+      if (projectId) assignments[threadId] = projectId;
+      else delete assignments[threadId];
+      return { ...current, assignments, projects: current.projects.map((project) => project.id === projectId ? { ...project, collapsed: false } : project) };
+    });
+  }
+  function dropHandlers(projectId?: string) {
+    const target = projectId ?? "recents";
+    return {
+      onDragOver: (event: ReactDragEvent<HTMLElement>) => {
+        if (!event.dataTransfer.types.includes(THREAD_DRAG_TYPE)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        setDropTarget(target);
+      },
+      onDragLeave: (event: ReactDragEvent<HTMLElement>) => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+        setDropTarget(undefined);
+      },
+      onDrop: (event: ReactDragEvent<HTMLElement>) => {
+        if (!event.dataTransfer.types.includes(THREAD_DRAG_TYPE)) return;
+        event.preventDefault();
+        setDropTarget(undefined);
+        try {
+          const data: unknown = JSON.parse(event.dataTransfer.getData(THREAD_DRAG_TYPE));
+          if (!data || typeof data !== "object" || !("sessionId" in data) || data.sessionId !== sessionId || !("threadId" in data) || typeof data.threadId !== "string") return;
+          if (!threads.some((thread) => thread.id === data.threadId)) return;
+          moveThread(data.threadId, projectId);
+        } catch { /* Ignore unrelated or malformed drag data. */ }
+      },
+    };
+  }
+
+  const renderThread = (t: ThreadSummary) => (
+            <ThreadNode
+              key={t.id}
+              thread={t}
+              isDefault={t.id === defaultId}
+              sessionModel={sessionModel}
+              models={modelsQ.data?.models ?? []}
+              tierMap={tierMapQ.data}
+              active={t.id === activeThreadId}
+              hasPendingGate={gatedThreadIds.has(t.id)}
+              childSessions={grouped.get(t.id) ?? []}
+              activeChildId={search.child}
+              projects={projects.value.projects}
+              projectId={projects.value.assignments[t.id]}
+              pinned={projects.value.pinned.includes(t.id)}
+              onPin={() => projects.update((current) => ({ ...current, pinned: current.pinned.includes(t.id) ? current.pinned.filter((id) => id !== t.id) : [...current.pinned, t.id] }))}
+              onMove={(projectId) => moveThread(t.id, projectId)}
+              onDragEnd={() => setDropTarget(undefined)}
+              onArchive={(threadId) => {
+                void setArchived.mutateAsync({ threadId, archived: true });
+                // Archiving the thread you're looking at would strand the
+                // view on a thread absent from the list — return to the
+                // default thread.
+                if (threadId === activeThreadId) {
+                  navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
+                }
+              }}
+              onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
+              onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
+              onRename={(threadId, title) =>
+                void renameThread.mutateAsync({ threadId, title })
+              }
+            />
+
+  );
 
   return (
     <>
@@ -366,83 +484,87 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           <Plus className="h-3.5 w-3.5 shrink-0" />
           <span>New thread</span>
         </button>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label="Sort threads"
-              className="inline-flex items-center justify-center rounded p-1.5 text-muted hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
-            >
-              <ArrowDownUp className="h-3.5 w-3.5" aria-hidden />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" aria-label="Thread sort order">
-            {THREAD_SORT_MODES.map((mode) => (
-              <DropdownMenuItem
-                key={mode.id}
-                onSelect={() => selectThreadSort(mode.id)}
-                aria-checked={sortMode === mode.id}
-                role="menuitemradio"
-              >
-                {sortMode === mode.id && <Check className="h-3.5 w-3.5" aria-hidden />}
-                {mode.label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
       </div>
-      <div className="px-2 pt-1 pb-2 space-y-1.5">
-        <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2 focus-within:border-moss/60">
-          <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
-          <input
-            ref={searchInputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search threads…"
-            aria-label="Search threads"
-            className="h-7 w-full min-w-0 bg-transparent text-sm text-ink placeholder:text-muted focus:outline-none"
-          />
-          {query && (
-            <button
-              type="button"
-              aria-label="Clear search"
-              onClick={() => setQuery("")}
-              className="text-muted hover:text-ink"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-        {showFilters && (
-          <div className="flex flex-wrap gap-1" role="tablist" aria-label="Thread origin">
-            {[THREAD_ORIGIN_FILTERS[0]!, ...bucketsInUse].map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                role="tab"
-                aria-selected={effectiveBucket === f.id}
-                onClick={() => selectBucket(f.id)}
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] transition-colors",
-                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-moss",
-                  effectiveBucket === f.id
-                    ? "bg-moss-wash-strong text-ink font-medium"
-                    : "text-muted hover:text-ink hover:bg-ink-wash",
-                )}
-              >
-                {f.label}
-                <span className="tabular-nums text-[10px] opacity-70">{counts[f.id]}</span>
-              </button>
-            ))}
+      <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
+        <DialogContent hideClose className="max-w-2xl rounded-2xl p-2 gap-1" onOpenAutoFocus={(event) => { event.preventDefault(); searchInputRef.current?.focus(); }}>
+          <DialogTitle className="sr-only">Search threads</DialogTitle>
+          <input ref={searchInputRef} value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0); }}
+            placeholder="Search threads" aria-label="Search threads" role="combobox" aria-expanded aria-controls="thread-search-results" aria-activedescendant={searchResults[searchIndex] ? `thread-search-${searchResults[searchIndex]!.id}` : undefined}
+            className="w-full bg-transparent px-4 py-4 text-lg outline-none placeholder:text-muted"
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                const next = Math.max(0, Math.min(searchResults.length - 1, searchIndex + (event.key === "ArrowDown" ? 1 : -1)));
+                setSearchIndex(next);
+                document.getElementById(`thread-search-${searchResults[next]?.id}`)?.scrollIntoView({ block: "nearest" });
+              }
+              if (event.key === "Enter" && searchResults[searchIndex]) { event.preventDefault(); selectSearchThread(searchResults[searchIndex]!.id); }
+            }} />
+          <p className="px-4 pt-2 pb-1 text-xs text-muted">{searchQuery ? "Threads" : "Recent threads"}</p>
+          <div id="thread-search-results" role="listbox" aria-label="Threads" className="max-h-[45dvh] overflow-y-auto">
+            {searchResults.map((thread, index) => {
+              const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
+              return <button key={thread.id} id={`thread-search-${thread.id}`} type="button" role="option" aria-selected={index === searchIndex}
+                onMouseMove={() => setSearchIndex(index)} onClick={() => selectSearchThread(thread.id)}
+                className={cn("flex w-full items-center gap-3 rounded-lg px-4 py-2.5 text-left text-sm", index === searchIndex && "bg-ink-wash")}>
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center">{gatedThreadIds.has(thread.id) && <Bell className="h-4 w-4 text-amber-500" />}</span>
+                <span className="min-w-0 flex-1 truncate">{thread.title || untitledThreadLabel(thread, thread.id === defaultId)}</span>
+                {project && <span className="max-w-[30%] truncate text-muted">{project.name}</span>}
+              </button>;
+            })}
+            {searchResults.length === 0 && <p className="px-4 py-6 text-sm text-muted">No matching threads in this workspace.</p>}
           </div>
-        )}
-      </div>
+          <div className="mt-2 border-t border-line pt-2">
+            <button type="button" disabled={createThread.isPending} onClick={() => { setSearchOpen(false); void createAndNavigate(); }} className="flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm hover:bg-ink-wash"><Plus className="h-5 w-5" />New thread</button>
+          </div>
+        </DialogContent>
+      </Dialog>
       {/* Plain overflow div, NOT the Radix ScrollArea — its viewport wraps
           content in a `display: table` div that sizes to intrinsic content
-          width, which defeats both the sidebar's max-content sizing and
-          row truncation when clamped. */}
+          width, which defeats row truncation within the fixed-width sidebar. */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
+          <div className="flex items-center gap-1 px-3 py-2">
+            <button onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-sm text-muted hover:text-ink">Projects {threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild><button aria-label="Sidebar options" className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger><PanelLeft className="h-4 w-4" />Organize sidebar</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>
+                    {[{ label: "By project", grouped: true }, { label: "In one list", grouped: false }].map((option) => <DropdownMenuItem key={option.label} role="menuitemradio" aria-checked={projects.value.grouped === option.grouped} onSelect={() => projects.update((current) => ({ ...current, grouped: option.grouped }))}><Check className={cn("h-4 w-4", projects.value.grouped !== option.grouped && "invisible")} />{option.label}</DropdownMenuItem>)}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger><Filter className="h-4 w-4" />Show threads from</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>{THREAD_ORIGIN_FILTERS.map((option) => <DropdownMenuItem key={option.id} role="menuitemradio" aria-checked={originFilter === option.id} onSelect={() => selectOriginFilter(option.id)}><Check className={cn("h-4 w-4", originFilter !== option.id && "invisible")} /><span className="flex-1">{option.label}</span><span className="text-xs text-muted">{originCounts[option.id]}</span></DropdownMenuItem>)}</DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuItem disabled={!threads.some((thread) => isThreadUnread(thread))} onSelect={() => markRead.mutate({})}><CheckCheck className="h-4 w-4" />Mark all as read</DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger><ArrowDownUp className="h-4 w-4" />Sort chats by</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>{THREAD_SORT_MODES.map((mode) => <DropdownMenuItem key={mode.id} role="menuitemradio" aria-checked={sortMode === mode.id} onSelect={() => selectThreadSort(mode.id)}><Check className={cn("h-4 w-4", sortMode !== mode.id && "invisible")} />{mode.label}</DropdownMenuItem>)}</DropdownMenuSubContent>
+                </DropdownMenuSub>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <button aria-label="New project" disabled={!viewer.data?.id} onClick={() => { setProjectError(undefined); setProjectName(""); setProjectDialog(true); }} className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><Plus className="h-4 w-4" /></button>
+          </div>
+          {originFilter !== "all" && (
+            <p className="flex items-center gap-2 px-4 pb-1 text-xs text-muted">
+              Showing {THREAD_ORIGIN_FILTERS.find((option) => option.id === originFilter)?.label.toLowerCase()}
+              <button type="button" className="underline hover:text-ink" onClick={() => selectOriginFilter("all")}>Clear</button>
+            </p>
+          )}
+          <Dialog open={projectDialog} onOpenChange={setProjectDialog}>
+            <DialogContent title="New project">
+              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); createProject(); }}>
+                <label className="grid gap-2 text-sm">Project name<Input autoFocus value={projectName} onChange={(event) => { setProjectName(event.target.value); setProjectError(undefined); }} placeholder="e.g. turnkey" maxLength={100} /></label>
+                {projectError && <p role="alert" className="text-xs text-danger-500">{projectError}</p>}
+                <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setProjectDialog(false)}>Cancel</Button><Button type="submit" disabled={!projectName.trim()}>Create project</Button></div>
+              </form>
+            </DialogContent>
+          </Dialog>
+
           {threadsQ.isLoading && (
             <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading…
@@ -451,40 +573,24 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           {threadsQ.error && (
             <div className="px-4 py-3 text-sm text-danger-500">Failed to load threads</div>
           )}
-          {!threadsQ.isLoading && !threadsQ.error && visible.length === 0 && threads.length > 0 && (
-            <div className="px-4 py-3 text-xs text-muted">
-              No threads match{query ? ` "${query}"` : " this filter"}.
-            </div>
-          )}
-          {visible.map((t) => (
-            <ThreadNode
-              key={t.id}
-              thread={t}
-              isDefault={t.id === defaultId}
-              sessionModel={sessionModel}
-              models={modelsQ.data?.models ?? []}
-              tierMap={tierMapQ.data}
-              active={t.id === activeThreadId}
-              hasPendingGate={gatedThreadIds.has(t.id)}
-              childSessions={grouped.get(t.id) ?? []}
-              activeChildId={search.child}
-              onArchive={(threadId) => {
-                void setArchived.mutateAsync({ threadId, archived: true });
-                // Archiving the thread you're looking at would strand the
-                // view on a thread absent from the list — return to the
-                // default thread.
-                if (threadId === activeThreadId) {
-                  navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-                }
-              }}
-              onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
-              onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
-              onRename={(threadId, title) =>
-                void renameThread.mutateAsync({ threadId, title })
-              }
-            />
-          ))}
+          {visible.some((thread) => projects.value.pinned.includes(thread.id)) && <section aria-label="Pinned"><h2 className="px-4 pb-1 pt-3 text-xs font-medium text-muted">Pinned</h2>{visible.filter((thread) => projects.value.pinned.includes(thread.id)).map(renderThread)}</section>}
+          {projects.value.grouped && !projects.value.collapsed && projects.value.projects.map((project) => {
+            const members = visible.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
+            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 rounded-lg transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
+              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex w-full items-center gap-2 rounded-lg px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
+                {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
+                <span className="truncate">{project.name}</span>{members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
+              </button>
+              {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted">Move a thread here</p>}</div>}
+            </section>;
+          })}
+          <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className="px-4 pb-1 pt-4 text-xs font-medium text-muted">Recents</h2>
+          {visible.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id]))).map(renderThread)}
+          </section>
         </nav>
+        {showChildren && childrenQ.isLoading && <p className="px-4 py-2 text-xs text-muted">Loading work…</p>}
+        {showChildren && childrenQ.error && <p className="px-4 py-2 text-xs text-danger-500">Could not load work. <button onClick={() => void childrenQ.refetch()} className="underline">Retry</button></p>}
+        {showChildren && !childrenQ.error && childrenQ.hasNextPage && <button className="px-4 py-2 text-xs text-moss" disabled={childrenQ.isFetchingNextPage} onClick={() => void childrenQ.fetchNextPage()}>{childrenQ.isFetchingNextPage ? "Loading…" : "Load more work"}</button>}
         <div className="border-t border-line/60 px-2 py-1.5">
           <button
             type="button"
@@ -502,10 +608,10 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           </button>
           {showArchived && (
             <ul className="mt-1 space-y-0.5">
-              {(archivedQ.data?.threads ?? []).length === 0 && !archivedQ.isLoading && (
+              {(archivedQ.data?.threads ?? []).filter((thread) => !isAppAssistantThread(thread)).length === 0 && !archivedQ.isLoading && (
                 <li className="px-2 py-1 text-xs text-muted">No archived threads.</li>
               )}
-              {(archivedQ.data?.threads ?? []).map((t) => (
+              {(archivedQ.data?.threads ?? []).filter((thread) => !isAppAssistantThread(thread)).map((t) => (
                 <li key={t.id} className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
                   <span className="flex-1 truncate">{t.title ?? t.id}</span>
                   {gatedThreadIds.has(t.id) && (
@@ -545,7 +651,19 @@ function ThreadNode({
   onReplaceSandbox,
   onDismissChild,
   onRename,
+  projects,
+  projectId,
+  onMove,
+  onDragEnd,
+  pinned,
+  onPin,
 }: {
+  pinned: boolean;
+  onPin: () => void;
+  projects: Array<{ id: string; name: string }>;
+  projectId?: string;
+  onMove: (projectId?: string) => void;
+  onDragEnd: () => void;
   thread: ThreadSummary;
   isDefault: boolean;
   /** Session default model — the pin chip shows only when the thread's pin diverges from it. */
@@ -555,7 +673,7 @@ function ThreadNode({
   active: boolean;
   /** The thread holds a pending decision gate — show the response-required bell. */
   hasPendingGate: boolean;
-  childSessions: OrchestratorChildSummary[];
+  childSessions: ChildWorkSummary[];
   activeChildId?: string;
   onArchive: (threadId: string) => void;
   onReplaceSandbox: () => void;
@@ -564,6 +682,19 @@ function ThreadNode({
   onRename: (threadId: string, title: string | null) => void;
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, isDefault);
+  const liveStatus = useThreadLiveStatus(thread.sessionId, thread.id);
+  const markRead = useMarkThreadsRead(thread.sessionId);
+  // An open thread is read: mark it when it opens and when a new reply lands.
+  const unread = !active && isThreadUnread(thread);
+  const openUnread = active && isThreadUnread(thread);
+  const markReadMutate = markRead.mutate;
+  useEffect(() => {
+    if (openUnread) markReadMutate({ threadIds: [thread.id] });
+  }, [openUnread, markReadMutate, thread.id, thread.lastAgentActivityAt]);
+  const pullRequest = rowPullRequest(thread.pullRequests);
+  // A question waiting on a reply outranks plain unread: it asks for an answer.
+  const question = pendingAgentQuestion(thread);
+  const queueState = useQueueStateForThread(thread.sessionId, thread.id);
   const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id));
 
   useEffect(() => {
@@ -696,12 +827,24 @@ function ThreadNode({
                 "focus-visible:outline-none focus-visible:bg-ink-wash",
                 active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
               )}
+              draggable
+              onDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData(THREAD_DRAG_TYPE, JSON.stringify({ sessionId: thread.sessionId, threadId: thread.id }));
+              }}
+              onDragEnd={onDragEnd}
               onDoubleClick={(event) => {
                 event.stopPropagation();
                 startEditing();
               }}
             >
-              <span className="flex-1 truncate">{label}</span>
+              <ThreadOriginIcon thread={thread} />
+              <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>{label}</span>
+              {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
+              {question
+                ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
+                : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
+              <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
               {pinnedModelLabel && (
                 <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>
                   <span className="max-w-28 truncate text-[10px] font-normal text-muted">
@@ -714,14 +857,7 @@ function ThreadNode({
                   )}
                 </span>
               )}
-              {hasPendingGate && (
-                <span role="img" aria-label="Response required" title="Response required">
-                  <Bell
-                    className="ml-2 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-300"
-                    aria-hidden
-                  />
-                </span>
-              )}
+
             </Link>
           </Tooltip>
         )}
@@ -739,6 +875,7 @@ function ThreadNode({
             />
           </button>
         )}
+        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} onClick={onPin} className="inline-flex shrink-0 items-center justify-center rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 hover:bg-ink-wash hover:text-ink">{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
@@ -750,12 +887,20 @@ function ThreadNode({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown}>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger><Folder className="h-4 w-4" />Move to project</DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuItem onSelect={() => onMove()}><Check className={cn("h-4 w-4", !!projectId && "invisible")} />Recents</DropdownMenuItem>
+                {projects.length > 0 && <DropdownMenuSeparator />}
+                {projects.map((project) => <DropdownMenuItem key={project.id} onSelect={() => onMove(project.id)}><Check className={cn("h-4 w-4", projectId !== project.id && "invisible")} />{project.name}</DropdownMenuItem>)}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
             <DropdownMenuItem
               onSelect={() => onArchive(thread.id)}
               className="justify-between gap-3"
             >
               <span className="inline-flex items-center gap-2">
-                <Archive className="h-3.5 w-3.5" aria-hidden />
+                <Archive className="h-4 w-4" aria-hidden />
                 Archive thread
               </span>
               <span className="text-[10px] text-muted tabular-nums" title={archiveGlobalHint}>
@@ -763,11 +908,11 @@ function ThreadNode({
               </span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => startEditing()}>
-              <Pencil className="h-3.5 w-3.5 mr-2" aria-hidden />
+              <Pencil className="h-4 w-4" aria-hidden />
               Rename thread
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onReplaceSandbox}>
-              <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
+              <RefreshCw className="h-4 w-4" aria-hidden />
               Replace sandbox (all threads)
             </DropdownMenuItem>
           </DropdownMenuContent>
@@ -827,7 +972,7 @@ function ThreadNode({
  * Live-updates the children query (decision 12): refetch on any
  * `queue.state` frame for the assistant session, debounced so a burst of
  * frames only triggers one refetch. The 30s poll (`refetchInterval` on
- * `useOrchestratorChildren`) is the fallback for when no WS frames arrive.
+ * `useChildWork`) is the fallback for when no WS frames arrive.
  */
 function useInvalidateChildrenOnQueueState(sessionId: string, refetch: () => void) {
   const queueByThread = useStreamStore((s) => s.bySession[sessionId]?.queueByThread);

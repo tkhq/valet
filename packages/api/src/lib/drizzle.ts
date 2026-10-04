@@ -21,6 +21,7 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { Pool } from "pg";
 import { applyEngineMigrations, isPgLockTimeout, pgDbFromPglite, pgDbFromPool, type PgDb } from "@valet/store-postgres";
 import { readFileSync } from "node:fs";
+import { normalizeLegacyDefinition } from "@valet/workflow";
 import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-member-activity.js";
 import { prepareAuxUsageRollups, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
@@ -129,6 +130,110 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
 
   await addColumnsMissingFromAppliedMigrations(db);
   await expandLegacySlackWildcards(db);
+  await stripRetiredAssistantTargets(db);
+  await normalizeLegacyWorkflowDefinitions(db);
+  await syncAssistantSessionStatus(db);
+  await reportRetiredAssistantSettings(db);
+  await reportOrganizationSlackRules(db);
+}
+
+/** A team Slack rule open to the whole organization now also answers a full
+ * Slack workspace member with no Valet account (`team-slack-gate.ts`). Before,
+ * it answered Valet members only. Name each enabled one at boot, so an admin
+ * can narrow a rule that should not reach those people. */
+export async function reportOrganizationSlackRules(db: PgDb): Promise<string | null> {
+  const result = await db.query(
+    `SELECT id, name, owner_id FROM event_subscriptions WHERE owner_type = 'team' AND audience = 'organization' AND enabled = true
+      ORDER BY owner_id, id`,
+  );
+  if (result.rows.length === 0) return null;
+  const names = result.rows.map((row) => `"${String(row.name)}" (${String(row.id)}, team ${String(row.owner_id)})`);
+  const message = `[slack] ${names.length} team Slack rule(s) open to the whole organization also answer Slack workspace members `
+    + `with no Valet account: ${names.join(", ")}. To limit a rule to the team's members, set its audience to the team on the Events page.`;
+  console.warn(message);
+  return message;
+}
+
+/** A stored integration allow-list keeps limiting its workspace until an
+ * admin clears it (`assistants/integration-limit.ts`). Name each affected
+ * workspace once at boot so an admin can review it. */
+export async function reportRetiredAssistantSettings(db: PgDb): Promise<string | null> {
+  const result = await db.query(
+    `SELECT owner_type, owner_id FROM assistants WHERE archived_at IS NULL AND behavior IS NOT NULL ORDER BY owner_type, owner_id`,
+  );
+  if (result.rows.length === 0) return null;
+  const names = result.rows.map((row) => `${String(row.owner_type)}:${String(row.owner_id)}`);
+  const message = `[migrations] ${names.length} workspace assistant(s) keep an integration allow-list from before one assistant per workspace: ${names.join(", ")}. `
+    + "It keeps limiting that workspace's assistant until an admin clears it on the Integrations page.";
+  console.warn(message);
+  return message;
+}
+
+/** Keeps each assistant's session status in line with the assistant.
+ * dev-v2 deleted an assistant by archiving it and marking its session
+ * `deleted`. The singleton cutover restores that assistant when its owner
+ * still exists, so its session becomes `active` again; otherwise the
+ * reconcile sweep destroys the runtime's sandbox and its threads drop out
+ * of every list. The cutover also retires extra assistants, and their
+ * sessions become `deleted`, so thread, brief, active-work, and approval
+ * lists stop showing threads a retired assistant can no longer open.
+ * Runs on every boot, so databases cut over before it existed are fixed
+ * too. Idempotent: rows already in line are untouched. */
+export async function syncAssistantSessionStatus(db: PgDb): Promise<void> {
+  const now = Date.now();
+  await db.query(
+    `UPDATE agent_sessions s SET status = 'active', updated_at = $1 FROM assistants a
+      WHERE s.id = a.session_id AND a.archived_at IS NULL AND s.status = 'deleted'`,
+    [now],
+  );
+  await db.query(
+    `UPDATE agent_sessions s SET status = 'deleted', updated_at = $1 FROM assistants a
+      WHERE s.id = a.session_id AND a.archived_at IS NOT NULL AND s.status <> 'deleted'`,
+    [now],
+  );
+}
+
+/** Stored workflow JSON that the current validator rejects: a top-level
+ * `assistantId` from before workspaces had one assistant. Saved workflows,
+ * their versions, run snapshots, and saved templates are rewritten with
+ * `normalizeLegacyDefinition`. Idempotent: the filter selects only rows that
+ * still carry the old shape. */
+export async function normalizeLegacyWorkflowDefinitions(db: PgDb): Promise<void> {
+  const LEGACY = (col: string) => `(${col} ? 'assistantId')`;
+  // A settled run never executes again, so only unsettled run snapshots need
+  // the rewrite; the run history stays out of every boot's scan.
+  for (const [table, scope] of [["workflow_definitions", ""], ["workflow_versions", ""], ["workflow_runs", " AND status <> 'settled'"]] as const) {
+    const rows = await db.query(`SELECT id, definition FROM ${table} WHERE ${LEGACY("definition")}${scope}`);
+    for (const row of rows.rows) {
+      const next = normalizeLegacyDefinition(row.definition);
+      if (next !== row.definition) {
+        await db.query(`UPDATE ${table} SET definition = $1 WHERE id = $2`, [JSON.stringify(next), row.id]);
+      }
+    }
+  }
+  const templates = await db.query(`SELECT id, template FROM workflow_templates WHERE ${LEGACY("(template->'definition')")}`);
+  for (const row of templates.rows) {
+    const template = row.template;
+    if (typeof template !== "object" || template === null || Array.isArray(template)) continue;
+    const definition = "definition" in template ? template.definition : undefined;
+    const next = normalizeLegacyDefinition(definition);
+    if (next !== definition) {
+      await db.query("UPDATE workflow_templates SET template = $1 WHERE id = $2",
+        [JSON.stringify({ ...template, definition: next }), row.id]);
+    }
+  }
+}
+
+/** Workspaces now have one assistant, so a subscription target no longer
+ * names one, and the write validator rejects `assistantId`. Rows written by
+ * the earlier model (or by an older binary during a rollback) still carry
+ * it, which made every edit, even disabling the rule, fail validation.
+ * Delivery already ignores the field. Idempotent: a clean row is untouched. */
+export async function stripRetiredAssistantTargets(db: PgDb): Promise<void> {
+  await db.query(
+    `UPDATE event_subscriptions SET target = target - 'assistantId', updated_at = $1 WHERE target ? 'assistantId'`,
+    [Date.now()],
+  );
 }
 
 const LEGACY_SLACK_EVENT_KEYS = [
@@ -156,6 +261,9 @@ export async function expandLegacySlackWildcards(db: PgDb): Promise<void> {
 interface SchemaRepair {
   /** Optional resumable preparation, outside the final DDL transaction. */
   prepare?: (db: PgDb) => Promise<void>;
+  /** A statement that must commit with `sql`, such as dropping the index it
+   * replaces. It runs first, inside the same lock-timed transaction. */
+  before?: string;
   /** Names the element in logs and errors, e.g. "orgs.sso_team_groups column". */
   describe: string;
   probe:
@@ -241,13 +349,139 @@ END $cost_view$`;
  * `0000_app.sql`. Delete this list at 1.0, when numbered migrations take
  * over.
  *
- * Every entry must also be safe to ROLL BACK: the previous release may boot
+ * Each entry must also be safe to ROLL BACK: the previous release may boot
  * this database again. Adding a column or a table is safe; renaming or
  * dropping is not, because the older release repairs the OLD name and its
  * statement then stops its boot. Do not rename or drop here.
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "workflow action grants", probe: { kind: "table", table: "workflow_action_grants" }, sql: `CREATE TABLE IF NOT EXISTS "workflow_action_grants" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "workflow_id" text NOT NULL,
+  "owner_type" text NOT NULL, "owner_id" text NOT NULL, "action_id" text NOT NULL,
+  "granted_by" text NOT NULL, "created_at" bigint NOT NULL
+);` },
+  { describe: "workflow grant lookup", probe: { kind: "index", index: "workflow_action_grants_workflow" }, sql: 'CREATE INDEX IF NOT EXISTS "workflow_action_grants_workflow" ON "workflow_action_grants" ("org_id", "workflow_id")' },
+  { describe: "workspace briefing cache", probe: { kind: "table", table: "workspace_briefing_cache" }, sql: `CREATE TABLE IF NOT EXISTS "workspace_briefing_cache" (
+    "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+    "version" text NOT NULL, "evidence_hash" text, "response" jsonb,
+    "checked_at" bigint, "next_check_at" bigint NOT NULL DEFAULT 0,
+    "lease_token" text, "lease_until" bigint NOT NULL DEFAULT 0,
+    PRIMARY KEY ("org_id", "owner_type", "owner_id")
+  )` },
+  { describe: "thread reads", probe: { kind: "table", table: "thread_reads" }, sql: `CREATE TABLE IF NOT EXISTS "thread_reads" (
+  "user_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL, "read_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id", "thread_id")
+)` },
+  { describe: "thread pull requests", probe: { kind: "table", table: "thread_pull_requests" }, sql: `CREATE TABLE IF NOT EXISTS "thread_pull_requests" (
+  "session_id" text NOT NULL, "thread_id" text NOT NULL, "url" text NOT NULL, "repo" text NOT NULL,
+  "number" bigint NOT NULL, "state" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
+  "checked_at" bigint NOT NULL,
+  PRIMARY KEY ("session_id", "thread_id", "url")
+)` },
+  { describe: "thread_pull_requests_url", probe: { kind: "index", index: "thread_pull_requests_url" }, sql: 'CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url")' },
+  { describe: "channel messages", probe: { kind: "table", table: "channel_messages" }, sql: `CREATE TABLE IF NOT EXISTS "channel_messages" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "channel_key" text NOT NULL, "conversation_key" text NOT NULL, "provider_message_id" text NOT NULL,
+  "direction" text NOT NULL, "author" text, "text" text, "url" text, "created_at" bigint NOT NULL
+)` },
+  {
+    // One message delivered to two workspaces is recorded once for each, so
+    // the key names the session. The first key (without it) is dropped.
+    describe: "channel_messages_session_message",
+    probe: { kind: "index", index: "channel_messages_session_message" },
+    // The replaced index goes in the same transaction, so a lock timeout
+    // never leaves the table with neither index.
+    before: 'DROP INDEX IF EXISTS "channel_messages_provider_message"',
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "channel_messages_session_message" ON "channel_messages" ("org_id", "session_id", "channel_key", "provider_message_id", "direction")',
+  },
+  { describe: "channel_messages_channel", probe: { kind: "index", index: "channel_messages_channel" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_channel" ON "channel_messages" ("org_id", "channel_key", "created_at")' },
+  { describe: "channel_messages_thread", probe: { kind: "index", index: "channel_messages_thread" }, sql: 'CREATE INDEX IF NOT EXISTS "channel_messages_thread" ON "channel_messages" ("session_id", "thread_id", "created_at")' },
+  { describe: "slack channel privacy", probe: { kind: "table", table: "slack_channel_privacy" }, sql: `CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (
+    "org_id" text NOT NULL, "channel_id" text NOT NULL, "is_private" boolean NOT NULL, "checked_at" bigint NOT NULL,
+    PRIMARY KEY("org_id","channel_id"))` },
+  { describe: "briefing dismissals", probe: { kind: "table", table: "briefing_dismissals" }, sql: `CREATE TABLE IF NOT EXISTS "briefing_dismissals" (
+    "user_id" text NOT NULL, "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+    "briefing_id" text NOT NULL, "dismissed_at" bigint NOT NULL,
+    PRIMARY KEY ("user_id", "owner_type", "owner_id", "briefing_id")
+  )` },
+  { describe: "event receipts table", probe: { kind: "table", table: "event_receipts" }, sql: `CREATE TABLE IF NOT EXISTS "event_receipts" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "service" text NOT NULL,
+  "external_id" text, "metadata" jsonb NOT NULL DEFAULT '{}',
+  "stages" jsonb NOT NULL DEFAULT '[]', "event_key" text, "event_id" text,
+  "subscriptions" jsonb NOT NULL DEFAULT '[]',
+  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
+)` },
+  { describe: "event receipts page index", probe: { kind: "index", index: "event_receipts_page" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id")' },
+  {
+    describe: "workspace assistant singleton cutover",
+    probe: { kind: "index", index: "assistants_workspace" },
+    // The earlier model allowed several assistant rows per owner, and
+    // deleting a profile archived it. One statement, so it commits or rolls
+    // back as a unit:
+    //   1. Keep one row per owner: live first, then the old default, then the
+    //      newest. Move every other row to a retired owner key
+    //      (`<owner>:retired:<id>`) and archive it. No row or history is
+    //      deleted, and the unique index below can be built.
+    //   2. Un-retire an archived survivor whose user, team, or org still
+    //      exists: that is a deleted profile, not a teardown. Team teardown
+    //      removes the team row in the same transaction that archives its
+    //      assistant, so a real teardown stays retired and keeps its slot.
+    sql: `DO $$ DECLARE now_ms bigint := (extract(epoch from clock_timestamp()) * 1000)::bigint; BEGIN
+      WITH ranked AS (
+        SELECT id, row_number() OVER (
+          PARTITION BY org_id, owner_type, owner_id
+          ORDER BY (archived_at IS NULL) DESC, is_default DESC, created_at DESC, id
+        ) AS rank
+        FROM assistants
+      )
+      UPDATE assistants a
+        SET owner_id = a.owner_id || ':retired:' || a.id,
+            archived_at = COALESCE(a.archived_at, now_ms)
+        FROM ranked r
+        WHERE a.id = r.id AND r.rank > 1;
+      UPDATE assistants a SET archived_at = NULL
+        WHERE a.archived_at IS NOT NULL AND position(':retired:' in a.owner_id) = 0 AND (
+          (a.owner_type = 'user' AND EXISTS (SELECT 1 FROM "user" u WHERE u.id = a.owner_id)) OR
+          (a.owner_type = 'team' AND EXISTS (SELECT 1 FROM teams t WHERE t.id = a.owner_id)) OR
+          (a.owner_type = 'org' AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = a.owner_id)));
+      CREATE UNIQUE INDEX assistants_workspace ON assistants(org_id, owner_type, owner_id);
+    END $$`,
+  },
+  { describe: "teams.slack_home_channel_id column", probe: { kind: "column", table: "teams", column: "slack_home_channel_id" }, sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "slack_home_channel_id" text' },
+  {
+    describe: "teams_org_slack_home",
+    probe: { kind: "index", index: "teams_org_slack_home" },
+    // The route checked before it wrote, so a race can have left two teams on
+    // one channel. The oldest keeps it; the others are named so an admin can
+    // pick a new home channel.
+    prepare: async (db) => {
+      const cleared = await db.query(`UPDATE "teams" t SET "slack_home_channel_id" = NULL
+        WHERE "slack_home_channel_id" IS NOT NULL AND EXISTS (SELECT 1 FROM "teams" o
+          WHERE o."org_id" = t."org_id" AND o."slack_home_channel_id" = t."slack_home_channel_id"
+            AND (o."created_at", o."id") < (t."created_at", t."id"))
+        RETURNING t."name"`);
+      if (cleared.rows.length > 0) {
+        console.warn(`[schema] cleared a Slack home channel another team already used: ${cleared.rows.map((row) => String(row.name)).join(", ")}. Set a new home channel on each.`);
+      }
+    },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "teams_org_slack_home" ON "teams" ("org_id", "slack_home_channel_id") WHERE "slack_home_channel_id" IS NOT NULL',
+  },
+  {
+    describe: "user_notification_preferences.team_dm column",
+    probe: { kind: "column", table: "user_notification_preferences", column: "team_dm" },
+    sql: 'ALTER TABLE "user_notification_preferences" ADD COLUMN IF NOT EXISTS "team_dm" boolean DEFAULT false NOT NULL',
+    // Before this column, every team member got a DM copy of team attention.
+    // Team DM copies are now opt-in, so members present at upgrade keep them
+    // on for every kind; members added later start with the new default.
+    // Existing `web` choices are kept; a new row takes the table default.
+    backfill:
+      `INSERT INTO "user_notification_preferences" ("user_id", "kind", "team_dm") ` +
+      `SELECT DISTINCT tm."user_id", k."kind", true FROM "team_members" tm ` +
+      `CROSS JOIN (VALUES ('notification'), ('question'), ('escalation'), ('approval'), ('review')) AS k("kind") ` +
+      `ON CONFLICT ("user_id", "kind") DO UPDATE SET "team_dm" = true RETURNING "user_id"`,
+  },
+
   {
     describe: "session_threads.last_user_activity_at column",
     probe: { kind: "column", table: "session_threads", column: "last_user_activity_at" },
@@ -273,6 +507,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "team_deletion_requests_pending", probe: { kind: "index", index: "team_deletion_requests_pending" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';` },
   { describe: "team_deletion_requests_team_status", probe: { kind: "index", index: "team_deletion_requests_team_status" }, sql: `CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");` },
 
+  {
+    describe: "action_invocations.thread_id column",
+    probe: { kind: "column", table: "action_invocations", column: "thread_id" },
+    sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "thread_id" text',
+  },
   {
     describe: "event_subscriptions.audience column",
     probe: { kind: "column", table: "event_subscriptions", column: "audience" },
@@ -467,22 +706,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "event_subscriptions", column: "origin" },
     sql: `ALTER TABLE "event_subscriptions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
   },
-  {
-    // Which of the owner's assistants a followed thread routes to. Null on
-    // rows from before the column, and on any follow whose rule named no
-    // assistant — both read as "the owner's default", the old behavior.
-    describe: "followed_threads.assistant_id column",
-    probe: { kind: "column", table: "followed_threads", column: "assistant_id" },
-    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "assistant_id" text',
-  },
-  {
-    // Which of the owner's assistants an orchestrator-target schedule prompts.
-    // Null on rows from before the column and on schedules that named none;
-    // both resolve to the owner's default at fire time.
-    describe: "workflow_schedules.assistant_id column",
-    probe: { kind: "column", table: "workflow_schedules", column: "assistant_id" },
-    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "assistant_id" text',
-  },
+
+
   {
     // Records which person's GitHub credential a team source may use.
     // Null on every row written before the column existed, which the sync
@@ -597,6 +822,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "updated_at" bigint NOT NULL,
       "revoked_at" bigint
     )`,
+  },
+  {
+    describe: "artifacts.source_thread_id column",
+    probe: { kind: "column", table: "artifacts", column: "source_thread_id" },
+    sql: 'ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "source_thread_id" text',
   },
   {
     describe: "artifacts_token_unique index",
@@ -788,22 +1018,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "mcp_oauth_clients.scopes_supported column",
     probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
-  },
-  {
-    // Per-assistant personality prose (assistant editor, #325). Null on rows
-    // from before the column existed, which the persona builder reads as
-    // "no personality section" — the same answer a fresh assistant gets.
-    describe: "assistants.personality column",
-    probe: { kind: "column", table: "assistants", column: "personality" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "personality" text',
-  },
-  {
-    // Per-assistant behavior config JSON (assistant editor, #325). Null reads
-    // as "no restrictions" at wake (host.ts parseAssistantBehavior), matching
-    // pre-editor behavior.
-    describe: "assistants.behavior column",
-    probe: { kind: "column", table: "assistants", column: "behavior" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "behavior" text',
   },
   {
     // The LLM recording gateway's request log (#432). The gateway writes a row
@@ -1344,20 +1558,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "default_reasoning" text',
   },
   {
-    // Per-assistant model override (model selector overhaul).
-    // Tier token or catalog model id. Null = inherit the cascade.
-    describe: "assistants.model column",
-    probe: { kind: "column", table: "assistants", column: "model" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "model" text',
-  },
-  {
-    // Per-assistant reasoning override (model selector overhaul).
-    // Null = inherit the cascade.
-    describe: "assistants.reasoning column",
-    probe: { kind: "column", table: "assistants", column: "reasoning" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "reasoning" text',
-  },
-  {
     // Persisted session-default reasoning level (model selector overhaul).
     // An ENGINE table: the same rule as engine_entries.seq above applies —
     // additive columns arrive through this repair, and ENGINE_SCHEMA_VERSION
@@ -1373,13 +1573,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "engine_threads.reasoning column",
     probe: { kind: "column", table: "engine_threads", column: "reasoning" },
     sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
-  },
-  {
-    // Per-assistant avatar for outbound channel posts (TKAI-387).
-    // Null = the bot's own icon.
-    describe: "assistants.avatar_url column",
-    probe: { kind: "column", table: "assistants", column: "avatar_url" },
-    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "avatar_url" text',
   },
   {
     // Team `vlt_` key pin (TKAI-396). Nullable: a personal key has none.
@@ -1589,6 +1782,7 @@ async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {
         // ALTER waits forever behind any open transaction on the table —
         // during a rolling update, the previous api pod's.
         await tx.query(`SET LOCAL lock_timeout = '${REPAIR_LOCK_TIMEOUT}'`);
+        if (repair.before) await tx.query(repair.before);
         await tx.query(repair.sql);
         if (!repair.backfill) return 0;
         const result = await tx.query(repair.backfill);

@@ -30,8 +30,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   Label,
+  StatusDot,
+  TabBar,
   Textarea,
 } from "~/components/primitives";
+
+const EMPTY_GATES: ReadonlyMap<string, "require_approval" | "deny"> = new Map();
+export const WORKFLOW_VIEW_KEY = "valet.workflow-view";
+function storedWorkflowView(): "steps" | "map" {
+  try { return localStorage.getItem(WORKFLOW_VIEW_KEY) === "map" ? "map" : "steps"; } catch { return "steps"; }
+}
 import {
   isWorkflowDefinitionShape,
   connect,
@@ -55,6 +63,7 @@ import {
   type WorkflowFlowEdge,
 } from "../editor-model";
 import { Canvas } from "./canvas";
+import { StepsView } from "./steps-view";
 import { EdgeInspector } from "./edge-inspector";
 import { Inspector } from "./inspector";
 import { cn } from "~/lib/cn";
@@ -130,6 +139,14 @@ function EditorDraft({
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonMode, setJsonMode] = useState(false);
   const [compactView, setCompactView] = useState<"canvas" | "assistant">("canvas");
+  // Steps is the reading view most people want: Valet wrote the workflow and
+  // they check each step. The map is the graph, where steps are added and wired.
+  // Each viewer's last choice is remembered on this device.
+  const [mainView, setMainViewState] = useState<"steps" | "map">(storedWorkflowView);
+  const setMainView = (view: "steps" | "map") => {
+    setMainViewState(view);
+    try { localStorage.setItem(WORKFLOW_VIEW_KEY, view); } catch { /* storage unavailable: keep it for this visit */ }
+  };
   const inspectorBackRef = useRef<HTMLButtonElement>(null);
   const canvasViewRef = useRef<HTMLButtonElement>(null);
   const wasInspectingRef = useRef(false);
@@ -371,12 +388,12 @@ function EditorDraft({
     <div className="flex h-full min-h-0 min-w-0 flex-col" data-testid="workflow-editor">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
+          {!jsonMode && (
+            <TabBar label="Workflow view" active={mainView} onSelect={setMainView}
+              tabs={[{ id: "steps", label: "Steps" }, { id: "map", label: "Map" }]} />
+          )}
           {effectiveDirty && (
-            <span
-              data-testid="unsaved-indicator"
-              title="Unsaved changes"
-              className="inline-block h-2 w-2 rounded-full bg-amber"
-            />
+            <StatusDot data-testid="unsaved-indicator" title="Unsaved changes" tone="warning" />
           )}
           {/* JSON mode is the escape hatch for a change the assistant
               cannot express, so it stays — but out of the way. Reaching it
@@ -443,12 +460,12 @@ function EditorDraft({
         <Button
           size="sm"
           variant={compactView === "canvas" ? "secondary" : "ghost"}
-          aria-label="Show canvas"
+          aria-label="Show workflow"
           ref={canvasViewRef}
           aria-pressed={compactView === "canvas"}
           onClick={showCanvas}
         >
-          Canvas
+          Workflow
         </Button>
         <Button
           size="sm"
@@ -459,7 +476,7 @@ function EditorDraft({
         >
           Assistant
         </Button>
-        {!jsonMode && <CompactPalette onAdd={handleAddNode} disabled={readOnly} />}
+        {!jsonMode && mainView === "map" && <CompactPalette onAdd={handleAddNode} disabled={readOnly} />}
       </div>
 
       <div className="flex min-h-0 flex-1">
@@ -471,6 +488,11 @@ function EditorDraft({
         {jsonMode && !readOnly ? (
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
             <JsonDefinitionEditor definition={definition} onApply={handleApplyJson} />
+          </div>
+        ) : mainView === "steps" ? (
+          <div className="min-w-0 flex-1">
+            <StepsView definition={definition} gateByNodeId={gateByNodeId ?? EMPTY_GATES} errorNodeIds={errorNodeIds}
+              selectedNodeId={selectedNodeId} onSelect={(nodeId) => handleSelectNode(nodeId)} />
           </div>
         ) : (
           <>
@@ -501,7 +523,7 @@ function EditorDraft({
             covered conversation out of the tab order and out of the
             accessibility tree, so only one of the two answers a query. */}
         <div className={cn(
-          "relative min-w-0 w-full flex-col bg-paper lg:flex lg:w-[--editor-aside] lg:max-w-full lg:shrink-0 lg:border-l lg:border-line",
+          "relative min-h-0 min-w-0 w-full flex-col bg-paper lg:flex lg:w-[--editor-aside] lg:max-w-full lg:shrink-0 lg:border-l lg:border-line",
           compactView === "assistant" || inspector ? "flex" : "hidden",
         )}>
           <div className="flex min-h-0 flex-1 flex-col" inert={inspector !== null}>
@@ -524,7 +546,7 @@ function EditorDraft({
                 </Button>
                 <Button ref={inspectorBackRef} variant="ghost" size="sm" className="lg:hidden" onClick={showCanvas}>
                   <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
-                  Back to canvas
+                  Back to workflow
                 </Button>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">{inspector}</div>
