@@ -4,7 +4,7 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { eq, sql } from "drizzle-orm";
 import { agentSessions, channelMessages, childWatches, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
 import { linkIdentity } from "../channels/identity-links.js";
-import { recordDelegatedPullRequest } from "../services/thread-read-state.js";
+import { recordDelegatedPullRequest } from "../services/thread-pull-requests.js";
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";

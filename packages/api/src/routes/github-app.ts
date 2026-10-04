@@ -49,7 +49,7 @@
  * webhook secret, then `resolveEnvFallbackOrgId` routes the delivery by
  * `installation.id` (or to the oldest org). Same single-org caveat.
  */
-import { pullRequestWebhookState, setPullRequestState } from "../services/thread-read-state.js";
+import { pullRequestWebhookState, setPullRequestState } from "../services/thread-pull-requests.js";
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -761,7 +761,7 @@ githubAppWebhookRouter.post("/", async (c) => {
   if (event === "pull_request") {
     const pr = pullRequestWebhookState(payload);
     if (pr) {
-      await setPullRequestState(c.var.providers.db, pr.url, pr.state).catch((err) => {
+      await setPullRequestState(c.var.providers.db, orgId, pr.url, pr.state).catch((err) => {
         console.error(`thread pull request state (${pr.url}):`, err);
       });
     }

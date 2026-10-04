@@ -15,7 +15,7 @@ import type {
 import {
   channelUrl, githubPullRequestKey, parseChannelKey, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl,
 } from "./channel-messages.js";
-import { parsePullRequestUrl } from "./thread-read-state.js";
+import { parsePullRequestUrl } from "./thread-pull-requests.js";
 
 /** Resolves Slack channel ids to names. Missing ids keep their id. */
 export type ChannelNames = (channelIds: string[]) => Promise<Map<string, string>>;

@@ -5,9 +5,10 @@ import { sessionThreads } from "../schema/index.js";
 import { collectWorkspaceBriefingSources } from "./workspace-briefing-sources.js";
 import type { ListThreadsResponse, WaitingThreadsResponse } from "../wire/types.js";
 import {
-  isSharedThreadKey, lastAgentAsk, listWaitingThreads, parsePullRequestUrl, sharedThreadKey, pullRequestWebhookState, recordThreadPullRequest,
-  setPullRequestState, wireThreadPullRequests,
+  isSharedThreadKey, lastAgentAsk, listWaitingThreads, sharedThreadKey,
 } from "./thread-read-state.js";
+
+import { parsePullRequestUrl, pullRequestWebhookState, recordThreadPullRequest, setPullRequestState, wireThreadPullRequests } from "./thread-pull-requests.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -95,7 +96,7 @@ it("records pull requests a thread creates and follows their GitHub state", asyn
     .toEqual([{ url: "https://github.com/acme/app/pull/7", repo: "acme/app", number: 7, state: "open" }]);
   stop();
   expect(await recordThreadPullRequest(api.providers.db, { sessionId: thread.sessionId, threadId: thread.id, url: "https://github.com/acme/app/pull/9" })).toBe(true);
-  await setPullRequestState(api.providers.db, "https://github.com/acme/app/pull/7", "merged");
+  await setPullRequestState(api.providers.db, "local-org", "https://github.com/acme/app/pull/7", "merged");
   const prs = (await listThreads(api, thread.sessionId)).find(t => t.id === thread.id)?.pullRequests;
   expect(prs?.map(pr => [pr.number, pr.state])).toEqual([[7, "merged"], [9, "open"]]);
 });

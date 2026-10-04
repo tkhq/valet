@@ -1,38 +1,13 @@
-import type { EventStream, Principal } from "@valet/engine";
-import { and, eq, inArray, lt, sql, type SQL } from "drizzle-orm";
+import type { Principal } from "@valet/engine";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childWatches, threadPullRequests, threadReads } from "../schema/index.js";
+import { threadPullRequests, threadReads } from "../schema/index.js";
 import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
-import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
-import { resolveGitHubToken, type GitHubTokenDeps } from "./github-tokens.js";
-import { recordTerminalPullRequestWrite } from "./channel-messages.js";
-
-/** An open pull request is checked against GitHub at most this often. */
-export const PULL_REQUEST_RECHECK_MS = 10 * 60_000;
-const RECHECK_BATCH = 5;
-
 export interface ThreadActivity {
   readAt?: number;
   lastAgentActivityAt?: number;
   agentQuestion?: string;
   pullRequests?: ThreadPullRequest[];
-}
-
-const NAME = /^[A-Za-z0-9_.-]+$/;
-
-/** Parses a pull request URL on the configured GitHub host (`GITHUB_URL`,
- * github.com by default). Other hosts and shapes return null. */
-export function parsePullRequestUrl(
-  url: string, githubUrl = resolveGithubUrl(process.env),
-): { owner: string; repo: string; number: number } | null {
-  let parsed: URL, host: URL;
-  try { parsed = new URL(url.trim()); host = new URL(githubUrl); } catch { return null; }
-  if (parsed.protocol !== "https:" || parsed.host !== host.host || parsed.search || parsed.hash) return null;
-  const base = host.pathname.replace(/\/+$/, "");
-  if (base && !parsed.pathname.startsWith(`${base}/`)) return null;
-  const [owner, repo, kind, number, ...rest] = parsed.pathname.slice(base.length).split("/").filter(Boolean);
-  if (rest.length || kind !== "pull" || !owner || !repo || !NAME.test(owner) || !NAME.test(repo) || !number || !/^\d+$/.test(number)) return null;
-  return { owner, repo, number: Number(number) };
 }
 
 /** Read state, the last agent message, and pull requests for the threads the viewer lists. */
@@ -85,119 +60,6 @@ export async function markThreadsRead(
       target: [threadReads.userId, threadReads.threadId],
       set: { readAt: sql`GREATEST(${threadReads.readAt}, excluded.read_at)`, sessionId: sql`excluded.session_id` },
     });
-}
-
-/** Records a pull request the thread created. A repeat of the same URL is ignored. */
-/** How far up the delegation chain a pull request is recorded. */
-const MAX_DELEGATION_DEPTH = 5;
-
-/**
- * Records a pull request on the thread that opened it and on each thread that
- * delegated that work. A child's pull request then shows on the workspace
- * thread that asked for it, and its comments route back to that thread.
- */
-export async function recordDelegatedPullRequest(db: AppDb, input: { sessionId: string; threadId: string; url: string }): Promise<void> {
-  let current: { sessionId: string; threadId: string } | undefined = { sessionId: input.sessionId, threadId: input.threadId };
-  for (let depth = 0; current && depth <= MAX_DELEGATION_DEPTH; depth++) {
-    if (!(await recordThreadPullRequest(db, { ...current, url: input.url }))) return;
-    const [parent] = await db.select({ sessionId: childWatches.parentSessionId, threadId: childWatches.parentThreadId })
-      .from(childWatches).where(eq(childWatches.childSessionId, current.sessionId)).limit(1);
-    current = parent;
-  }
-}
-
-export async function recordThreadPullRequest(
-  db: AppDb, input: { sessionId: string; threadId: string; url: string }, at = Date.now(),
-): Promise<boolean> {
-  const parsed = parsePullRequestUrl(input.url);
-  if (!parsed) return false;
-  await db.insert(threadPullRequests).values({
-    sessionId: input.sessionId, threadId: input.threadId, url: input.url.trim(),
-    repo: `${parsed.owner}/${parsed.repo}`, number: parsed.number, state: "open",
-    createdAt: at, updatedAt: at, checkedAt: at,
-  }).onConflictDoNothing();
-  return true;
-}
-
-/** Applies a state GitHub reported for a pull request to every thread that created it. */
-export async function setPullRequestState(
-  db: AppDb, url: string, state: ThreadPullRequest["state"], at = Date.now(),
-): Promise<void> {
-  await db.update(threadPullRequests).set({ state, updatedAt: at, checkedAt: at })
-    .where(eq(threadPullRequests.url, url));
-}
-
-/** The pull request state named by a GitHub `pull_request` webhook payload, if any. */
-export function pullRequestWebhookState(payload: unknown): { url: string; state: ThreadPullRequest["state"] } | null {
-  if (typeof payload !== "object" || payload === null || !("pull_request" in payload)) return null;
-  const pr = payload.pull_request;
-  if (typeof pr !== "object" || pr === null || !("html_url" in pr) || typeof pr.html_url !== "string") return null;
-  const merged = "merged" in pr && pr.merged === true;
-  const closed = "state" in pr && pr.state === "closed";
-  return { url: pr.html_url, state: merged ? "merged" : closed ? "closed" : "open" };
-}
-
-/**
- * Records pull requests as threads create them. A `gh pr create` in the
- * terminal and the GitHub `create_pull_request` action both report a
- * `pull_request_created` outcome on the engine's `tool_end` event.
- */
-export function wireThreadPullRequests(eventStream: EventStream, db: AppDb): () => void {
-  return eventStream.subscribe({ eventTypes: ["tool_end"] }, (delivered) => {
-    const { event, sessionId } = delivered;
-    if (event.type !== "tool_end" || !event.outcome) return;
-    const { kind, url } = event.outcome;
-    if (kind === "pull_request_created" && url) {
-      void recordDelegatedPullRequest(db, { sessionId, threadId: event.threadId, url })
-        .catch(err => console.error("[thread-activity] could not record a pull request", err));
-      return;
-    }
-    // A comment or review posted from the terminal is Valet's own: record it,
-    // so its webhook does not wake the thread that posted it.
-    if (kind === "pull_request_comment" || kind === "review_submitted") {
-      void (async () => {
-        const [session] = await db.select({ orgId: agentSessions.orgId }).from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
-        if (session) await recordTerminalPullRequestWrite(db, { orgId: session.orgId, sessionId, threadId: event.threadId, kind, ...(url ? { url } : {}) });
-      })().catch(err => console.error("[thread-activity] could not record a terminal pull request write", err));
-    }
-  });
-}
-
-/**
- * Checks open pull requests that GitHub has not reported on recently. A
- * webhook usually updates the state first; this covers orgs without one.
- * Bounded per call, and a pull request that cannot be read waits for the
- * next window instead of retrying.
- */
-export async function recheckOpenPullRequests(
-  deps: GitHubTokenDeps, db: AppDb, sessionId: string, now = Date.now(),
-): Promise<void> {
-  const stale = await db.select({ url: threadPullRequests.url, repo: threadPullRequests.repo, number: threadPullRequests.number })
-    .from(threadPullRequests)
-    .where(and(eq(threadPullRequests.sessionId, sessionId), eq(threadPullRequests.state, "open"),
-      lt(threadPullRequests.checkedAt, now - PULL_REQUEST_RECHECK_MS)))
-    .limit(RECHECK_BATCH);
-  if (stale.length === 0) return;
-  const [session] = await db.select({ orgId: agentSessions.orgId }).from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
-  if (!session) return;
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const apiUrl = deps.apiUrl ?? resolveGithubApiUrl(process.env);
-  for (const pr of stale) {
-    // Claim the window first, so parallel list requests do not repeat the call.
-    await db.update(threadPullRequests).set({ checkedAt: now }).where(eq(threadPullRequests.url, pr.url));
-    const [owner, repo] = pr.repo.split("/");
-    if (!owner || !repo) continue;
-    // No usable credential means no check; the webhook can still update the row.
-    const token = await resolveGitHubToken(deps, { orgId: session.orgId, purpose: "api", repo: { owner, name: repo } })
-      .then((resolved) => resolved.token, () => null);
-    if (!token) continue;
-    const res = await fetchImpl(`${apiUrl}/repos/${owner}/${repo}/pulls/${pr.number}`, {
-      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-    }).catch(() => null);
-    if (!res?.ok) continue;
-    const state = pullRequestWebhookState({ pull_request: await res.json() });
-    if (state && state.state !== "open") await setPullRequestState(db, pr.url, state.state, now);
-  }
 }
 
 /**
