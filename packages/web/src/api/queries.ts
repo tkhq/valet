@@ -280,7 +280,7 @@ export function useSetSessionProfile(sessionId: string) {
 export function useSetThreadModel(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; model: string | null }>({
-    mutationFn: ({ threadId, model }) => api.patchThread(sessionId, threadId, { model }),
+    mutationFn: ({ threadId, model }) => api.patchThread(threadId, { model }),
     onSuccess: () => {
       // Thread PATCH touches only the thread row; the session detail (and
       // its default model) is unchanged — no session invalidation.
@@ -295,7 +295,7 @@ export function useSetThreadModel(sessionId: string) {
 export function useSetThreadReasoning(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; reasoning: string | null }>({
-    mutationFn: ({ threadId, reasoning }) => api.patchThread(sessionId, threadId, { reasoning }),
+    mutationFn: ({ threadId, reasoning }) => api.patchThread(threadId, { reasoning }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
     },
@@ -326,7 +326,7 @@ export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
     mutationFn: ({ threadId, archived }) =>
-      api.patchThread(sessionId, threadId, { archived }),
+      api.patchThread(threadId, { archived }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
@@ -339,7 +339,7 @@ export function useRenameThread(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }>({
     mutationFn: ({ threadId, title }) =>
-      api.patchThread(sessionId, threadId, { title }),
+      api.patchThread(threadId, { title }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
@@ -466,7 +466,7 @@ export function useSandboxJwt(sessionId: string) {
 export function useAbortThread(sessionId: string) {
   return useMutation<{ ok: true }, Error, { threadId: string; targetItemId: string }>({
     mutationFn: ({ threadId, targetItemId }) =>
-      api.abortThread(sessionId, threadId, { targetItemId }),
+      api.abortThread(threadId, { targetItemId }),
     // No invalidation — the abort's terminal state (submission settled
     // `aborted`, thread status back to idle) arrives via the WS stream,
     // same as every other engine-driven state transition.
@@ -475,7 +475,7 @@ export function useAbortThread(sessionId: string) {
 
 export function useResumeThread(sessionId: string) {
   return useMutation<{ ok: true }, Error, { threadId: string }>({
-    mutationFn: ({ threadId }) => api.resumeThread(sessionId, threadId),
+    mutationFn: ({ threadId }) => api.resumeThread(threadId),
   });
 }
 

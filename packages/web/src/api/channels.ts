@@ -30,7 +30,7 @@ export function useWorkspaceChannel(owner: OwnerFilter | undefined, key: string)
 export function useThreadChannelActivity(sessionId: string, threadId: string, enabled = true) {
   return useQuery({
     queryKey: qkChannels.thread(sessionId, threadId),
-    queryFn: () => api.getThreadChannelActivity(sessionId, threadId),
+    queryFn: () => api.getThreadChannelActivity(threadId),
     enabled,
     refetchInterval: 15_000,
   });

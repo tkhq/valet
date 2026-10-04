@@ -8,6 +8,37 @@ let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 
 describe("thread addressing compatibility", () => {
+  it("withdraws only a decision belonging to the addressed thread", async () => {
+    api = await bootTestApi();
+    const create = async () => {
+      const response = await fetch(`${api!.baseUrl}/api/threads`, { method: "POST" });
+      expect(response.status).toBe(201);
+      return await response.json() as { id: string; sessionId: string };
+    };
+    const first = await create();
+    const other = await create();
+    const gate = {
+      id: "addressed-withdrawal", sessionId: first.sessionId, threadId: first.id,
+      queueItemId: "queued-question", resumeKey: "answer", ordinal: 0,
+      type: "question" as const, title: "Which environment?", actions: [],
+      status: "pending" as const, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    await api.providers.engineStore.saveDecisionGate(first.sessionId, first.id, gate);
+    const mismatch = await fetch(`${api.baseUrl}/api/threads/${first.id}/messages?threadId=${other.id}`);
+    expect(mismatch.status).toBe(400);
+    for (const body of [JSON.stringify({ threadId: other.id, title: "Wrong thread" }), "null", "[]"]) {
+      const response = await fetch(`${api.baseUrl}/api/threads/${first.id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body,
+      });
+      expect(response.status).toBe(400);
+    }
+    const withdraw = (threadId: string) => fetch(`${api!.baseUrl}/api/threads/${threadId}/decisions/${gate.id}/withdraw`, { method: "POST" });
+    expect((await withdraw(other.id)).status).toBe(404);
+    expect((await api.providers.engineStore.getDecisionGate(first.sessionId, gate.id))?.status).toBe("pending");
+    expect((await withdraw(first.id)).status).toBe(200);
+    expect((await api.providers.engineStore.getDecisionGate(first.sessionId, gate.id))?.status).toBe("withdrawn");
+  });
+
   it("creates in the workspace and reads the same history through either address", async () => {
     api = await bootTestApi();
     const created = await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Thread API" }) });

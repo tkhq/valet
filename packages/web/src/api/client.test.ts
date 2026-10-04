@@ -42,12 +42,12 @@ describe("api client: colon-safe URL encoding", () => {
     expect(url).toBe(`/api/sessions/${encodeURIComponent(COLON_ID)}/threads`);
   });
 
-  it("patchThread encodes both the session id and the thread id", async () => {
+  it("patchThread encodes the thread id", async () => {
     const fetchMock = stubFetchOk();
-    await api.patchThread(COLON_ID, "thread:1", { model: "claude-haiku-4-5" });
+    await api.patchThread("thread:1", { model: "claude-haiku-4-5" });
     const url = fetchMock.mock.calls[0]?.[0] as string;
     expect(url).toBe(
-      `/api/sessions/${encodeURIComponent(COLON_ID)}/threads/${encodeURIComponent("thread:1")}`,
+      `/api/threads/${encodeURIComponent("thread:1")}`,
     );
   });
 
@@ -56,6 +56,14 @@ describe("api client: colon-safe URL encoding", () => {
     await api.sendPrompt(COLON_ID, { text: "hi" });
     const url = fetchMock.mock.calls[0]?.[0] as string;
     expect(url).toBe(`/api/sessions/${encodeURIComponent(COLON_ID)}/messages`);
+  });
+
+  it("addresses explicit message threads and preserves pagination", async () => {
+    const fetchMock = stubFetchOk();
+    await api.listMessages(COLON_ID, { threadId: "thread:1", cursor: "cursor:2", limit: 25 });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/threads/thread%3A1/messages?limit=25&cursor=cursor%3A2");
+    await api.sendPrompt(COLON_ID, { text: "hello", threadId: "thread:1" });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/threads/thread%3A1/messages");
   });
 
   it("resolveDecision encodes session id and gate id", async () => {
@@ -75,22 +83,22 @@ describe("api client: colon-safe URL encoding", () => {
     expect(res.sessionId).toBe(COLON_ID);
   });
 
-  it("abortThread encodes both the session id and the thread id", async () => {
+  it("abortThread encodes the thread id", async () => {
     const fetchMock = stubFetchOk();
-    await api.abortThread(COLON_ID, "thread:1", { targetItemId: "item:1" });
+    await api.abortThread("thread:1", { targetItemId: "item:1" });
     const url = fetchMock.mock.calls[0]?.[0] as string;
     expect(url).toBe(
-      `/api/sessions/${encodeURIComponent(COLON_ID)}/threads/${encodeURIComponent("thread:1")}/abort`,
+      `/api/threads/${encodeURIComponent("thread:1")}/abort`,
     );
     const opts = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(opts.body).toBe(JSON.stringify({ targetItemId: "item:1" }));
   });
 
-  it("resumeThread encodes both the session id and the thread id", async () => {
+  it("resumeThread encodes the thread id", async () => {
     const fetchMock = stubFetchOk();
-    await api.resumeThread(COLON_ID, "thread:1");
+    await api.resumeThread("thread:1");
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      `/api/sessions/${encodeURIComponent(COLON_ID)}/threads/${encodeURIComponent("thread:1")}/resume`,
+      `/api/threads/${encodeURIComponent("thread:1")}/resume`,
     );
   });
 });

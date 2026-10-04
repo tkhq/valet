@@ -1,4 +1,4 @@
-import { createThreadsRouter } from "./routes/threads.js";
+import { threadsRouter } from "./routes/threads.js";
 /**
  * Hono app factory. Wiring lives here; main.ts only handles boot + listen.
  *
@@ -311,7 +311,7 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
 
-  app.route("/api/threads", createThreadsRouter(async (request) => app.fetch(request)));
+  app.route("/api/threads", threadsRouter);
   app.route("/api/sessions", childWorkRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.

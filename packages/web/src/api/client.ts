@@ -574,8 +574,8 @@ export const api = {
     request<void>("DELETE", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
   getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
     request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
-  getThreadChannelActivity: (sessionId: string, threadId: string) =>
-    request<ThreadChannelActivity>("GET", `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/channel-activity`),
+  getThreadChannelActivity: (threadId: string) =>
+    request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */
   threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
     `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,
@@ -851,10 +851,10 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/threads`,
       body,
     ),
-  patchThread: (sessionId: string, threadId: string, body: PatchThreadRequest) =>
+  patchThread: (threadId: string, body: PatchThreadRequest) =>
     request<PatchThreadResponse>(
       "PATCH",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}`,
+      `/threads/${encodeURIComponent(threadId)}`,
       body,
     ),
   listMessages: (
@@ -864,29 +864,29 @@ export const api = {
     const qs = new URLSearchParams();
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
-    if (opts?.threadId) qs.set("threadId", opts.threadId);
+
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListMessagesResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
+      opts?.threadId ? `/threads/${encodeURIComponent(opts.threadId)}/messages${tail}` : `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
     );
   },
   sendPrompt: (sessionId: string, body: SendPromptRequest) =>
     request<SendPromptResponse>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/messages`,
+      body.threadId ? `/threads/${encodeURIComponent(body.threadId)}/messages` : `/sessions/${encodeURIComponent(sessionId)}/messages`,
       body,
     ),
-  abortThread: (sessionId: string, threadId: string, body: AbortThreadRequest) =>
+  abortThread: (threadId: string, body: AbortThreadRequest) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/abort`,
+      `/threads/${encodeURIComponent(threadId)}/abort`,
       body,
     ),
-  resumeThread: (sessionId: string, threadId: string) =>
+  resumeThread: (threadId: string) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/resume`,
+      `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
 
   // slash commands

@@ -20,13 +20,15 @@ export async function authorizedWorkspaceOwner(c: Context<AppEnv>, workspace = c
   return allowed ? { type: "team", id: workspace } : null;
 }
 
-workspaceRuntimeRouter.post("/:workspace/runtime", async (c) => {
-  const owner = await authorizedWorkspaceOwner(c);
-  if (!owner) return c.json({ error: "Workspace not found." }, 404);
+async function ensureWorkspaceRuntime(c: Context<AppEnv>, workspace = c.req.param("workspace")) {
+  const owner = await authorizedWorkspaceOwner(c, workspace);
+  if (!owner) return c.json({ error: "Workspace not found. Select an accessible workspace." }, 404);
   const { sessionId } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
   const body: EnsureWorkspaceRuntimeResponse = { sessionId };
   return c.json(body);
-});
+}
+
+workspaceRuntimeRouter.post("/:workspace/runtime", c => ensureWorkspaceRuntime(c));
 
 workspaceRuntimeRouter.get("/:workspace/integration-limit", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
@@ -80,29 +82,7 @@ workspaceRuntimeRouter.get("/:workspace/runtime/info", async (c) => {
   return c.json(body);
 });
 
-/**
- * Routes that clients built before workspace runtimes still call. A CLI
- * posts `/api/orchestrator` (a team key: `/api/teams/:id/orchestrator`) to
- * find its default target, and an open tab running the previous web bundle
- * probes `GET /api/orchestrator`. They answer with the workspace runtime.
- * That tab's other reads (`/api/orchestrator/info`, `/children`, and
- * `/api/assistants`) are gone and return 404, so it works only after a
- * reload. New code uses `/api/workspaces/:workspace/runtime`.
- */
+/** Retain these aliases until the supported CLI floor uses workspace runtime URLs. */
 export const legacyOrchestratorRouter = new Hono<AppEnv>();
-
-legacyOrchestratorRouter.post("/orchestrator", async (c) => {
-  const owner = await authorizedWorkspaceOwner(c, "user");
-  if (!owner) return c.json({ error: "A team key has no personal runtime. Use /api/workspaces/<team id>/runtime." }, 404);
-  const { sessionId } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
-  const body: EnsureWorkspaceRuntimeResponse = { sessionId };
-  return c.json(body);
-});
-
-legacyOrchestratorRouter.post("/teams/:workspace/orchestrator", async (c) => {
-  const owner = await authorizedWorkspaceOwner(c);
-  if (!owner) return c.json({ error: "Workspace not found." }, 404);
-  const { sessionId } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
-  const body: EnsureWorkspaceRuntimeResponse = { sessionId };
-  return c.json(body);
-});
+legacyOrchestratorRouter.post("/orchestrator", c => ensureWorkspaceRuntime(c, "user"));
+legacyOrchestratorRouter.post("/teams/:workspace/orchestrator", c => ensureWorkspaceRuntime(c));

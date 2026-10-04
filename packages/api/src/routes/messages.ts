@@ -65,9 +65,8 @@ import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
-import { listThreadActivity, markThreadsRead, recheckOpenPullRequests } from "../services/thread-read-state.js";
+import { listThreadActivity, markThreadsRead } from "../services/thread-read-state.js";
 import { threadChannel } from "../services/channels.js";
 import { threadChannelActivity } from "../services/channel-messages.js";
 
@@ -81,9 +80,8 @@ export const messagesRouter = new Hono<AppEnv>();
  * model change — in `routes/sessions.ts`) are NOT widened by this; talking
  * to a team's orchestrator is not the same decision as reconfiguring it.
  */
-export async function loadOwnedSession(c: Context<AppEnv>) {
+export async function loadOwnedSession(c: Context<AppEnv>, id = c.req.param("id")) {
   const { db } = c.var.providers;
-  const id = c.req.param("id");
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
   if (!row || !(await canViewSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) return null;
@@ -304,6 +302,7 @@ function threadToSummary(
 
 async function loadEngineSession(
   c: Context<AppEnv>,
+  id = c.req.param("id"),
 ): Promise<
   | {
       session: typeof agentSessions.$inferSelect;
@@ -312,7 +311,7 @@ async function loadEngineSession(
     }
   | { error: Response }
 > {
-  const session = await loadOwnedSession(c);
+  const session = await loadOwnedSession(c, id);
   if (!session) return { error: c.json({ error: "session not found" }, 404) };
   const { engineHost, db } = c.var.providers;
 
@@ -326,8 +325,10 @@ async function loadEngineSession(
   return { session, engineSession, meta };
 }
 
-messagesRouter.get("/:id/threads", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.get("/:id/threads", (c) => listThreads(c, c.req.param("id")));
+
+export async function listThreads(c: Context<AppEnv>, sessionId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const { db } = c.var.providers;
@@ -406,29 +407,29 @@ messagesRouter.get("/:id/threads", async (c) => {
     const channel = threadChannel(summary.key, summary.pullRequests);
     if (channel) summary.channel = channel;
   }
-  const { engineCredentials, encryptionKey } = c.var.providers;
-  void recheckOpenPullRequests({ db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) }, db, session.id)
-    .catch((err) => console.error("[threads] pull request recheck failed", err));
   const body: ListThreadsResponse = { threads: summaries };
   return c.json(body);
-});
+}
 
 /** How much one thread has talked in its channel: a count and the newest message. */
-messagesRouter.get("/:id/threads/:threadId/channel-activity", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.get("/:id/threads/:threadId/channel-activity", (c) => getThreadChannelActivity(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function getThreadChannelActivity(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
-  const threadId = c.req.param("threadId");
   if (!await visibleThread(c, session, engineSession, threadId)) {
     return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
   }
   const body: ThreadChannelActivity = await threadChannelActivity(c.var.providers.db, session.id, threadId);
   return c.json(body);
-});
+}
 
 /** Marks threads read for the caller. With no ids, marks every thread in the session. */
-messagesRouter.post("/:id/threads/read", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.post("/:id/threads/read", (c) => readThreads(c, c.req.param("id")));
+
+export async function readThreads(c: Context<AppEnv>, sessionId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session } = result;
   // An empty body marks every thread. A malformed one is refused rather than
@@ -447,7 +448,7 @@ messagesRouter.post("/:id/threads/read", async (c) => {
     : body.threadIds.filter((id): id is string => typeof id === "string" && known.has(id));
   await markThreadsRead(c.var.providers.db, c.var.user.id, session.id, ids);
   return c.body(null, 204);
-});
+}
 
 // ── Commands ────────────────────────────────────────────────────────────────
 //
@@ -494,13 +495,14 @@ messagesRouter.get("/:id/commands", async (c) => {
 /** Maximum length for a thread title. This matches the session title limit. */
 const MAX_THREAD_TITLE_CHARS = 200;
 
-messagesRouter.patch("/:id/threads/:threadId", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.patch("/:id/threads/:threadId", (c) => patchThread(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function patchThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const { db } = c.var.providers;
 
-  const threadId = c.req.param("threadId");
   const thread = await visibleThread(c, session, engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
@@ -595,7 +597,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     const pending = (await engineSession.pendingDecisionGates())
       .filter((gate) => gate.threadId === thread.id && gate.status === "pending");
     if (pending.length > 0) {
-      if (!(await canAnswerDecision(c, session))) {
+      if (!(await canAnswerDecision(c, session, sessionId))) {
         return c.json(
           { error: "This thread is waiting on an approval. Ask someone who can answer it to approve or deny it, then archive the thread." },
           409,
@@ -655,10 +657,12 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     thread.reasoning() ?? null,
   );
   return c.json(summary);
-});
+}
 
-messagesRouter.post("/:id/threads", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.post("/:id/threads", (c) => createThread(c, c.req.param("id")));
+
+export async function createThread(c: Context<AppEnv>, sessionId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession, meta } = result;
   const { db, engineHost } = c.var.providers;
@@ -731,7 +735,7 @@ messagesRouter.post("/:id/threads", async (c) => {
     thread.reasoning() ?? null,
   );
   return c.json(summary, 201);
-});
+}
 
 /**
  * Resolve the target thread from a `?threadId=` query param or body field.
@@ -762,13 +766,15 @@ async function visibleThread(
 
 // ── Messages: list ────────────────────────────────────────────────────────
 
-messagesRouter.get("/:id/messages", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.get("/:id/messages", (c) => listMessages(c, c.req.param("id")));
+
+export async function listMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
 
   await engineSession.ensureDefaultThread();
-  const requested = c.req.query("threadId") || undefined;
+  const requested = threadId ?? (c.req.query("threadId") || undefined);
   const thread = await visibleThread(c, session, engineSession, requested);
   if (!thread) {
     return c.json({ error: "thread not found" }, 404);
@@ -793,7 +799,7 @@ messagesRouter.get("/:id/messages", async (c) => {
     nextCursor: undefined, // engine cursor pagination is opaque; revisit if needed
   };
   return c.json(body);
-});
+}
 
 // ── Messages: send prompt ─────────────────────────────────────────────────
 
@@ -990,8 +996,10 @@ export async function submitSessionPrompt(
   };
 }
 
-messagesRouter.post("/:id/messages", async (c) => {
-  const row = await loadOwnedSession(c);
+messagesRouter.post("/:id/messages", (c) => sendPrompt(c, c.req.param("id")));
+
+export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const row = await loadOwnedSession(c, sessionId);
   if (!row) return c.json({ error: "session not found" }, 404);
 
   let body: SendPromptRequest;
@@ -1000,6 +1008,7 @@ messagesRouter.post("/:id/messages", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  body = { ...body, threadId: threadId ?? body.threadId };
   const promoteItemId =
     typeof body.promoteItemId === "string" && body.promoteItemId.length > 0
       ? body.promoteItemId
@@ -1045,7 +1054,7 @@ messagesRouter.post("/:id/messages", async (c) => {
     return c.json({ error: "Add a message or an attachment." }, 400);
   }
   if (row.ownerType === "team" && body.threadId !== undefined) {
-    const loaded = await loadEngineSession(c);
+    const loaded = await loadEngineSession(c, sessionId);
     if ("error" in loaded) return loaded.error;
     if (!await visibleThread(c, row, loaded.engineSession, body.threadId)) return c.json({ error: "thread not found" }, 404);
   }
@@ -1056,7 +1065,7 @@ messagesRouter.post("/:id/messages", async (c) => {
       if (typeof body.replyToMessageId !== "string" || body.replyToMessageId.length === 0) {
         return c.json({ error: "replyToMessageId must name an assistant message in this thread." }, 400);
       }
-      const loaded = await loadEngineSession(c);
+      const loaded = await loadEngineSession(c, sessionId);
       if ("error" in loaded) return loaded.error;
       const targetThread = await visibleThread(c, loaded.session, loaded.engineSession, body.threadId);
       if (!targetThread) return c.json({ error: "thread not found" }, 404);
@@ -1116,7 +1125,7 @@ messagesRouter.post("/:id/messages", async (c) => {
     }
     throw err;
   }
-});
+}
 
 // ── Thread abort ──────────────────────────────────────────────────────────
 //
@@ -1124,12 +1133,13 @@ messagesRouter.post("/:id/messages", async (c) => {
 // interrupts only the turn named by the gesture target. `Thread.interrupt()`
 // stamps abort intent only if that item is still active, withdraws its gates,
 // and starts the next queued submission. A delayed retry cannot abort it.
-messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.post("/:id/threads/:threadId/abort", (c) => abortThread(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function abortThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
 
-  const threadId = c.req.param("threadId");
   const thread = await visibleThread(c, session, engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
@@ -1173,22 +1183,23 @@ messagesRouter.post("/:id/threads/:threadId/abort", async (c) => {
 
   await thread.interrupt(body.targetItemId);
   return c.json({ ok: true });
-});
+}
 
 // A queue can be busy without an active Stop target while paused or between
 // durable claims. This control resumes a paused queue and kicks an unpaused
 // queue without stamping abort intent on any submission.
-messagesRouter.post("/:id/threads/:threadId/resume", async (c) => {
-  const result = await loadEngineSession(c);
+messagesRouter.post("/:id/threads/:threadId/resume", (c) => resumeThread(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function resumeThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
 
-  const threadId = c.req.param("threadId");
   if (!await visibleThread(c, session, engineSession, threadId)) return c.json({ error: "thread not found" }, 404);
 
   await engineSession.resume({ threadId });
   return c.json({ ok: true });
-});
+}
 
 // ── Decision gates ────────────────────────────────────────────────────────
 //
@@ -1199,8 +1210,8 @@ messagesRouter.post("/:id/threads/:threadId/resume", async (c) => {
 // / `Session.withdrawDecision` — which finds the thread that owns the gate
 // and unblocks it.
 
-async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike): Promise<boolean> {
-  if (session.ownerType === "org" && c.req.param("id").startsWith("wf:")) {
+async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike, sessionId: string): Promise<boolean> {
+  if (session.ownerType === "org" && sessionId.startsWith("wf:")) {
     return c.var.principal.type === "user" && session.ownerId === c.var.user.orgId
       && await isOrgAdminUser(c);
   }
@@ -1210,9 +1221,8 @@ async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike):
 /** Workflow agent gates have a run owner, but no app session row. Only
  * decision endpoints use this fallback; it grants no sandbox or prompt access.
  */
-async function loadDecisionSession(c: Context<AppEnv>) {
-  const id = c.req.param("id");
-  if (!id.startsWith("wf:")) return loadEngineSession(c);
+export async function loadDecisionSession(c: Context<AppEnv>, id: string) {
+  if (!id.startsWith("wf:")) return loadEngineSession(c, id);
   const missing = () => ({ error: c.json({ error: "session not found" }, 404) });
   let parts;
   try { parts = parseWorkflowSessionId(id); } catch { return missing(); }
@@ -1227,7 +1237,7 @@ async function loadDecisionSession(c: Context<AppEnv>) {
     userId: run.owner.ownerType === "user" ? run.owner.ownerId : "",
     orgId: definition.orgId,
   };
-  if (!(await canAnswerDecision(c, session))) return missing();
+  if (!(await canAnswerDecision(c, session, id))) return missing();
   if (!(await runVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId, params: run.params }))) return missing();
   // A guessed node ID must not materialize a new agent on a read request.
   if (!(await p.engineStore.getSession(id))) return missing();
@@ -1257,18 +1267,22 @@ async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, 
   return pending.filter((_, i) => shown[i]);
 }
 
-messagesRouter.get("/:id/decisions", async (c) => {
-  const result = await loadDecisionSession(c);
+messagesRouter.get("/:id/decisions", (c) => listDecisions(c, c.req.param("id")));
+
+export async function listDecisions(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const result = await loadDecisionSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
 
   const pending = await visibleGates(c, session, engineSession);
-  const body: ListDecisionsResponse = { gates: pending.map(engineGateToWire) };
+  const body: ListDecisionsResponse = { gates: pending.filter(gate => !threadId || gate.threadId === threadId).map(engineGateToWire) };
   return c.json(body);
-});
+}
 
-messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
-  const result = await loadDecisionSession(c);
+messagesRouter.post("/:id/decisions/:gateId/resolve", (c) => resolveDecision(c, c.req.param("id")));
+
+export async function resolveDecision(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const result = await loadDecisionSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
@@ -1276,7 +1290,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // Explicit resolve authorization, distinct from `loadEngineSession`'s
   // view check: answering a gate acts on the session's behalf. The same
   // named check gates the channel gate-callback path.
-  if (!(await canAnswerDecision(c, session))) {
+  if (!(await canAnswerDecision(c, session, sessionId))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,
@@ -1325,7 +1339,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // Confirm the gate is actually pending in this session before resolving.
   // Without this check, a stale gateId from the client would silently no-op.
   const pending = await visibleGates(c, session, engineSession);
-  const gate = pending.find((g) => g.id === gateId);
+  const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
   if (!answersGate(gate, c.var.principal)) {
     return c.json({ error: `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.` }, 403);
@@ -1337,7 +1351,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
       return c.json({ error: 'A browser approval requires an authorized user. Sign in to Valet.' }, 403);
     }
     try {
-      await policy.authorize({ protocolVersion: '1.0', sessionId: c.req.param('id'),
+      await policy.authorize({ protocolVersion: '1.0', sessionId,
         threadId: gate.threadId, actorId: c.var.user.id, ownerId: session.ownerId });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : 'Browser access changed. Reopen the session.' }, 403);
@@ -1352,17 +1366,19 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
     source: { channelType: "web" },
   });
   return c.json({ ok: true });
-});
+}
 
-messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
-  const result = await loadDecisionSession(c);
+messagesRouter.post("/:id/decisions/:gateId/withdraw", (c) => withdrawDecision(c, c.req.param("id")));
+
+export async function withdrawDecision(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const result = await loadDecisionSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
 
   // Same explicit resolve authorization as the resolve route above —
   // withdrawing settles the gate too.
-  if (!(await canAnswerDecision(c, session))) {
+  if (!(await canAnswerDecision(c, session, sessionId))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,
@@ -1386,9 +1402,9 @@ messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
   }
 
   const pending = await visibleGates(c, session, engineSession);
-  const gate = pending.find((g) => g.id === gateId);
+  const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
 
   await engineSession.withdrawDecision(gateId, reason);
   return c.json({ ok: true });
-});
+}

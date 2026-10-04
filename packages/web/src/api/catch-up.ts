@@ -44,7 +44,7 @@ export function useWaitingThreads(owner: OwnerFilter) {
 export function useFinishWaitingThread(owner: OwnerFilter) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (thread: { sessionId: string; threadId: string }) => api.patchThread(thread.sessionId, thread.threadId, { archived: true }),
+    mutationFn: (thread: { sessionId: string; threadId: string }) => api.patchThread(thread.threadId, { archived: true }),
     onMutate: (thread) => {
       qc.setQueryData<WaitingThreadsResponse>(qkCatchUp.waiting(owner), (current) => current && ({
         threads: current.threads.filter((row) => row.threadId !== thread.threadId),

@@ -129,6 +129,6 @@ it("puts Valet's questions under Needs attention and plain replies in their own 
     { sessionId: "s", threadId: "ask", title: "Dependency bump", lastAgentActivityAt: 5, unread: true, question: "Should I merge it once CI passes?" },
   ] });
   fireEvent.click(within(replies).getByRole("button", { name: "Done with Lockfile fix" }));
-  await waitFor(() => expect(api.patchThread).toHaveBeenCalledWith("s", "told", { archived: true }));
+  await waitFor(() => expect(api.patchThread).toHaveBeenCalledWith("told", { archived: true }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "Unanswered replies" })).toBeNull());
 });
