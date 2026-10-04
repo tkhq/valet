@@ -32,6 +32,23 @@ export function sortNotifications(notifications: readonly NotificationSummary[])
   return [...notifications].sort((a, b) => Number(isActionable(b)) - Number(isActionable(a)));
 }
 
+/** Unread updates, newest first, one row per title: a workflow that fails
+ * every few minutes is one row with a count, not a list. Read updates leave
+ * the list, so "Mark all read" clears it. */
+export function groupUpdates(updates: readonly NotificationSummary[]): Array<{ latest: NotificationSummary; ids: string[] }> {
+  const groups = new Map<string, { latest: NotificationSummary; ids: string[] }>();
+  for (const n of updates) {
+    if (n.readAt !== undefined) continue;
+    const group = groups.get(n.title);
+    if (!group) groups.set(n.title, { latest: n, ids: [n.id] });
+    else {
+      group.ids.push(n.id);
+      if (n.createdAt > group.latest.createdAt) group.latest = n;
+    }
+  }
+  return [...groups.values()].sort((a, b) => b.latest.createdAt - a.latest.createdAt);
+}
+
 /**
  * Pure `onOpenChange` handler, extracted so the open-refetch behavior is
  * unit-testable without rendering the Radix dropdown.
@@ -51,17 +68,17 @@ export function NotificationsBell() {
   const markAllRead = useMarkAllNotificationsRead();
   const pendingCount = (workflows.data?.count ?? 0) + (decisions.data?.items.length ?? 0);
   // Approval state comes from gates. Historical notification copies do not create another inbox item.
-  const updates = (notifications.data?.notifications ?? []).filter(n => n.kind !== "approval");
-  const unread = updates.filter(n => n.readAt === undefined).length;
+  const updates = groupUpdates((notifications.data?.notifications ?? []).filter(n => n.kind !== "approval"));
+  const unread = updates.length;
   const loading = workflows.isLoading || decisions.isLoading;
   const failed = workflows.isError || decisions.isError;
   function changeOpen(value: boolean) {
     setOpen(value);
     if (value) { void notifications.refetch(); void workflows.refetch(); void decisions.refetch(); }
   }
-  async function openUpdate(n: NotificationSummary) {
-    try { if (!n.readAt) await markRead.mutateAsync(n.id); }
-    finally { if (n.href) window.location.assign(n.href); }
+  async function openUpdate({ latest, ids }: { latest: NotificationSummary; ids: string[] }) {
+    try { await Promise.all(ids.map(id => markRead.mutateAsync(id))); }
+    finally { if (latest.href) window.location.assign(latest.href); }
   }
   return (
     <Popover open={open} onOpenChange={changeOpen}>
@@ -94,10 +111,11 @@ export function NotificationsBell() {
             {unread > 0 && <button className="text-xs text-muted underline" onClick={() => markAllRead.mutate()}>Mark all read</button>}
           </div>
           {notifications.isError && <p role="alert" className="text-sm text-danger-500">Could not load updates. <button className="underline" onClick={() => void notifications.refetch()}>Retry</button></p>}
-          {updates.length === 0 && <p className="text-sm text-muted">No updates yet.</p>}
-          {updates.map(n => <button key={n.id} onClick={() => void openUpdate(n)} className="block w-full rounded-md p-2 text-left hover:bg-ink-wash">
-            <span className="flex items-center gap-2">{!n.readAt && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-500" />}<span className="text-sm font-medium">{n.title}</span></span>
-            <span className="text-xs text-muted">{relativeTime(n.createdAt)}</span>
+          {!notifications.isError && updates.length === 0 && <p className="text-sm text-muted">No new updates.</p>}
+          {updates.map(group => <button key={group.latest.id} onClick={() => void openUpdate(group)} className="block w-full rounded-md p-2 text-left hover:bg-ink-wash">
+            <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-500" /><span className="min-w-0 truncate text-sm font-medium">{group.latest.title}</span>
+              {group.ids.length > 1 && <Badge variant="neutral">{group.ids.length}</Badge>}</span>
+            <span className="text-xs text-muted">{relativeTime(group.latest.createdAt)}</span>
           </button>)}
         </section>
       </PopoverContent>
