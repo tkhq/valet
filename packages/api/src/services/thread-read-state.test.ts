@@ -68,6 +68,15 @@ it("marks a thread unread after an agent message and read once the viewer opens 
   expect((await fetch(`${api.baseUrl}/api/sessions/${thread.sessionId}/threads/read`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: "{",
   })).status).toBe(400);
+  // Another pod made this thread, and this pod's session has not loaded it.
+  await api.providers.engineStore.saveThread(thread.sessionId, {
+    id: "from-other-pod", sessionId: thread.sessionId, key: "web:other-pod", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1,
+  });
+  expect((await fetch(`${api.baseUrl}/api/sessions/${thread.sessionId}/threads/read`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threadIds: ["from-other-pod"] }),
+  })).status).toBe(204);
+  const marked = await api.providers.db.execute(sql`SELECT 1 FROM thread_reads WHERE session_id = ${thread.sessionId} AND thread_id = 'from-other-pod'`) as { rows: unknown[] };
+  expect(marked.rows).toHaveLength(1);
 });
 
 it("records pull requests a thread creates and follows their GitHub state", async () => {
