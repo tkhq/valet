@@ -44,6 +44,14 @@ it("lets a thread read only what its audience may see", async () => {
   expect(await read("web:default", "workflow:wf_legacy")).toBe(false);
   // A private channel's thread reads its own channel.
   expect(await read("slack:CREADPRIV:2.2", "slack:CREADPRIV:1.1")).toBe(true);
+  // People outside the team read Slack, Telegram, and GitHub threads, so those
+  // threads read no team web thread. A Slack thread still reads public channels.
+  expect(await read("slack:CREADPRIV:2.2", "web:shared")).toBe(false);
+  expect(await read("slack:CREADPUB:2.2", "web:shared")).toBe(false);
+  expect(await read("slack:CREADPRIV:2.2", "slack:CREADPUB:1.1")).toBe(true);
+  expect(await read("telegram:dm:99", "web:shared")).toBe(false);
+  expect(await read("github:acme/app#12", "slack:CREADPUB:1.1")).toBe(false);
+  expect(await read("github:acme/app#12", "github:acme/app#12")).toBe(true);
   // A helper thread reads what its person may see.
   expect(await read("app-assistant:member", "slack:CREADPRIV:1.1")).toBe(true);
   expect(await read("app-assistant:outsider", "slack:CREADPRIV:1.1")).toBe(false);

@@ -147,6 +147,9 @@ async function spawningThread(db: Providers["db"], sessionId: string): Promise<{
   return row?.parent_session_id && row.parent_thread_id ? { sessionId: row.parent_session_id, threadId: row.parent_thread_id } : null;
 }
 
+/** Conversations whose readers need not be on the team. */
+const OUTSIDE_THREAD_KEY = /^(slack|telegram|github):/;
+
 /** Whether a key names one person's thread: a helper or a workflow editor
  * conversation. Such a thread is never shared, even when the key names no
  * person, as an editor key from before per-person keys (`workflow:<id>`) does. */
@@ -280,7 +283,9 @@ export async function visibleThreadIds(
  *
  * - A helper or workflow editor thread reads what its person may see.
  * - A Slack channel thread reads its own channel's threads.
- * - Any thread reads what the whole team may see.
+ * - A Slack, Telegram, or GitHub thread has readers who need not be on the
+ *   team. Beyond its own conversation, it reads only public Slack channels.
+ * - Any other thread reads what the whole team may see.
  */
 export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
   return async ({ owner, orgId, reader, target }) => {
@@ -288,8 +293,14 @@ export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
     const person = privateThreadOwner(reader.key);
     if (person) return threadVisibility(deps, { ownerType: "team" }, { orgId, userId: person })(target.key);
     if (isPersonalThreadKey(target.key)) return false;
+    const readerChannel = slackConversation(reader.key)?.channelId;
     const targetChannel = slackConversation(target.key)?.channelId;
-    if (!targetChannel || targetChannel === slackConversation(reader.key)?.channelId) return true;
+    if (targetChannel && targetChannel === readerChannel) return true;
+    if (OUTSIDE_THREAD_KEY.test(reader.key ?? "")) {
+      if (!readerChannel || !targetChannel) return reader.key === target.key;
+    } else if (!targetChannel) {
+      return true;
+    }
     let token: Promise<string | null> | undefined;
     const isPrivate = await slackChannelIsPrivate(deps, orgId, targetChannel,
       () => (token ??= orgSlackCredential(deps, orgId).then(botToken)));
