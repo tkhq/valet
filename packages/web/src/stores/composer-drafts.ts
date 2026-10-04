@@ -11,8 +11,13 @@
  *    the user switches away. Its result folds into the ORIGINATING
  *    thread's slot here — component state would have dropped it on
  *    unmount, silently losing the attachment.
+ *
+ * The text also persists to localStorage, so a draft survives a reload and
+ * shows in another window. Attachments stay in memory: they are uploads in
+ * flight, not text that can be written back.
  */
 import { create } from "zustand";
+import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import type { ComposerImage } from "~/components/session/composer-images";
 import type { ComposerFile } from "~/components/session/composer-files";
 
@@ -83,7 +88,25 @@ interface ComposerDraftStore {
   adoptOrphanDraft(sessionId: string, threadId: string): void;
 }
 
-export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
+/** localStorage can be absent or throw (private windows, blocked site data,
+ * a full quota). A draft that cannot be saved still works for this tab. */
+const safeLocalStorage: StateStorage = {
+  getItem: (name) => {
+    try { return localStorage.getItem(name); } catch { return null; }
+  },
+  setItem: (name, value) => {
+    try { localStorage.setItem(name, value); } catch { /* keep the in-memory draft */ }
+  },
+  removeItem: (name) => {
+    try { localStorage.removeItem(name); } catch { /* nothing to remove */ }
+  },
+};
+
+const STORAGE_NAME = "valet:composer-drafts";
+
+type PersistedDrafts = { texts: Record<string, string> };
+
+export const useComposerDraftStore = create<ComposerDraftStore>()(persist((set) => {
   /** Apply `fn` to the slot; an all-empty result deletes the slot. */
   function patch(key: string, fn: (prev: ComposerDraft) => ComposerDraft): void {
     set((state) => {
@@ -122,7 +145,33 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
         return { byKey: target !== undefined ? rest : { ...rest, [targetKey]: orphan } };
       }),
   };
-});
+}, {
+  name: STORAGE_NAME,
+  version: 1,
+  storage: createJSONStorage<PersistedDrafts>(() => safeLocalStorage),
+  partialize: (state): PersistedDrafts => ({
+    texts: Object.fromEntries(
+      Object.entries(state.byKey).filter(([, draft]) => draft.text !== "").map(([key, draft]) => [key, draft.text]),
+    ),
+  }),
+  // The stored texts win; attachments and errors in memory are kept.
+  merge: (persisted, current) => {
+    const texts = (persisted as PersistedDrafts | undefined)?.texts ?? {};
+    const byKey: Record<string, ComposerDraft> = {};
+    for (const [key, draft] of Object.entries(current.byKey)) byKey[key] = { ...draft, text: texts[key] ?? "" };
+    for (const [key, text] of Object.entries(texts)) byKey[key] = { ...(byKey[key] ?? EMPTY_DRAFT), text };
+    for (const [key, draft] of Object.entries(byKey)) if (isEmpty(draft)) delete byKey[key];
+    return { ...current, byKey };
+  },
+}));
+
+// Another window wrote its drafts. Reload them, so this window's next write
+// does not put back the text that window just changed.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_NAME) void useComposerDraftStore.persist.rehydrate();
+  });
+}
 
 /** The draft for one (sessionId, threadId) slot, or the stable empty draft. */
 export function useComposerDraft(key: string): ComposerDraft {
