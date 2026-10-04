@@ -65,6 +65,8 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
+import { hasBorrowGrant } from "../services/credential-borrow.js";
+import { membersSharing } from "../services/credential-shares.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -342,7 +344,7 @@ async function computeResult(
       const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
       if (refusal) return refusal;
     }
-    // A credential read can throw a typed refusal (a broken delegation, a
+    // A credential read can throw a typed refusal (a broken share, a
     // ref outside the team's 1Password lease). That message names the fix,
     // so it comes back as a failed result, the same way execute reports.
     let resolved: PluginAction[];
@@ -674,7 +676,11 @@ function buildCredentialProvider(
   owner: CredentialOwner,
   defaultService: string,
 ): CredentialProvider {
-  const deps = { credentials: opts.credentials, onePassword: opts.onePassword };
+  const deps = { credentials: opts.credentials, onePassword: opts.onePassword, shares: (teamId: string, svc: string) => membersSharing(opts.db, teamId, svc) };
+  // A run borrows another member's account only once that member approved it
+  // for this run (`services/credential-borrow.ts`).
+  const mayBorrow = (svc: string) => async (memberId: string) =>
+    ctx.workflowExecutionId ? hasBorrowGrant(opts.db, { sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
   return {
     async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
@@ -700,7 +706,7 @@ function buildCredentialProvider(
           : owner.type === "team"
             ? await resolveTeamCredentialRead(
                 deps,
-                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id) },
+                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id), mayBorrow: mayBorrow(svc) },
                 svc,
                 fallback,
               )

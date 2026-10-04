@@ -4968,7 +4968,12 @@ export class Thread {
       threadId: this.id,
       sessionPurpose: session.options.purpose,
       cwd: session.options.workspace,
-      credentials: session.credentialProvider(),
+      // The turn's author picks whose account a team read uses first. A
+      // channel sender with no Valet account acts for nobody.
+      credentials: session.credentialProvider({
+        ...(this.runningItem?.author && !this.runningItem.author.externalSender ? { actorId: this.runningItem.author.id } : {}),
+        threadId: this.id,
+      }),
       sandbox: session.sandbox,
       recordSkillInvocation: (skill, path, injectedText) =>
         this.recordModelToolSkillInvocation(skill, path, injectedText, toolCallId),

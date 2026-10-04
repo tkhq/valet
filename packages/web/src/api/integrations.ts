@@ -121,8 +121,8 @@ export function useDelegateCredential() {
 
 export function useRevokeDelegation() {
   const qc = useQueryClient();
-  return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string }>({
-    mutationFn: ({ service, teamId }) => api.revokeDelegation(service, teamId),
+  return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string; userId?: string }>({
+    mutationFn: ({ service, teamId, userId }) => api.revokeDelegation(service, teamId, userId),
     onSuccess: () => invalidateCredentialCaches(qc),
   });
 }

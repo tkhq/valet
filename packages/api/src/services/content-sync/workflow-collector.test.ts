@@ -8,6 +8,7 @@ import linearEventPlugin from "@valet/plugin-linear/plugin";
  * rows alone. A mirror that loses a working workflow because someone pushed a
  * typo is worse than a mirror that lags a commit.
  */
+import { shareCredential } from "../credential-shares.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -1050,9 +1051,9 @@ describe("workflow collector", () => {
       ].join("\n");
     }
 
-    it("disarms and restores delegated schedules after membership changes at the same commit", async () => {
+    it("disarms shared-account schedules when the member leaves, and restores them once they share again", async () => {
       await credentials.save({ type: "user", id: "u1" }, "github", { type: "oauth2", accessToken: "personal-token" });
-      await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", metadata: { delegatedFrom: "u1" } });
+      await shareCredential(db, { teamId: TEAM, service: "github", userId: "u1", createdAt: 1 });
       const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
       const id = await teamSource();
       await serviceFor(f).syncOnce(id);
@@ -1060,7 +1061,9 @@ describe("workflow collector", () => {
       await removeMember(db, { teamId: TEAM, userId: "u1" });
       await serviceFor(f).pollOnce();
       expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      // The share left with the member, so a returning member shares again.
       await addMember(db, { teamId: TEAM, userId: "u1", role: "member" });
+      await shareCredential(db, { teamId: TEAM, service: "github", userId: "u1", createdAt: 2 });
       await serviceFor(f).pollOnce();
       expect(await db.select().from(workflowSchedules)).toHaveLength(1);
       expect(await mirrored()).toHaveLength(1);

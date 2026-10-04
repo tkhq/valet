@@ -1330,10 +1330,11 @@ export const api = {
       `/credentials/${encodeURIComponent(service)}/delegate`,
       body,
     ),
-  revokeDelegation: (service: string, teamId: string) =>
+  /** Ends a share: the caller's own, or a member's (`userId`) as a team admin. */
+  revokeDelegation: (service: string, teamId: string, userId?: string) =>
     request<DeleteCredentialResponse>(
       "DELETE",
-      `/credentials/${encodeURIComponent(service)}/delegations/${encodeURIComponent(teamId)}`,
+      `/credentials/${encodeURIComponent(service)}/delegations/${encodeURIComponent(teamId)}${userId ? `?userId=${encodeURIComponent(userId)}` : ""}`,
     ),
 
   // 1Password picker backend + settings. `scope` selects which

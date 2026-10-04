@@ -107,15 +107,14 @@ describe("Integrations workspace isolation", () => {
     expect(screen.queryByDisplayValue("personal-token-draft")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(await screen.findByText("Shared by Alice")).toBeTruthy();
-    expect(screen.getByText("Shared by members")).toBeTruthy();
-    expect(screen.getByText(/Team actions use Alice’s account/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Stop sharing Linear with Team A" }));
+    expect(screen.getByText(/Using another member's account asks them first/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop sharing Alice's Linear with Team A" }));
 
     view.switchTo("b");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText("Linear MCP")).toBeNull();
     expect(await screen.findByText("Sentry")).toBeTruthy();
-    expect(screen.getByText("Stored on the team")).toBeTruthy();
+    expect(screen.getAllByText("Team connection").length).toBeGreaterThan(0);
     expect(api.listCredentials).toHaveBeenCalledWith("team", "a");
     expect(api.listCredentials).toHaveBeenCalledWith("team", "b");
     expect(api.listPlugins).toHaveBeenCalledWith("a");
@@ -224,7 +223,7 @@ describe("Integrations workspace isolation", () => {
   it("hides stale credentials and an open dialog when a refetch loses access", async () => {
     teamId = "a";
     const view = mount();
-    fireEvent.click(await screen.findByRole("button", { name: "Stop sharing Linear with Team A" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop sharing Alice's Linear with Team A" }));
     vi.mocked(api.listCredentials).mockRejectedValue(new Error("Forbidden"));
     await act(async () => { await view.client.invalidateQueries({ queryKey: qkIntegrations.credentials("team", "a") }); });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -267,7 +266,7 @@ describe("Team account connection", () => {
     expect(dialog.getByText(/Team Integrations cannot recreate this connection/)).toBeTruthy();
     expect(dialog.getByText(/organization admin manages organization access in Organization settings/)).toBeTruthy();
     expect(dialog.queryByText(/again from Integrations/)).toBeNull();
-    expect(screen.queryByText("Shared by members")).toBeNull();
+    expect(screen.queryByText("Shared by Alice")).toBeNull();
     expect(api.deleteCredential).not.toHaveBeenCalled();
   });
 
@@ -324,7 +323,7 @@ describe("Team account connection", () => {
     expect(await screen.findByText("Connected Linear via MCP.")).toBeTruthy();
     expect(await screen.findByText("Linear MCP")).toBeTruthy();
     expect(window.localStorage.getItem("valet:workspace")).toBe("a");
-    expect(screen.getByRole("button", { name: "Stop sharing Linear with Team A" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop sharing Alice's Linear with Team A" })).toBeTruthy();
     expect(api.listCredentials).toHaveBeenCalledWith("team", "a");
   });
 

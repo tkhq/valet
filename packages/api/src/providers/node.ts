@@ -443,11 +443,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // The org Linear connection's client_credentials token has no refresh
   // token; this layer mints a replacement before it expires.
   const linearAppCredentials = new LinearAppTokenStore(refreshingCredentials, { env: process.env });
-  // Team references wrap outside refresh: a followed user row refreshes
-  // under that user, a direct team row refreshes under the team.
-  const engineCredentials = new TeamCredentialStore(linearAppCredentials, {
-    isMember: (teamId, userId) => isTeamMember(db, teamId, userId),
-  });
+  const engineCredentials = new TeamCredentialStore(linearAppCredentials);
 
   // 1Password reference-credential service (1Password credential provider
   // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s

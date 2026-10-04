@@ -22,6 +22,7 @@ import {
   assistants,
   channelBindings,
   credentials,
+  credentialShares,
   eventSubscriptions,
   followedThreads,
   orgMembers,
@@ -517,6 +518,10 @@ export async function removeMember(db: AppDb, opts: RemoveMemberOptions): Promis
     await tx
       .delete(teamMembers)
       .where(and(eq(teamMembers.teamId, opts.teamId), eq(teamMembers.userId, opts.userId)));
+    // A shared account belongs to the member, so it leaves with them.
+    await tx
+      .delete(credentialShares)
+      .where(and(eq(credentialShares.teamId, opts.teamId), eq(credentialShares.userId, opts.userId)));
     await invalidateWorkflowSources(tx, { teamId: opts.teamId });
   });
 }
@@ -814,6 +819,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, opts.teamId)));
+    await tx.delete(credentialShares).where(eq(credentialShares.teamId, opts.teamId));
     // The team's `vlt_` keys go with it. Once the team row is gone, every
     // route that could revoke one is closed: the team key list 404s, and
     // the personal routes refuse a team-pinned key, so a surviving row is

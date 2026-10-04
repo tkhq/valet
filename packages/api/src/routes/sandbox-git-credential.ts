@@ -65,6 +65,8 @@ import { credentialSecret } from "@valet/engine";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { sessionRepos } from "../schema/index.js";
 import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-resolution.js";
+import { hasBorrowGrant } from "../services/credential-borrow.js";
+import { membersSharing } from "../services/credential-shares.js";
 import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
 import { getTeamInOrg } from "../services/teams.js";
 import { repoHostForUrl, type RepoHostContext } from "../repos/host.js";
@@ -158,8 +160,12 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
     // public clone still works and a push fails visibly.
     if (workflowOwner.type === "team") {
       const teamRow = await usableTeamGithubRow(
-        { credentials: engineCredentials, onePassword },
-        { orgId: sandbox.orgId, teamId: workflowOwner.id, userId: sandbox.userId, scopes: onePasswordScopesFor("team", workflowOwner.id) },
+        { credentials: engineCredentials, onePassword, shares: (teamId, svc) => membersSharing(db, teamId, svc) },
+        {
+          orgId: sandbox.orgId, teamId: workflowOwner.id, userId: sandbox.userId, scopes: onePasswordScopesFor("team", workflowOwner.id),
+          // A member's account backs git only after that member approved it for this run.
+          mayBorrow: async (memberId) => hasBorrowGrant(db, { sessionId: sandbox.sessionId, service: "github", memberId }),
+        },
         orgFallbackPolicy(plugins, "github"),
       );
       const secret = teamRow ? credentialSecret(teamRow) : undefined;

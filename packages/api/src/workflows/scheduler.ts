@@ -164,9 +164,12 @@ export class WorkflowScheduler {
       // `def` (the workflow definition row) is already fetched above.
       // Matches `events/dispatcher.ts`'s workflow-target fire, which
       // never had this bug.
+      // The run acts for whoever set the schedule up: their own shared
+      // accounts first (`services/credential-shares.ts`).
       await workflowRunHost.start(runId, params, def.definition, {
         ownerType: def.ownerType,
         ownerId: def.ownerId,
+        actorUserId: schedule.createdBy,
       });
     }
     return "ok";

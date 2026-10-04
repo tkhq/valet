@@ -26,7 +26,8 @@ import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teams, workflowDefinitions } from "../schema/index.js";
+import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -673,19 +674,14 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(1);
   });
 
-  it("team-owned run: a broken delegated reference returns the typed error", async () => {
-    const { TeamCredentialStore, CredentialReferenceBrokenError } = await import(
-      "./team-credential-store.js"
-    );
-    const inner = new FakeCredentialStore();
-    inner.seed({ type: "team", id: "t1" }, "demo", {
-      type: "oauth2",
-      metadata: { delegatedFrom: "u1" },
-    });
-    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+  it("team-owned run: a share whose account is gone returns the typed error", async () => {
+    const { CredentialReferenceBrokenError } = await import("./team-credential-store.js");
+    const db = await makeDb();
+    await db.insert(teamMembers).values({ teamId: "t1", userId: "u1", role: "member" });
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "u1", createdAt: 1 });
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-broken" },
@@ -693,9 +689,7 @@ describe("buildActionInvoker", () => {
     );
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && "error" in result ? result.error : "").toMatch(
-      /Reconnect demo|share it with the team again/,
-    );
+    expect(result.ok === false && "error" in result ? result.error : "").toMatch(/should reconnect demo/);
     expect(result.ok === false && "error" in result ? result.error : "").toBe(
       new CredentialReferenceBrokenError("demo").message,
     );
@@ -1490,14 +1484,14 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toEqual({ ok: true, result: { token: "team-tok" } });
   });
 
-  // A delegated row follows to the member's live github row. When that row
-  // is one the member's own runs would refuse (identity-only scopes here),
-  // the team run must not act on it either: it falls to the App path the
-  // same way a team with no row does.
-  it("team-owned: an unhealthy delegated github row falls through to the installation token", async () => {
+  // A share follows to the member's live github row. When that row is one
+  // the member's own runs would refuse (identity-only scopes here), the team
+  // run must not act on it either: it falls to the App path the same way a
+  // team with no row does.
+  it("team-owned: an unhealthy shared github row falls through to the installation token", async () => {
     const { TeamCredentialStore } = await import("./team-credential-store.js");
     const { appDb, credentials: inner } = await harness();
-    const credentials = new TeamCredentialStore(inner, { isMember: async () => true });
+    const credentials = new TeamCredentialStore(inner);
     await saveAppConfig({ credentials }, orgId, appConfig);
     await appDb.insert(githubInstallations).values({
       id: "ghi_team_2",
@@ -1517,10 +1511,8 @@ describe("buildActionInvoker: github service resolution", () => {
       accessToken: "identity-tok",
       metadata: { login: "octocat", identityOnly: true },
     });
-    await credentials.save({ type: "team", id: "gh-team" }, "github", {
-      type: "oauth2",
-      metadata: { delegatedFrom: userId, sourceType: "oauth2" },
-    });
+    await appDb.insert(teamMembers).values({ teamId: "gh-team", userId, role: "member" });
+    await shareCredential(appDb, { teamId: "gh-team", service: "github", userId, createdAt: 1 });
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },

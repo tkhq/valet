@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
-import { useCredentials, useDisconnectCredential } from "~/api/integrations";
+import { useCredentials, useDisconnectCredential, useRevokeDelegation } from "~/api/integrations";
 import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow, cardClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
@@ -8,33 +8,38 @@ import { displayName } from "./display-name";
 import { cn } from "~/lib/cn";
 
 /**
- * The verb for a removal control. One route serves both rows
- * (`DELETE /api/credentials/:service?scope=team`), but they cost different
- * things. A delegated row is a secretless reference that follows a member's
- * live credential, so dropping it cuts the team's link and leaves that member
- * connected, which is what the Integrations share menu already calls "Stop
- * sharing". A direct row holds the team's own secret, and dropping it deletes
- * that secret. Calling both "Disconnect" read as though it would take a
- * member's personal connection away with it.
+ * The verb for a removal control. A share is a member's own account, so
+ * ending it cuts the team's link and leaves that member connected, which is
+ * what the Integrations share menu calls "Stop sharing". The team's own
+ * connection holds the team's secret, and removing it deletes that secret.
  *
- * Both targets name the service through `displayName`. `row.service` is the
- * wire id, and spelling it raw made one credential read "Linear" on
- * Integrations and in every API refusal, and "linear" here.
+ * Both targets name the service through `displayName`: `row.service` is the
+ * wire id, and the API refusals and Integrations spell it the product way.
  */
 function removalLabels(
   row: CredentialSummary,
   teamName: string,
+  nameFor: (userId: string) => string,
 ): { action: string; pending: string; target: string } {
   const service = displayName(row.service);
   return row.delegatedFrom
-    ? { action: "Stop sharing", pending: "Stopping…", target: `${service} with ${teamName}` }
+    ? { action: "Stop sharing", pending: "Stopping…", target: `${nameFor(row.delegatedFrom)}'s ${service} with ${teamName}` }
     : { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` };
 }
 
+/** The rows grouped by integration, in the order the API lists them. */
+function byService(rows: CredentialSummary[]): Array<{ service: string; rows: CredentialSummary[] }> {
+  const groups = new Map<string, CredentialSummary[]>();
+  for (const row of rows) groups.set(row.service, [...(groups.get(row.service) ?? []), row]);
+  return [...groups].map(([service, grouped]) => ({ service, rows: grouped }));
+}
+
 /**
- * Credentials this team can act as, shared by Settings and Integrations.
- * Direct rows and delegated rows share the list because ownership varies
- * inside it, so each row names how it arrived.
+ * Every account this team can act as, one entry per integration, shared by
+ * Settings and Integrations. An integration lists the team's own connection
+ * and each member's shared account. A team action uses the acting member's
+ * own share first, then the team's connection, and asks before it uses
+ * another member's account.
  */
 export function TeamCredentials({
   team,
@@ -49,25 +54,27 @@ export function TeamCredentials({
 }) {
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
-  // One row at a time, so the list renders ONE dialog. A single boolean would
-  // open it for every row and remove whichever service was last in scope.
+  const revoke = useRevokeDelegation();
+  // One row at a time, so the list renders ONE dialog.
   const [removing, setRemoving] = useState<CredentialSummary | null>(null);
   const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
   const rows = credsQ.error ? [] : credsQ.data?.credentials ?? [];
-  const dialogLabels = removing ? removalLabels(removing, team.name) : null;
+  const dialogLabels = removing ? removalLabels(removing, team.name, nameFor) : null;
+  const pending = disconnect.isPending || revoke.isPending;
+  const failure = removing?.delegatedFrom ? revoke.error : disconnect.error;
 
   function removalNote(row: CredentialSummary): string {
     const service = displayName(row.service);
-    if (!row.delegatedFrom && (row.service === "slack" || row.service === "github")) {
+    if (row.delegatedFrom) {
+      return `Team actions stop using ${nameFor(row.delegatedFrom)}'s ${service} account. They keep their own ` +
+        `${service} connection and can share it with the team again from Integrations.`;
+    }
+    if (row.service === "slack" || row.service === "github") {
       return `This deletes the ${service} credential stored on ${team.name}. Team Integrations cannot recreate this connection. ` +
         "An organization admin manages organization access in Organization settings. Its permissions can differ from this stored connection.";
     }
-    const loss = `Runtimes and workflows that run as ${team.name} lose access to ${service}.`;
-    return row.delegatedFrom
-      ? `${loss} This removes the team's link only. ${nameFor(row.delegatedFrom)} keeps their own ` +
-          `${service} connection and can share it with the team again from Integrations.`
-      : `${loss} This deletes the credential stored on the team. Connect ${service} again from ` +
-          `Integrations to give the team access back.`;
+    return `Runtimes and workflows that run as ${team.name} lose the team's own ${service} connection. ` +
+      `Members' shared accounts stay. Connect ${service} again from Integrations to restore it.`;
   }
 
   return (
@@ -75,68 +82,66 @@ export function TeamCredentials({
       {cards && <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Team connections</h4>}
       {credsQ.isLoading && <LoadingRow label="Loading credentials…" className="py-2 text-xs" />}
       {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
+      {rows.length > 0 && (
+        <p className="mt-1 text-xs text-muted">
+          Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first.
+        </p>
+      )}
       {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
         <EmptyRow>
           No connections added to this team yet. Connect an account for this team.
         </EmptyRow>
       )}
-      {(cards ? [
-        { title: null, rows: rows.filter((row) => !row.delegatedFrom) },
-        { title: "Shared by members", rows: rows.filter((row) => row.delegatedFrom) },
-      ] : [{ title: null, rows }]).filter((group) => group.rows.length > 0).map((group) => <div key={group.title ?? "direct"}>
-      {group.title && group.rows.length > 0 && <h4 className="mt-6 text-xs font-medium uppercase tracking-wide text-muted">{group.title}</h4>}
       <ul className={cards ? "grid gap-3 pt-4 sm:grid-cols-2" : "mt-1 space-y-3"}>
-        {group.rows.map((row) => {
-          const removal = removalLabels(row, team.name);
-          return (
-            <li key={row.service}>
-              <div className={cards ? cn(cardClass, "flex h-full flex-col p-5") : "flex items-center justify-between gap-4 py-2"}>
-              <div className="min-w-0">
-                <CardHeading
-                  title={row.service === "linear" ? "Linear MCP" : displayName(row.service)}
-                  slug={row.service}
-                  state={row.referenceBroken && <Badge variant="danger">Broken</Badge>}
-                  description={row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Stored on the team"}
-                />
-                {/* pl-12 starts these lines under the title, past the 36px icon and its gap. */}
-                <div className="mt-1 pl-12 text-xs">
-                  <p className="text-muted">
-                    {row.delegatedFrom
-                      ? `Team actions use ${nameFor(row.delegatedFrom)}’s account. Access ends if they stop sharing or leave the team.`
-                      : "Used by team runtimes and workflows."}
-                  </p>
-                  {row.referenceBroken && (
-                    <p className="text-danger-500">
-                      The source credential is gone or the member left. Re-share it, or store a
-                      direct team credential.
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div className={cards ? "mt-auto flex items-center justify-end gap-2 pt-4" : "flex shrink-0 items-center gap-2 whitespace-nowrap"}>
-                {canMutate && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={disconnect.isPending}
-                    aria-label={`${removal.action} ${removal.target}`}
-                    onClick={() => {
-                      // Clear the previous attempt's refusal as the dialog
-                      // opens: React Query holds `error` until the next mutate.
-                      disconnect.reset();
-                      setRemoving(row);
-                    }}
-                  >
-                    {removal.action}
-                  </Button>
-                )}
-              </div>
-              </div>
-            </li>
-          );
-        })}
+        {byService(rows).map((group) => (
+          <li key={group.service}>
+            <div className={cards ? cn(cardClass, "flex h-full flex-col p-5") : "py-2"}>
+              <CardHeading
+                title={group.service === "linear" ? "Linear MCP" : displayName(group.service)}
+                slug={group.service}
+                description={group.rows.length === 1 ? "1 account" : `${group.rows.length} accounts`}
+              />
+              {/* pl-12 starts these lines under the title, past the 36px icon and its gap. */}
+              <ul className="mt-2 space-y-2 pl-12 text-xs">
+                {group.rows.map((row) => {
+                  const removal = removalLabels(row, team.name, nameFor);
+                  return (
+                    <li key={row.delegatedFrom ?? "team"} className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="flex items-center gap-2 text-ink">
+                          <span className="truncate">{row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Team connection"}</span>
+                          {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
+                        </p>
+                        {row.referenceBroken && (
+                          <p className="text-danger-500">Their account is gone or they left the team. They can share it again.</p>
+                        )}
+                      </div>
+                      {canMutate && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="shrink-0"
+                          disabled={pending}
+                          aria-label={`${removal.action} ${removal.target}`}
+                          onClick={() => {
+                            // Clear the previous attempt's refusal as the dialog
+                            // opens: React Query holds `error` until the next mutate.
+                            disconnect.reset();
+                            revoke.reset();
+                            setRemoving(row);
+                          }}
+                        >
+                          {removal.action}
+                        </Button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </li>
+        ))}
       </ul>
-      </div>)}
 
       {canMutate && !credsQ.error && removing && dialogLabels && (
         <ConfirmDialog
@@ -148,20 +153,16 @@ export function TeamCredentials({
           description={removalNote(removing)}
           confirmLabel={dialogLabels.action}
           pendingLabel={dialogLabels.pending}
-          pending={disconnect.isPending}
-          // One mutation serves every row, so opening a second row's dialog
-          // would otherwise show the first row's refusal before any click.
-          error={
-            disconnect.error != null && disconnect.variables?.service === removing.service
-              ? errorText(disconnect.error)
-              : undefined
-          }
-          onConfirm={() =>
-            disconnect.mutate(
-              { service: removing.service, scope: "team", teamId: team.id },
-              { onSuccess: () => setRemoving(null) },
-            )
-          }
+          pending={pending}
+          error={failure != null ? errorText(failure) : undefined}
+          onConfirm={() => {
+            const done = { onSuccess: () => setRemoving(null) };
+            if (removing.delegatedFrom) {
+              revoke.mutate({ service: removing.service, teamId: team.id, userId: removing.delegatedFrom }, done);
+            } else {
+              disconnect.mutate({ service: removing.service, scope: "team", teamId: team.id }, done);
+            }
+          }}
         />
       )}
     </div>

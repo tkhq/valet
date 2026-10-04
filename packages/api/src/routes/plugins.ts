@@ -40,7 +40,8 @@ import { connectModeFor, missingClientEnv } from "../services/integration-availa
 import { isOrgAdmin } from "../services/org.js";
 import { canViewTeam, getTeamInOrg } from "../services/teams.js";
 import { pluginIconSlugs } from "../plugins/registry.gen.js";
-import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
+import { listTeamShares } from "../services/credential-shares.js";
+import { isTeamMember } from "../services/teams.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
 
@@ -113,19 +114,19 @@ pluginsRouter.get("/", async (c) => {
   const health = new Map<string, PluginServiceSummary["health"]>();
   await Promise.all(
     [...connectedServices].map(async (service) => {
-      try {
-        const stored = await engineCredentials.get(owner, service);
-        if (stored) health.set(service, credentialHealth(stored));
-        else connectedServices.delete(service);
-      } catch (err) {
-        // A list row can be a delegated team credential whose source was
-        // removed. Treat it as disconnected without exposing the source or
-        // letting one broken row make the whole catalog unavailable.
-        if (!(err instanceof CredentialReferenceBrokenError)) throw err;
-        connectedServices.delete(service);
-      }
+      const stored = await engineCredentials.get(owner, service);
+      if (stored) health.set(service, credentialHealth(stored));
+      else connectedServices.delete(service);
     }),
   );
+  // A member's shared account connects the service for the team too, while
+  // that member is on the team and their own account still stands.
+  if (owner.type === "team") {
+    await Promise.all((await listTeamShares(db, owner.id)).map(async (share) => {
+      if (connectedServices.has(share.service) || !(await isTeamMember(db, owner.id, share.userId))) return;
+      if (await engineCredentials.get({ type: "user", id: share.userId }, share.service)) connectedServices.add(share.service);
+    }));
+  }
 
   // Connected dynamic services get a live-resolved tool count (TTL-cached,
   // fail-soft — see plugins/dynamic-tool-count.ts). Resolved up front and

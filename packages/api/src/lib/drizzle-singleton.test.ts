@@ -16,6 +16,23 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("ALTER TABLE assistants ADD COLUMN IF NOT EXISTS is_default boolean NOT NULL DEFAULT false");
   }
 
+  it("moves each share stored as a team credential row into its own share row", async () => {
+    await db.query("DROP TABLE credential_shares");
+    await db.query(`INSERT INTO credentials(owner_type, owner_id, service, type, metadata, created_at, updated_at)
+      VALUES ('team', 'team-s', 'linear', 'api_key', '{"delegatedFrom":"bea","sourceType":"api_key"}', 5, 5),
+             ('team', 'team-s', 'github', 'oauth2', NULL, 6, 6)`);
+    await applyAppMigrations(db);
+    const shares = (await db.query("SELECT team_id, service, user_id, created_at FROM credential_shares")).rows as
+      Array<{ team_id: string; service: string; user_id: string; created_at: string }>;
+    expect(shares.map((r) => [r.team_id, r.service, r.user_id, Number(r.created_at)])).toEqual([["team-s", "linear", "bea", 5]]);
+    const rows = (await db.query("SELECT service FROM credentials WHERE owner_id = 'team-s'")).rows as Array<{ service: string }>;
+    // The team's own connection stays where it was.
+    expect(rows.map((r) => r.service)).toEqual(["github"]);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    await db.query("DELETE FROM credential_shares");
+    await db.query("DELETE FROM credentials WHERE owner_id = 'team-s'");
+  });
+
   it("names each workspace that keeps an integration allow-list", async () => {
     await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, created_at, behavior)
       VALUES ('limited', 'org-r', 'team', 'team-limited', 'limited-session', 1, '{"integrations":["github"]}'),

@@ -39,6 +39,7 @@ import type {
   MessageEntry,
   CreateSessionOptions,
   CredentialOwner,
+  CredentialUse,
   CredentialProvider,
   DecisionGate,
   DecisionGateRequest,
@@ -1687,7 +1688,7 @@ export class Session {
 
   // ── credential provider for tools ───────────────────────────────
 
-  credentialProvider(): CredentialProvider {
+  credentialProvider(use: CredentialUse = {}): CredentialProvider {
     // The session owner is the credential owner. A user session stays
     // `{ type: "user", id: userId }` because that is the default principal.
     // A team session must not read as the synthetic `team:{id}` actor.
@@ -1703,13 +1704,13 @@ export class Session {
     // or raw store read — is one `credentials.get` span, nesting under the
     // running tool/turn span via the active context. Values never land on
     // the span; only the service name and hit/miss.
-    const read = (service: string): Promise<StoredCredential | null> =>
+    const read = (service: string, purpose?: "discover"): Promise<StoredCredential | null> =>
       withSpan(
         "credentials.get",
         { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
         async (span) => {
           const stored = resolver
-            ? await resolver(owner, service)
+            ? await resolver(owner, service, purpose === "discover" ? { ...use, discover: true } : use)
             : credStore
               ? await credStore.get(owner, service)
               : null;
@@ -1719,10 +1720,10 @@ export class Session {
         },
       );
     return {
-      async get(service?: string) {
+      async get(service?: string, purpose?: "discover") {
         if (!resolver && !credStore) return null;
         if (!service) return null; // session-level provider has no default service
-        const stored = await read(service);
+        const stored = await read(service, purpose);
         if (!stored) return null;
         return {
           accessToken: credentialSecret(stored) ?? "",

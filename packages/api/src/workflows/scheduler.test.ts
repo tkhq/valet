@@ -102,6 +102,7 @@ describe("WorkflowScheduler fire ownership", () => {
     await scheduler.tick();
 
     expect(runHost.started).toHaveLength(1);
-    expect(runHost.started[0]!.owner).toEqual({ ownerType: "user", ownerId: "workflow-owner" });
+    // Billing follows the workflow; the run acts for the schedule's creator.
+    expect(runHost.started[0]!.owner).toEqual({ ownerType: "user", ownerId: "workflow-owner", actorUserId: "schedule-creator" });
   });
 });

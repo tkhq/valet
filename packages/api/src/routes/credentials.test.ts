@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { contentSources, credentials, orgMembers, orgs, users } from "../schema/index.js";
+import { listTeamShares } from "../services/credential-shares.js";
 import { createContentSource } from "../services/content-sources.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { addMember, createTeam, removeMember, setRole, deleteTeam } from "../services/teams.js";
@@ -1212,123 +1213,45 @@ describe("team credential scope (TKAI-205)", () => {
     });
   });
 
-  it("delegates and revokes a personal credential, and 409s an occupied slot", async () => {
+  it("keeps each member's share beside the others and the team's own connection", async () => {
     const team = await teamWithMember();
-    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
-      method: "PUT",
-      headers: MEMBER_HEADERS,
-      body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    const connect = (headers: Record<string, string>, apiKey: string) => fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT", headers, body: JSON.stringify({ type: "api_key", apiKey }),
     });
-    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
-      method: "POST",
-      headers: MEMBER_HEADERS,
-      body: JSON.stringify({ teamId: team.id }),
+    const shareFrom = (headers: Record<string, string>) => fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST", headers, body: JSON.stringify({ teamId: team.id }),
     });
-    expect(share.status).toBe(201);
-
-    const listed = (await (
+    const list = async () => ((await (
       await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
-    ).json()) as ListCredentialsResponse;
-    expect(listed.credentials).toEqual([
-      expect.objectContaining({ service: "linear", delegatedFrom: "test-member", referenceBroken: false }),
-    ]);
+    ).json()) as ListCredentialsResponse).credentials;
 
-    // A caller with nothing to share is told to connect first; the slot
-    // check only applies once the caller holds a source credential.
-    const unconnected = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ teamId: team.id }),
-    });
+    // A caller with nothing to share is told to connect first.
+    const unconnected = await shareFrom(HEADERS);
     expect(unconnected.status).toBe(400);
     expect(((await unconnected.json()) as { error: string }).error).toContain("Connect Linear in Integrations first");
 
-    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ type: "api_key", apiKey: "admin-lin" }),
-    });
-    const occupied = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ teamId: team.id }),
-    });
-    expect(occupied.status).toBe(409);
-    expect(((await occupied.json()) as { error: string }).error).toContain(
-      "Ask a team admin to change it in Settings → Organization → Teams.",
-    );
+    await connect(MEMBER_HEADERS, "member-lin");
+    await connect(HEADERS, "admin-lin");
+    expect((await shareFrom(MEMBER_HEADERS)).status).toBe(201);
+    expect((await shareFrom(HEADERS)).status).toBe(201);
+    // Sharing again changes nothing.
+    expect((await shareFrom(HEADERS)).status).toBe(201);
+    expect(await list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: "linear", delegatedFrom: "test-member", referenceBroken: false }),
+      expect.objectContaining({ service: "linear", delegatedFrom: "local-user", referenceBroken: false }),
+    ]));
+    expect(await list()).toHaveLength(2);
 
-    const revoke = await fetch(
-      `${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`,
-      { method: "DELETE", headers: MEMBER_HEADERS },
-    );
+    const revoke = await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`, { method: "DELETE", headers: MEMBER_HEADERS });
     expect(revoke.status).toBe(200);
-    const after = (await (
-      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
-    ).json()) as ListCredentialsResponse;
-    expect(after.credentials).toEqual([]);
-  });
-
-  // The refusals name the service the way the product does, not the way
-  // the route param spells it: the caller reads "Linear"/"GitHub", the
-  // same spelling the connect UI and this file's own GitHub copy use.
-  // Both halves are asserted together, because a label that swallowed the
-  // corrective sentence would be the worse regression.
-  //
-  // The slot can hold either kind of team row, and the two are removed
-  // under different labels ("Stop sharing" a delegated row, "Disconnect" a
-  // direct one), so the refusal names neither verb. It sends the caller to
-  // the page that shows which row is there, the same place the web
-  // client's own 409 copy names.
-  it("names the service by its product name in the occupied-slot refusal, and sends the caller to the page instead of one row kind's verb", async () => {
-    const team = await teamWithMember();
-    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
-      type: "api_key",
-      apiKey: "member-lin",
-    });
-    const shared = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
-      method: "POST",
-      headers: MEMBER_HEADERS,
-      body: JSON.stringify({ teamId: team.id }),
-    });
-    expect(shared.status).toBe(201);
-    const occupied = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
-      method: "POST",
-      headers: MEMBER_HEADERS,
-      body: JSON.stringify({ teamId: team.id }),
-    });
-    expect(occupied.status).toBe(409);
-    const occupiedError = ((await occupied.json()) as { error: string }).error;
-    expect(occupiedError).toBe(
-      "This team already has Linear. Ask a team admin to change it in Settings → Organization → Teams.",
-    );
-    // Neither removal verb: one of them is always wrong for the row that
-    // holds the slot, and a caller outside the browser would hunt for a
-    // control that row does not have.
-    expect(occupiedError).not.toMatch(/disconnect/i);
-    expect(occupiedError).not.toMatch(/stop sharing/i);
-
-    // `github` is the case a first-letter capitalization gets wrong, and
-    // the one this file already spells "GitHub" by hand two refusals up.
-    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
-      type: "api_key",
-      apiKey: "ghp_pat",
-    });
-    const sharedGithub = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
-      method: "POST",
-      headers: MEMBER_HEADERS,
-      body: JSON.stringify({ teamId: team.id }),
-    });
-    expect(sharedGithub.status).toBe(201);
-    const occupiedGithub = await fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
-      method: "POST",
-      headers: MEMBER_HEADERS,
-      body: JSON.stringify({ teamId: team.id }),
-    });
-    expect(occupiedGithub.status).toBe(409);
-    expect(((await occupiedGithub.json()) as { error: string }).error).toBe(
-      "This team already has GitHub. Ask a team admin to change it in Settings → Organization → Teams.",
-    );
+    expect((await list()).map((row) => row.delegatedFrom)).toEqual(["local-user"]);
+    // Revoking a share that is not there is a 404.
+    expect((await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`, { method: "DELETE", headers: MEMBER_HEADERS })).status).toBe(404);
+    // A member cannot end someone else's share; a team admin can.
+    expect((await shareFrom(MEMBER_HEADERS)).status).toBe(201);
+    expect((await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}?userId=local-user`, { method: "DELETE", headers: MEMBER_HEADERS })).status).toBe(403);
+    expect((await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}?userId=test-member`, { method: "DELETE", headers: HEADERS })).status).toBe(200);
+    expect((await list()).map((row) => row.delegatedFrom)).toEqual(["local-user"]);
   });
 
   // A team row is read with org-scoped 1Password tokens only, so a
@@ -1353,68 +1276,6 @@ describe("team credential scope (TKAI-205)", () => {
     expect(body.error).toContain("store the secret directly");
     expect(fake.resolveCalls).toEqual([]);
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
-  });
-
-  // `metadata.delegatedFrom` is what the team read follows to a member's
-  // personal row. Only the delegate route may write it, because that route
-  // runs as the member whose credential is being shared. A PUT that carries
-  // it would let a team admin point the team at any member's token.
-  describe("reserves the delegation metadata keys", () => {
-    it("refuses a team-scope reference that names a member, and stores nothing", async () => {
-      const team = await teamWithMember();
-      const fake = new FakeOnePasswordService();
-      api!.providers.onePassword = fake;
-      await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", {
-        type: "api_key",
-        apiKey: "member-lin",
-      });
-      const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
-        method: "PUT",
-        headers: HEADERS,
-        body: JSON.stringify({
-          type: "api_key",
-          scope: "team",
-          teamId: team.id,
-          onepassword: { reference: "op://vault/item/field", tokenScope: "org" },
-          metadata: { delegatedFrom: "test-member" },
-        }),
-      });
-      expect(put.status).toBe(400);
-      const { error } = (await put.json()) as { error: string };
-      expect(error).toContain("metadata.delegatedFrom");
-      expect(error).toContain("POST /api/credentials/linear/delegate");
-      expect(fake.resolveCalls).toEqual([]);
-      // The team read must not reach the member's row through a forged reference.
-      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
-    });
-
-    it("refuses the keys on every scope, with or without a secret", async () => {
-      const team = await teamWithMember();
-      const attempts: { scope?: string; teamId?: string; headers: Record<string, string> }[] = [
-        { headers: HEADERS },
-        { scope: "org", headers: HEADERS },
-        { scope: "team", teamId: team.id, headers: HEADERS },
-      ];
-      for (const attempt of attempts) {
-        for (const metadata of [{ delegatedFrom: "test-member" }, { sourceType: "api_key" }]) {
-          const put = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
-            method: "PUT",
-            headers: attempt.headers,
-            body: JSON.stringify({
-              type: "api_key",
-              apiKey: "some-secret",
-              scope: attempt.scope,
-              teamId: attempt.teamId,
-              metadata,
-            }),
-          });
-          expect(put.status).toBe(400);
-        }
-      }
-      expect(await api!.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear")).toBeNull();
-      expect(await api!.providers.engineCredentials.get({ type: "org", id: "local-org" }, "linear")).toBeNull();
-      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toBeNull();
-    });
   });
 
   // The same scope rule holds for a delegated reference: the team read
@@ -1483,9 +1344,7 @@ describe("team credential scope (TKAI-205)", () => {
       expect(
         await api!.providers.engineCredentials.get({ type: "user", id: "test-member" }, "linear"),
       ).toMatchObject({ apiKey: "member-lin" });
-      expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
-        metadata: { delegatedFrom: "test-member" },
-      });
+      expect(await listTeamShares(api!.providers.db, team.id)).toEqual([expect.objectContaining({ service: "linear", userId: "test-member" })]);
 
       // An org-scope reference is one the team read can use, so it is accepted.
       const orgRef = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
@@ -1784,7 +1643,7 @@ describe("team credential scope (TKAI-205)", () => {
     expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect GitHub for the team instead.");
   });
 
-  it("refuses to overwrite a direct team credential, even when a pre-read saw the slot empty", async () => {
+  it("shares beside the team's own connection without touching it", async () => {
     const team = await teamWithMember();
     const putDirect = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT",
@@ -1797,26 +1656,13 @@ describe("team credential scope (TKAI-205)", () => {
       headers: MEMBER_HEADERS,
       body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
     });
-
-    // Models the read-then-write window of a concurrent delegation or an
-    // admin's direct PUT: whatever a pre-read reports, the write itself
-    // must refuse an occupied slot.
-    const store = api!.providers.engineCredentials;
-    api!.providers.engineCredentials = {
-      get: (owner, service) => store.get(owner, service),
-      save: (owner, service, credential) => store.save(owner, service, credential),
-      delete: (owner, service) => store.delete(owner, service),
-      list: async () => [],
-    };
-
     const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
       method: "POST",
       headers: MEMBER_HEADERS,
       body: JSON.stringify({ teamId: team.id }),
     });
-    expect(share.status).toBe(409);
-
-    const direct = await store.get({ type: "team", id: team.id }, "linear");
+    expect(share.status).toBe(201);
+    const direct = await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear");
     expect(direct).toMatchObject({ type: "api_key", apiKey: "team-lin" });
     expect(direct?.metadata).toBeUndefined();
   });

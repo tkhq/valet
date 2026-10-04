@@ -9,9 +9,10 @@ import { describe, expect, it } from "vitest";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordService } from "./onepassword.js";
-import { CredentialReferenceBrokenError, TeamCredentialStore } from "../plugins/team-credential-store.js";
+import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import {
   resolveOrgCredentialRead,
+  readTeamCredential,
   resolveTeamCredentialRead,
   resolveUserCredentialRead,
   onePasswordScopesFor,
@@ -663,49 +664,51 @@ describe("resolveTeamCredentialRead", () => {
     ).resolves.toMatchObject({ apiKey: "resolved" });
   });
 
-  // A delegation whose source row is gone throws out of the store. The org
-  // bot is a different credential the team is entitled to, so a service the
-  // catalog reports as connected must still run.
-  describe("a broken delegation", () => {
-    function storeWithBrokenDelegation(): Promise<CredentialStore> {
-      const inner = fakeCredentialStore();
-      return inner
-        .save({ type: "team", id: teamId }, "slack", {
-          type: "bot_token",
-          metadata: { delegatedFrom: "departed-user" },
-        })
-        .then(() => new TeamCredentialStore(inner, { isMember: async () => false }));
+  // Each member's share is its own account. The acting member's share comes
+  // first, then the team's own connection; another member's share is used
+  // only with their approval.
+  describe("member shares", () => {
+    const shares = (members: string[]) => async () => members;
+    async function storeWith(rows: Array<[CredentialOwner, StoredCredential]>, service = "linear"): Promise<CredentialStore> {
+      const credentials = fakeCredentialStore();
+      for (const [owner, row] of rows) await credentials.save(owner, service, row);
+      return credentials;
     }
+    const bea = { type: "user" as const, id: "bea" };
+    const al = { type: "user" as const, id: "al" };
+    const team = { type: "team" as const, id: teamId };
 
-    it("falls back to the org row when the service is org-provided", async () => {
-      const credentials = await storeWithBrokenDelegation();
-      await credentials.save({ type: "org", id: orgId }, "slack", {
-        type: "bot_token",
-        accessToken: "org-bot",
-      });
-      const got = await resolveTeamCredentialRead(
-        { credentials },
-        { orgId, teamId },
-        "slack",
-        "org-provided",
-      );
+    it("uses the acting member's own share before the team's connection", async () => {
+      const credentials = await storeWith([[al, { type: "api_key", apiKey: "al-key" }], [team, { type: "api_key", apiKey: "team-key" }]]);
+      const deps = { credentials, shares: shares(["bea", "al"]) };
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "al-key" }) });
+      // Without a share of their own, a member uses the team's connection.
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "cy" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "team-key" }) });
+    });
+
+    it("asks the member whose share it would use, and uses it once they approved", async () => {
+      const credentials = await storeWith([[bea, { type: "api_key", apiKey: "bea-key" }]]);
+      const deps = { credentials, shares: shares(["bea"]) };
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: null, approvalFrom: "bea" });
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async (id) => id === "bea" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "bea-key" }) });
+    });
+
+    it("falls back to the org bot behind a share whose account is gone", async () => {
+      const credentials = await storeWith([[{ type: "org", id: orgId }, { type: "bot_token", accessToken: "org-bot" }]], "slack");
+      const got = await resolveTeamCredentialRead({ credentials, shares: shares(["departed"]) }, { orgId, teamId }, "slack", "org-provided");
       expect(got?.accessToken).toBe("org-bot");
     });
 
-    it("surfaces the typed error when no org row answers", async () => {
-      const credentials = await storeWithBrokenDelegation();
-      await expect(
-        resolveTeamCredentialRead({ credentials }, { orgId, teamId }, "slack", "org-provided"),
-      ).rejects.toBeInstanceOf(CredentialReferenceBrokenError);
-    });
-
-    // Readiness reads with "none" and reports a broken row as broken. A
+    // Readiness reads with "none" and reports a broken share as broken. A
     // silent null there would arm a trigger that fails on every fire.
-    it("surfaces the typed error when the caller allows no fallback", async () => {
-      const credentials = await storeWithBrokenDelegation();
-      await expect(
-        resolveTeamCredentialRead({ credentials }, { orgId, teamId }, "slack", "none"),
-      ).rejects.toBeInstanceOf(CredentialReferenceBrokenError);
+    it("names the fix when only a broken share remains", async () => {
+      const credentials = await storeWith([]);
+      await expect(resolveTeamCredentialRead({ credentials, shares: shares(["departed"]) }, { orgId, teamId, mayBorrow: async () => true }, "slack", "none"))
+        .rejects.toBeInstanceOf(CredentialReferenceBrokenError);
     });
   });
 

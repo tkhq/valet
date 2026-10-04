@@ -220,6 +220,7 @@ vi.mock("~/api/integrations", async (importOriginal) => {
     ...actual,
     useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
     useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null , reset: vi.fn() }),
+    useRevokeDelegation: () => ({ mutate: vi.fn(), isPending: false, error: null, reset: vi.fn() }),
   };
 });
 

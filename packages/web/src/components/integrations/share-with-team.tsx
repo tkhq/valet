@@ -13,7 +13,6 @@
  */
 import { useState } from "react";
 import type { TeamSummary } from "@valet/api/wire";
-import { ApiError } from "~/api/client";
 import {
   useCredentials,
   useDelegateCredential,
@@ -43,12 +42,12 @@ export function ShareWithTeam({ service, title }: { service: string; title: stri
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-2">
         <p className="px-2 pb-2 text-xs text-muted">
-          Prefer a dedicated team account. Sharing lets teammates act through your {title} account with its permissions.
-          Access stops if you leave the team or revoke sharing.
+          Your own work in the team uses your {title} account. When a teammate's request needs it, Valet asks you
+          first. Sharing stops if you leave the team or stop sharing.
         </p>
         <label className="flex items-start gap-2 px-2 pb-2 text-xs">
           <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
-          I authorize teammates to act through my personal account.
+          Use my account for my team work, and ask me before a teammate uses it.
         </label>
         {teamsQ.isLoading && <p className="px-2 py-2 text-xs text-muted">Loading teams…</p>}
         {teamsQ.error && (
@@ -93,30 +92,27 @@ function TeamShareRow({
   const credsQ = useCredentials("team", { teamId: team.id, enabled: open });
   const delegate = useDelegateCredential();
   const revoke = useRevokeDelegation();
-  const row = credsQ.data?.credentials.find((c) => c.service === service);
-  const mine = row !== undefined && row.delegatedFrom === me.data?.id;
-  const occupied = row !== undefined && !mine;
+  const rows = credsQ.data?.credentials.filter((c) => c.service === service) ?? [];
+  // Each member keeps their own share, so sharing never displaces anyone.
+  const myRow = rows.find((c) => c.delegatedFrom === me.data?.id);
+  const mine = myRow !== undefined;
+  const others = rows.filter((c) => c.delegatedFrom && c.delegatedFrom !== me.data?.id).length;
+  const teamOwn = rows.some((c) => !c.delegatedFrom);
   const pending = delegate.isPending || revoke.isPending;
   const err = delegate.error ?? revoke.error;
+  const context = [teamOwn ? "Has its own connection." : null,
+    others > 0 ? `${others === 1 ? "1 other member shares" : `${others} other members share`} theirs.` : null].filter(Boolean).join(" ");
 
   return (
     <li className="flex items-center justify-between gap-2 px-2 py-1">
       <div className="min-w-0">
         <p className="truncate text-sm text-ink">{team.name}</p>
-        {occupied && (
-          <p className="text-xs text-muted">
-            {row.referenceBroken
-              ? "Shared, but the reference is broken."
-              : row.delegatedFrom
-                ? "Already shared by another member."
-                : "This team already has a direct credential."}
-          </p>
-        )}
-        {mine && row?.referenceBroken && (
+        {context && <p className="text-xs text-muted">{context}</p>}
+        {myRow?.referenceBroken && (
           <p className="text-xs text-danger-500">Broken. Reconnect {title}, then share again.</p>
         )}
-        {credsQ.error && <p className="text-xs text-danger-500">Could not check this team’s connection. Reload before sharing.</p>}
-        {err && <p className="text-xs text-danger-500">{shareError(err, title)}</p>}
+        {credsQ.error && <p className="text-xs text-danger-500">Could not check this team’s connections. Reload before sharing.</p>}
+        {err && <p className="text-xs text-danger-500">{errorText(err)}</p>}
       </div>
       {mine ? (
         // "Stop sharing", not "Disconnect": this drops the team's link and
@@ -140,7 +136,7 @@ function TeamShareRow({
         <Button
           size="sm"
           className="shrink-0"
-          disabled={!acknowledged || pending || occupied || credsQ.isLoading || !!credsQ.error || !credsQ.data}
+          disabled={!acknowledged || pending || credsQ.isLoading || !!credsQ.error || !credsQ.data}
           aria-label={`Share ${title} with ${team.name}`}
           onClick={() => delegate.mutate({ service, body: { teamId: team.id } })}
         >
@@ -149,15 +145,4 @@ function TeamShareRow({
       )}
     </li>
   );
-}
-
-/** A 409 says the team's slot filled between the list read and the click.
- * The row behind it may be another member's share or a secret the team
- * stores, and the two are removed under different labels, so this names the
- * page rather than one of them. */
-function shareError(err: Error, title: string): string {
-  if (err instanceof ApiError && err.status === 409) {
-    return `This team already has ${title}. Ask a team admin to change it in Settings → Organization → Teams.`;
-  }
-  return errorText(err);
 }

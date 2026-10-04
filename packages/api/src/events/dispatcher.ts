@@ -238,7 +238,7 @@ export class EventDispatcher {
       }
 
       if (target.kind === "workflow" && target.workflowId) {
-        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
+        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy);
       } else if (target.kind === "orchestrator") {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
@@ -418,6 +418,8 @@ export class EventDispatcher {
     deliveryId: string,
     event: typeof events.$inferSelect,
     refs: Record<string, string>,
+    /** Who set the rule up. The run acts for them: their own shared accounts first. */
+    createdBy: string,
   ): Promise<void> {
     // Mirrors routes/workflows.ts POST /:id/runs: same run-id scheme, same
     // definitionVersionId, owner resolved from the definition row. The org
@@ -460,6 +462,7 @@ export class EventDispatcher {
     await this.deps.workflowRunHost.start(runId, params, def.definition, {
       ownerType: def.ownerType,
       ownerId: def.ownerId,
+      actorUserId: createdBy,
     });
   }
 

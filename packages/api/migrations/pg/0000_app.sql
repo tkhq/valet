@@ -802,6 +802,16 @@ CREATE TABLE "credentials" (
 	PRIMARY KEY("owner_type", "owner_id", "service")
 );
 --> statement-breakpoint
+CREATE TABLE "credential_shares" (
+	"team_id" text NOT NULL,
+	"service" text NOT NULL,
+	"user_id" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	PRIMARY KEY("team_id", "service", "user_id")
+);
+--> statement-breakpoint
+CREATE INDEX "credential_shares_user" ON "credential_shares" USING btree ("user_id","service");
+--> statement-breakpoint
 CREATE TABLE "mcp_oauth_clients" (
 	"service" text PRIMARY KEY NOT NULL,
 	"client_id" text NOT NULL,

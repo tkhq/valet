@@ -198,7 +198,8 @@ describe("EventDispatcher", () => {
     // Derived, not minted: retried claims must resolve to the same run.
     expect(runId).toBe(`wfrun_evt_${deliveryId}`);
     expect(def).toEqual(definition);
-    expect(owner).toEqual({ ownerType: "user", ownerId: "user-1" });
+    // The run acts for whoever set the rule up.
+    expect(owner).toEqual({ ownerType: "user", ownerId: "user-1", actorUserId: "user-1" });
     expect(params.workflowId).toBe("wf-1");
     expect(params.triggerId).toBe(subscriptionId);
     const trigger = params.input as WorkflowTriggerPayload;

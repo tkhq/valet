@@ -356,6 +356,20 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "credential shares", probe: { kind: "table", table: "credential_shares" }, sql: `CREATE TABLE IF NOT EXISTS "credential_shares" (
+  "team_id" text NOT NULL, "service" text NOT NULL, "user_id" text NOT NULL, "created_at" bigint NOT NULL,
+  PRIMARY KEY ("team_id", "service", "user_id")
+)` },
+  // A share used to be a team credential row with `metadata.delegatedFrom`,
+  // one per team and service. Move each into its own share row. This runs
+  // until the index below exists, so it lands once, before that index.
+  { describe: "credential shares move", probe: { kind: "index", index: "credential_shares_user" }, sql: `WITH moved AS (
+  DELETE FROM "credentials" WHERE "owner_type" = 'team' AND "metadata" ? 'delegatedFrom'
+  RETURNING "owner_id", "service", "metadata"->>'delegatedFrom' AS "user_id", "created_at"
+) INSERT INTO "credential_shares" ("team_id", "service", "user_id", "created_at")
+  SELECT "owner_id", "service", "user_id", "created_at" FROM moved WHERE "user_id" <> ''
+  ON CONFLICT DO NOTHING` },
+  { describe: "credential_shares_user", probe: { kind: "index", index: "credential_shares_user" }, sql: 'CREATE INDEX IF NOT EXISTS "credential_shares_user" ON "credential_shares" ("user_id", "service")' },
   { describe: "workflow action grants", probe: { kind: "table", table: "workflow_action_grants" }, sql: `CREATE TABLE IF NOT EXISTS "workflow_action_grants" (
   "id" text PRIMARY KEY, "org_id" text NOT NULL, "workflow_id" text NOT NULL,
   "owner_type" text NOT NULL, "owner_id" text NOT NULL, "action_id" text NOT NULL,

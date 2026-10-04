@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
-import { TeamCredentialStore } from "../plugins/team-credential-store.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
 import type { ListPluginsResponse } from "../wire/types.js";
@@ -334,14 +334,8 @@ describe("GET /api/plugins connect mode", () => {
     const team = await createTeam(api.providers.db, {
       orgId: "local-org", name: "Broken delegation", creatorUserId: "local-user",
     });
-    await api.providers.engineCredentials.save({ type: "team", id: team.id }, "slack", {
-      type: "bot_token", metadata: { delegatedFrom: "former-member" },
-    });
-    // Match production composition: list sees the team row, while get
-    // resolves the delegation and throws because its source is gone.
-    api.providers.engineCredentials = new TeamCredentialStore(api.providers.engineCredentials, {
-      isMember: async () => true,
-    });
+    // A share from someone who left the team, whose account is gone too.
+    await shareCredential(api.providers.db, { teamId: team.id, service: "slack", userId: "former-member", createdAt: 1 });
 
     const res = await fetch(`${api.baseUrl}/api/plugins?teamId=${team.id}`);
     expect(res.status).toBe(200);

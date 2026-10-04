@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CredentialSummary } from "@valet/api/wire";
+import { useMe } from "~/api/settings";
 import { useCredentials, useDelegateCredential } from "~/api/integrations";
 import { Button, Popover, PopoverContent, PopoverTrigger } from "~/components/primitives";
 import { displayName } from "~/components/integrations/display-name";
@@ -30,11 +31,11 @@ const ONEPASSWORD = "onepassword";
  * team a pointer that never resolves — the route refuses it, and saying so
  * here saves the round trip.
  */
-export function blockedReason(cred: CredentialSummary, teamServices: Set<string>): string | null {
+export function blockedReason(cred: CredentialSummary, sharedByMe: Set<string>): string | null {
   if (cred.service === ONEPASSWORD) {
     return "A 1Password token is not a single connection. Connect a team service account instead.";
   }
-  if (teamServices.has(cred.service)) return "This team already has a connection for this service.";
+  if (sharedByMe.has(cred.service)) return "You already share this with the team.";
   if (cred.onepasswordTokenScope === "personal") {
     return "This reads a personal 1Password token, which a team cannot use. Store it again with the organization token.";
   }
@@ -49,7 +50,9 @@ export function PullFromPersonal({ teamId, teamName }: { teamId: string; teamNam
   const delegate = useDelegateCredential();
 
   const mine = mineQ.data?.credentials ?? [];
-  const teamServices = new Set((teamQ.data?.credentials ?? []).map((c) => c.service));
+  const me = useMe();
+  // Each member keeps their own share, so only the caller's own blocks a pull.
+  const sharedByMe = new Set((teamQ.data?.credentials ?? []).filter((c) => c.delegatedFrom === me.data?.id).map((c) => c.service));
   const settled = !mineQ.isLoading && !mineQ.error;
 
   return (
@@ -95,7 +98,7 @@ export function PullFromPersonal({ teamId, teamName }: { teamId: string; teamNam
 
         {settled &&
           mine.map((cred) => {
-            const blocked = blockedReason(cred, teamServices);
+            const blocked = blockedReason(cred, sharedByMe);
             const title = displayName(cred.service);
             return (
               <div key={cred.service} className="px-2 py-1">

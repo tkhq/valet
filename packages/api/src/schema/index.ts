@@ -1301,8 +1301,9 @@ export const workflowRuns = pgTable(
     // path once it resolves the workflow's owner.
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
-    // Who clicked Run. Null on a scheduled, event, or webhook start.
-    // Display and audit only — credential resolution uses owner_type/owner_id.
+    // The member a run acts for: who clicked Run, or who set up the schedule
+    // or event rule. Null on a webhook start. A team run uses this member's
+    // own shared accounts first (`services/credential-shares.ts`).
     actorUserId: text("actor_user_id"),
     // When the settled-run sandbox reclaim destroyed this run's session
     // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
@@ -1383,6 +1384,24 @@ export const credentials = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.service] })],
+);
+
+/** A member's own account for `service`, shared with a team. The row holds
+ * no secret: a read follows it to the member's live user credential. Each
+ * member keeps their own share, so a team can hold several per service
+ * (`services/credential-shares.ts`). */
+export const credentialShares = pgTable(
+  "credential_shares",
+  {
+    teamId: text("team_id").notNull(),
+    service: text("service").notNull(),
+    userId: text("user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.service, t.userId] }),
+    index("credential_shares_user").on(t.userId, t.service),
+  ],
 );
 
 // `mcp_oauth_clients` — one dynamically-registered OAuth client per MCP

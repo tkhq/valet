@@ -876,7 +876,7 @@ async function resolveDynamic(
   if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
   const credentialService = plugin.credentialService ?? plugin.service;
   const actions = await resolveActions({
-    credentials: scopedCredentialProvider(ctx, credentialService),
+    credentials: scopedCredentialProvider(ctx, credentialService, "discover"),
   });
   const built = buildEntries(plugin.service, plugin, actions);
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
@@ -1610,9 +1610,10 @@ function qualifiedId(entry: CatalogEntry): string {
 function scopedCredentialProvider(
   ctx: ToolContext,
   defaultService: string,
+  purpose?: "discover",
 ): ToolContext["credentials"] {
   return {
-    get: (service?: string) => ctx.credentials.get(service ?? defaultService),
+    get: (service?: string) => ctx.credentials.get(service ?? defaultService, purpose),
     request: (service: string, reason: string) => ctx.credentials.request(service, reason),
   };
 }

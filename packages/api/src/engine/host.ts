@@ -34,7 +34,9 @@ import {
   type PolicyResolver,
   type PluginStore,
 } from "@valet/engine";
-import type { ValetPlugin } from "@valet/engine";
+import type { CredentialUse, ValetPlugin } from "@valet/engine";
+import { hasBorrowGrant } from "../services/credential-borrow.js";
+import { membersSharing } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { createBrowserPolicy, browserSessionHooks, prepareBrowserSandboxStop } from "../services/browser-host.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
@@ -1805,13 +1807,15 @@ export class EngineHost {
     userId: string,
     orgId: string,
     actingMember: boolean,
-  ): ((owner: CredentialOwner, service: string) => Promise<StoredCredential | null>) | undefined {
+    /** The member a turn with no author acts for: a workflow run's actor. */
+    runActor?: string,
+  ): ((owner: CredentialOwner, service: string, use: CredentialUse) => Promise<StoredCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
     const onePassword = this.opts.onePassword;
     if ((!tokenDeps || !db) && !onePassword) return undefined;
-    return async (sessionOwner, service) => {
+    return async (sessionOwner, service, use) => {
       // A legacy team session reads as the member prompting it; every other
       // session reads as the principal the engine hands over. The scope
       // follows the OWNER either way: a shared session never reaches the
@@ -1885,9 +1889,13 @@ export class EngineHost {
           // org-scoped 1Password lookup. The sandbox git credential route
           // reads a team-owned workflow sandbox's row through the same
           // helper, so git and these tools agree.
+          const actor = use.actorId ?? runActor;
           const teamRow = await usableTeamGithubRow(
-            { credentials, onePassword },
-            { orgId, teamId: owner.id, userId, scopes },
+            { credentials, onePassword, shares: (teamId, svc) => membersSharing(db, teamId, svc) },
+            {
+              orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
+              mayBorrow: async (memberId) => hasBorrowGrant(db, { sessionId, threadId: use.threadId, service: "github", memberId }),
+            },
             orgFallbackPolicy(this.opts.plugins, "github"),
           );
           if (teamRow) return teamRow;
@@ -1922,9 +1930,17 @@ export class EngineHost {
       // only a user-owned session has one person whose link can authorize it.
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
       if (owner.type === "team") {
+        // The acting member's own share first. Another member's share is
+        // used only to list tools, or once that member approved
+        // (`services/credential-borrow.ts`).
+        const actor = use.actorId ?? runActor;
         return resolveTeamCredentialRead(
-          { credentials, onePassword },
-          { orgId, teamId: owner.id, userId, scopes },
+          { credentials, onePassword, ...(db ? { shares: (teamId: string, svc: string) => membersSharing(db, teamId, svc) } : {}) },
+          {
+            orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
+            mayBorrow: async (memberId) => use.discover === true
+              || (db ? await hasBorrowGrant(db, { sessionId, threadId: use.threadId, service, memberId }) : false),
+          },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read
           // reach an org-scoped 1Password item by service name while still
@@ -3841,7 +3857,7 @@ export class EngineHost {
     });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
-    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false);
+    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, false, opts.actorUserId);
     // Workspace prep for the session's sandbox: the git credential helper,
     // the `gh` shim, `valet-secrets` and a git identity. Until 2026-09-22
     // this build wired no `specProvider`, so a workflow sandbox never ran

@@ -834,14 +834,28 @@ export interface CredentialProvider {
    * actions can call `.get()` to use their own default scope (set up by
    * the plugin catalog when it builds PluginActionContext); first-class
    * tools should always pass it explicitly.
+   *
+   * `purpose: "discover"` marks a read that only lists a service's tools.
+   * The host may then use an account it would ask approval for before an
+   * action runs (`CredentialUse.discover`).
    */
-  get(service?: string): Promise<Credential | null>;
+  get(service?: string, purpose?: "discover"): Promise<Credential | null>;
   request(service: string, reason: string): Promise<Credential>;
 }
 
 export interface CredentialOwner {
   type: "user" | "team" | "org" | "session";
   id: string;
+}
+
+/** Who a credential read acts for: the turn's author and thread. A team host
+ * uses the acting member's own account first. A turn from a channel sender
+ * with no Valet account carries no `actorId`. */
+export interface CredentialUse {
+  actorId?: string;
+  threadId?: string;
+  /** The read only lists a service's tools (`CredentialProvider.get`). */
+  discover?: boolean;
 }
 
 export interface StoredCredential {
@@ -2397,14 +2411,14 @@ export interface CreateSessionOptions {
    * existing paths unchanged (the session-scoped `CredentialProvider`
    * `Session.credentialProvider()` returns reads `providers.credentials`
    * directly, byte-identical to before). When present it REPLACES that read:
-   * `Session.credentialProvider()` calls it with `(owner, service)` and uses
+   * `Session.credentialProvider()` calls it with `(owner, service, use)` and uses
    * its return value directly — a `null` return yields `null` with NO store
    * fallback. The host implementation is the single decision point (e.g. the
    * api resolves `github` through the token service and delegates every other
    * service to the raw store itself), so the engine never re-reads the store
    * behind a resolver it was given.
    */
-  credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
+  credentialResolver?: (owner: CredentialOwner, service: string, use: CredentialUse) => Promise<StoredCredential | null>;
   /** Resolve the assistant identity used by provider-specific outbound actions. */
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */
