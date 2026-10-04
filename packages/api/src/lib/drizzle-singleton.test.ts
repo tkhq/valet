@@ -6,7 +6,8 @@ import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefini
 describe("workspace singleton repair on an already migrated database", () => {
   const pglite = new PGlite();
   const db = pgDbFromPglite(pglite);
-  beforeAll(async () => { await applyAppMigrations(db); });
+  // Engine tables too: several repairs read them, and each test must run alone.
+  beforeAll(async () => { await applyEngineMigrations(db); await applyAppMigrations(db); });
   afterAll(async () => { await db.close(); });
 
   async function restorePreviousSchema() {
@@ -26,7 +27,6 @@ describe("workspace singleton repair on an already migrated database", () => {
   });
 
   it("gives a team workflow editor thread from an earlier build its first author", async () => {
-    await applyEngineMigrations(db);
     await db.query(`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
       VALUES ('team-rt', 'team', 'team-x', 'u-first', 'org', '/', 'interactive', 'running', 1, 1),
              ('user-rt', 'user', 'u-solo', 'u-solo', 'org', '/', 'interactive', 'running', 1, 1)`);

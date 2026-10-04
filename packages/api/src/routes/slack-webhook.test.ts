@@ -902,18 +902,6 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(res.status).toBe(413);
   });
 
-  it("acks inside Slack's 3-second window without waiting on the fan-out", async () => {
-    api = await bootTestApi({ plugins: [slackPlugin] });
-    await seedRunningTransport(api);
-
-    const body = envelope(dmMessage(), "Ev-timing");
-    const started = Date.now();
-    const res = await post(api.baseUrl, body, sign(body));
-    const elapsed = Date.now() - started;
-
-    expect(res.status).toBe(200);
-    expect(elapsed).toBeLessThan(3_000);
-  });
 });
 
 

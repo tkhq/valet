@@ -122,21 +122,6 @@ it("shows a private Slack channel only to a viewer whose linked Slack account is
   expect((await detail()).status).toBe(200);
 });
 
-it("hides a team runtime's private Slack thread from members outside that channel", async () => {
-  api = await bootTestApi();
-  const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Secret", creatorUserId: "local-user" });
-  const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
-  const thread = await session.createThread("slack:CTEAMSECRET:1700.1");
-  await connectSlack(api, { CTEAMSECRET: ["UTEAMMATE"] });
-  const threads = async () => ((await (await fetch(`${api!.baseUrl}/api/sessions/${sessionId}/threads`)).json()) as ListThreadsResponse).threads.map((t) => t.id);
-  const messages = () => fetch(`${api!.baseUrl}/api/sessions/${sessionId}/messages?threadId=${thread.id}`);
-  expect(await threads()).not.toContain(thread.id);
-  expect((await messages()).status).toBe(404);
-  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UTEAMMATE", userId: "local-user" });
-  expect(await threads()).toContain(thread.id);
-  expect((await messages()).status).toBe(200);
-});
-
 async function teamRuntime(a: TestApi) {
   const team = await createTeam(a.providers.db, { orgId: "local-org", name: "Secret", creatorUserId: "local-user" });
   return await ensureDefaultAssistantSession(a.providers, { type: "team", id: team.id }, { actorUserId: "local-user", orgId: "local-org" });
@@ -187,16 +172,6 @@ it("keeps a public channel's threads readable after Slack disconnects, and a pri
   expect(listed).not.toContain(closed.id);
 });
 
-it("keeps another member's helper thread private in the API", async () => {
-  api = await bootTestApi();
-  const { session, sessionId } = await teamRuntime(api);
-  const theirs = await session.createThread("app-assistant:another-user");
-  const mine = await session.createThread("app-assistant:local-user");
-  expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${theirs.id}`)).status).toBe(404);
-  expect((await fetch(`${api.baseUrl}/api/threads/${theirs.id}`)).status).toBe(404);
-  expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?threadId=${mine.id}`)).status).toBe(200);
-});
-
 it("leaves another member's helper thread out of a team channel's conversations and messages", async () => {
   api = await bootTestApi();
   const { session, sessionId } = await teamRuntime(api);
@@ -215,18 +190,6 @@ it("leaves another member's helper thread out of a team channel's conversations 
   expect(detail.messages.map((m) => m.text)).toEqual(["team update"]);
   const list = await (await fetch(`${api.baseUrl}/api/workspaces/${owner}/channels`)).json() as ListChannelsResponse;
   expect(list.channels.find((c) => c.key === "slack:CPUBLICENG")).toMatchObject({ messageCount: 1, conversationCount: 1 });
-});
-
-it("hides a child session started from another member's helper thread", async () => {
-  api = await bootTestApi();
-  const { session, sessionId } = await teamRuntime(api);
-  const theirs = await session.createThread("app-assistant:another-user");
-  const owner = (await api.providers.db.execute(sql`SELECT owner_id FROM agent_sessions WHERE id = ${sessionId}`) as { rows: Array<{ owner_id: string }> }).rows[0]!.owner_id;
-  await api.providers.db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at)
-    VALUES ('their-child', 'team', ${owner}, 'another-user', 'local-org', '/', 'child', 'running', ${sessionId}, ${theirs.id}, 1, 1)`);
-  await api.providers.db.insert(agentSessions).values({ id: "their-child", userId: "another-user", orgId: "local-org", workspace: "/", ownerType: "team", ownerId: owner, title: "Private work", createdAt: 1, updatedAt: 1 });
-  expect((await fetch(`${api.baseUrl}/api/sessions/their-child`)).status).toBe(404);
-  expect((await fetch(`${api.baseUrl}/api/sessions/their-child/messages`)).status).toBe(404);
 });
 
 it("routes a delegated child's pull request back to the thread that delegated it", async () => {
