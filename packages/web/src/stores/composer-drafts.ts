@@ -17,7 +17,6 @@
  * flight, not text that can be written back.
  */
 import { create } from "zustand";
-import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import type { ComposerImage } from "~/components/session/composer-images";
 import type { ComposerFile } from "~/components/session/composer-files";
 
@@ -88,25 +87,32 @@ interface ComposerDraftStore {
   adoptOrphanDraft(sessionId: string, threadId: string): void;
 }
 
-/** localStorage can be absent or throw (private windows, blocked site data,
- * a full quota). A draft that cannot be saved still works for this tab. */
-const safeLocalStorage: StateStorage = {
-  getItem: (name) => {
-    try { return localStorage.getItem(name); } catch { return null; }
-  },
-  setItem: (name, value) => {
-    try { localStorage.setItem(name, value); } catch { /* keep the in-memory draft */ }
-  },
-  removeItem: (name) => {
-    try { localStorage.removeItem(name); } catch { /* nothing to remove */ }
-  },
-};
+/** One localStorage entry per draft, so a write in one window names exactly
+ * the draft it changed and leaves the others alone. localStorage can be
+ * absent or throw (private windows, blocked site data, a full quota). A draft
+ * that cannot be saved still works for this tab. */
+const STORAGE_PREFIX = "valet:composer-draft:";
 
-const STORAGE_NAME = "valet:composer-drafts";
+function storedDrafts(): Record<string, ComposerDraft> {
+  const byKey: Record<string, ComposerDraft> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const name = localStorage.key(i);
+      const text = name?.startsWith(STORAGE_PREFIX) ? localStorage.getItem(name) : null;
+      if (name && text) byKey[name.slice(STORAGE_PREFIX.length)] = { ...EMPTY_DRAFT, text };
+    }
+  } catch { /* nothing stored */ }
+  return byKey;
+}
 
-type PersistedDrafts = { texts: Record<string, string> };
+function storeText(key: string, text: string): void {
+  try {
+    if (text) localStorage.setItem(STORAGE_PREFIX + key, text);
+    else localStorage.removeItem(STORAGE_PREFIX + key);
+  } catch { /* keep the in-memory draft */ }
+}
 
-export const useComposerDraftStore = create<ComposerDraftStore>()(persist((set) => {
+export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
   /** Apply `fn` to the slot; an all-empty result deletes the slot. */
   function patch(key: string, fn: (prev: ComposerDraft) => ComposerDraft): void {
     set((state) => {
@@ -120,7 +126,7 @@ export const useComposerDraftStore = create<ComposerDraftStore>()(persist((set) 
     });
   }
   return {
-    byKey: {},
+    byKey: storedDrafts(),
     setText: (key, text) => patch(key, (d) => ({ ...d, text })),
     setImages: (key, update) => patch(key, (d) => ({ ...d, images: resolve(update, d.images) })),
     setFiles: (key, update) => patch(key, (d) => ({ ...d, files: resolve(update, d.files) })),
@@ -145,31 +151,21 @@ export const useComposerDraftStore = create<ComposerDraftStore>()(persist((set) 
         return { byKey: target !== undefined ? rest : { ...rest, [targetKey]: orphan } };
       }),
   };
-}, {
-  name: STORAGE_NAME,
-  version: 1,
-  storage: createJSONStorage<PersistedDrafts>(() => safeLocalStorage),
-  partialize: (state): PersistedDrafts => ({
-    texts: Object.fromEntries(
-      Object.entries(state.byKey).filter(([, draft]) => draft.text !== "").map(([key, draft]) => [key, draft.text]),
-    ),
-  }),
-  // The stored texts win; attachments and errors in memory are kept.
-  merge: (persisted, current) => {
-    const texts = (persisted as PersistedDrafts | undefined)?.texts ?? {};
-    const byKey: Record<string, ComposerDraft> = {};
-    for (const [key, draft] of Object.entries(current.byKey)) byKey[key] = { ...draft, text: texts[key] ?? "" };
-    for (const [key, text] of Object.entries(texts)) byKey[key] = { ...(byKey[key] ?? EMPTY_DRAFT), text };
-    for (const [key, draft] of Object.entries(byKey)) if (isEmpty(draft)) delete byKey[key];
-    return { ...current, byKey };
-  },
-}));
+});
 
-// Another window wrote its drafts. Reload them, so this window's next write
-// does not put back the text that window just changed.
+useComposerDraftStore.subscribe((state, prev) => {
+  if (state.byKey === prev.byKey) return;
+  for (const key of new Set([...Object.keys(state.byKey), ...Object.keys(prev.byKey)])) {
+    const text = state.byKey[key]?.text ?? "";
+    if (text !== (prev.byKey[key]?.text ?? "")) storeText(key, text);
+  }
+});
+
+// Another window changed one draft. Apply that draft only.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
-    if (event.key === STORAGE_NAME) void useComposerDraftStore.persist.rehydrate();
+    if (!event.key?.startsWith(STORAGE_PREFIX)) return;
+    useComposerDraftStore.getState().setText(event.key.slice(STORAGE_PREFIX.length), event.newValue ?? "");
   });
 }
 

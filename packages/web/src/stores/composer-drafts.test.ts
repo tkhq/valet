@@ -5,7 +5,7 @@
  * while the threads query loaded) into the real thread, and draft text that
  * survives a reload.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { draftKey, EMPTY_DRAFT, useComposerDraftStore, prefillComposerDraft } from "./composer-drafts";
 
 const SESSION = "sess-1";
@@ -101,15 +101,24 @@ describe("starter drafts", () => {
     const key = draftKey(SESSION, THREAD);
     store().setText(key, "typed before reload");
     store().setFileErrors(key, ["too large"]);
-    // A reload starts from an empty store and the saved text.
-    const saved = localStorage.getItem("valet:composer-drafts") ?? "";
-    useComposerDraftStore.setState({ byKey: {} });
-    localStorage.setItem("valet:composer-drafts", saved);
-    await useComposerDraftStore.persist.rehydrate();
-    expect(store().byKey[key]).toEqual({ ...EMPTY_DRAFT, text: "typed before reload" });
+    vi.resetModules();
+    const reloaded = await import("./composer-drafts");
+    expect(reloaded.useComposerDraftStore.getState().byKey[key]).toEqual({ ...EMPTY_DRAFT, text: "typed before reload" });
 
     store().clear(key);
-    await useComposerDraftStore.persist.rehydrate();
-    expect(store().byKey[key]).toBeUndefined();
+    expect(localStorage.getItem(`valet:composer-draft:${key}`)).toBeNull();
+  });
+
+  it("applies another window's draft without touching this window's others", () => {
+    const mine = draftKey("session-a", "thread-a");
+    const theirs = draftKey("session-b", "thread-b");
+    store().setText(mine, "draft A");
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:${theirs}`, newValue: "draft B" }));
+    expect(store().byKey[mine]?.text).toBe("draft A");
+    expect(store().byKey[theirs]?.text).toBe("draft B");
+    // That window sent its message.
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:${theirs}`, newValue: null }));
+    expect(store().byKey[theirs]).toBeUndefined();
+    expect(store().byKey[mine]?.text).toBe("draft A");
   });
 });
