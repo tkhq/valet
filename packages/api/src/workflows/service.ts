@@ -29,7 +29,7 @@ import {
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
-import { runOriginVisible } from "../services/thread-access.js";
+import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
 import {
   updateInvocationOutcome,
   writeExecutionGrant,
@@ -1663,13 +1663,15 @@ async function ownedRun(
   if (scope === "act" && run.owner.ownerType === "org") {
     if (!(await isOrgAdmin(deps.db, owner.orgId, owner.userId))) return null;
   }
-  // A team run started from a private thread is that thread's audience's. A
-  // team principal names a person only when a member is acting
+  // A team principal names a person only when a member is acting
   // (`ownerFromContext`); a team key or a machine turn sees what the team shares.
   const person = owner.principal?.type !== "team" || owner.requireTeamMembership === true;
   const viewer = { orgId: owner.orgId, userId: person ? owner.userId : undefined };
   const access = { db: deps.db, engineCredentials: deps.credentials, onePassword: deps.onePassword, engineStore: deps.engineStore };
-  if (!(await runOriginVisible(access, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))) {
+  // A run started from a private thread or a private Slack channel is that
+  // audience's alone.
+  if (!(await runOriginVisible(access, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))
+    || !(await runEventVisible(access, viewer, run.params))) {
     // A member the run asks to lend their account sees it while it waits on them.
     const approvers = await pendingApprovers(deps, run);
     if (![...approvers.values()].some((a) => a.userId === viewer.userId)) return null;

@@ -1732,7 +1732,8 @@ describe("buildChildReader", () => {
       ('shared-child', 'team', 'team-1', 'local-user', 'local-org', '/', 'child', 'running', 'team-runtime', 'thr-shared', 1, 1)`);
     await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
       ('thr-helper', 'team-runtime', 'app-assistant:local-user', 'idle', 'steer', 1, 1),
-      ('thr-shared', 'team-runtime', 'web:default', 'idle', 'steer', 1, 1)`);
+      ('thr-shared', 'team-runtime', 'web:default', 'idle', 'steer', 1, 1),
+      ('thr-slack', 'team-runtime', 'slack:CPUB:1.1', 'idle', 'steer', 1, 1)`);
     for (const [child, parentThreadId] of [["private-child", "thr-helper"], ["shared-child", "thr-shared"]] as const) {
       await db.insert(agentSessions).values({ id: child, userId: "local-user", orgId: "local-org", workspace: "/", ownerType: "team", ownerId: "team-1", createdAt: 1, updatedAt: 1 });
       await db.insert(childWatches).values({ childSessionId: child, queueItemId: `q-${child}`, parentSessionId: "team-runtime", parentThreadId,
@@ -1741,8 +1742,11 @@ describe("buildChildReader", () => {
     // The helper thread that started it reads it; a shared thread does not.
     expect(await reader({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-helper" })).toEqual([]);
     expect(await reader({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();
-    // A child of a shared thread is readable from any thread.
+    // A child of a shared thread is readable from any of the team's own threads.
     expect(await reader({ childSessionId: "shared-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-helper" })).toEqual([]);
+    // A Slack conversation has readers outside the team, so it reaches only
+    // what `thread_read` lets it read: not a team web thread's child.
+    expect(await reader({ childSessionId: "shared-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-slack" })).toBeNull();
     // child_status and child_send apply the same rule.
     const status = buildChildStatusReader(childrenDeps(api));
     expect(await status({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();

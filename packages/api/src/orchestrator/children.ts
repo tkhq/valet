@@ -18,7 +18,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
-import { governingThreadKeySql, sharedWithWholeTeamSql } from "../services/thread-access.js";
+import { governingThreadKeySql, isOutsideThreadKey, outsideReaderMayReach, sharedWithWholeTeamSql } from "../services/thread-access.js";
 import {
   PendingCapError,
   recordSandboxDestroyed,
@@ -1020,12 +1020,18 @@ async function childReachableFrom(
   readerThreadId: string | undefined,
 ): Promise<boolean> {
   if (readerThreadId === undefined || readerThreadId === watch.parentThreadId) return true;
-  const result = await db.execute(sql`SELECT s.owner_type, ${sharedWithWholeTeamSql(watch.orgId,
-    governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`, "parent link"))} AS shared
-    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; shared: boolean }> };
+  const governing = governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`, "parent link");
+  const result = await db.execute(sql`SELECT s.owner_type, ${governing} AS key, ${sharedWithWholeTeamSql(watch.orgId, governing)} AS shared,
+    (SELECT t.key FROM engine_threads t WHERE t.session_id = s.id AND t.id = ${readerThreadId}) AS reader_key
+    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; key: string | null; shared: boolean; reader_key: string | null }> };
   const parent = result.rows[0];
   // A parent that is gone leaves nobody to say who may read its child.
-  return !!parent && (parent.owner_type !== "team" || parent.shared === true);
+  if (!parent) return false;
+  if (parent.owner_type !== "team") return true;
+  // A Slack, Telegram, or GitHub conversation reaches only what it may read
+  // with `thread_read` (`services/thread-access.ts#threadReadAccess`).
+  if (isOutsideThreadKey(parent.reader_key)) return outsideReaderMayReach(parent.reader_key!, parent.key, parent.shared === true);
+  return parent.shared === true;
 }
 
 export function buildChildReader(deps: ChildrenDeps): ChildReader {

@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { linkIdentity } from "../channels/identity-links.js";
-import { events } from "../schema/index.js";
+import { events, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 
 let api: TestApi | undefined;
@@ -49,4 +49,29 @@ it("shows a private Slack channel's events only to the channel's members", async
   })).status).toBe(404);
   expect((await get("public-message", "test-member")).status).toBe(200);
   expect((await get("github-push", "test-member")).status).toBe(200);
+});
+
+it("shows a workflow run a private Slack channel's event started only to the channel's members", async () => {
+  api = await bootTestApi();
+  await connectSlack(api, { CPRIV: ["UMEMBER"] });
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UMEMBER", userId: "local-user" });
+  const p = api.providers;
+  await p.db.insert(teams).values({ id: "team-ev", orgId: "local-org", name: "Events", createdAt: 1 });
+  await p.db.insert(teamMembers).values([
+    { teamId: "team-ev", userId: "local-user", role: "member" },
+    { teamId: "team-ev", userId: "test-member", role: "member" },
+  ]);
+  await p.db.insert(workflowDefinitions).values({ id: "wf-ev", orgId: "local-org", ownerType: "team", ownerId: "team-ev", name: "Digest", definition: {}, createdAt: 1, updatedAt: 1 });
+  const start = (runId: string, channel: string) => p.workflowStore.createRun(runId, {
+    workflowId: "wf-ev", definitionVersionId: "v1",
+    input: { type: "event", timestamp: "2026-10-04T00:00:00.000Z", data: { key: "slack.message", refs: { channel }, payload: { channel, text: "secret plan" } }, metadata: {} },
+  }, { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "team-ev" });
+  await start("run-private", "CPRIV");
+  await start("run-public", "CPUB");
+  const get = (runId: string, user?: string) =>
+    fetch(`${api!.baseUrl}/api/workflows/runs/${runId}`, user ? { headers: { "x-valet-test-user-id": user } } : {});
+
+  expect((await get("run-private")).status).toBe(200);
+  expect((await get("run-private", "test-member")).status).toBe(404);
+  expect((await get("run-public", "test-member")).status).toBe(200);
 });

@@ -161,6 +161,23 @@ async function spawningThread(db: Providers["db"], sessionId: string): Promise<{
 /** Conversations whose readers need not be on the team. */
 const OUTSIDE_THREAD_KEY = /^(slack|telegram|github):/;
 
+/** Whether people outside the team read this conversation (Slack, Telegram, GitHub). */
+export function isOutsideThreadKey(key: string | null | undefined): boolean {
+  return OUTSIDE_THREAD_KEY.test(key ?? "");
+}
+
+/** Whether a conversation people outside the team read may reach `targetKey`,
+ * work the whole team may see (`targetShared`): its own conversation, or a
+ * public Slack channel from a Slack conversation. `threadReadAccess` applies
+ * the same rule with a live privacy check. */
+export function outsideReaderMayReach(readerKey: string, targetKey: string | null, targetShared: boolean): boolean {
+  const readerChannel = slackConversation(readerKey)?.channelId;
+  const targetChannel = slackConversation(targetKey)?.channelId;
+  if (targetChannel && targetChannel === readerChannel) return true;
+  if (!readerChannel || !targetChannel) return readerKey === targetKey;
+  return targetShared;
+}
+
 /** Whether a key names one person's thread: a helper or a workflow editor
  * conversation. Such a thread is never shared, even when the key names no
  * person, as an editor key from before per-person keys (`workflow:<id>`) does. */
@@ -307,7 +324,7 @@ export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
     const readerChannel = slackConversation(reader.key)?.channelId;
     const targetChannel = slackConversation(target.key)?.channelId;
     if (targetChannel && targetChannel === readerChannel) return true;
-    if (OUTSIDE_THREAD_KEY.test(reader.key ?? "")) {
+    if (isOutsideThreadKey(reader.key)) {
       if (!readerChannel || !targetChannel) return reader.key === target.key;
     } else if (!targetChannel) {
       return true;
@@ -335,4 +352,28 @@ export async function runOriginVisible(
   const thread = session && await deps.engineStore.getThread(run.origin.assistantSessionId, run.origin.threadId);
   if (!thread) return viewer.userId !== undefined && viewer.userId === run.actorUserId;
   return threadVisibility(deps, session, viewer)(thread.key);
+}
+
+/** The Slack channel an event came from. Ingest copies it to `refs.channel`
+ * (`plugin-slack/src/triggers.ts`); an older row falls back to the payload,
+ * where a reaction keeps it at `item.channel`. */
+export function slackEventChannel(event: { service: string; refs: unknown; payload: unknown }): string | undefined {
+  if (event.service !== "slack") return undefined;
+  const str = (v: unknown) => typeof v === "string" && v ? v : undefined;
+  const obj = (v: unknown) => v && typeof v === "object" ? v as Record<string, unknown> : undefined;
+  const payload = obj(event.payload);
+  return str(obj(event.refs)?.channel) ?? str(payload?.channel) ?? str(obj(payload?.channel)?.id)
+    ?? str(payload?.channel_id) ?? str(obj(payload?.item)?.channel);
+}
+
+/** Whether the viewer may see a workflow run started by a Slack event. The
+ * run's input carries the event's message, so a run from a private channel
+ * shows only to that channel's members, the same as the event itself. */
+export async function runEventVisible(deps: AccessDeps, viewer: ThreadViewer, params: { input?: unknown }): Promise<boolean> {
+  const input = params.input && typeof params.input === "object" ? params.input as Record<string, unknown> : undefined;
+  const data = input?.type === "event" && input.data && typeof input.data === "object" ? input.data as Record<string, unknown> : undefined;
+  const key = typeof data?.key === "string" ? data.key : "";
+  if (!key.startsWith("slack.")) return true;
+  const channel = slackEventChannel({ service: "slack", refs: data?.refs, payload: data?.payload });
+  return channel === undefined || channelVisibility(deps, viewer)(`slack:${channel}`);
 }
