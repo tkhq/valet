@@ -23,7 +23,8 @@ import type { AppEnv } from "../env.js";
 import { agentSessions, workflowRuns, workflowDefinitions, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
 import { canResolveSessionGate } from "../services/session-access.js";
 import { engineGateToWire } from "../engine/bridge.js";
-import { threadsVisibleTo } from "./_thread-access.js";
+import type { WorkflowRunOrigin } from "@valet/workflow";
+import { runOriginVisible, threadsVisibleTo } from "./_thread-access.js";
 import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
@@ -70,6 +71,7 @@ notificationsRouter.get("/decisions", async (c) => {
   const workflowSessions = await db.selectDistinct({
     session_id: sql<string>`g.session_id`,
     owner_type: workflowRuns.ownerType, owner_id: workflowRuns.ownerId, title: workflowDefinitions.name,
+    origin: sql<WorkflowRunOrigin | null>`${workflowRuns.params}->'origin'`,
   }).from(sql`engine_decision_gates g`)
     .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(g.session_id, ':', 2)`)
     .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
@@ -80,6 +82,7 @@ notificationsRouter.get("/decisions", async (c) => {
       ownerType: session.owner_type, ownerId: session.owner_id,
       userId: session.owner_type === "user" ? session.owner_id : "",
     }, c.var.principal)) continue;
+    if (!await runOriginVisible(c, { ownerType: session.owner_type, origin: session.origin })) continue;
     const gates = await engineStore.listDecisionGates(session.session_id, undefined, "pending");
     for (const gate of gates) {
       if (!items.some(item => item.gate.id === gate.id)) {

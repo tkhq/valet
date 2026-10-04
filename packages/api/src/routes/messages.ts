@@ -55,7 +55,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { canResolveSessionGate, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import { spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
+import { runOriginVisible, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -1213,6 +1213,7 @@ async function loadDecisionSession(c: Context<AppEnv>) {
     orgId: definition.orgId,
   };
   if (!(await canAnswerDecision(c, session))) return missing();
+  if (!(await runOriginVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin }))) return missing();
   // A guessed node ID must not materialize a new agent on a read request.
   if (!(await p.engineStore.getSession(id))) return missing();
   const engineSession = await ensureWorkflowSession({
@@ -1223,11 +1224,17 @@ async function loadDecisionSession(c: Context<AppEnv>) {
   return { session, engineSession };
 }
 
-/** Pending gates on threads this request may see. */
+/** Pending gates on threads this request may see. Another pod may have made
+ * the thread after this one loaded the session, so a thread missing here is
+ * read from the store. A gate whose thread is gone stays hidden. */
 async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, engineSession: EngineSession) {
   const visible = threadsVisibleTo(c, session);
   const pending = await engineSession.pendingDecisionGates();
-  const shown = await Promise.all(pending.map((gate) => visible(engineSession.threadById(gate.threadId)?.key)));
+  const shown = await Promise.all(pending.map(async (gate) => {
+    const thread = engineSession.threadById(gate.threadId)
+      ?? await c.var.providers.engineStore.getThread(engineSession.id, gate.threadId);
+    return !!thread && visible(thread.key);
+  }));
   return pending.filter((_, i) => shown[i]);
 }
 

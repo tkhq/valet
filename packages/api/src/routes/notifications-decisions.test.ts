@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import type { ListNotificationDecisionsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -51,4 +52,43 @@ it("keeps another member's helper-thread approvals out of the inbox, and the vie
   }
   const body = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
   expect(body.items.map((item) => item.gate.id)).toEqual(["gate-own"]);
+});
+
+it("keeps a team workflow's approvals with the private thread that started the run", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await p.db.insert(teams).values({ id: "mine", orgId: "local-org", name: "Mine", createdAt: 1 });
+  await p.db.insert(teamMembers).values([
+    { teamId: "mine", userId: "local-user", role: "member" },
+    { teamId: "mine", userId: "test-member", role: "member" },
+  ]);
+  await p.db.insert(workflowDefinitions).values({ id: "wf-private", orgId: "local-org", ownerType: "team", ownerId: "mine", name: "Private", definition: {}, createdAt: 1, updatedAt: 1 });
+  const open = async (asUser?: string) => await (await fetch(`${api!.baseUrl}/api/workspaces/mine/conversation`, {
+    method: "POST", headers: asUser ? { "x-valet-test-user-id": asUser } : {},
+  })).json() as { sessionId: string; threadId: string };
+  const gateFor = async (runId: string, origin: { sessionId: string; threadId: string }) => {
+    await p.workflowStore.createRun(runId, { workflowId: "wf-private", definitionVersionId: "v1", origin: { assistantSessionId: origin.sessionId, threadId: origin.threadId } },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "mine" });
+    const sessionId = `wf:${runId}:triage`;
+    const session = await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+      host: p.engineHost, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, sessionId);
+    const threadId = session.thread().id;
+    await p.engineStore.saveDecisionGate(sessionId, threadId, {
+      id: `gate-${runId}`, sessionId, threadId, queueItemId: "q", resumeKey: "rk", ordinal: 0,
+      type: "approval", title: "Approve?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+    });
+    return { base: `${api!.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions`, thread: `${api!.baseUrl}/api/threads/${threadId}/decisions` };
+  };
+  const theirs = await gateFor("run-theirs", await open("test-member"));
+  const own = await gateFor("run-own", await open());
+
+  const inbox = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
+  expect(inbox.items.map((item) => item.gate.id)).toEqual(["gate-run-own"]);
+  const json = { "Content-Type": "application/json" };
+  expect((await fetch(theirs.base)).status).toBe(404);
+  expect((await fetch(theirs.thread)).status).toBe(404);
+  expect((await fetch(`${theirs.base}/gate-run-theirs/resolve`, { method: "POST", headers: json, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
+  expect((await fetch(own.base)).status).toBe(200);
+  // The member who started the run still answers it.
+  expect((await fetch(theirs.base, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(200);
 });
