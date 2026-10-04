@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { actionInvocations, agentSessions, artifacts, sessionThreads, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { actionInvocations, agentSessions, artifacts, sessionThreads, slackChannelPrivacy, workflowCheckpoints, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { budgetBriefingEvidence, collectWorkspaceBriefingSources, type BriefingEvidence } from "./workspace-briefing-sources.js";
 import { recordChannelMessage, slackThreadUrl } from "./channel-messages.js";
 import { briefingModelSpec, defaultBriefingSummarizer, createBriefingGenerator, withoutInternalIds, parseWorkspaceBriefings, type BriefingSummarizer } from "./workspace-briefings.js";
@@ -178,6 +178,27 @@ describe("workspace briefing evidence", () => {
     expect(sources.reduce((n,item) => n+item.content.length,0)).toBeLessThanOrEqual(24_000);
     const team = await collectWorkspaceBriefingSources(db,"local-org",{ type: "team", id: "team" });
     expect(team.map(item => item.source.sessionId)).toEqual(["team"]);
+  });
+  it("leaves out runs any Slack event from a private channel started", async () => {
+    api = await bootTestApi(); const db = api.providers.db;
+    await db.insert(slackChannelPrivacy).values([
+      { orgId: "local-org", channelId: "CPRIV", isPrivate: true, checkedAt: 1 },
+      { orgId: "local-org", channelId: "CPUB", isPrivate: false, checkedAt: 1 },
+    ]);
+    const run = async (id: string, key: string, payload: Record<string, unknown>, refs?: Record<string, string>) => {
+      await db.insert(workflowDefinitions).values({ id: `wf-${id}`, orgId: "local-org", ownerType: "team", ownerId: "team", name: id, definition: {}, createdAt: 1, updatedAt: 1 });
+      await db.insert(workflowRuns).values({ id, workflowId: `wf-${id}`, definitionVersionId: "v1", definition: {}, ownerType: "team", ownerId: "team",
+        params: { workflowId: `wf-${id}`, input: { type: "event", data: { key, payload, ...(refs ? { refs } : {}) } } },
+        status: "parked", waitingOn: [{ kind: "signal", nodeId: "n", signalType: "approval:n" }], createdAt: 1, updatedAt: 1 });
+    };
+    await run("private-message", "slack.message", { channel: "CPRIV", ts: "1.1" }, { channel: "CPRIV" });
+    await run("private-reaction", "slack.reaction_added", { item: { channel: "CPRIV", ts: "1.1" } }, { channel: "CPRIV" });
+    await run("private-join", "slack.member_joined_channel", { channel: "CPRIV" }, { channel: "CPRIV" });
+    // A run stored before ingest copied the channel to refs.
+    await run("private-reaction-old", "slack.reaction_added", { item: { channel: "CPRIV", ts: "1.1" } });
+    await run("public-reaction", "slack.reaction_added", { item: { channel: "CPUB", ts: "1.1" } }, { channel: "CPUB" });
+    const team = await collectWorkspaceBriefingSources(db, "local-org", { type: "team", id: "team" });
+    expect(team.map(item => item.source.runId)).toEqual(["public-reaction"]);
   });
   it("folds a thread's Slack messages into that thread, so the briefing lists it once", async () => {
     api = await bootTestApi(); const db = api.providers.db;

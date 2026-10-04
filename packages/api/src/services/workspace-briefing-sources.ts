@@ -37,6 +37,12 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
   const teamShared = owner.type === "team" ? (key: SQL) => sharedWithWholeTeamSql(orgId, key) : undefined;
   const shared = (key: SQL) => teamShared ? teamShared(key) : sql`true`;
   const threadKey = governingThreadKeySql;
+  // The channel a Slack event names, whatever its shape: ingest copies it to
+  // `refs.channel` (`plugin-slack/src/triggers.ts`), and a reaction keeps it at
+  // `item.channel`. A run stored before refs falls back to the payload.
+  const data = sql`r.params->'input'->'data'`;
+  const slackChannel = sql`COALESCE(${data}->'refs'->>'channel',${data}->'payload'->'item'->>'channel',
+    ${data}->'payload'->>'channel_id',${data}->'payload'->'channel'->>'id',${data}->'payload'->>'channel')`;
   const scopedSession = sql`s.status<>'deleted' AND s.org_id=${orgId} AND s.owner_type=${owner.type}
     AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id}`;
   const hasNarrative = sql`(NULLIF(e.content,'') IS NOT NULL OR EXISTS(
@@ -85,13 +91,13 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
             AND (newer.created_at,newer.id) > (r.created_at,r.id))
         -- A run a private conversation or channel started reports what it read there.
         AND ${shared(threadKey(sql`r.params->'origin'->>'assistantSessionId'`, sql`r.params->'origin'->>'threadId'`))}
-        AND (r.params->'input'->'data'->>'key' NOT LIKE 'slack.%' OR ${shared(sql`('slack:' || (r.params->'input'->'data'->'payload'->>'channel') || ':')`)})
+        AND (r.params->'input'->'data'->>'key' NOT LIKE 'slack.%' OR ${shared(sql`('slack:' || ${slackChannel} || ':')`)})
       ORDER BY r.updated_at DESC,r.id DESC LIMIT 12
     ) SELECT r.id,r.title,r.updated_at,r.status,
       -- Only a thread in this same workspace: a team run started from a
       -- personal chat must not link team members to that personal thread.
       o.session_id AS origin_session_id,o.thread_id AS origin_thread_id,
-      r.params->'input'->'data'->>'key' AS event_key,r.params->'input'->'data'->'payload'->>'channel' AS event_channel,
+      r.params->'input'->'data'->>'key' AS event_key,${slackChannel} AS event_channel,
       COALESCE(r.params->'input'->'data'->'payload'->>'thread_ts',r.params->'input'->'data'->'payload'->>'ts') AS event_ts,
       CASE WHEN r.status='parked' THEN left((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
         'kind',w->>'kind','node',w->>'nodeId','signal',w->>'signalType','wakeAt',w->'wakeAt')))::text
