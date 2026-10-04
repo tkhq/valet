@@ -6,9 +6,9 @@
  * clickable); any other signalType gets a generic envelope (chip + body).
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { Message } from "@valet/api/wire";
-import { SignalCard, childCardTitle, truncateBody } from "./signal-card";
+import { SignalCard, childCardTitle, isLongBody, truncateBody } from "./signal-card";
 
 function baseMessage(overrides: Partial<Message> = {}): Message {
   return {
@@ -76,6 +76,26 @@ describe("SignalCard — other signal types", () => {
     expect(screen.getByText("reminder.due")).toBeTruthy();
     expect(screen.getByText(/Reminder: standup/)).toBeTruthy();
     expect(screen.queryByText("You")).toBeNull();
+  });
+});
+
+describe("SignalCard — long bodies", () => {
+  // The workflow card renders the same body; it needs a router for its run link.
+  it("starts a long message collapsed, and expands it on request", () => {
+    const content = Array.from({ length: 20 }, (_, i) => `Source line ${i}`).join("\n");
+    const message = baseMessage({ content, signal: { signalType: "workflow.request" } });
+    render(<SignalCard message={message} />);
+    const toggle = screen.getByRole("button", { name: "Show full message" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("shows a short message whole, with no toggle", () => {
+    render(<SignalCard message={baseMessage({ content: "Reminder: standup at 10am.", signal: { signalType: "reminder.due" } })} />);
+    expect(screen.queryByRole("button", { name: "Show full message" })).toBeNull();
+    expect(isLongBody("x".repeat(601))).toBe(true);
+    expect(isLongBody("short")).toBe(false);
   });
 });
 

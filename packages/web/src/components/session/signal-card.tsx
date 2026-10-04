@@ -1,10 +1,18 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import type { Message, MessageSignal } from "@valet/api/wire";
 import { Badge } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 
 const BODY_PREVIEW_LEN = 200;
+/** A signal body past either limit starts collapsed. */
+const LONG_BODY_CHARS = 600;
+const LONG_BODY_LINES = 8;
+
+/** Pure: whether a signal body is long enough to start collapsed. */
+export function isLongBody(text: string): boolean {
+  return text.length > LONG_BODY_CHARS || text.split("\n").length > LONG_BODY_LINES;
+}
 
 /** Pure: first ~`max` chars of `text`, with an ellipsis when truncated. */
 export function truncateBody(text: string, max = BODY_PREVIEW_LEN): string {
@@ -127,11 +135,7 @@ function WorkflowRequestCard({ message, runId, outcome }: { message: Message; ru
           Open run
         </Link>
       </div>
-      {message.content && (
-        <div className="mt-1.5 text-sm text-ink">
-          <Markdown>{message.content}</Markdown>
-        </div>
-      )}
+      {message.content && <SignalBody content={message.content} />}
     </CardShell>
   );
 }
@@ -146,12 +150,27 @@ function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSi
       <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
         {signal.signalType}
       </span>
-      {message.content && (
-        <div className="mt-1.5 text-sm text-ink">
-          <Markdown>{message.content}</Markdown>
-        </div>
-      )}
+      {message.content && <SignalBody content={message.content} />}
     </CardShell>
+  );
+}
+
+/** A signal's text. A long one, such as a workflow's full prompt or a
+ * fetched log, starts collapsed so it does not fill the thread. */
+function SignalBody({ content }: { content: string }) {
+  const long = isLongBody(content);
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1.5 text-sm text-ink">
+      <div className={long && !open ? "max-h-32 overflow-hidden [mask-image:linear-gradient(to_bottom,black_60%,transparent)]" : undefined}>
+        <Markdown>{content}</Markdown>
+      </div>
+      {long && (
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-xs text-muted hover:text-ink">
+          {open ? "Show less" : "Show full message"}
+        </button>
+      )}
+    </div>
   );
 }
 
