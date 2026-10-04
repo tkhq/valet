@@ -1897,7 +1897,7 @@ export class EngineHost {
             { credentials, onePassword, shares: (teamId, svc) => membersSharing(db, teamId, svc) },
             {
               orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
-              mayBorrow: async (memberId) => hasBorrowGrant(db, { sessionId, threadId: use.threadId, service: "github", memberId }),
+              mayBorrow: async (memberId) => !use.externalSender && hasBorrowGrant(db, { sessionId, threadId: use.threadId, service: "github", memberId }),
             },
             orgFallbackPolicy(this.opts.plugins, "github"),
           );
@@ -1941,8 +1941,9 @@ export class EngineHost {
           { credentials, onePassword, ...(db ? { shares: (teamId: string, svc: string) => membersSharing(db, teamId, svc) } : {}) },
           {
             orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
+            // A sender with no Valet account never rides a teammate's approval.
             mayBorrow: async (memberId) => use.discover === true
-              || (db ? await hasBorrowGrant(db, { sessionId, threadId: use.threadId, service, memberId }) : false),
+              || (!use.externalSender && db ? await hasBorrowGrant(db, { sessionId, threadId: use.threadId, service, memberId }) : false),
           },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read

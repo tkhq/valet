@@ -856,6 +856,9 @@ export interface CredentialUse {
   threadId?: string;
   /** The read only lists a service's tools (`CredentialProvider.get`). */
   discover?: boolean;
+  /** The turn came from a channel sender with no Valet account: no
+   * teammate's approval to lend an account covers it. */
+  externalSender?: boolean;
 }
 
 export interface StoredCredential {

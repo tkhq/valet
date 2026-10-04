@@ -4972,6 +4972,7 @@ export class Thread {
       // channel sender with no Valet account acts for nobody.
       credentials: session.credentialProvider({
         ...(this.runningItem?.author && !this.runningItem.author.externalSender ? { actorId: this.runningItem.author.id } : {}),
+        ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
         threadId: this.id,
       }),
       sandbox: session.sandbox,

@@ -620,7 +620,8 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         {
           orgId: input.orgId, teamId: input.teamId,
           ...(input.userId && !input.externalSender ? { userId: input.userId } : {}),
-          mayBorrow: (memberId) => hasBorrowGrant(deps.db, { sessionId: input.sessionId, threadId: input.threadId, service, memberId }),
+          // A sender with no Valet account never rides a teammate's approval.
+          mayBorrow: async (memberId) => !input.externalSender && hasBorrowGrant(deps.db, { sessionId: input.sessionId, threadId: input.threadId, service, memberId }),
         },
         service,
         orgFallbackPolicy(deps.plugins, service),
