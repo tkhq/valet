@@ -697,6 +697,13 @@ describe("resolveTeamCredentialRead", () => {
         .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "bea-key" }) });
     });
 
+    it("uses a later sharer who already approved before asking an older one", async () => {
+      const credentials = await storeWith([[bea, { type: "api_key", apiKey: "bea-key" }], [{ type: "user", id: "cy" }, { type: "api_key", apiKey: "cy-key" }]]);
+      const deps = { credentials, shares: shares(["bea", "cy"]) };
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async (id) => id === "cy" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "cy-key" }) });
+    });
+
     it("falls back to the org bot behind a share whose account is gone", async () => {
       const credentials = await storeWith([[{ type: "org", id: orgId }, { type: "bot_token", accessToken: "org-bot" }]], "slack");
       const got = await resolveTeamCredentialRead({ credentials, shares: shares(["departed"]) }, { orgId, teamId }, "slack", "org-provided");

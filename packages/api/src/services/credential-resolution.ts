@@ -319,15 +319,18 @@ export async function readTeamCredential(
     const fromVault = await lookupInOnePassword(deps, readCtx, service);
     if (fromVault) return { credential: fromVault };
   }
-  for (const memberId of sharers) {
-    if (memberId === ctx.userId) continue;
-    if (!(await ctx.mayBorrow?.(memberId))) {
-      // Only an account that would actually answer is worth an approval.
-      if (await fromShare(memberId)) return { credential: null, approvalFrom: memberId };
-      continue;
-    }
+  // A member who already approved comes before asking anyone new, so an
+  // approval holds even when an older sharer is listed first.
+  const others = sharers.filter((memberId) => memberId !== ctx.userId);
+  const approved = await Promise.all(others.map(async (memberId) => (await ctx.mayBorrow?.(memberId)) === true));
+  for (const [i, memberId] of others.entries()) {
+    if (!approved[i]) continue;
     const borrowed = await fromShare(memberId);
     if (borrowed) return { credential: borrowed };
+  }
+  for (const [i, memberId] of others.entries()) {
+    // Only an account that would actually answer is worth an approval.
+    if (!approved[i] && await fromShare(memberId)) return { credential: null, approvalFrom: memberId };
   }
   // A share whose member left their account unusable: name the fix.
   if (brokenShare) throw new CredentialReferenceBrokenError(service);
