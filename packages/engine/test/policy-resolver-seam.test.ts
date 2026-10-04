@@ -377,6 +377,28 @@ describe("policyResolver seam: require_approval gate", () => {
   });
 });
 
+describe("policyResolver seam: another member's shared account", () => {
+  it("asks only that member, with allow and deny and none of the session-wide choices", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    const { resolver } = makeResolver({
+      decision: {
+        mode: "require_approval",
+        provenance: { baseMode: "allow", source: "shared_account" },
+        approver: { userId: "bea", name: "Bea" },
+        extraGateActions: [{ id: "approve_always", label: "Always allow", approves: true }],
+      },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.title).toBe("Let a teammate use your github account?");
+    expect(gateReq?.actions?.map((a) => a.id)).toEqual(["approve", "deny"]);
+    expect((gateReq?.context as Record<string, unknown>)?.approver).toEqual({ userId: "bea", name: "Bea" });
+  });
+});
+
 describe("policyResolver seam: sender with no Valet account", () => {
   it("refuses an action that needs approval without opening a gate", async () => {
     let executed = false;

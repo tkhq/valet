@@ -7,6 +7,7 @@ import type {
   MessagePart as EngineMessagePart,
   QueueState as EngineQueueState,
 } from "@valet/engine";
+import { gateApprover } from "../services/session-access.js";
 import type {
   DecisionGate as WireDecisionGate,
   DecisionGateProvenance,
@@ -23,10 +24,12 @@ import type {
  * commit us to a contract before we know what we want). The ONE typed
  * extraction is `context.provenance` (policy gates, action-policies spec
  * decision 4): the wire carries a validated `DecisionGateProvenance` so gate
- * surfaces can render WHY the gate opened.
+ * surfaces can render WHY the gate opened. `context.approver` rides along the
+ * same way, so a surface can say whose answer the gate waits on.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
+  const approver = gateApprover(g);
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -40,6 +43,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     ...(provenance ? { provenance } : {}),
+    ...(approver ? { approver } : {}),
   };
 }
 

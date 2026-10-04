@@ -133,6 +133,23 @@ export async function canResolveSessionGate(
   return canViewSession(db, session, caller);
 }
 
+/** The one person who may answer a gate, when the gate names one: a gate
+ * asking a member to lend their shared account (`PolicyDecision.approver`). */
+export function gateApprover(gate: { context?: Record<string, unknown> }): { userId: string; name?: string } | undefined {
+  const raw = gate.context?.approver;
+  if (!raw || typeof raw !== "object") return undefined;
+  const { userId, name } = raw as Record<string, unknown>;
+  return typeof userId === "string" && userId ? { userId, ...(typeof name === "string" ? { name } : {}) } : undefined;
+}
+
+/** Whether `caller` may answer `gate` once they may resolve the session's
+ * gates (`canResolveSessionGate`). A gate that names an approver answers to
+ * that person alone. */
+export function answersGate(gate: { context?: Record<string, unknown> }, caller: RequestPrincipal): boolean {
+  const approver = gateApprover(gate);
+  return !approver || (caller.type === "user" && caller.id === approver.userId);
+}
+
 /**
  * True when `caller` owns `session` outright: no membership, no admin
  * recovery path. A user owns the row stamped with its id. A team principal

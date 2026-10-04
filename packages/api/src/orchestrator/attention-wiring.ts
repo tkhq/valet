@@ -33,6 +33,7 @@ import type { DeliveredBusEvent, EventStream, Principal, SessionStore } from "@v
 import { parseAssistantSessionId } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { digestGate } from "../channels/gate-digest.js";
+import { gateApprover } from "../services/session-access.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import {
@@ -116,15 +117,19 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
   // a channel DM should show that. The digest keeps the one-line summary and
   // hands the key parameters over as labeled fields.
   const digest = digestGate(gate);
+  // A gate asking to use a member's shared account goes to that member
+  // alone. The thread may be private to the requester, so it carries no link
+  // into it; the member answers from their inbox or the channel message.
+  const approver = gateApprover(gate);
   await routeAttention(deps, {
     kind: "approval",
     urgency: "high",
-    owner,
+    owner: approver ? { type: "user", id: approver.userId } : owner,
     sessionId,
     threadId: gate.threadId,
     title: digest.title,
     body: digest.body,
-    href: attentionHref(sessionId, gate.threadId, sessionData.owner),
+    ...(approver ? {} : { href: attentionHref(sessionId, gate.threadId, sessionData.owner) }),
     dedupeKey: gate.id,
     gate: { id: gate.id, actions: gate.actions, fields: digest.fields },
   });

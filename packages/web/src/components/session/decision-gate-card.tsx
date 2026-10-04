@@ -73,6 +73,19 @@ export function DecisionGateCard({
 
   const Icon = ICON_FOR_TYPE[gate.type];
   const kind = KIND_FOR_TYPE[gate.type];
+  // A gate asking to use a member's shared account answers to that member.
+  // Everyone else sees that the request went to them.
+  const waitingOn = gate.approver && gate.approver.userId !== meQ.data?.id ? gate.approver : undefined;
+  if (waitingOn) {
+    return (
+      <div className={cn(cardClass, "mx-3 mt-3 px-3.5 py-3")} role="status" aria-live="polite">
+        <Badge variant={kind.variant}>Asked {waitingOn.name ?? "a teammate"} for permission</Badge>
+        <p className="mt-1.5 text-sm text-muted">
+          This needs {waitingOn.name ?? "a teammate"}'s shared account. Valet asked them, and continues once they allow it.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div

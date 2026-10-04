@@ -1797,6 +1797,9 @@ export class EngineHost {
       this.policyResolverInstance = buildPolicyResolver({
         db: this.opts.db,
         actionPluginByService: this.opts.actionPluginByService ?? new Map(),
+        credentials: this.opts.engineCredentials,
+        ...(this.opts.onePassword ? { onePassword: this.opts.onePassword } : {}),
+        ...(this.opts.plugins ? { plugins: this.opts.plugins } : {}),
       });
     }
     return this.policyResolverInstance;

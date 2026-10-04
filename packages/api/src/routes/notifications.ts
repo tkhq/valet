@@ -21,7 +21,7 @@ import { and, desc, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { agentSessions, workflowRuns, workflowDefinitions, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
-import { canResolveSessionGate } from "../services/session-access.js";
+import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
 import { engineGateToWire } from "../engine/bridge.js";
 import type { WorkflowRunOrigin } from "@valet/workflow";
 import { runOriginVisible, threadsVisibleTo } from "./_thread-access.js";
@@ -62,8 +62,14 @@ notificationsRouter.get("/decisions", async (c) => {
     const keys = new Map<string, Promise<boolean>>();
     const gates = await engineStore.listDecisionGates(session.id, undefined, "pending");
     for (const gate of gates) {
-      if (!keys.has(gate.threadId)) keys.set(gate.threadId, engineStore.getThread(session.id, gate.threadId).then((t) => visible(t?.key)));
-      if (!await keys.get(gate.threadId)) continue;
+      // A gate asking to lend a member's account is that member's to answer,
+      // and only theirs, whatever thread asked for it.
+      const approver = gateApprover(gate);
+      if (approver && approver.userId !== caller.id) continue;
+      if (!approver) {
+        if (!keys.has(gate.threadId)) keys.set(gate.threadId, engineStore.getThread(session.id, gate.threadId).then((t) => visible(t?.key)));
+        if (!await keys.get(gate.threadId)) continue;
+      }
       items.push({ sessionId: session.id, title: session.title || "Thread approval", gate: engineGateToWire(gate) });
     }
   }

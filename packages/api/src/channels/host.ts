@@ -62,7 +62,7 @@ import { ingestChannelFile, type IngestedChannelFile } from "../services/channel
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { isOrgAdmin } from "../services/org.js";
-import { canResolveSessionGate, type SessionOwnerLike } from "../services/session-access.js";
+import { answersGate, canResolveSessionGate, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
 import { recordThreadUserActivity } from "../services/thread-activity.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
@@ -1103,6 +1103,19 @@ export class ChannelHost {
       return;
     }
 
+    // A gate asking to use a member's shared account answers to that member,
+    // who gets it directly (`attention-wiring.ts`). The conversation learns
+    // that the request went to them, with no buttons to press.
+    const approver = gateApprover(gate);
+    if (approver) {
+      const sender = await this.workspaceSenderForSession(sessionId);
+      await transport.send(mapped.conversationKey, {
+        markdown: `This needs ${approver.name ?? "a teammate"}'s shared account. Valet asked them for permission and continues once they allow it.`,
+        ...(sender !== undefined ? { sender } : {}),
+      });
+      return;
+    }
+
     // Digest before sending: a tool-approval gate's raw body is a
     // tool_id/args JSON dump; the card shows the summary plus labeled
     // fields instead, with a link for the full request.
@@ -1685,6 +1698,13 @@ export class ChannelHost {
     if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && sessionOrgId && !(await canApplyAlwaysAllow(this.deps.db, sessionOrgId, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
+      return;
+    }
+    // A gate asking to use a member's shared account answers to that member alone.
+    const stored = await this.deps.engineStore.getDecisionGate(mapped.sessionId, mapped.gateId);
+    if (stored && !answersGate(stored, userPrincipal(userId))) {
+      await transport?.answerCallback?.(gateCallback.callbackId, `Only ${gateApprover(stored)?.name ?? "the account's owner"} can allow use of their account.`);
+      await this.dropLog(orgId, "unauthorized", event.conversationKey, "only the account's owner may answer this gate");
       return;
     }
 

@@ -1060,7 +1060,9 @@ export type PolicyProvenanceSource =
   | "override"
   | "plugin_default"
   | "risk_default"
-  | "resolver_error";
+  | "resolver_error"
+  /** The action would use another member's shared account (`PolicyDecision.approver`). */
+  | "shared_account";
 
 /**
  * The host's decision for one action invocation. `mode` drives `call_tool`:
@@ -1084,6 +1086,13 @@ export interface PolicyDecision {
    * so denial stickiness classifies host rejection actions the same way.
    */
   extraGateActions?: (DecisionAction & { approves: boolean })[];
+  /**
+   * The one person who may answer this gate: the member whose shared account
+   * the action would use. The gate offers approve and deny only, and carries
+   * the approver in its `context.approver` so the host routes and authorizes
+   * it to them alone.
+   */
+  approver?: { userId: string; name?: string };
 }
 
 /**

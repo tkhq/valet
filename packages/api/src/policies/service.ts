@@ -26,6 +26,7 @@ import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type {
   ActionPlugin,
   ApprovalMode,
+  CredentialStore,
   DecisionResolution,
   PolicyDecision,
   PolicyInvocationRecord,
@@ -35,7 +36,11 @@ import type {
   ValetPlugin,
 } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, users, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { hasBorrowGrant, writeBorrowGrant } from "../services/credential-borrow.js";
+import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
+import { membersSharing } from "../services/credential-shares.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 import { isOrgAdmin } from "../services/org.js";
 import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
@@ -581,6 +586,12 @@ export interface PolicyResolverDeps {
   db: AppDb;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   clock?: () => number;
+  /** The team accounts an action could use, read to tell when it would use
+   * another member's shared account (`services/credential-borrow.ts`).
+   * Absent: an action never asks a member. */
+  credentials?: CredentialStore;
+  onePassword?: OnePasswordService;
+  plugins?: ValetPlugin[];
 }
 
 /**
@@ -591,6 +602,37 @@ export interface PolicyResolverDeps {
  */
 export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
   const clock = deps.clock ?? Date.now;
+  const credentialServiceFor = (service: string): string =>
+    deps.actionPluginByService.get(service)?.actionPlugin.credentialService ?? service;
+
+  /** The member whose shared account this team action would use, when no
+   * account of the acting member's or the team's own answers. GitHub has the
+   * organization App behind the team's row, so it never borrows. */
+  async function sharedAccountApprover(input: PolicyResolveInput): Promise<{ userId: string; name?: string } | undefined> {
+    const service = credentialServiceFor(input.service);
+    if (!deps.credentials || !input.teamId || !input.orgId || service === "github") return undefined;
+    const sharers = await membersSharing(deps.db, input.teamId, service);
+    if (sharers.length === 0) return undefined;
+    let approvalFrom: string | undefined;
+    try {
+      ({ approvalFrom } = await readTeamCredential(
+        { credentials: deps.credentials, onePassword: deps.onePassword, shares: async () => sharers },
+        {
+          orgId: input.orgId, teamId: input.teamId,
+          ...(input.userId && !input.externalSender ? { userId: input.userId } : {}),
+          mayBorrow: (memberId) => hasBorrowGrant(deps.db, { sessionId: input.sessionId, threadId: input.threadId, service, memberId }),
+        },
+        service,
+        orgFallbackPolicy(deps.plugins, service),
+      ));
+    } catch {
+      // A share that no longer resolves: the action itself reports that.
+      return undefined;
+    }
+    if (!approvalFrom) return undefined;
+    const [member] = await deps.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
+    return { userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+  }
 
   const pluginDefaultFor = (service: string): ApprovalMode | undefined =>
     deps.actionPluginByService.get(service)?.actionPlugin.defaultApprovalMode;
@@ -632,6 +674,12 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         ...(input.externalSender ? { externalSender: true } : {}),
       });
 
+      if (decision.mode === "deny") return decision;
+      // Another member's account: they answer, and nobody else can.
+      const approver = await sharedAccountApprover(input);
+      if (approver) {
+        return { mode: "require_approval", provenance: { ...decision.provenance, source: "shared_account" }, approver };
+      }
       if (decision.mode !== "require_approval") return decision;
 
       // Offer the two escalation actions on the gate. `onResolution`
@@ -663,6 +711,17 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       if (!input.orgId) return;
 
       const now = clock();
+      if (decision.approver) {
+        if (resolution.actionId !== "approve") return;
+        // The routes let only the approver answer; refuse anyone else here too.
+        if (resolution.resolvedBy !== decision.approver.userId) {
+          throw new Error(`Only ${decision.approver.name ?? "the account's owner"} can allow use of their account.`);
+        }
+        await writeBorrowGrant(deps.db, input.orgId, {
+          sessionId: input.sessionId, threadId: input.threadId, service: credentialServiceFor(input.service), memberId: decision.approver.userId,
+        }, now);
+        return;
+      }
       if (resolution.actionId === GATE_ACTION_APPROVE_SESSION) {
         if (!input.sessionId) return;
         await writeSessionGrant(deps.db, input.sessionId, {

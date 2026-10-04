@@ -9,9 +9,10 @@
  */
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pgDbFromPglite } from "@valet/store-postgres";
-import type { DecisionResolution, PolicyInvocationRecord, PolicyResolveInput } from "@valet/engine";
+import { InMemoryCredentialStore, type DecisionResolution, type PolicyInvocationRecord, type PolicyResolveInput } from "@valet/engine";
+import { shareCredential } from "../services/credential-shares.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, users } from "../schema/index.js";
 import {
@@ -495,5 +496,46 @@ describe("team policy ownership", () => {
     const resolver = buildPolicyResolver({ db, actionPluginByService: new Map() });
     expect(await resolver.resolve({ ...input, sessionId: "wf:run:triage", teamId: "team-a" })).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
     expect(await resolver.resolve({ ...input, sessionId: "wf:other:triage", teamId: "team-b" })).toMatchObject({ mode: "allow", provenance: { source: "risk_default" } });
+  });
+});
+
+describe("another member's shared account", () => {
+  const TEAM = "team-share";
+  const input: PolicyResolveInput = {
+    teamId: TEAM, service: "linear", actionId: "linear.create_issue", riskLevel: "low", params: {},
+    userId: ADMIN, orgId: ORG, sessionId: SESSION, threadId: "thread-1", appliesIn: "session",
+  };
+  async function sharedByMember() {
+    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "team", ownerId: TEAM, createdAt: 1, updatedAt: 1 });
+    await pg.query(`INSERT INTO team_members(team_id, user_id, role) VALUES ('${TEAM}', '${MEMBER}', 'member'), ('${TEAM}', '${ADMIN}', 'admin') ON CONFLICT DO NOTHING`);
+    await shareCredential(db, { teamId: TEAM, service: "linear", userId: MEMBER, createdAt: 1 });
+    const credentials = new InMemoryCredentialStore();
+    await credentials.save({ type: "user", id: MEMBER }, "linear", { type: "api_key", apiKey: "member-key" });
+    return buildPolicyResolver({ db, actionPluginByService: new Map(), credentials });
+  }
+
+  it("asks that member, and only them, before an action uses their account", async () => {
+    const resolver = await sharedByMember();
+    const decision = await resolver.resolve(input);
+    expect(decision).toMatchObject({ mode: "require_approval", provenance: { source: "shared_account" }, approver: { userId: MEMBER, name: "Member" } });
+
+    // Another person's approval is refused, and grants nothing.
+    await expect(resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: ADMIN, resolvedAt: 1 })).rejects.toThrow(/Only Member/);
+    expect((await resolver.resolve(input)).approver).toBeDefined();
+
+    // The member's approval holds for this conversation.
+    await resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 1 });
+    expect((await resolver.resolve(input)).approver).toBeUndefined();
+    expect((await resolver.resolve({ ...input, threadId: "thread-2" })).approver).toEqual({ userId: MEMBER, name: "Member" });
+  });
+
+  it("never asks the member acting on their own account", async () => {
+    const resolver = await sharedByMember();
+    expect((await resolver.resolve({ ...input, userId: MEMBER })).approver).toBeUndefined();
+  });
+
+  afterEach(async () => {
+    await pg.query("DELETE FROM credential_shares");
+    await pg.query(`DELETE FROM team_members WHERE team_id = '${TEAM}'`);
   });
 });

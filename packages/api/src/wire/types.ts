@@ -1331,6 +1331,9 @@ export interface DecisionGate {
   createdAt: number;
   updatedAt: number;
   provenance?: DecisionGateProvenance;
+  /** The one member who may answer: the gate asks to use their shared
+   * account. Anyone else sees the gate as waiting on them. */
+  approver?: { userId: string; name?: string };
 }
 
 export interface DecisionResolution {

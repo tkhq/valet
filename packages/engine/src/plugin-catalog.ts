@@ -642,16 +642,21 @@ export async function invokeAction(
     // Pass `approves` through to the gate — DecisionAction persists it on
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
-    const extras: DecisionAction[] = decision.extraGateActions ?? [];
+    const extras: DecisionAction[] = decision.approver ? [] : decision.extraGateActions ?? [];
     const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    // Another member's account: only they answer, so the gate asks them.
+    const borrowed = decision.approver
+      ? { title: `Let a teammate use your ${entry.service} account?`, body: `${summary}\n\nValet would run ${entry.action.name} through your ${entry.service} account. Only you can answer.` }
+      : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
+      ...borrowed,
       actions: [
-        { id: "approve", label: "Approve", style: "primary" },
+        { id: "approve", label: decision.approver ? "Allow" : "Approve", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],
-      context: { ...baseReq.context, provenance: decision.provenance },
+      context: { ...baseReq.context, provenance: decision.provenance, ...(decision.approver ? { approver: decision.approver } : {}) },
     });
     if (gateOutcome.kind === "expired") {
       // The gate opened and nobody answered before the deadline — a terminal

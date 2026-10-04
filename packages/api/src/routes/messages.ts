@@ -54,8 +54,8 @@ import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engi
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
-import { canResolveSessionGate, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import { runOriginVisible, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
+import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
+import { runOriginVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -1233,6 +1233,9 @@ async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, 
   const visible = threadsVisibleTo(c, session);
   const pending = await engineSession.pendingDecisionGates();
   const shown = await Promise.all(pending.map(async (gate) => {
+    // The member asked to lend their account answers the gate even when the
+    // requester's thread is private to the requester.
+    if (gateApprover(gate)?.userId === viewerOf(c).userId) return true;
     const thread = engineSession.threadById(gate.threadId)
       ?? await c.var.providers.engineStore.getThread(engineSession.id, gate.threadId);
     return !!thread && visible(thread.key);
@@ -1310,6 +1313,9 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   const pending = await visibleGates(c, session, engineSession);
   const gate = pending.find((g) => g.id === gateId);
   if (!gate) return c.json({ error: "gate not pending" }, 404);
+  if (!answersGate(gate, c.var.principal)) {
+    return c.json({ error: `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.` }, 403);
+  }
 
   if (gate.context?.browser) {
     const policy = c.var.providers.engineHost.browserPolicy();

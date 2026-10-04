@@ -104,3 +104,34 @@ it("keeps a team workflow's approvals with the private thread that started the r
   expect(await getWorkflowRunDetail(deps, asTool("local-user"), "run-theirs")).toBeNull();
   expect(await getWorkflowRunDetail(deps, { userId: "team:mine", orgId: "local-org", principal: { type: "team", id: "mine" } }, "run-theirs")).toBeNull();
 });
+
+it("puts a gate asking for a member's shared account before that member alone", async () => {
+  api = await bootTestApi();
+  await api.providers.db.insert(teams).values({ id: "mine", orgId: "local-org", name: "Mine", createdAt: 1 });
+  await api.providers.db.insert(teamMembers).values([
+    { teamId: "mine", userId: "local-user", role: "member" },
+    { teamId: "mine", userId: "test-member", role: "member" },
+  ]);
+  // The requester's own helper thread, which the approver cannot read.
+  const own = await (await fetch(`${api.baseUrl}/api/workspaces/mine/conversation`, { method: "POST" })).json() as { sessionId: string; threadId: string };
+  await api.providers.engineStore.saveDecisionGate(own.sessionId, own.threadId, {
+    id: "borrow", sessionId: own.sessionId, threadId: own.threadId, queueItemId: "q", resumeKey: "rk", ordinal: 0,
+    type: "approval", title: "Let a teammate use your linear account?", actions: [{ id: "approve", label: "Allow" }, { id: "deny", label: "Deny" }],
+    context: { approver: { userId: "test-member", name: "Test Member" } },
+    status: "pending", createdAt: 1, updatedAt: 1,
+  });
+  const asMember = { "x-valet-test-user-id": "test-member" };
+  const inbox = async (headers?: Record<string, string>) =>
+    ((await (await fetch(`${api!.baseUrl}/api/notifications/decisions`, headers ? { headers } : {})).json()) as ListNotificationDecisionsResponse).items.map((i) => i.gate.id);
+  expect(await inbox()).toEqual([]);
+  expect(await inbox(asMember)).toEqual(["borrow"]);
+
+  // The requester's thread shows who the request went to.
+  const base = `${api.baseUrl}/api/sessions/${encodeURIComponent(own.sessionId)}/decisions`;
+  expect(await (await fetch(base)).json()).toMatchObject({ gates: [{ id: "borrow", approver: { userId: "test-member" } }] });
+  const resolve = (headers: Record<string, string>) => fetch(`${base}/borrow/resolve`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ actionId: "approve" }),
+  });
+  expect((await resolve({})).status).toBe(403);
+  expect((await resolve(asMember)).status).toBe(200);
+});
