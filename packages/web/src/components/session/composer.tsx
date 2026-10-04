@@ -76,8 +76,8 @@ const ACTION_LABEL: Record<SubmitAction, string> = {
 };
 
 /**
- * One line of copy that tells the user what happens to the message. Shown
- * only while the agent works — while it is idle, "Send" needs no gloss.
+ * One line of copy for the action that needs a gloss. "Send" and "Queue"
+ * explain themselves, so only the steer prompt has one.
  *
  * Mid-turn the first Enter queues. A second empty Enter promotes that
  * queued item into a steer (`Thread.promoteQueuedItem`) so the same
@@ -86,7 +86,7 @@ const ACTION_LABEL: Record<SubmitAction, string> = {
 const ACTION_HINT: Record<SubmitAction, string> = {
   send: "",
   steer: "Queued. Press Enter again, or select Send now above.",
-  queue: "The agent completes the current turn. Then it reads your message.",
+  queue: "",
 };
 
 const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
@@ -342,7 +342,7 @@ export function Composer({
     !!threadId &&
     !uploadsPending &&
     (action === "steer" || text.trim().length > 0 || images.length > 0 || toFileRefs(files).length > 0);
-  const sendTitle = working ? ACTION_HINT[action] : uploadsPending ? "Wait for the file uploads to finish." : undefined;
+  const sendTitle = working ? ACTION_HINT[action] || undefined : uploadsPending ? "Wait for the file uploads to finish." : undefined;
 
   /** True while the composer refuses new files. */
   const intakeBlocked =
@@ -884,7 +884,7 @@ export function Composer({
           onDismiss={() => setSubmitError(null)}
         />
         <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
-        {working && <p className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">{ACTION_HINT[action]}</p>}
+        {working && ACTION_HINT[action] && <p className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">{ACTION_HINT[action]}</p>}
         {/* `relative` anchors the command popup to the input row, so the hint
             above it never moves the popup. */}
         <div className={cn("relative flex min-h-0", expanded ? "flex-col" : "items-end")}>
