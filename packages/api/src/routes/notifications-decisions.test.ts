@@ -1,4 +1,5 @@
 import { afterEach, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
@@ -134,4 +135,68 @@ it("puts a gate asking for a member's shared account before that member alone", 
   });
   expect((await resolve({})).status).toBe(403);
   expect((await resolve(asMember)).status).toBe(200);
+});
+
+it.each(["session", "thread"])("lets a named approver answer a private child gate by %s without exposing other content", async (addressKind) => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await p.db.insert(teams).values({ id: "mine", orgId: "local-org", name: "Mine", createdAt: 1 });
+  await p.db.insert(teamMembers).values([
+    { teamId: "mine", userId: "local-user", role: "member" },
+    { teamId: "mine", userId: "test-member", role: "member" },
+  ]);
+  const parent = await (await fetch(`${api.baseUrl}/api/workspaces/mine/conversation`, { method: "POST" })).json() as { sessionId: string; threadId: string };
+  const parentSession = await p.engineStore.getSession(parent.sessionId);
+  const parentThread = await p.engineStore.getThread(parent.sessionId, parent.threadId);
+  if (!parentSession || !parentThread) throw new Error("Missing parent fixture");
+  const childId = "private-child";
+  await p.db.insert(agentSessions).values({ id: childId, userId: "local-user", orgId: "local-org", workspace: "/",
+    ownerType: "team", ownerId: "mine", createdAt: 1, updatedAt: 1 });
+  await p.engineStore.saveSession({ ...parentSession, id: childId, parentSessionId: parent.sessionId, parentThreadId: parent.threadId });
+  for (const threadId of ["child-asked", "child-other"]) {
+    await p.engineStore.saveThread(childId, { ...parentThread, id: threadId, sessionId: childId, key: `web:${threadId}` });
+  }
+  for (const [id, threadId, approver] of [
+    ["borrow-child", "child-asked", "test-member"],
+    ["hidden-same-thread", "child-asked", undefined],
+    ["hidden-other-thread", "child-other", undefined],
+  ] as const) {
+    await p.engineStore.saveDecisionGate(childId, threadId, {
+      id, sessionId: childId, threadId, queueItemId: `q-${id}`, resumeKey: `rk-${id}`, ordinal: 0,
+      type: "approval", title: "Approve?", actions: [{ id: "approve", label: "Allow" }],
+      ...(approver ? { context: { approver: { userId: approver } } } : {}),
+      status: "pending", createdAt: 1, updatedAt: 1,
+    });
+  }
+  const headers = { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" };
+  const request = (path: string, method = "GET", body?: object) => fetch(`${api!.baseUrl}/api/${path}`, {
+    method, headers, ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const inbox = await (await request("notifications/decisions")).json() as ListNotificationDecisionsResponse;
+  expect(inbox.items.map(item => item.gate.id)).toEqual(["borrow-child"]);
+  for (const address of [`sessions/${childId}`, "threads/child-asked"]) {
+    const decisions = await request(`${address}/decisions`);
+    expect(decisions.status).toBe(200);
+    const body = await decisions.json() as { gates: Array<{ id: string }> };
+    expect(body.gates.map(gate => gate.id)).toEqual(["borrow-child"]);
+    expect((await request(address)).status).toBe(404);
+    expect((await request(`${address}/messages`)).status).toBe(404);
+    expect((await request(`${address}/messages`, "POST", { text: "private" })).status).toBe(404);
+    expect((await request(`${address}/decisions/hidden-same-thread/resolve`, "POST", { actionId: "approve" })).status).toBe(404);
+    expect((await request(`${address}/decisions/hidden-same-thread/withdraw`, "POST")).status).toBe(404);
+  }
+  expect((await request("threads/child-other/decisions")).status).toBe(404);
+  expect((await request("threads/child-other/decisions/borrow-child/resolve", "POST", { actionId: "approve" })).status).toBe(404);
+  const decisionPaths = [`sessions/${childId}/decisions`, "threads/child-asked/decisions"];
+  // Naming an approver cannot bypass organization or current team membership.
+  await p.db.update(agentSessions).set({ orgId: "other-org" }).where(eq(agentSessions.id, childId));
+  for (const path of decisionPaths) expect((await request(path)).status).toBe(404);
+  await p.db.update(agentSessions).set({ orgId: "local-org" }).where(eq(agentSessions.id, childId));
+  await p.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
+  for (const path of decisionPaths) expect((await request(path)).status).toBe(404);
+  await p.db.insert(teamMembers).values({ teamId: "mine", userId: "test-member", role: "member" });
+  const resolvePath = addressKind === "session" ? decisionPaths[0] : decisionPaths[1];
+  expect((await request(`${resolvePath}/borrow-child/resolve`, "POST", { actionId: "approve" })).status).toBe(200);
+  expect((await p.engineStore.getDecisionGate(childId, "borrow-child"))?.status).toBe("resolved");
+  for (const path of decisionPaths) expect((await request(path)).status).toBe(404);
 });

@@ -38,7 +38,7 @@ threadsRouter.post("/read", c => inWorkspace(c, readThreads));
 
 type ThreadOperation = (c: Context<AppEnv>, sessionId: string, threadId: string) => Promise<Response>;
 
-async function inThread(c: Context<AppEnv>, operation: ThreadOperation, workflowDecision = false) {
+async function inThread(c: Context<AppEnv>, operation: ThreadOperation, purpose: "content" | "metadata" | "decision" = "content") {
   const threadId = c.req.param("threadId");
   const { db, engineStore } = c.var.providers;
   const [appSession] = await db.select().from(agentSessions)
@@ -47,12 +47,15 @@ async function inThread(c: Context<AppEnv>, operation: ThreadOperation, workflow
     )`)).limit(1);
   let sessionId = appSession?.id;
   if (appSession) {
-    if (!await canViewSession(db, appSession, c.var.principal) || !await spawnedFromVisibleThread(c, appSession)) {
+    if (purpose === "decision") {
+      const authorized = await loadDecisionSession(c, appSession.id, threadId);
+      if ("error" in authorized) return authorized.error;
+    } else if (!await canViewSession(db, appSession, c.var.principal) || !await spawnedFromVisibleThread(c, appSession)) {
       return c.json({ error: "Thread not found." }, 404);
     }
   } else {
     // Workflow threads permit metadata and decisions only, never prompts or sandbox access.
-    if (!workflowDecision) return c.json({ error: "Thread not found." }, 404);
+    if (purpose === "content") return c.json({ error: "Thread not found." }, 404);
     const [workflowThread] = await db.select({ sessionId: sql<string>`t.session_id` })
       .from(sql`engine_threads t`)
       .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(t.session_id, ':', 2)`)
@@ -60,12 +63,12 @@ async function inThread(c: Context<AppEnv>, operation: ThreadOperation, workflow
       .where(and(eq(workflowDefinitions.orgId, c.var.user.orgId), sql`t.id = ${threadId} and t.session_id LIKE 'wf:%'`)).limit(1);
     if (!workflowThread) return c.json({ error: "Thread not found." }, 404);
     sessionId = workflowThread.sessionId;
-    const authorized = await loadDecisionSession(c, sessionId);
+    const authorized = await loadDecisionSession(c, sessionId, threadId);
     if ("error" in authorized) return authorized.error;
   }
   if (!sessionId) return c.json({ error: "Thread not found." }, 404);
   const thread = await engineStore.getThread(sessionId, threadId);
-  if (!thread || (appSession && !await threadsVisibleTo(c, appSession)(thread.key))) return c.json({ error: "Thread not found." }, 404);
+  if (!thread || (appSession && purpose !== "decision" && !await threadsVisibleTo(c, appSession)(thread.key))) return c.json({ error: "Thread not found." }, 404);
   if (c.req.query("threadId") !== undefined && c.req.query("threadId") !== threadId) {
     return c.json({ error: "threadId must match the URL." }, 400);
   }
@@ -83,13 +86,13 @@ threadsRouter.get("/:threadId", c => inThread(c, async (c, sessionId, threadId) 
   const [meta] = await c.var.providers.db.select().from(sessionThreads)
     .where(and(eq(sessionThreads.id, threadId), eq(sessionThreads.sessionId, sessionId))).limit(1);
   return c.json({ id: threadId, sessionId, title: meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null });
-}, true));
+}, "metadata"));
 threadsRouter.patch("/:threadId", c => inThread(c, patchThread));
 threadsRouter.get("/:threadId/messages", c => inThread(c, listMessages));
 threadsRouter.post("/:threadId/messages", c => inThread(c, sendPrompt));
 threadsRouter.get("/:threadId/channel-activity", c => inThread(c, getThreadChannelActivity));
 threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread));
 threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread));
-threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, true));
-threadsRouter.post("/:threadId/decisions/:gateId/resolve", c => inThread(c, resolveDecision, true));
-threadsRouter.post("/:threadId/decisions/:gateId/withdraw", c => inThread(c, withdrawDecision, true));
+threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision"));
+threadsRouter.post("/:threadId/decisions/:gateId/resolve", c => inThread(c, resolveDecision, "decision"));
+threadsRouter.post("/:threadId/decisions/:gateId/withdraw", c => inThread(c, withdrawDecision, "decision"));

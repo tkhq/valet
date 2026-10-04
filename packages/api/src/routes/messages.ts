@@ -80,12 +80,22 @@ export const messagesRouter = new Hono<AppEnv>();
  * model change — in `routes/sessions.ts`) are NOT widened by this; talking
  * to a team's orchestrator is not the same decision as reconfiguring it.
  */
-export async function loadOwnedSession(c: Context<AppEnv>, id = c.req.param("id")) {
-  const { db } = c.var.providers;
+export async function loadOwnedSession(
+  c: Context<AppEnv>, id = c.req.param("id"), decisionAccess?: { threadId?: string },
+) {
+  const { db, engineStore } = c.var.providers;
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, c.var.principal)) || !(await spawnedFromVisibleThread(c, row))) return null;
-  return row;
+  if (!row || row.orgId !== c.var.user.orgId || !(await canViewSession(db, row, c.var.principal))) return null;
+  const thread = decisionAccess?.threadId ? await engineStore.getThread(id, decisionAccess.threadId) : undefined;
+  if (decisionAccess?.threadId && !thread) return null;
+  if (await spawnedFromVisibleThread(c, row) && (!thread || await threadsVisibleTo(c, row)(thread.key))) return row;
+  // Named approval grants decision access only, never private child content.
+  if (decisionAccess && c.var.principal.type === "user") {
+    const gates = await engineStore.listDecisionGates(id, decisionAccess.threadId, "pending");
+    if (gates.some(gate => gateApprover(gate)?.userId === c.var.principal.id)) return row;
+  }
+  return null;
 }
 
 /**
@@ -303,6 +313,7 @@ function threadToSummary(
 async function loadEngineSession(
   c: Context<AppEnv>,
   id = c.req.param("id"),
+  decisionAccess?: { threadId?: string },
 ): Promise<
   | {
       session: typeof agentSessions.$inferSelect;
@@ -311,7 +322,7 @@ async function loadEngineSession(
     }
   | { error: Response }
 > {
-  const session = await loadOwnedSession(c, id);
+  const session = await loadOwnedSession(c, id, decisionAccess);
   if (!session) return { error: c.json({ error: "session not found" }, 404) };
   const { engineHost, db } = c.var.providers;
 
@@ -1221,8 +1232,8 @@ async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike, 
 /** Workflow agent gates have a run owner, but no app session row. Only
  * decision endpoints use this fallback; it grants no sandbox or prompt access.
  */
-export async function loadDecisionSession(c: Context<AppEnv>, id: string) {
-  if (!id.startsWith("wf:")) return loadEngineSession(c, id);
+export async function loadDecisionSession(c: Context<AppEnv>, id: string, threadId?: string) {
+  if (!id.startsWith("wf:")) return loadEngineSession(c, id, { threadId });
   const missing = () => ({ error: c.json({ error: "session not found" }, 404) });
   let parts;
   try { parts = parseWorkflowSessionId(id); } catch { return missing(); }
@@ -1270,7 +1281,7 @@ async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, 
 messagesRouter.get("/:id/decisions", (c) => listDecisions(c, c.req.param("id")));
 
 export async function listDecisions(c: Context<AppEnv>, sessionId: string, threadId?: string) {
-  const result = await loadDecisionSession(c, sessionId);
+  const result = await loadDecisionSession(c, sessionId, threadId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
 
@@ -1282,7 +1293,7 @@ export async function listDecisions(c: Context<AppEnv>, sessionId: string, threa
 messagesRouter.post("/:id/decisions/:gateId/resolve", (c) => resolveDecision(c, c.req.param("id")));
 
 export async function resolveDecision(c: Context<AppEnv>, sessionId: string, threadId?: string) {
-  const result = await loadDecisionSession(c, sessionId);
+  const result = await loadDecisionSession(c, sessionId, threadId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
@@ -1371,7 +1382,7 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
 messagesRouter.post("/:id/decisions/:gateId/withdraw", (c) => withdrawDecision(c, c.req.param("id")));
 
 export async function withdrawDecision(c: Context<AppEnv>, sessionId: string, threadId?: string) {
-  const result = await loadDecisionSession(c, sessionId);
+  const result = await loadDecisionSession(c, sessionId, threadId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
