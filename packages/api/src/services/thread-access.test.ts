@@ -176,16 +176,17 @@ it("keeps a DM and a group DM to their members", async () => {
   expect(shared.rows[0]?.shared).toBe(false);
 });
 
-it("stops trusting a stale public answer when Slack cannot confirm it", async () => {
+it("rechecks a stale public answer, and keeps it when Slack cannot answer", async () => {
   api = await bootTestApi();
   await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
-  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: false, error: "ratelimited" }), { headers: { "content-type": "application/json" } }));
   const visible = () => threadVisibility(api!.providers, { ownerType: "team" }, { orgId: "local-org", userId: "outsider" })("slack:CWASPUBLIC:1.1");
-  // Fresh "public": shown, without asking Slack.
-  await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CWASPUBLIC", isPrivate: false, checkedAt: Date.now() });
+  await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CWASPUBLIC", isPrivate: false, checkedAt: Date.now() - 60 * 60_000 });
+  // Slack is down: the last known "public" stands, so the thread stays readable.
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: false, error: "ratelimited" }), { headers: { "content-type": "application/json" } }));
   expect(await visible()).toBe(true);
-  // Stale "public", and Slack cannot say whether it turned private: hidden.
+  // Slack answers that the channel is now private: the stale answer is replaced and the thread hides.
+  vi.restoreAllMocks();
   resetThreadAccessCache();
-  await api.providers.db.update(slackChannelPrivacy).set({ checkedAt: Date.now() - 60 * 60_000 });
+  await connectSlack(api, { CWASPUBLIC: ["USOMEONE"] });
   expect(await visible()).toBe(false);
 });

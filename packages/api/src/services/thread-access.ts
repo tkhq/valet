@@ -16,9 +16,11 @@
  *
  * Whether a channel is private is the channel's state, not the viewer's, so it
  * is stored once per org (`slack_channel_privacy`) and Slack is asked again
- * only after it goes stale. When Slack cannot answer, the stored answer
- * stands: a public channel stays readable after a disconnect, and a private
- * one stays hidden. A channel never classified, when Slack cannot answer,
+ * once it goes stale: after five minutes for "public", an hour for
+ * "private". When Slack cannot answer (an outage or a disconnect), the stored
+ * answer stands, so a public channel stays readable and a private one stays
+ * hidden; a channel made private during the outage shows until Slack
+ * answers again. A channel never classified, when Slack cannot answer,
  * stays hidden: it may be private. The first thread list after a channel's
  * first message classifies it, while the bot's token still works there.
  */
@@ -75,9 +77,8 @@ const membershipCache = new Map<string, { allowed: boolean; expiresAt: number }>
 
 /**
  * Whether a Slack channel is private: from memory, then the stored answer
- * while it is fresh, then Slack. When Slack cannot answer, a stored "private"
- * stands, but a stale "public" does not: it reads as unknown, which hides the
- * channel, because a channel may have turned private since.
+ * while it is fresh, then Slack, with the stored answer standing when Slack
+ * cannot answer. Undefined only for a channel never classified.
  */
 export async function slackChannelIsPrivate(
   deps: AccessDeps, orgId: string, channelId: string, token: () => Promise<string | null>,
@@ -102,8 +103,6 @@ export async function slackChannelIsPrivate(
       isPrivate = info.isPrivate;
       await deps.db.insert(slackChannelPrivacy).values({ orgId, channelId, isPrivate, checkedAt: now })
         .onConflictDoUpdate({ target: [slackChannelPrivacy.orgId, slackChannelPrivacy.channelId], set: { isPrivate, checkedAt: now } });
-    } else if (isPrivate === false) {
-      isPrivate = undefined;
     }
   }
   setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: now + ttl(isPrivate) });
