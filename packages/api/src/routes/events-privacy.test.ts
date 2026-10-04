@@ -88,12 +88,18 @@ it("leaves a private Slack channel's events out of a non-member's Log", async ()
   ]);
   await db.insert(eventSubscriptions).values({ id: "sub-log", orgId: "local-org", ownerType: "team", ownerId: "team-log", name: "Slack", eventKeys: ["slack.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1 });
   const now = Date.now();
-  for (const [id, channel] of [["log-private", "CPRIV"], ["log-public", "CPUB"]] as const) {
-    await db.insert(events).values({ id, orgId: "local-org", service: "slack", eventKey: "slack.message", dedupeKey: id, refs: { channel }, summary: `message in ${channel}`, payload: { channel }, occurredAt: now, receivedAt: now });
+  // The private channel's events are the newest, so a short page holds only them.
+  for (const [id, channel, at] of [["log-private", "CPRIV", now + 2], ["log-private-2", "CPRIV", now + 1], ["log-public", "CPUB", now]] as const) {
+    await db.insert(events).values({ id, orgId: "local-org", service: "slack", eventKey: "slack.message", dedupeKey: id, refs: { channel }, summary: `message in ${channel}`, payload: { channel }, occurredAt: at, receivedAt: at });
     await db.insert(eventDeliveries).values({ id: `d-${id}`, eventId: id, subscriptionId: "sub-log", status: "delivered", attempts: 1, nextAttemptAt: now, createdAt: now });
   }
   const log = async (user?: string) => ((await (await fetch(`${api!.baseUrl}/api/events/log?ownerType=team&ownerId=team-log`,
     user ? { headers: { "x-valet-test-user-id": user } } : {})).json()) as { items: Array<{ id: string }> }).items.map((i) => i.id).sort();
-  expect(await log()).toEqual(["log-private", "log-public"]);
+  expect(await log()).toEqual(["log-private", "log-private-2", "log-public"]);
   expect(await log("test-member")).toEqual(["log-public"]);
+  // A page whose window is all hidden rows reads on to the visible one.
+  const page = (await (await fetch(`${api.baseUrl}/api/events/log?ownerType=team&ownerId=team-log&limit=1`,
+    { headers: { "x-valet-test-user-id": "test-member" } })).json()) as { items: Array<{ id: string }>; nextCursor: string | null };
+  expect(page.items.map((i) => i.id)).toEqual(["log-public"]);
+  expect(page.nextCursor).toBeNull();
 });

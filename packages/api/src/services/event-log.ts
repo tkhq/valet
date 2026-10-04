@@ -56,12 +56,16 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
+/** How many pages of events one Log read scans past hidden rows. */
+const MAX_SCAN_BATCHES = 20;
+
 export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ items: EventLogItem[]; hasMore: boolean }> {
   const { orgId, owner, problemsOnly, limit } = query;
   const like = query.q ? `%${escapeLike(query.q)}%` : undefined;
   const take = limit + 1;
 
   const eventRows: EventLogItem[] = [];
+  let moreEvents = false;
   {
     const where: SQL[] = [
       sql`e.org_id = ${orgId}`,
@@ -72,31 +76,41 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
       sql`((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org')`,
     ];
     if (like) where.push(sql`(e.summary ILIKE ${like} ESCAPE '\\' OR e.event_key ILIKE ${like} ESCAPE '\\')`);
-    if (query.before) where.push(sql`(e.received_at, e.id) < (${query.before.at}, ${query.before.id})`);
     const having = problemsOnly ? sql`HAVING ${EVENT_STATUS} = 'failed'` : sql``;
-    const result = await db.execute(sql`
-      SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
-        CASE WHEN e.service = 'slack' THEN COALESCE(e.refs->>'channel', e.payload->'item'->>'channel', e.payload->>'channel_id',
-          e.payload->'channel'->>'id', e.payload->>'channel') END AS slack_channel,
-        MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason
-      FROM events e JOIN event_deliveries d ON d.event_id = e.id JOIN event_subscriptions s ON s.id = d.subscription_id
-      WHERE ${sql.join(where, sql` AND `)}
-      GROUP BY e.id
-      ${having}
-      ORDER BY e.received_at DESC, e.id DESC
-      LIMIT ${take}`) as { rows: Array<{
-        id: string; service: string; event_key: string; summary: string | null; actor: unknown;
-        received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
-        slack_channel: string | null;
-      }> };
-    for (const row of result.rows) {
-      if (row.slack_channel && query.channelVisible && !(await query.channelVisible(`slack:${row.slack_channel}`))) continue;
-      const actor = row.actor && typeof row.actor === "object" ? row.actor as { login?: string; externalId?: string } : null;
-      eventRows.push({
-        kind: "event", id: row.id, at: Number(row.received_at), status: row.status,
-        service: row.service, eventKey: row.event_key, summary: row.summary, actor: actor?.login ?? actor?.externalId ?? null,
-        reason: null, detail: row.status === "skipped" ? row.skipped_reason : null, deliveryCount: Number(row.deliveries),
-      });
+    // Rows a viewer may not see (a private Slack channel's) are dropped after
+    // the read, so a page keeps reading until it holds `take` visible rows or
+    // the events run out. The scan is bounded; past it the page says more.
+    let before = query.before;
+    for (let batch = 0; eventRows.length < take; batch++) {
+      if (batch === MAX_SCAN_BATCHES) { moreEvents = true; break; }
+      const scoped = before ? [...where, sql`(e.received_at, e.id) < (${before.at}, ${before.id})`] : where;
+      const result = await db.execute(sql`
+        SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
+          CASE WHEN e.service = 'slack' THEN COALESCE(e.refs->>'channel', e.payload->'item'->>'channel', e.payload->>'channel_id',
+            e.payload->'channel'->>'id', e.payload->>'channel') END AS slack_channel,
+          MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason
+        FROM events e JOIN event_deliveries d ON d.event_id = e.id JOIN event_subscriptions s ON s.id = d.subscription_id
+        WHERE ${sql.join(scoped, sql` AND `)}
+        GROUP BY e.id
+        ${having}
+        ORDER BY e.received_at DESC, e.id DESC
+        LIMIT ${take}`) as { rows: Array<{
+          id: string; service: string; event_key: string; summary: string | null; actor: unknown;
+          received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
+          slack_channel: string | null;
+        }> };
+      for (const row of result.rows) {
+        if (row.slack_channel && query.channelVisible && !(await query.channelVisible(`slack:${row.slack_channel}`))) continue;
+        const actor = row.actor && typeof row.actor === "object" ? row.actor as { login?: string; externalId?: string } : null;
+        eventRows.push({
+          kind: "event", id: row.id, at: Number(row.received_at), status: row.status,
+          service: row.service, eventKey: row.event_key, summary: row.summary, actor: actor?.login ?? actor?.externalId ?? null,
+          reason: null, detail: row.status === "skipped" ? row.skipped_reason : null, deliveryCount: Number(row.deliveries),
+        });
+      }
+      const last = result.rows.at(-1);
+      if (result.rows.length < take || !last) break;
+      before = { at: Number(last.received_at), id: last.id };
     }
   }
 
@@ -122,7 +136,7 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
   }
 
   const merged = [...eventRows, ...problemRows].sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-  return { items: merged.slice(0, limit), hasMore: merged.length > limit };
+  return { items: merged.slice(0, limit), hasMore: merged.length > limit || moreEvents };
 }
 
 /** When anything last reached ingest: a stored event or a visible problem. */
