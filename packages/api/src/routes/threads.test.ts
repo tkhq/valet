@@ -98,6 +98,15 @@ describe("thread addressing compatibility", () => {
     const legacyDenial = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/decisions/${gate.id}/resolve`, { method: "POST", headers, body: JSON.stringify({ actionId: "always_allow" }) });
     expect(legacyDenial.status).toBe(403);
     expect((await resolve(first.id, "approve")).status).toBe(200);
+
+    // The admin's own helper thread on the team runtime is theirs alone. A
+    // gate there names no approver, and the key's viewer names nobody, so the
+    // two must not compare equal.
+    const helper = await (await fetch(`${api.baseUrl}/api/workspaces/${team.team.id}/conversation`, { method: "POST", headers: { cookie } })).json() as { sessionId: string; threadId: string };
+    await api.providers.engineStore.saveDecisionGate(helper.sessionId, helper.threadId, { ...gate, id: "helper-gate", sessionId: helper.sessionId, threadId: helper.threadId, resumeKey: "helper" });
+    const decisions = `${api.baseUrl}/api/sessions/${encodeURIComponent(helper.sessionId)}/decisions`;
+    expect(((await (await fetch(decisions, { headers })).json()) as { gates: Array<{ id: string }> }).gates.map((g) => g.id)).not.toContain("helper-gate");
+    expect((await fetch(`${decisions}/helper-gate/resolve`, { method: "POST", headers, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
     expect((await api.providers.engineStore.getDecisionGate(first.sessionId, gate.id))?.status).toBe("resolved");
   });
 });

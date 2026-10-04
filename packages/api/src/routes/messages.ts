@@ -1235,7 +1235,8 @@ async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, 
   const shown = await Promise.all(pending.map(async (gate) => {
     // The member asked to lend their account answers the gate even when the
     // requester's thread is private to the requester.
-    if (gateApprover(gate)?.userId === viewerOf(c).userId) return true;
+    const approver = gateApprover(gate)?.userId;
+    if (approver !== undefined && approver === viewerOf(c).userId) return true;
     const thread = engineSession.threadById(gate.threadId)
       ?? await c.var.providers.engineStore.getThread(engineSession.id, gate.threadId);
     return !!thread && visible(thread.key);
