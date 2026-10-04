@@ -620,11 +620,13 @@ describe("ThreadTree — unread and pull requests", () => {
   it("dots unread threads, shows pull request state, and marks all read", async () => {
     const user = userEvent.setup();
     markThreadsReadMutate.mockClear();
+    // Fixed creation times: the newest thread is the open one, and an open
+    // thread shows no unread dot. `Date.now()` per fixture made that a race.
     threads = [
-      thread({ id: "home", title: "Home", key: "default" }),
-      thread({ id: "replied", title: "Agent replied", lastUserActivityAt: 10, lastAgentActivityAt: 20,
+      thread({ id: "home", title: "Home", key: "default", createdAt: 3 }),
+      thread({ id: "replied", title: "Agent replied", createdAt: 2, lastUserActivityAt: 10, lastAgentActivityAt: 20,
         pullRequests: [{ url: "https://github.com/acme/app/pull/7", repo: "acme/app", number: 7, state: "merged" }] }),
-      thread({ id: "read", title: "Already read", lastUserActivityAt: 10, lastAgentActivityAt: 20, readAt: 30,
+      thread({ id: "read", title: "Already read", createdAt: 1, lastUserActivityAt: 10, lastAgentActivityAt: 20, readAt: 30,
         pullRequests: [{ url: "https://github.com/acme/app/pull/8", repo: "acme/app", number: 8, state: "open" }] }),
     ];
     renderTree();
