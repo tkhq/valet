@@ -1833,7 +1833,9 @@ export class EngineHost {
       // same contract `isTeamMember` holds everywhere else.
       let actsAsMember = actingMember;
       if (actsAsMember && sessionOwner.type === "team") {
-        actsAsMember = db ? await isTeamMember(db, sessionOwner.id, userId) : false;
+        // A turn from a channel sender with no Valet account never reads a
+        // member's own credentials, whoever woke the runtime.
+        actsAsMember = !use.externalSender && db ? await isTeamMember(db, sessionOwner.id, userId) : false;
       }
       const owner: CredentialOwner = actsAsMember ? { type: "user", id: userId } : sessionOwner;
       const scopes = onePasswordScopesFor(actsAsMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);

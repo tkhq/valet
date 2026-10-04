@@ -11,7 +11,7 @@ import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
 import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
-import { authorizedSubscriptionMatchesEvent, setSlackWorkspaceMemberCheck } from "./team-slack-gate.js";
+import { authorizedSubscriptionMatchesEvent, newcomerAuthor, setSlackWorkspaceMemberCheck } from "./team-slack-gate.js";
 
 const ORG = "org-team-events";
 const channelFilter = { field: "channel", op: "eq", value: "C1" } as const;
@@ -326,5 +326,18 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, body, scope)).toEqual({ ok: true, filters: [channelFilter] });
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, { ...body, filters: [] }, scope)).toMatchObject({ ok: false });
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, { ...body, filters: [] }, { ...scope, anyChannel: true })).toEqual({ ok: true, filters: [] });
+  });
+});
+
+describe("newcomerAuthor", () => {
+  it("keeps the newcomer limits unless the sender is linked to the user the turn runs as", async () => {
+    const tdb = await freshTestPgDb();
+    await tdb.appDb.insert(userIdentityLinks).values({ id: "link-a", provider: "slack", externalId: "U_A", userId: "member-a", createdAt: Date.now() });
+    // Linked to the actor: the member writes as themselves.
+    expect(await newcomerAuthor(tdb.appDb, ORG, "member-a", "U_A")).toBeUndefined();
+    // Unlinked, or linked to someone else than the actor (a link that changed
+    // after the actor was chosen): the turn keeps the limits.
+    expect(await newcomerAuthor(tdb.appDb, ORG, "creator", "U_NEW", "Sam")).toEqual({ id: "creator", name: "Sam", externalSender: true });
+    expect(await newcomerAuthor(tdb.appDb, ORG, "creator", "U_A")).toMatchObject({ id: "creator", externalSender: true });
   });
 });

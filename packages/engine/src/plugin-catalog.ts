@@ -1153,6 +1153,7 @@ function resolveFailurePrefix(message: string): string {
 function makeCallTool(catalog: Catalog): ToolDef {
   return {
     name: "call_tool",
+    policyChecked: true,
     description:
       "Invoke a plugin action by tool_id (discovered via list_tools). Approval gates may suspend execution for high/critical risk actions.",
     parameters: Type.Object({
@@ -1423,6 +1424,7 @@ function makePinnedTool(
   // sends no summary or the schema cannot carry one.
   const derivedSummary = `${entry.action.name} (${name})`;
   return {
+    policyChecked: true,
     name,
     description: parts.join(" "),
     parameters: published.schema,

@@ -153,8 +153,36 @@ describe("decision gates: sender with no Valet account", () => {
 
     expect(gatesFrom(events)).toEqual([]);
     const entries = await session.readEntries("web:default");
-    expect(JSON.stringify(entries)).toContain("denied");
+    // The tool acts as the workspace, so the turn refuses it before it can ask.
+    expect(JSON.stringify(entries)).toContain("[not_available] do_thing");
     expect(JSON.stringify(entries)).not.toContain("did the thing");
+    faux.unregister();
+  });
+});
+
+describe("tools on a turn from a sender with no Valet account", () => {
+  it("refuses a tool that acts as the workspace, and runs it for a member", async () => {
+    const faux = registerFauxProvider({ provider: "external-sender-tools" });
+    let ran = 0;
+    const writeTool: ToolDef = {
+      name: "write_note", description: "Write a note into the workspace.", parameters: Type.Object({}),
+      execute: async () => { ran += 1; return { text: "written" }; },
+    };
+    const turn = () => [
+      fauxAssistantMessage([fauxToolCall("write_note", {}, { id: `tc${ran}` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ];
+    faux.setResponses([...turn(), ...turn()]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [writeTool] });
+
+    await session.prompt("write it", { author: { id: "u1", name: "Slack member", externalSender: true } });
+    await waitFor(() => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length >= 1);
+    expect(ran).toBe(0);
+    expect(JSON.stringify(await session.readEntries("web:default"))).toContain("[not_available] write_note");
+
+    await session.prompt("write it", { author: { id: "u1" } });
+    await waitFor(() => ran === 1);
     faux.unregister();
   });
 });

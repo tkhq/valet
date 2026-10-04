@@ -4939,7 +4939,7 @@ export class Thread {
   }
 
   private buildTools(): AgentTool[] {
-    const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])];
+    const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
     return all.map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
@@ -6277,4 +6277,20 @@ export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] 
   if (!kind) return {};
   const url = "url" in outcome && typeof outcome.url === "string" ? outcome.url : undefined;
   return { outcome: { kind, ...(url ? { url } : {}) } };
+}
+
+/** The tools a turn from a channel sender with no Valet account may run
+ * beyond policy-checked plugin actions: listing actions, and reading the
+ * threads its conversation may read (`threadAccess`). Sandbox, file, memory,
+ * artifact, and child tools act as the workspace, so they refuse that turn. */
+const EXTERNAL_SENDER_READS = new Set(["list_tools", "list_threads", "thread_read"]);
+
+function refuseExternalSender(def: ToolDef): ToolDef {
+  if (def.policyChecked || EXTERNAL_SENDER_READS.has(def.name)) return def;
+  return {
+    ...def,
+    execute: (args, ctx) => ctx.externalSender
+      ? Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` })
+      : def.execute(args, ctx),
+  };
 }

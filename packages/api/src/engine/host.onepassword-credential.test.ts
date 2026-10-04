@@ -24,7 +24,7 @@ import {
   type OnePasswordService,
 } from "../services/onepassword.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgs } from "../schema/index.js";
+import { orgs, teamMembers } from "../schema/index.js";
 import { EngineHost, type EngineHostOpts } from "./host.js";
 
 const orgId = "op-org";
@@ -108,6 +108,19 @@ describe("EngineHost session 1Password credential resolution", () => {
     // The exact object `credentials.get()` returned was handed to
     // `resolveCredential` (no clone before the call).
     expect(sawRow).toBe(stored);
+  });
+
+  it("never reads a member's own credential on a newcomer's turn in a team session that acts as its member", async () => {
+    const { appDb } = await freshTestPgDb();
+    await appDb.insert(teamMembers).values({ teamId: "team-actor", userId, role: "member" });
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "acme-service", { type: "api_key", apiKey: "member-key" });
+    const h = makeHost(credentials, { db: appDb, onePassword: fakeOnePassword(async (row) => row) });
+    const session = await h.sessionFor("sess-actor-newcomer", {
+      userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: "team-actor", credentialOwnerMode: "actor",
+    });
+    expect((await session.credentialProvider().get("acme-service"))?.accessToken).toBe("member-key");
+    expect(await session.credentialProvider({ externalSender: true }).get("acme-service")).toBeNull();
   });
 
   it("non-1Password row passes through byte-identical (the exact object the store returned, unmodified)", async () => {

@@ -625,6 +625,11 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
   name: string;
   description: string;
   parameters: TParams;
+  /** The tool runs a plugin action through the host's policy check
+   * (`invokeAction`). A turn from a channel sender with no Valet account may
+   * run such a tool, because the policy refuses what needs approval; other
+   * tools act as the workspace and refuse that turn (`Thread.buildTools`). */
+  policyChecked?: boolean;
   riskLevel?: RiskLevel;
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */

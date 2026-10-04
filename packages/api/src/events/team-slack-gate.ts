@@ -27,14 +27,19 @@ export function setSlackWorkspaceMemberCheck(check: (userId: string) => Promise<
  * the rule up (`actorUserId`), but wrote the message themselves. The author
  * keeps that person's id, so everything the turn starts runs as a real Valet
  * user, and carries the sender's Slack id and name for display. Any other
- * sender writes as the user it runs as, and this returns undefined.
+ * sender linked to the user it runs as writes as that user, and this
+ * returns undefined.
  */
 export async function newcomerAuthor(
   db: AppDb, orgId: string, actorUserId: string, externalId: unknown, name?: string,
 ): Promise<PromptAuthor | undefined> {
   if (typeof externalId !== "string" || !externalId) return undefined;
-  if (await identityForExternal(db, "slack", externalId)) return undefined;
-  if (!(await isWorkspaceNewcomer(externalId))) return undefined;
+  // Only a sender linked to the user the turn runs as writes as that user.
+  // Anyone else did not decide to act as them, so the turn keeps the
+  // newcomer limits even if the sender's link changed after the actor was
+  // chosen (`teamMentionActor`). The check fails closed.
+  const identity = await identityForExternal(db, "slack", externalId);
+  if (identity?.userId === actorUserId) return undefined;
   return { id: actorUserId, name: name || "Slack member", externalSender: true };
 }
 
