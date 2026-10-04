@@ -39,6 +39,7 @@ let orgData: OrgResponse = {
   name: "Acme",
   createdAt: 0,
   callerRole: "admin",
+  modelFailoverEnabled: true,
   allowPublicArtifacts: false,
   plugins: [],
   features: { organizations: true, ssoTeamSync: false },
@@ -89,7 +90,7 @@ import { SkillEditor } from "~/components/skills/skill-editor";
 
 describe("OrganizationLibraryPage — org skills panel", () => {
   beforeEach(() => {
-    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [] };
+    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", modelFailoverEnabled: true, features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [] };
     createSkill.mockClear();
     skillsQuery.mockClear();
     sourcesQuery.mockClear();
@@ -148,7 +149,7 @@ describe("OrganizationLibraryPage — org skills panel", () => {
  */
 describe("SkillEditor — the org scope", () => {
   beforeEach(() => {
-    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [] };
+    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", modelFailoverEnabled: true, features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [] };
     createSkill.mockClear();
   });
 

@@ -15,7 +15,7 @@ import type { OrgSettingsResponse } from "../wire/types.js";
 
 export const orgSettingsRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations"]);
+const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "modelFailoverEnabled"]);
 
 orgSettingsRouter.patch("/", async (c) => {
   const gate = await requireOrgAdmin(c);
@@ -36,7 +36,7 @@ orgSettingsRouter.patch("/", async (c) => {
     return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
   }
 
-  const update: { bareSkillCommands?: boolean; allowPublicArtifacts?: boolean; allowAnonymousImageBakes?: boolean; allowPersonalInstallations?: boolean } = {};
+  const update: { bareSkillCommands?: boolean; allowPublicArtifacts?: boolean; allowAnonymousImageBakes?: boolean; allowPersonalInstallations?: boolean; modelFailoverEnabled?: boolean } = {};
 
   if ("bareSkillCommands" in raw) {
     if (typeof raw.bareSkillCommands !== "boolean") {
@@ -57,6 +57,11 @@ orgSettingsRouter.patch("/", async (c) => {
       return c.json({ error: "allowAnonymousImageBakes must be a boolean. Send true or false." }, 400);
     }
     update.allowAnonymousImageBakes = raw.allowAnonymousImageBakes;
+  }
+
+  if ("modelFailoverEnabled" in raw) {
+    if (typeof raw.modelFailoverEnabled !== "boolean") return c.json({ error: "modelFailoverEnabled must be a boolean" }, 400);
+    update.modelFailoverEnabled = raw.modelFailoverEnabled;
   }
 
   if ("allowPersonalInstallations" in raw) {
@@ -81,6 +86,7 @@ orgSettingsRouter.patch("/", async (c) => {
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    modelFailoverEnabled: row.modelFailoverEnabled,
   };
   return c.json(resp);
 });

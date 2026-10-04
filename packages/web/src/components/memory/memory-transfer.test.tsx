@@ -8,7 +8,7 @@ import { MemoryTransfer } from "./memory-transfer";
 const team = { id: "t1", orgId: "o1", name: "Engineering", origin: "local" as const, externalId: null,
   createdAt: 1, memberCount: 1, callerRole: "admin" as const, defaultModel: null };
 const org = { id: "o1", name: "Org", createdAt: 1, callerRole: "member" as const,
-  features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [] };
+  features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [], modelFailoverEnabled: true };
 
 afterEach(() => vi.restoreAllMocks());
 function setup(owner?: { ownerType: "team"; ownerId: string }) {

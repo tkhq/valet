@@ -38,6 +38,7 @@ const PATCH_FIELDS = new Set([
   "name",
   "avatarUrl",
   "defaultModel",
+  "modelFailoverEnabled",
   "defaultReasoning",
   "newThreadBehavior",
 ]);
@@ -66,6 +67,7 @@ async function loadMeResponse(
     orgId: user.orgId,
     orgRole: membership?.role ?? "member",
     defaultModel: row.defaultModel,
+    modelFailoverEnabled: row.modelFailoverEnabled,
     defaultReasoning: row.defaultReasoning ?? null,
     newThreadBehavior: row.newThreadBehavior,
   };
@@ -121,6 +123,7 @@ meRouter.patch("/", async (c) => {
     name?: string;
     image?: string;
     defaultModel?: string | null;
+    modelFailoverEnabled?: boolean | null;
     defaultReasoning?: string | null;
     newThreadBehavior?: NewThreadBehavior;
   } = {};
@@ -137,6 +140,13 @@ meRouter.patch("/", async (c) => {
       return c.json({ error: "avatarUrl must be a string" }, 400);
     }
     update.image = raw.avatarUrl;
+  }
+
+  if ("modelFailoverEnabled" in raw) {
+    if (raw.modelFailoverEnabled !== null && typeof raw.modelFailoverEnabled !== "boolean") {
+      return c.json({ error: "modelFailoverEnabled must be a boolean or null to inherit the organization setting." }, 400);
+    }
+    update.modelFailoverEnabled = raw.modelFailoverEnabled;
   }
 
   if ("defaultModel" in raw) {

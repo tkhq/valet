@@ -187,6 +187,55 @@ describe("restoreSession does not block on the resumed turn", () => {
     }
   }, 30_000);
 
+  it("surfaces a safe provider error from a resumed turn when failover is configured", async () => {
+    const faux = registerFauxProvider({ provider: "restore-provider-error" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("hang", {}, { id: "call-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+    ]);
+    const store = new InMemorySessionStore();
+    const stream2 = new InMemoryEventStream();
+    const errors: string[] = [];
+    stream2.subscribe({}, (event) => {
+      if (event.event.type === "error") errors.push(event.event.error);
+    });
+    const hang = deferred();
+    let started = false;
+    const tool: ToolDef<ReturnType<typeof Type.Object>> = {
+      name: "hang",
+      description: "blocks before the restart",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await hang.promise;
+        return { text: "done" };
+      },
+    };
+    const options = {
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+      resolveModelFailover: async () => ({ candidates: [], enabled: true }),
+    };
+    try {
+      const engine1 = new Engine({
+        providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() },
+      });
+      const session1 = await engine1.createSession({ id: "restore-provider-error-sess", ...options });
+      const receipt = await session1.prompt("go");
+      await poll(() => started, 10_000, "interrupted tool to start");
+      await sleep(50);
+
+      const engine2 = new Engine({
+        providers: { store, stream: stream2, sandboxProvider: new VirtualSandboxProvider() },
+      });
+      const session2 = await engine2.restoreSession({ sessionId: "restore-provider-error-sess", options });
+      await session2.thread().awaitResult(receipt.queueItemId);
+      await poll(() => errors.includes("503 service unavailable"), 10_000, "resumed provider error");
+    } finally {
+      hang.resolve();
+      faux.unregister();
+    }
+  }, 30_000);
+
   it("a second same-process restore does not steal the live resume drive's attempt", async () => {
     // Cache-evict-then-rebuild scenario (host.evictCache + sessionFor): a
     // SECOND Engine restores the same session while the first restore's

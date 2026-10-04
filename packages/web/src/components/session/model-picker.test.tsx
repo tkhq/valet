@@ -30,6 +30,7 @@ function makeMe(overrides: Partial<MeResponse> = {}): MeResponse {
     orgRole: "member",
     defaultModel: null,
     defaultReasoning: null,
+    modelFailoverEnabled: null,
     newThreadBehavior: "keep_current",
     ...overrides,
   };
