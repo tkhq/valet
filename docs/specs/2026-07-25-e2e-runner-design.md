@@ -91,7 +91,7 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 |---|---|
 | `typecheck` | root `pnpm typecheck` (all packages except frozen `worker`) |
 | `conventions` | `scripts/check-conventions.ts` — recurring review rules as executable checks: `@ts-ignore`/`@ts-expect-error` banned, `as unknown as` ratcheted via allowlist (`scripts/e2e/conventions.ts`), every `ws`-consuming package declares both `@types/ws` and `@types/node`. Legacy packages (worker, client, runner) excluded. |
-| `unit` | root `pnpm test` (`shared`, `sdk`, `api`, `web` projects) |
+| `unit` | root `pnpm test --project '!@valet/engine'` (`shared`, `sdk`, `api`, `web`, and runner projects); engine runs once in `engine-unit` |
 | `engine-unit` | `pnpm --filter @valet/engine test` — store contract, compaction, gates, signals, kill-mid-turn, model switching |
 | `workflow-unit` | `pnpm --filter @valet/workflow test` — DAG interpreter, node executors, expression eval, checkpoints |
 | `gateway-unit` | `pnpm --filter @valet/sandbox-gateway test` — sandbox JWT mint/verify, WS proxy |
