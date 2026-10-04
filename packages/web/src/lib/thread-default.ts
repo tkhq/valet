@@ -11,3 +11,11 @@ export function defaultThreadId(threads: ThreadSummary[]): string | undefined {
     undefined,
   )?.id;
 }
+
+/** Who can see a team thread, as the thread shows it: a helper or editor
+ * thread is its person's alone, and a Slack thread follows its channel. */
+export function teamThreadNotice(teamName: string, key: string | null | undefined): string {
+  if (isAppAssistantThread({ key: key ?? undefined })) return "Only you can see this thread.";
+  if (key?.startsWith("slack:") || key?.startsWith("slack-events:")) return `Shared with ${teamName} members who can see this Slack channel.`;
+  return `Shared with ${teamName}. Members can read and reply.`;
+}

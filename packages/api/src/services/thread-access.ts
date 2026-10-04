@@ -32,10 +32,18 @@ import { identityForUser } from "../channels/identity-links.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { Providers } from "../providers/types.js";
 import { agentSessions, slackChannelPrivacy } from "../schema/index.js";
-/** The Slack conversation a thread key names, DMs and group DMs included. */
+/** The Slack conversation a thread key names, DMs and group DMs included,
+ * and a channel's events thread (`slackEventsThreadKey`). */
 function slackConversation(key: string | null | undefined): { channelId: string } | null {
-  const match = /^slack:([^:]+):[^:]+$/.exec(key ?? "");
-  return match ? { channelId: match[1]! } : null;
+  const match = /^slack:([^:]+):[^:]+$|^slack-events:([^:]+)$/.exec(key ?? "");
+  return match ? { channelId: (match[1] ?? match[2])! } : null;
+}
+
+/** Where a Slack event with no thread to reply into lands for a team: a
+ * bot message, a reaction, a join. Keyed by its channel, so the channel's
+ * privacy governs it, not the shared events thread every member reads. */
+export function slackEventsThreadKey(channelId: string): string {
+  return `slack-events:${channelId}`;
 }
 import type { ChannelVisibility } from "./channels.js";
 import { resolveOrgCredentialRead } from "./credential-resolution.js";
@@ -281,7 +289,7 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string;
  */
 export function sharedWithWholeTeamSql(orgId: string, key: SQL): SQL {
   return sql`(${key} IS NULL OR (${key} NOT LIKE 'app-assistant:%' AND ${key} NOT LIKE 'workflow:%'
-    AND (${key} NOT LIKE 'slack:%' OR EXISTS (SELECT 1 FROM slack_channel_privacy p
+    AND ((${key} NOT LIKE 'slack:%' AND ${key} NOT LIKE 'slack-events:%') OR EXISTS (SELECT 1 FROM slack_channel_privacy p
       WHERE p.org_id = ${orgId} AND p.channel_id = split_part(${key}, ':', 2) AND p.is_private = false))))`;
 }
 

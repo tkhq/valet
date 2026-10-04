@@ -14,6 +14,8 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/hooks/use-workspace-conversation", () => ({ useWorkspaceConversation: () => ({ data, error, refetch: vi.fn() }) }));
 vi.mock("~/lib/workspace-scope", () => ({ useWorkspaceScope: () => ({ key: "team-a", teamId: "team-a" }) }));
 vi.mock("~/api/settings", () => ({ useTeams: () => ({ data: { teams: [{ id: "team-a", name: "Platform" }] } }) }));
+let threadKey: string | undefined = "web:default";
+vi.mock("~/api/queries", () => ({ useThreads: () => ({ data: { threads: [{ id: "thread-a", key: threadKey, createdAt: 1 }] } }) }));
 vi.mock("~/hooks/use-invalidate-messages-on-queue-state", () => ({ useInvalidateMessagesOnQueueState: vi.fn() }));
 vi.mock("~/components/session/session-view", () => ({ SessionView: ({ sessionId, activeThreadId, scopeNotice }: { sessionId: string; activeThreadId?: string; scopeNotice?: string }) => <div data-testid="conversation" data-scope-notice={scopeNotice}>{sessionId}:{activeThreadId}</div> }));
 vi.mock("~/components/session/child-panel", () => ({ ChildPanel: () => null }));
@@ -21,7 +23,12 @@ beforeEach(() => { data = { sessionId: "team-session" }; error = null; });
 function show() { if (!capture.page) throw new Error("missing route"); const Page = capture.page; return render(<Page />); }
 it("opens the resolved workspace thread and labels its audience", () => {
   show(); expect(screen.getByTestId("conversation").textContent).toBe("team-session:thread-a");
-  expect(screen.getByTestId("conversation").getAttribute("data-scope-notice")).toContain("Platform");
+  expect(screen.getByTestId("conversation").getAttribute("data-scope-notice")).toBe("Shared with Platform. Members can read and reply.");
+});
+it("tells a helper thread's person that only they can see it", () => {
+  threadKey = "app-assistant:me"; show();
+  expect(screen.getByTestId("conversation").getAttribute("data-scope-notice")).toBe("Only you can see this thread.");
+  threadKey = "web:default";
 });
 it("does not read a conversation before its session is ensured", () => {
   data = undefined; show(); expect(screen.queryByTestId("conversation")).toBeNull();

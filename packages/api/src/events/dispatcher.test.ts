@@ -302,6 +302,21 @@ describe("EventDispatcher", () => {
     expect(deliver.mock.calls[0]![0]).not.toHaveProperty("threadKey");
   });
 
+  it("keeps a Slack event with no thread to reply into on its channel's events thread", async () => {
+    // A reaction in a channel has no Slack thread to answer, so it would land
+    // on the shared events thread; keyed by its channel, the channel's
+    // privacy governs who reads it.
+    await seedDelivery({
+      target: { kind: "orchestrator" }, ownerType: "org",
+      service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
+      refs: { channel: "CPRIV" }, summary: "reaction :eyes: added in CPRIV by U9",
+      payload: { type: "reaction_added", item: { channel: "CPRIV", ts: "1.2" }, user: "U9", reaction: "eyes" },
+    });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    await new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver }).pollOnce();
+    expect(deliver.mock.calls[0]?.[0].threadKey).toBe("slack-events:CPRIV");
+  });
+
   it("delivers an orchestrator-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
     const { eventId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, ownerType: "org" });
 

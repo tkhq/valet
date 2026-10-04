@@ -74,6 +74,9 @@ it("shares a team thread with the whole team only when nothing narrows it", asyn
   expect(await shared("web:default")).toBe(true);
   expect(await shared("slack:CSHAREPUB:1.1")).toBe(true);
   expect(await shared("slack:CSHAREPRIV:1.1")).toBe(false);
+  // A channel's events thread follows the channel.
+  expect(await shared("slack-events:CSHAREPUB")).toBe(true);
+  expect(await shared("slack-events:CSHAREPRIV")).toBe(false);
   // A channel never classified waits until a thread list classifies it.
   expect(await shared("slack:CSHARENEW:1.1")).toBe(false);
   expect(await shared("app-assistant:someone")).toBe(false);

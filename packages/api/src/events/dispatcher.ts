@@ -24,6 +24,7 @@
  * would claim the row.) A crash mid-delivery leaves the row pending; it
  * becomes due again when the lease lapses.
  */
+import { slackEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { ChannelOrigin, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
@@ -258,6 +259,9 @@ export class EventDispatcher {
         // text, not the machine summary or raw `<@U…>` markup and ids.
         // A non-channel event keeps the compact JSON excerpt it always had.
         const origin = this.deps.resolveChannelOrigin?.(event.service, event.eventKey, event.payload) ?? null;
+        // A Slack event from a channel with no thread to reply into stays
+        // with that channel's audience, not the shared events thread.
+        const slackChannel = slackEventChannel(event);
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
         let body: string;
         let channelBody = "";
@@ -342,7 +346,7 @@ export class EventDispatcher {
             origin: origin ?? undefined,
           },
           dispatchId: `event:${delivery.id}`,
-          ...(prThreadKey ? { threadKey: prThreadKey } : {}),
+          ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
           ...(inbound ? { inbound } : {}),
           ...(author ? { author } : {}),
         });
