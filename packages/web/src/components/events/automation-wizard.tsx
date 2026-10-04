@@ -31,6 +31,8 @@ import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-p
  * workflow kind (`EventSubscriptionTargetWire`), so a workflow-targeted event
  * rule needs no separate event-trigger endpoint.
  */
+import { EventMatchStep } from "./event-match-step";
+import { useSubscriptionMatch, validateSubscriptionFilters } from "./subscription-match";
 import { Link } from "@tanstack/react-router";
 import type {
   EventSubscriptionAudienceWire,
@@ -44,12 +46,7 @@ import { useTeams } from "~/api/settings";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
 import { CollisionNotice, collisionsFromError } from "~/components/events/collision-notice";
 import {
-  FilterEditor,
-  incompleteFilterRow,
   NO_CHANNEL_MATCH_HELP,
-  pruneFilterRows,
-  toWireFilters,
-  type FilterField,
   type UiFilterRow,
 } from "~/components/events/filter-editor";
 import {
@@ -62,17 +59,15 @@ import {
   Dialog,
   DialogContent,
   DialogFooter,
-  ErrorRow,
   Input,
   Label,
-  LoadingRow,
 } from "~/components/primitives";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
 import { useActiveWorkspace } from "~/components/workspace-clause";
-import { hasChannelScopeFilter, SLACK_APP_MENTION } from "~/lib/slack-mention";
+import { SLACK_APP_MENTION } from "~/lib/slack-mention";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */
 interface SelectedChannel {
@@ -125,6 +120,7 @@ export function AutomationWizard({
   onOpenChange: (open: boolean) => void;
 }) {
   const catalogQ = useEventCatalog();
+  const services = catalogQ.data?.services ?? [];
   const workflowsQ = useWorkflows();
   const createSubscription = useCreateEventSubscription();
   const createSchedule = useCreateSchedule();
@@ -138,8 +134,7 @@ export function AutomationWizard({
   const [threadLink, setThreadLink] = useState("");
   const threadPreset = parseSlackThreadLink(threadLink);
   const [name, setName] = useState("");
-  const [keys, setKeys] = useState<Set<string>>(new Set());
-  const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
+  const { keys, setKeys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(services);
   const [cron, setCron] = useState("");
   const [timezone, setTimezone] = useState(defaultTimezone());
   const [prompt, setPrompt] = useState("");
@@ -207,7 +202,6 @@ export function AutomationWizard({
   }, [scopedTeamId]);
 
   const workflows = workflowsQ.data?.workflows ?? [];
-  const services = catalogQ.data?.services ?? [];
   const teams = teamsQ.data?.teams ?? [];
 
   const isPending = createSubscription.isPending || createSchedule.isPending;
@@ -218,18 +212,6 @@ export function AutomationWizard({
   // and notify outcomes still pick one event, but never carry a target the
   // outcome forbids.
   const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced" || outcome === "thread";
-
-  const filterFields = unionFilterFields(services, keys);
-
-  function toggleKey(key: string) {
-    const next = new Set(keys);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    setKeys(next);
-    // Drop filters whose field none of the now-selected events declare, so an
-    // orphaned filter cannot 400 on submit.
-    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(services, next)));
-  }
 
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
   const targetReady = replyTeam
@@ -350,20 +332,12 @@ export function AutomationWizard({
     }
 
     if (isEventOutcome) {
-      const incomplete = incompleteFilterRow(filterRows);
-      if (incomplete) {
-        setError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
+      const match = validateSubscriptionFilters(filterRows, { mention: keys.has(SLACK_APP_MENTION), anyChannel });
+      if (match.error !== undefined) {
+        setError(match.error);
         return;
       }
-      const filters = toWireFilters(filterRows);
-      // Mirror the server's mention rule (TKAI-299): "Any channel" with a
-      // channel filter is a contradiction the server refuses outright.
-      if (keys.has(SLACK_APP_MENTION) && anyChannel && hasChannelScopeFilter(filters)) {
-        setError(
-          '"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.',
-        );
-        return;
-      }
+      const { filters } = match;
       // The notify outcome speaks to an assistant, never follows a thread.
       // An assistant target carries the prompt templates; a workflow target
       // has its own prompt configuration on its nodes, and the server refuses
@@ -1006,140 +980,6 @@ function ChannelMultiSelect({
   );
 }
 
-export interface CatalogService {
-  service: string;
-  entries: { key: string; description: string; filters?: FilterField[] }[];
-}
-
-/** Filter fields the selected events declare, unioned and deduped by field —
- * a filter is valid when any selected event declares it (the same rule the
- * server's validateSubscription applies). Shared with the edit dialog. */
-export function unionFilterFields(
-  services: CatalogService[],
-  selected: Set<string>,
-): FilterField[] {
-  const out: FilterField[] = [];
-  const seen = new Set<string>();
-  for (const s of services) {
-    for (const entry of s.entries) {
-      if (!selected.has(entry.key)) continue;
-      for (const f of entry.filters ?? []) {
-        if (seen.has(f.field)) continue;
-        seen.add(f.field);
-        out.push({ field: f.field, description: f.description, options: f.options });
-      }
-    }
-  }
-  return out;
-}
-
-export function EventMatchStep({
-  services,
-  catalogLoading,
-  catalogError,
-  keys,
-  onToggleKey,
-  filterFields,
-  filterRows,
-  onFilterChange,
-  singleEvent,
-  anyChannel,
-  onAnyChannelChange,
-}: {
-  services: CatalogService[];
-  catalogLoading: boolean;
-  catalogError: boolean;
-  keys: Set<string>;
-  onToggleKey: (key: string) => void;
-  filterFields: FilterField[];
-  filterRows: UiFilterRow[];
-  onFilterChange: (rows: UiFilterRow[]) => void;
-  singleEvent: boolean;
-  anyChannel: boolean;
-  onAnyChannelChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="space-y-4">
-      <div>
-        <p className="mb-1.5 text-xs font-medium text-muted">
-          {singleEvent ? "Run this when this happens" : "Run this when any of these happens"}
-        </p>
-        {catalogLoading && <LoadingRow label="Loading catalog…" className="py-2 text-xs" />}
-        {catalogError && (
-          <ErrorRow className="py-2 text-xs">
-            Could not load the event catalog. Retry, or check your integrations in Settings.
-          </ErrorRow>
-        )}
-        {!catalogLoading && !catalogError && services.length === 0 && (
-          <p className="py-2 text-xs text-muted">
-            No plugin publishes events yet. Connect an integration with triggers first.
-          </p>
-        )}
-        <div className="max-h-56 space-y-3 overflow-y-auto">
-          {services.map((s) => (
-            <div key={s.service}>
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">
-                {s.service.charAt(0).toUpperCase() + s.service.slice(1)}
-              </p>
-              <div className="space-y-0.5">
-                {s.entries.map((entry) => (
-                  <label
-                    key={entry.key}
-                    className="flex min-h-11 cursor-pointer items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-hover"
-                  >
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={keys.has(entry.key)}
-                      onChange={() => onToggleKey(entry.key)}
-                    />
-                    <span className="min-w-0">
-                      {/* Plain language first — what the person recognizes, not
-                          the event key (how the system is built). */}
-                      <span className="block text-sm text-ink">{entry.description}</span>
-                      <span className="block break-all font-mono text-[11px] leading-tight text-muted">{entry.key}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {keys.size > 0 && (
-        <div>
-          <p className="mb-1.5 text-xs font-medium text-muted">Filters</p>
-          <FilterEditor fields={filterFields} rows={filterRows} onChange={onFilterChange} />
-          <p className="mt-1.5 text-xs text-muted">
-            A rule matches only when every filter matches. Add none to match every selected event.
-          </p>
-          {/* A `slack.app_mention` rule is scoped to the creator's own
-              mentions and needs a channel filter, unless this explicit
-              opt-out is set — the same rule the server enforces. */}
-          {keys.has(SLACK_APP_MENTION) && (
-            <label className="mt-2 flex items-start gap-2 text-sm text-ink">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={anyChannel}
-                onChange={(e) => onAnyChannelChange(e.target.checked)}
-              />
-              <span>
-                Any channel
-                <span className="block text-xs text-muted">
-                  Personal rules accept your own mentions. Team assistant rules accept linked team members. A channel filter is required.
-                  Check this to listen in every channel the app can see instead.
-                </span>
-              </span>
-            </label>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ScheduleMatchStep({
   cron,
   onCronChange,
@@ -1392,7 +1232,7 @@ function opWord(op: UiFilterRow["op"]): string {
  * The plain-language sentence the Review step shows. Built from names, so a
  * reader confirms the rule without reading an id.
  */
-export function summarize(args: {
+function summarize(args: {
   outcome: Outcome;
   keys: Set<string>;
   filterRows: UiFilterRow[];

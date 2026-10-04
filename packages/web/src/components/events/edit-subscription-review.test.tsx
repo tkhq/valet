@@ -8,7 +8,7 @@ vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: { services: [] } }),
   usePatchEventSubscription: () => ({ mutate: patch, isPending: false }),
 }));
-vi.mock("./automation-wizard", () => ({ EventMatchStep: () => <div>Event match</div>, unionFilterFields: () => [] }));
+vi.mock("./event-match-step", () => ({ EventMatchStep: () => <div>Event match</div> }));
 const sub: EventSubscriptionWire = {
   id: "proposal-1", name: "Follow launch", ownerType: "user", ownerId: "u1",
   eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C123" }, { field: "thread_ts", op: "eq", value: "1790650000.123456" }],

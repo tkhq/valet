@@ -26,6 +26,13 @@ const createSchedule = vi.fn();
 const catalogData = {
   services: [
     {
+      service: "slack",
+      entries: [
+        { key: "slack.app_mention", description: "Mention", filters: [{ field: "channel" }] },
+        { key: "slack.message", description: "Message", filters: [{ field: "channel" }] },
+      ],
+    },
+    {
       service: "github",
       entries: [
         {
@@ -441,6 +448,43 @@ describe("AutomationWizard", () => {
       orchestrator: "team",
       teamId: "t_platform",
     });
+  });
+
+  function submitAdvanced() {
+    clickNext();
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Match rule" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+  }
+
+  it("prunes only unsupported filters as selected events change", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    pickOutcome(/Advanced \/ custom trigger/);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.app_mention/ }));
+    fireEvent.click(screen.getByText(/^Add filter$/));
+    fireEvent.change(screen.getByLabelText("Filter value"), { target: { value: "C123" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.message/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.app_mention/ }));
+    expect(screen.getByDisplayValue("C123")).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.message/ }));
+    expect(screen.queryByLabelText("Filter value")).toBeNull();
+    submitAdvanced();
+    expect(createSubscription.mock.calls[0][0]).toMatchObject({ eventKeys: ["github.pr.opened"], filters: [] });
+  });
+
+  it.each(["", "C123"])("refuses invalid mention filters before creating (%s)", (value) => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    pickOutcome(/Advanced \/ custom trigger/);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.app_mention/ }));
+    fireEvent.click(screen.getByText(/^Add filter$/));
+    fireEvent.change(screen.getByLabelText("Filter value"), { target: { value } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+    submitAdvanced();
+    expect(createSubscription).not.toHaveBeenCalled();
+    expect(screen.getByText(value ? /removes the channel restriction/ : /Enter a value for/)).toBeTruthy();
   });
 
   // The server refuses a bad template by naming the wire field, the way every
