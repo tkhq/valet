@@ -139,6 +139,11 @@ function formatPluginOutcome(
         ok: false,
         output: "This action is blocked by org policy. Ask an administrator to allow it.",
       };
+    case "denied-external-sender":
+      return {
+        ok: false,
+        output: "This action needs approval. Only a teammate with a Valet account can run it.",
+      };
     case "denied-approval":
       return {
         ok: false,

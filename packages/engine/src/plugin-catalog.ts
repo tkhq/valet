@@ -340,6 +340,10 @@ export type InvokeActionResult =
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
   | { kind: "denied-policy"; scope?: "team" }
+  /** The action needs approval and the turn came from a channel sender with
+   * no Valet account (`ToolContext.externalSender`). No gate opens, so a
+   * newcomer can never send a teammate an approval request. */
+  | { kind: "denied-external-sender" }
   | { kind: "denied-approval"; reason?: "approval-processing-failed" }
   | { kind: "expired-approval" }
   | { kind: "pending-approval" }
@@ -519,6 +523,7 @@ export async function invokeAction(
   if (!resolver) {
     const approvalMode = approvalModeFor(entry);
     if (approvalMode === "deny") return { kind: "denied-policy" };
+    if (approvalMode === "require_approval" && ctx.externalSender) return { kind: "denied-external-sender" };
     if (approvalMode === "require_approval") {
       const gateOutcome = await requestApprovalDecision(
         ctx,
@@ -606,6 +611,16 @@ export async function invokeAction(
   // Populated only when a gate actually opens below (require_approval), so
   // the terminal audit record can carry it — absent for allow/deny.
   let gateOrdinal: number | undefined;
+
+  if (decision.mode === "require_approval" && ctx.externalSender) {
+    emitInvocation(resolver, {
+      ...baseRecord,
+      status: "denied",
+      resolvedMode: "require_approval",
+      provenance: decision.provenance,
+    });
+    return { kind: "denied-external-sender" };
+  }
 
   if (decision.mode === "require_approval") {
     // Reject reserved ids up front: "approve"/"deny" are the engine's own
@@ -1182,6 +1197,10 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       };
     case "denied-policy":
       return { text: `denied: ${toolId} is blocked by ${outcome.scope === "team" ? "team" : "org"} policy` };
+    case "denied-external-sender":
+      return {
+        text: `denied: ${toolId} needs approval, and this message came from someone with no Valet account. Do not retry it. Tell them a teammate with a Valet account must ask for this.`,
+      };
     // The LLM tool path has no distinct "pending" state — requestDecision
     // blocks until the gate resolves — so both approval outcomes collapse
     // to the same "did not approve" text.

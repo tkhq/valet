@@ -138,6 +138,27 @@ describe("decision gates: pending -> resolved", () => {
   });
 });
 
+describe("decision gates: sender with no Valet account", () => {
+  it("refuses the request without opening a gate", async () => {
+    const faux = registerFauxProvider({ provider: "gate-external-sender" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tc1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("could not"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [approvalTool()] });
+
+    await session.prompt("please do thing", { author: { id: "u1", name: "Slack member", externalSender: true } });
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+
+    expect(gatesFrom(events)).toEqual([]);
+    const entries = await session.readEntries("web:default");
+    expect(JSON.stringify(entries)).toContain("denied");
+    expect(JSON.stringify(entries)).not.toContain("did the thing");
+    faux.unregister();
+  });
+});
+
 describe("decision gates: opened after an earlier tool call", () => {
   it("resumes and settles when a prior tool call ran in the same submission", async () => {
     // The gated call is NOT the first tool call of the submission: an

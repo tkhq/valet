@@ -4992,6 +4992,12 @@ export class Thread {
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        // A channel sender with no Valet account may not put an approval or a
+        // question in front of a teammate: the request is refused here, before
+        // any gate opens, so a newcomer cannot flood the team with requests.
+        if (this.runningItem?.author?.externalSender) {
+          return { actionId: "deny", resolvedBy: "external-sender", resolvedAt: Date.now() };
+        }
         if (!req.resumeKey) {
           throw new Error(
             "DecisionGateRequest.resumeKey is required for restart-safe gates.",
