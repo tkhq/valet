@@ -9,7 +9,7 @@
  * gate's actions render regardless. `useMe` comes from `~/api/settings`.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { DecisionGate, MeResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -152,5 +152,27 @@ describe("DecisionGateCard — another member's shared account", () => {
     meData = { id: "bea", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current" };
     renderCard(borrow);
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+  });
+});
+
+
+describe("question keyboard confirmation", () => {
+  it.each(["metaKey", "ctrlKey"])("submits a typed answer with %s + Enter", async (modifier) => {
+    renderCard(gate({ type: "question", actions: [] }));
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "  Start with Linear  " } });
+    fireEvent.keyDown(input, { key: "Enter", [modifier]: true });
+    expect(resolveMutateAsync).toHaveBeenCalledWith({ gateId: "gate_1", body: { value: "Start with Linear" } });
+  });
+
+  it("keeps plain Enter, composition, and empty answers from submitting", () => {
+    renderCard(gate({ type: "question", actions: [] }));
+    const input = screen.getByRole("textbox");
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    fireEvent.change(input, { target: { value: "answer" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true, isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, repeat: true });
+    expect(resolveMutateAsync).not.toHaveBeenCalled();
   });
 });

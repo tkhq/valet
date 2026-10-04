@@ -16,6 +16,7 @@ import type { DecisionGate } from "@valet/api/wire";
 import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
 import { useMe } from "~/api/settings";
+import { formatChord } from "~/lib/chat-keybindings";
 import { cn } from "~/lib/cn";
 
 // The gate action id the policy resolver offers on a `require_approval`
@@ -132,6 +133,12 @@ export function DecisionGateCard({
           <Textarea
             value={value}
             onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.repeat || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              event.stopPropagation();
+              void submitValue();
+            }}
             placeholder={gate.actions.length > 0 ? "Or type a different answer…" : "Your answer…"}
             rows={2}
             className="flex-1"
@@ -140,6 +147,8 @@ export function DecisionGateCard({
           <Button
             size="sm"
             onClick={submitValue}
+            title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
+            aria-keyshortcuts="Meta+Enter Control+Enter"
             disabled={busy || value.trim().length === 0}
           >
             {busy ? <Spinner size={14} /> : "Submit"}
