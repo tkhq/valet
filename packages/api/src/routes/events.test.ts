@@ -19,6 +19,7 @@ import {
   events,
   eventSubscriptions,
   orgMembers,
+  slackChannelPrivacy,
   teamMembers,
   teams,
   userIdentityLinks,
@@ -1699,6 +1700,8 @@ describe("mention scoping (slack.app_mention)", () => {
       ownerType: "team", ownerId: "team-replay", eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "orchestrator" },
     });
+    // An event from a channel nobody has classified stays hidden (`routes/events.ts#eventVisibleTo`).
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "C1", isPrivate: false, checkedAt: Date.now() });
     await a.providers.db.insert(events).values({
       id: "event-replay", orgId: "local-org", service: "slack", eventKey: "slack.app_mention",
       dedupeKey: "replay", actor: { externalId: "U_B" }, refs: {}, summary: "Mention",

@@ -15,7 +15,7 @@ import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-
  */
 import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
 import { and, desc, eq, or, type SQL } from "drizzle-orm";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
@@ -50,6 +50,7 @@ import type {
 } from "../wire/types.js";
 import { armableDefinitionRow } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
+import { channelsVisibleTo } from "./_thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
 
@@ -351,6 +352,27 @@ eventsRouter.get("/events/log", async (c) => {
   return c.json(resp);
 });
 
+/** The Slack channel an event came from. Ingest copies it to `refs.channel`
+ * (`plugin-slack/src/triggers.ts`); an older row falls back to the payload,
+ * where a reaction keeps it at `item.channel`. */
+function slackChannelOf(row: { service: string; refs: unknown; payload: unknown }): string | undefined {
+  if (row.service !== "slack") return undefined;
+  const str = (v: unknown) => typeof v === "string" && v ? v : undefined;
+  const obj = (v: unknown) => v && typeof v === "object" ? v as Record<string, unknown> : undefined;
+  const payload = obj(row.payload);
+  return str(obj(row.refs)?.channel) ?? str(payload?.channel) ?? str(obj(payload?.channel)?.id)
+    ?? str(payload?.channel_id) ?? str(obj(payload?.item)?.channel);
+}
+
+/** Whether this request may see an event. A Slack event from a private
+ * channel shows only to the channel's members (`services/thread-access.ts`),
+ * because its payload carries the message. Anyone else gets the same 404 as
+ * a missing event. */
+async function eventVisibleTo(c: Context<AppEnv>, row: { service: string; refs: unknown; payload: unknown }): Promise<boolean> {
+  const channel = slackChannelOf(row);
+  return channel === undefined || channelsVisibleTo(c)(`slack:${channel}`);
+}
+
 eventsRouter.get("/events/:id", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
@@ -362,7 +384,7 @@ eventsRouter.get("/events/:id", async (c) => {
     .where(and(eq(events.id, id), eq(events.orgId, user.orgId)))
     .limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "event not found" }, 404);
+  if (!row || !(await eventVisibleTo(c, row))) return c.json({ error: "event not found" }, 404);
   // The join carries the subscription NAME onto each delivery, so a row can
   // say what it was trying to reach. It also does the org scoping the
   // previous `subscriptionId IN (org subscriptions)` subquery did, over the
@@ -446,7 +468,7 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
     .where(and(eq(events.id, id), eq(events.orgId, user.orgId)))
     .limit(1);
   const event = rows[0];
-  if (!event) return c.json({ error: "event not found" }, 404);
+  if (!event || !(await eventVisibleTo(c, event))) return c.json({ error: "event not found" }, 404);
   const subs = await db
     .select()
     .from(eventSubscriptions)
