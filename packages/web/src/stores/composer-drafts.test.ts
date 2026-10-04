@@ -5,7 +5,7 @@
  * while the threads query loaded) into the real thread, and draft text that
  * survives a reload.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { draftKey, EMPTY_DRAFT, useComposerDraftStore, prefillComposerDraft } from "./composer-drafts";
 
 const SESSION = "sess-1";
@@ -16,7 +16,8 @@ function store() {
 }
 
 beforeEach(() => {
-  useComposerDraftStore.setState({ byKey: {} });
+  localStorage.clear();
+  useComposerDraftStore.setState({ owner: "account-a", byKey: {} });
 });
 
 describe("composer draft store", () => {
@@ -97,28 +98,53 @@ describe("starter drafts", () => {
     expect(store().byKey[draftKey("another-workspace", THREAD)]?.text).toBe("Create a workflow");
   });
 
-  it("restores draft text after a reload and keeps attachments in memory", async () => {
+  it("restores draft text after reactivation and keeps attachments in memory", () => {
     const key = draftKey(SESSION, THREAD);
     store().setText(key, "typed before reload");
     store().setFileErrors(key, ["too large"]);
-    vi.resetModules();
-    const reloaded = await import("./composer-drafts");
-    expect(reloaded.useComposerDraftStore.getState().byKey[key]).toEqual({ ...EMPTY_DRAFT, text: "typed before reload" });
+    store().activateOwner("");
+    store().activateOwner("account-a");
+    expect(store().byKey[key]).toEqual({ ...EMPTY_DRAFT, text: "typed before reload" });
 
     store().clear(key);
-    expect(localStorage.getItem(`valet:composer-draft:${key}`)).toBeNull();
+    expect(localStorage.getItem(`valet:composer-draft:v2:${key}`)).toBeNull();
   });
 
   it("applies another window's draft without touching this window's others", () => {
     const mine = draftKey("session-a", "thread-a");
     const theirs = draftKey("session-b", "thread-b");
     store().setText(mine, "draft A");
-    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:${theirs}`, newValue: "draft B" }));
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${theirs}`, newValue: "draft B" }));
     expect(store().byKey[mine]?.text).toBe("draft A");
     expect(store().byKey[theirs]?.text).toBe("draft B");
     // That window sent its message.
-    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:${theirs}`, newValue: null }));
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${theirs}`, newValue: null }));
     expect(store().byKey[theirs]).toBeUndefined();
     expect(store().byKey[mine]?.text).toBe("draft A");
+  });
+});
+
+
+describe("account isolation", () => {
+  it("isolates the same team thread across accounts, rejects late uploads and restores only its owner's text", () => {
+    const alice = draftKey(SESSION, THREAD);
+    store().setText(alice, "Alice private draft");
+    store().activateOwner("account-b");
+    const bob = draftKey(SESSION, THREAD);
+    expect(bob).not.toBe(alice);
+    expect(store().byKey).toEqual({});
+    store().setFileErrors(alice, ["late upload"]);
+    store().setText(bob, "Bob draft");
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${alice}`, newValue: "foreign window" }));
+    expect(store().byKey[alice]).toBeUndefined();
+    store().activateOwner("account-a");
+    expect(store().byKey[alice]).toEqual({ ...EMPTY_DRAFT, text: "Alice private draft" });
+    expect(store().byKey[bob]).toBeUndefined();
+  });
+
+  it("does not restore unscoped legacy drafts for the next signed-in account", () => {
+    localStorage.setItem(`valet:composer-draft:${SESSION}\u0000${THREAD}`, "unattributed private text");
+    store().activateOwner("new-account");
+    expect(store().byKey).toEqual({});
   });
 });

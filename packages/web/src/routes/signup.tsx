@@ -1,4 +1,5 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { finishAuthChange } from "~/lib/auth-navigation";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { signUpEmailWithInvite } from "~/lib/auth-client";
 import { safeNextPath } from "~/lib/next-path";
@@ -32,7 +33,6 @@ function SignupRoute() {
 }
 
 export function SignupPage({ invite, next }: { invite?: string; next?: string }) {
-  const navigate = useNavigate();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -54,7 +54,7 @@ export function SignupPage({ invite, next }: { invite?: string; next?: string })
       setError(signUpError.message ?? "Couldn't create your account.");
       return;
     }
-    navigate({ to: next ?? "/" });
+    finishAuthChange(safeNextPath(next) ?? "/");
   }
 
   return (

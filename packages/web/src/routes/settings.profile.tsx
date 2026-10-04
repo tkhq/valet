@@ -1,3 +1,4 @@
+import { finishAuthChange } from "~/lib/auth-navigation";
 import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
@@ -7,6 +8,7 @@ import { Button, Input, Spinner } from "~/components/primitives";
 import { ProfilePictureUpload } from "~/components/settings/profile-picture-upload";
 import { useMe, useOrg, usePatchMe, useUploadMyAvatar } from "~/api/settings";
 import { authClient } from "~/lib/auth-client";
+import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { errorText } from "~/lib/error-text";
 
 /**
@@ -51,7 +53,8 @@ export function ProfilePage() {
 
   async function signOut() {
     await authClient.signOut();
-    window.location.href = "/login";
+    useComposerDraftStore.getState().activateOwner("");
+    finishAuthChange("/login");
   }
 
   return (

@@ -13,6 +13,8 @@
  */
 export function safeNextPath(raw: unknown): string | undefined {
   if (typeof raw !== "string" || raw.length === 0) return undefined;
+  // URL parsing strips controls before resolving scheme-relative destinations.
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return undefined;
   if (!raw.startsWith("/")) return undefined;
   if (raw.startsWith("//") || raw.startsWith("/\\")) return undefined;
   const pathOnly = raw.split(/[?#]/)[0];

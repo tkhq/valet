@@ -6,7 +6,7 @@ import { qk } from "~/api/queries";
 import { api } from "~/api/client";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { AssistantPanel } from "~/components/session/assistant-panel";
-import { prefillComposerDraft } from "~/stores/composer-drafts";
+import { prefillComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { Button } from "~/components/primitives";
 
 type Conversation = { sessionId: string; threadId: string };
@@ -36,6 +36,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   activeWorkspace.current = workspace;
   function close() { requestGeneration.current += 1; setOpened(undefined); }
   async function open(prompt?: string) {
+    const draftOwner = useComposerDraftStore.getState().owner;
     const generation = ++requestGeneration.current;
     const mayNavigate = () => generation === requestGeneration.current && activeWorkspace.current === workspace && activePath.current === pathname;
     setOpened(workspace);
@@ -66,7 +67,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
     }
     try {
       const conversation = await pending;
-      if (prompt) prefillComposerDraft(conversation.sessionId, conversation.threadId, prompt);
+      if (prompt && useComposerDraftStore.getState().owner === draftOwner) prefillComposerDraft(conversation.sessionId, conversation.threadId, prompt);
       setLoaded((current) => ({ ...current, [workspace]: conversation }));
       // Chat already owns a composer: navigate to this Thread instead of mounting a second one.
       if (pathname === "/chat" && mayNavigate()) {
