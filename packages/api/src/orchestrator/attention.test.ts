@@ -159,6 +159,15 @@ describe("routeAttention (DB-backed)", () => {
     const recipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
     expect(recipients.map((r) => r.userId)).toEqual(["test-member"]);
     expect(deliverTeam).not.toHaveBeenCalled();
+
+    // A workflow run this channel's event started has no thread of the
+    // channel's, so its alert names the channel's audience directly.
+    await db.delete(notifications);
+    await routeAttention({ db, access: api.providers, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+      kind: "notification", owner: { type: "team", id: "team-s" }, title: "run failed", audienceKey: "slack-events:CATTN",
+    });
+    expect((await db.select().from(notifications)).map((r) => r.userId)).toEqual(["test-member"]);
+    expect(deliverTeam).not.toHaveBeenCalled();
     vi.restoreAllMocks();
     resetThreadAccessCache();
   });

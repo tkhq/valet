@@ -35,15 +35,16 @@ import { agentSessions, slackChannelPrivacy } from "../schema/index.js";
 /** The Slack conversation a thread key names, DMs and group DMs included,
  * and a channel's events thread (`slackEventsThreadKey`). */
 function slackConversation(key: string | null | undefined): { channelId: string } | null {
-  const match = /^slack:([^:]+):[^:]+$|^slack-events:([^:]+)$/.exec(key ?? "");
+  const match = /^slack:([^:]+):[^:]+$|^slack-events:([^:]+)(?::.+)?$/.exec(key ?? "");
   return match ? { channelId: (match[1] ?? match[2])! } : null;
 }
 
 /** Where a Slack event with no thread to reply into lands for a team: a
  * bot message, a reaction, a join. Keyed by its channel, so the channel's
- * privacy governs it, not the shared events thread every member reads. */
-export function slackEventsThreadKey(channelId: string): string {
-  return `slack-events:${channelId}`;
+ * privacy governs it, not the shared events thread every member reads. A
+ * `suffix` keeps one such thread per item, such as a workflow run. */
+export function slackEventsThreadKey(channelId: string, suffix?: string): string {
+  return suffix ? `slack-events:${channelId}:${suffix}` : `slack-events:${channelId}`;
 }
 import type { ChannelVisibility } from "./channels.js";
 import { resolveOrgCredentialRead } from "./credential-resolution.js";
@@ -378,10 +379,16 @@ export function slackEventChannel(event: { service: string; refs: unknown; paylo
  * run's input carries the event's message, so a run from a private channel
  * shows only to that channel's members, the same as the event itself. */
 export async function runEventVisible(deps: AccessDeps, viewer: ThreadViewer, params: { input?: unknown }): Promise<boolean> {
+  const channel = runEventChannel(params);
+  return channel === undefined || channelVisibility(deps, viewer)(`slack:${channel}`);
+}
+
+/** The Slack channel whose event started a workflow run, or undefined. The
+ * run's thread and its attention stay with that channel's audience. */
+export function runEventChannel(params: { input?: unknown }): string | undefined {
   const input = params.input && typeof params.input === "object" ? params.input as Record<string, unknown> : undefined;
   const data = input?.type === "event" && input.data && typeof input.data === "object" ? input.data as Record<string, unknown> : undefined;
   const key = typeof data?.key === "string" ? data.key : "";
-  if (!key.startsWith("slack.")) return true;
-  const channel = slackEventChannel({ service: "slack", refs: data?.refs, payload: data?.payload });
-  return channel === undefined || channelVisibility(deps, viewer)(`slack:${channel}`);
+  if (!key.startsWith("slack.")) return undefined;
+  return slackEventChannel({ service: "slack", refs: data?.refs, payload: data?.payload });
 }

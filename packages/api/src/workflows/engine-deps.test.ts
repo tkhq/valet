@@ -16,7 +16,7 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
+import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
 import { eq } from "drizzle-orm";
 import { assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
@@ -853,4 +853,9 @@ describe("mapPiAiUsage", () => {
       costUsd: 0,
     });
   });
+});
+
+it("keys a run a Slack channel's event started by that channel", () => {
+  expect(workflowRunThreadKey("run_1")).toBe("signal:workflow:run_1");
+  expect(workflowRunThreadKey("run_1", "CPRIV")).toBe("slack-events:CPRIV:workflow:run_1");
 });

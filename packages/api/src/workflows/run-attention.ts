@@ -20,6 +20,7 @@
  *     narrows an escalation on a team-owned run to team admins, which would
  *     hide a failed batch from the people who run it.
  */
+import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import { eq } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
 import type { NodeCheckpoint, OnRunSettled, WorkflowStore } from "@valet/workflow";
@@ -65,7 +66,10 @@ export function buildRunSettledAttention(deps: RunSettledAttentionDeps): OnRunSe
       const checkpoints = await deps.store.getCheckpoints(info.runId);
       // A run started from a thread is that thread's audience's
       // (`thread-access.ts`): a private thread's run notifies only them.
-      const origin = (await deps.store.getRun(info.runId))?.params.origin;
+      const params = (await deps.store.getRun(info.runId))?.params;
+      const origin = params?.origin;
+      // A run a Slack channel's event started reaches that channel's audience.
+      const slackChannel = params && !origin ? runEventChannel(params) : undefined;
       await routeAttention(
         { db: deps.db, channels: deps.channels, ...(deps.access ? { access: deps.access } : {}) },
         {
@@ -73,6 +77,7 @@ export function buildRunSettledAttention(deps: RunSettledAttentionDeps): OnRunSe
           urgency: "high",
           owner,
           ...(origin ? { sessionId: origin.assistantSessionId, threadId: origin.threadId } : {}),
+          ...(slackChannel ? { audienceKey: slackEventsThreadKey(slackChannel) } : {}),
           title: `Workflow run failed: ${name}`,
           body: failedNodeSummary(checkpoints),
           href: `/workflows/runs/${info.runId}`,
@@ -259,7 +264,8 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
           );
           continue;
         }
-        if (thread.key !== key) continue;
+        // The run's thread: the plain key, or its channel's (`workflowRunThreadKey`).
+        if (thread.key !== key && !(thread.key?.startsWith("slack-events:") && thread.key.endsWith(`:workflow:${info.runId}`))) continue;
         const items = await Promise.all(
           dispatch.queueItemIds.map((itemId) => deps.engineStore.getQueueItem(dispatch.sessionId, itemId)),
         );

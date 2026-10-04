@@ -48,6 +48,10 @@ export interface AttentionEvent {
   sessionId?: string;
   /** Origin thread, when attention belongs to an existing conversation. */
   threadId?: string;
+  /** The thread key that decides who may see this, when no thread carries
+   * it: a workflow run a Slack channel's event started reaches that
+   * channel's audience (`slackEventsThreadKey`). */
+  audienceKey?: string;
   title: string;
   body?: string;
   href?: string;
@@ -275,7 +279,9 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
 /** The key that decides who may see a team event's thread, or undefined for
  * any other event. A child's gate is judged by the thread that started it. */
 async function teamThreadKey(db: AppDb, event: AttentionEvent): Promise<string | null | undefined> {
-  if (event.owner.type !== "team" || !event.sessionId || !event.threadId) return undefined;
+  if (event.owner.type !== "team") return undefined;
+  if (event.audienceKey !== undefined) return event.audienceKey;
+  if (!event.sessionId || !event.threadId) return undefined;
   return governingThreadKey(db, event.sessionId, event.threadId);
 }
 

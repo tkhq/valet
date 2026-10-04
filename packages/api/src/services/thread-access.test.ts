@@ -77,6 +77,9 @@ it("shares a team thread with the whole team only when nothing narrows it", asyn
   // A channel's events thread follows the channel.
   expect(await shared("slack-events:CSHAREPUB")).toBe(true);
   expect(await shared("slack-events:CSHAREPRIV")).toBe(false);
+  // So does a workflow run that channel's event started (`workflowRunThreadKey`).
+  expect(await shared("slack-events:CSHAREPRIV:workflow:run_1")).toBe(false);
+  expect(await shared("slack-events:CSHAREPUB:workflow:run_1")).toBe(true);
   // A channel never classified waits until a thread list classifies it.
   expect(await shared("slack:CSHARENEW:1.1")).toBe(false);
   expect(await shared("app-assistant:someone")).toBe(false);

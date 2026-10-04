@@ -1,4 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
+import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -663,6 +664,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
           // A run started from a thread is that thread's audience's
           // (`thread-access.ts`): a private thread's run notifies only them.
           ...(run?.params.origin && !info.approver ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
+          // A run a Slack channel's event started reaches that channel's audience.
+          ...(run && !run.params.origin && runEventChannel(run.params) ? { audienceKey: slackEventsThreadKey(runEventChannel(run.params)!) } : {}),
           title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
           body: isPolicyGate
             ? `Workflow run ${info.runId} is paused on ${info.nodeId}.`

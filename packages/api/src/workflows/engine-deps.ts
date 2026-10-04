@@ -31,6 +31,7 @@
  * than assuming the session `createSession` warmed is still cached.
  */
 
+import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
@@ -173,8 +174,9 @@ export function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdPart
  * as a whole, so runs of one workflow must not share one. Read back by
  * `run-attention.ts`, which archives the thread at settlement.
  */
-export function workflowRunThreadKey(runId: string): string {
-  return `signal:workflow:${runId}`;
+export function workflowRunThreadKey(runId: string, slackChannel?: string): string {
+  // A run a Slack channel's event started is that channel's audience's.
+  return slackChannel ? slackEventsThreadKey(slackChannel, `workflow:${runId}`) : `signal:workflow:${runId}`;
 }
 
 interface RunContext {
@@ -182,6 +184,8 @@ interface RunContext {
   actorUserId: string;
   owner: Principal;
   origin?: WorkflowRunOrigin;
+  /** The Slack channel whose event started the run (`runEventChannel`). */
+  slackChannel?: string;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -206,8 +210,9 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
+  const slackChannel = runEventChannel(run.params);
   return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
-    origin: run.params.origin };
+    origin: run.params.origin, ...(slackChannel ? { slackChannel } : {}) };
 }
 
 /**
@@ -536,7 +541,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // from instead.
       const thread = origin
         ? session.threadById(origin.threadId)
-        : session.thread(workflowRunThreadKey(runId));
+        : session.thread(workflowRunThreadKey(runId, ctx.slackChannel));
       if (!thread) {
         throw new Error(
           `Workflow origin thread ${origin?.threadId} is missing from session ${session.id}. ` +
