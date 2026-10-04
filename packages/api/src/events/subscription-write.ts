@@ -11,7 +11,7 @@
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries } from "./ingest.js";
-import { validateRegexPattern, type SubscriptionFilter } from "./match.js";
+import { eventKeyMatches, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
@@ -61,9 +61,7 @@ export function validateSubscription(
     if (typeof pattern !== "string" || pattern.length === 0) {
       return "eventKeys entries must be non-empty strings";
     }
-    const matches = pattern.endsWith(".*")
-      ? entries.filter((e) => e.key.startsWith(pattern.slice(0, -1)))
-      : entries.filter((e) => e.key === pattern);
+    const matches = entries.filter((entry) => eventKeyMatches(entry.key, [pattern]));
     if (matches.length === 0) return `unknown event key: ${pattern}`;
     selectedEntries.push(...matches);
   }

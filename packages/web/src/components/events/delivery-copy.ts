@@ -6,6 +6,7 @@
  * countdown, and "Retries in 8 minutes" is the sentence that stops someone
  * escalating. `now` is injectable so the wording is testable without clocks.
  */
+import { eventKeyMatches } from "@valet/shared";
 import type { EventDeliveryWire, EventSubscriptionWire } from "@valet/api/wire";
 
 const MINUTE = 60_000;
@@ -78,9 +79,7 @@ export function subscriptionsMatchingKey(
   return subscriptions.filter(
     (sub) =>
       sub.enabled &&
-      sub.eventKeys.some((pattern) =>
-        pattern.endsWith(".*") ? eventKey.startsWith(pattern.slice(0, -1)) : pattern === eventKey,
-      ),
+      eventKeyMatches(eventKey, sub.eventKeys),
   );
 }
 

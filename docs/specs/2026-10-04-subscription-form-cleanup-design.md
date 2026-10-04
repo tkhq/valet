@@ -9,3 +9,10 @@ Both forms reject incomplete filter rows and contradictory channel scope. The ed
 Each form keeps its submission behavior. The wizard builds a create request. The edit dialog builds a patch with changed fields only. A rename does not resend filters or run the collision check again. Both forms retain collision retries and the Done action after a committed overlap.
 
 Regression tests use both forms with their shared component. They cover filter pruning, invalid rows, channel scope, stored any-channel state, changed-field patches, and collision retries. Existing wizard tests cover reply channels, schedule creation, targets, and prompts.
+
+## Shared match rules
+
+`@valet/shared` owns event-key matching, Slack mention detection, and fixed channel-scope detection.
+API validation, ingestion, and web previews use these pure predicates.
+The API retains identity checks, audience authorization, and filter-value validation.
+Existing import paths re-export the predicates for callers.
