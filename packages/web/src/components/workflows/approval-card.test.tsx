@@ -75,4 +75,24 @@ describe("ApprovalCard", () => {
       body: { approved: true, note: "looks good", iteration: undefined },
     });
   });
+
+  it("cancels approval then confirms denial with the note and iteration", () => {
+    mutate.mockClear();
+    render(<ApprovalCard runId="wfrun_1" nodeId="deploy" iteration={2} confirmActions />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Optional note" }), {
+      target: { value: "  needs changes  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    fireEvent.click(screen.getByRole("button", { name: "Deny step" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({
+      nodeId: "deploy",
+      body: { approved: false, note: "needs changes", iteration: 2 },
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
 });

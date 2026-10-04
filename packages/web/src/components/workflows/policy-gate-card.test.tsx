@@ -16,12 +16,13 @@ import { PolicyGateCard } from "./policy-gate-card";
 const mutate = vi.fn();
 let mockOrgRole: string | undefined = "member";
 let mockIsError = false;
+let mockIsPending = false;
 let mockError: ApiError | null = null;
 
 vi.mock("~/api/workflows", () => ({
   useResolveApproval: () => ({
     mutate,
-    isPending: false,
+    isPending: mockIsPending,
     isError: mockIsError,
     error: mockError,
   }),
@@ -29,7 +30,7 @@ vi.mock("~/api/workflows", () => ({
 }));
 
 vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: mockOrgRole != null ? { orgRole: mockOrgRole } : undefined }),
+  useMe: () => ({ data: mockOrgRole != null ? { id: "me", orgRole: mockOrgRole } : undefined }),
 }));
 
 vi.mock("@tanstack/react-query", async (importOriginal) => {
@@ -60,6 +61,7 @@ describe("PolicyGateCard", () => {
     mutate.mockClear();
     mockOrgRole = "member";
     mockIsError = false;
+    mockIsPending = false;
     mockError = null;
   });
 
@@ -203,4 +205,47 @@ describe("PolicyGateCard", () => {
     render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ iteration: 4 })} />);
     expect(screen.getByText(/Iteration 4/i)).toBeTruthy();
   });
+
+  it("cancels workflow permission then confirms denial without retaining its scope", () => {
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ iteration: 4 })} confirmActions />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Optional note" }), {
+      target: { value: "  needs changes  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Allow for this workflow" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Deny action" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({
+      nodeId: "node_1",
+      body: { approved: false, scope: "once", note: "needs changes", iteration: 4 },
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("disables the note and actions while a response is pending", () => {
+    const gate = makeGate();
+    const { rerender } = render(<PolicyGateCard runId="wfrun_1" gate={gate} />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve once" }));
+    mockIsPending = true;
+    rerender(<PolicyGateCard runId="wfrun_1" gate={gate} />);
+    expect(screen.getByRole("textbox", { name: "Optional note" }).hasAttribute("disabled")).toBe(true);
+    for (const button of screen.getAllByRole("button")) {
+      expect(button.hasAttribute("disabled")).toBe(true);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("only exposes credential approval actions to the named approver", () => {
+    const gate = makeGate({ approver: { userId: "other", name: "Ada" } });
+    const { rerender } = render(<PolicyGateCard runId="wfrun_1" gate={gate} />);
+    expect(screen.getByRole("status").textContent).toContain("Asked Ada for permission");
+    expect(screen.queryByRole("button")).toBeNull();
+    rerender(<PolicyGateCard runId="wfrun_1" gate={{ ...gate, approver: { userId: "me" } }} />);
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
 });

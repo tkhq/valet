@@ -7,17 +7,18 @@
  * only to this workflow. Deny is a separate danger button. Note field rides whichever action
  * fires. On 409 the query key is invalidated so the stale card disappears.
  */
-import { type ReactElement, useState } from "react";
+import { type ReactElement } from "react";
 import { ChevronDown, ShieldAlert } from "lucide-react";
 import type { WorkflowPendingGate } from "@valet/api/wire";
 import { useMe } from "~/api/settings";
-import { useResolveApproval } from "~/api/workflows";
+import { useApprovalResponse } from "./use-approval-response";
 import { ApiError } from "~/api/client";
 import { apiErrorMessage } from "~/api/policies";
 import {
   Button,
   cardClass,
   ConfirmDialog,
+  Input,
   Spinner,
   DropdownMenu,
   DropdownMenuTrigger,
@@ -27,17 +28,15 @@ import {
 import { RiskBadge } from "./risk-badge";
 import { cn } from "~/lib/cn";
 
-export interface PolicyGateCardProps {
+interface PolicyGateCardProps {
   runId: string;
   gate: WorkflowPendingGate; // kind === "policy_gate"
   confirmActions?: boolean;
 }
 
 export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGateCardProps): ReactElement {
-  const [note, setNote] = useState("");
-  const [busyScope, setBusyScope] = useState<"once" | "run" | "workflow" | "deny" | null>(null);
-  const [confirmation, setConfirmation] = useState<"once" | "run" | "workflow" | "deny" | null>(null);
-  const resolve = useResolveApproval(runId);
+  const { note, setNote, confirmation, submitted, resolve, respond, confirm, onConfirmationOpenChange } =
+    useApprovalResponse(runId, gate.nodeId, gate.iteration);
   const me = useMe();
 
   const service = gate.service ?? "";
@@ -47,47 +46,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   const busy = resolve.isPending;
 
   function fireApprove(scope: "once" | "run" | "workflow") {
-    if (confirmActions || scope === "workflow") {
-      setConfirmation(scope);
-      return;
-    }
-    submitApprove(scope);
-  }
-
-  function submitApprove(scope: "once" | "run" | "workflow") {
-    setBusyScope(scope);
-    resolve.mutate({
-      nodeId: gate.nodeId,
-      body: {
-        approved: true,
-        scope,
-        note: note.trim() || undefined,
-        iteration: gate.iteration,
-      },
-    });
-    setConfirmation(null);
-  }
-
-  function handleDeny() {
-    if (confirmActions) {
-      setConfirmation("deny");
-      return;
-    }
-    submitDeny();
-  }
-
-  function submitDeny() {
-    setBusyScope("deny");
-    resolve.mutate({
-      nodeId: gate.nodeId,
-      body: {
-        approved: false,
-        scope: "once",
-        note: note.trim() || undefined,
-        iteration: gate.iteration,
-      },
-    });
-    setConfirmation(null);
+    respond({ approved: true, scope }, confirmActions || scope === "workflow");
   }
 
   // `ApiError.message` is "{method} {path} → {status}" — the server's {error}
@@ -165,17 +124,12 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
       )}
 
       {/* Note input */}
-      <input
-        type="text"
+      <Input
+        aria-label="Optional note"
         value={note}
         onChange={(e) => setNote(e.target.value)}
         placeholder="Optional note"
         disabled={busy}
-        className={cn(
-          "min-h-11 w-full rounded border border-line bg-[--bg] px-2 py-1.5 sm:min-h-0 text-sm text-ink",
-          "placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss",
-          "disabled:opacity-50",
-        )}
       />
 
       {/* Action buttons */}
@@ -189,7 +143,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
             onClick={() => fireApprove("once")}
             disabled={busy}
           >
-            {busy && busyScope === "once" ? <Spinner size={12} /> : null}
+            {busy && submitted?.approved && submitted.scope === "once" ? <Spinner size={12} /> : null}
             Approve once
           </Button>
 
@@ -222,8 +176,8 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         </div>
 
         {/* Deny */}
-        <Button size="sm" variant="danger" onClick={handleDeny} disabled={busy}>
-          {busy && busyScope === "deny" ? <Spinner size={12} /> : null}
+        <Button size="sm" variant="danger" onClick={() => respond({ approved: false, scope: "once" }, confirmActions)} disabled={busy}>
+          {busy && submitted?.approved === false ? <Spinner size={12} /> : null}
           Deny
         </Button>
       </div>
@@ -233,24 +187,19 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
 
       <ConfirmDialog
         open={confirmation !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirmation(null);
-        }}
-        title={confirmation === "deny" ? "Deny this tool action?" : "Allow this tool action?"}
+        onOpenChange={onConfirmationOpenChange}
+        title={confirmation?.approved === false ? "Deny this tool action?" : "Allow this tool action?"}
         description={
-          confirmation === "workflow"
+          confirmation?.scope === "workflow"
             ? `Allow ${serviceAction} for future runs of this workflow only, until its saved permissions are reset. Existing policy restrictions remain in effect.`
-            : confirmation === "run"
+            : confirmation?.scope === "run"
             ? `Valet runs ${serviceAction} now and allows later calls in this run.`
-            : confirmation === "deny"
+            : confirmation?.approved === false
               ? denyMicrocopy
               : `Valet runs ${serviceAction} once with the shown parameters.`
         }
-        confirmLabel={confirmation === "deny" ? "Deny action" : "Allow action"}
-        onConfirm={() => {
-          if (confirmation === "deny") submitDeny();
-          else if (confirmation !== null) submitApprove(confirmation);
-        }}
+        confirmLabel={confirmation?.approved === false ? "Deny action" : "Allow action"}
+        onConfirm={confirm}
       />
 
       {/* Footer: timeout + error */}

@@ -22,12 +22,11 @@
  * alpha inside the token. It needs no partner and no modifier, and it sits
  * over whatever `--paper` currently is, so it cannot fall out of step again.
  */
-import { useState } from "react";
 import { Hand } from "lucide-react";
-import { useResolveApproval } from "~/api/workflows";
+import { useApprovalResponse } from "./use-approval-response";
 import { Button, ConfirmDialog, Input } from "~/components/primitives";
 
-export interface ApprovalCardProps {
+interface ApprovalCardProps {
   runId: string;
   nodeId: string;
   prompt?: string;
@@ -38,25 +37,8 @@ export interface ApprovalCardProps {
 }
 
 export function ApprovalCard({ runId, nodeId, prompt, summary, details, iteration, confirmActions = false }: ApprovalCardProps) {
-  const [note, setNote] = useState("");
-  const [confirmation, setConfirmation] = useState<boolean | null>(null);
-  const resolve = useResolveApproval(runId);
-
-  function respond(approved: boolean) {
-    if (confirmActions) {
-      setConfirmation(approved);
-      return;
-    }
-    submit(approved);
-  }
-
-  function submit(approved: boolean) {
-    resolve.mutate({
-      nodeId,
-      body: { approved, note: note.trim() || undefined, iteration },
-    });
-    setConfirmation(null);
-  }
+  const { note, setNote, confirmation, resolve, respond, confirm, onConfirmationOpenChange } =
+    useApprovalResponse(runId, nodeId, iteration);
 
   return (
     <div className="rounded-md border border-accent-300 bg-moss-wash p-4 space-y-3 dark:border-accent-800">
@@ -80,13 +62,13 @@ export function ApprovalCard({ runId, nodeId, prompt, summary, details, iteratio
         aria-label="Optional note"
       />
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" onClick={() => respond(true)} disabled={resolve.isPending}>
+        <Button size="sm" onClick={() => respond({ approved: true }, confirmActions)} disabled={resolve.isPending}>
           Approve
         </Button>
         <Button
           size="sm"
           variant="danger"
-          onClick={() => respond(false)}
+          onClick={() => respond({ approved: false }, confirmActions)}
           disabled={resolve.isPending}
         >
           Deny
@@ -94,17 +76,15 @@ export function ApprovalCard({ runId, nodeId, prompt, summary, details, iteratio
       </div>
       <ConfirmDialog
         open={confirmation !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirmation(null);
-        }}
-        title={confirmation ? "Approve this workflow step?" : "Deny this workflow step?"}
+        onOpenChange={onConfirmationOpenChange}
+        title={confirmation?.approved ? "Approve this workflow step?" : "Deny this workflow step?"}
         description={
-          confirmation
+          confirmation?.approved
             ? "The run continues past this step."
             : "The run stops at this step unless the workflow handles denial."
         }
-        confirmLabel={confirmation ? "Approve step" : "Deny step"}
-        onConfirm={() => submit(confirmation === true)}
+        confirmLabel={confirmation?.approved ? "Approve step" : "Deny step"}
+        onConfirm={confirm}
       />
       {resolve.isError && <div className="text-xs text-danger-500">Failed to record response — try again.</div>}
     </div>
