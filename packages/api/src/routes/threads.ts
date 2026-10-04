@@ -65,6 +65,7 @@ async function inThread(c: Context<AppEnv>, operation: ThreadOperation, purpose:
     sessionId = workflowThread.sessionId;
     const authorized = await loadDecisionSession(c, sessionId, threadId);
     if ("error" in authorized) return authorized.error;
+    if (purpose !== "decision" && "decisionApproverOnly" in authorized.session && authorized.session.decisionApproverOnly) return c.json({ error: "Thread not found." }, 404);
   }
   if (!sessionId) return c.json({ error: "Thread not found." }, 404);
   const thread = await engineStore.getThread(sessionId, threadId);

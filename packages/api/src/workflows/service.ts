@@ -1863,7 +1863,7 @@ export async function resolveWorkflowApproval(
   // A step that would use another member's account answers to them, and
   // their approval covers this run only.
   const approver = (await pendingApprovers(deps, run)).get(`${input.nodeId}:${iter}`);
-  if (approver && approver.userId !== owner.userId) return "not_approver";
+  if (approver && (owner.principal?.type === "team" || approver.userId !== owner.userId)) return "not_approver";
   if (approver && input.scope !== undefined && input.scope !== "once") input = { ...input, scope: undefined };
 
   const orgId = await definitionOrgId(deps.db, run.params.workflowId);

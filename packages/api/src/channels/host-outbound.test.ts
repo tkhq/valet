@@ -28,7 +28,7 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -1909,6 +1909,32 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text === undefined)).toHaveLength(1);
     expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text?.includes("already resolved"))).toHaveLength(1);
+  });
+
+  it("allows only the named private-workflow gate in DMs and callbacks", async () => {
+    await testDb.appDb.insert(teams).values({ id: "private-team", orgId: ORG_ID, name: "Private", createdAt: 1 });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "private-team", userId: USER_ID, role: "member" });
+    const { ref, sessionId } = await seedWorkflowGate({ workflowId: "private-wf", runId: "private-run", workflowOrgId: ORG_ID,
+      owner: { ownerType: "team", ownerId: "private-team" }, gateId: "named-gate" });
+    // The original private thread is gone; no actor fallback grants this viewer access.
+    await testDb.appDb.update(workflowRuns).set({ params: { workflowId: "private-wf", definitionVersionId: "v1",
+      origin: { assistantSessionId: "private-origin", threadId: "private-thread" } } }).where(eq(workflowRuns.id, "private-run"));
+    const gate = await engineStore.getDecisionGate(sessionId, "named-gate");
+    if (!gate) throw new Error("Missing gate fixture");
+    await engineStore.saveDecisionGate(sessionId, gate.threadId, { ...gate, context: { approver: { userId: USER_ID } } });
+    await engineStore.saveDecisionGate(sessionId, gate.threadId, { ...gate, id: "other-gate", resumeKey: "other-rk" });
+    const otherRef = { conversationKey: "fake:dm:other", messageId: "other-message" };
+    host.recordGatePrompt("other-gate", otherRef, sessionId);
+    await host.attentionDeliverer().deliver(USER_ID, { kind: "approval", owner: { type: "user", id: USER_ID }, sessionId,
+      title: "Other gate", gate: { id: "other-gate", actions: gate.actions } });
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    await host.attentionDeliverer().deliver(USER_ID, { kind: "approval", owner: { type: "user", id: USER_ID }, sessionId,
+      title: "Named gate", gate: { id: "named-gate", actions: gate.actions } });
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    await callback(otherRef, "other-callback");
+    expect((await engineStore.getDecisionGate(sessionId, "other-gate"))?.status).toBe("pending");
+    await callback(ref, "named-callback");
+    expect((await engineStore.getDecisionGate(sessionId, "named-gate"))?.status).toBe("resolved");
   });
 
   it("rejects a cross-org workflow callback with the uniform expired response", async () => {

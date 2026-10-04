@@ -65,12 +65,14 @@ notificationsRouter.get("/decisions", async (c) => {
       // A gate asking to lend a member's account is that member's to answer,
       // and only theirs, whatever thread asked for it.
       const approver = gateApprover(gate);
-      if (approver && approver.userId !== caller.id) continue;
+      if (approver && (caller.type !== "user" || approver.userId !== caller.id)) continue;
       if (!approver) {
         if (!keys.has(gate.threadId)) keys.set(gate.threadId, engineStore.getThread(session.id, gate.threadId).then((t) => visible(t?.key)));
         if (!await keys.get(gate.threadId)) continue;
       }
-      items.push({ sessionId: session.id, title: session.title || "Thread approval", gate: engineGateToWire(gate) });
+      const thread = await engineStore.getThread(session.id, gate.threadId);
+      const canOpenThread = !!thread && await visible(thread.key);
+      items.push({ canOpenThread, sessionId: session.id, title: session.title || "Thread approval", gate: engineGateToWire(gate) });
     }
   }
   // Workflow agent sessions have no app session row. Their run owns the gates.
@@ -89,11 +91,13 @@ notificationsRouter.get("/decisions", async (c) => {
       ownerType: session.owner_type, ownerId: session.owner_id,
       userId: session.owner_type === "user" ? session.owner_id : "",
     }, c.var.principal)) continue;
-    if (!await runVisible(c, { ownerType: session.owner_type, origin: session.origin, actorUserId: session.actor_user_id, params: { input: session.input } })) continue;
+    const canOpenThread = await runVisible(c, { ownerType: session.owner_type, origin: session.origin, actorUserId: session.actor_user_id, params: { input: session.input } });
     const gates = await engineStore.listDecisionGates(session.session_id, undefined, "pending");
     for (const gate of gates) {
+      const approver = gateApprover(gate);
+      if (approver ? caller.type !== "user" || approver.userId !== caller.id : !canOpenThread) continue;
       if (!items.some(item => item.gate.id === gate.id)) {
-        items.push({ sessionId: session.session_id, title: session.title, gate: engineGateToWire(gate) });
+        items.push({ canOpenThread, sessionId: session.session_id, title: session.title, gate: engineGateToWire(gate) });
       }
     }
   }

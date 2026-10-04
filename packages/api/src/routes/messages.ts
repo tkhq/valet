@@ -384,6 +384,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const shown = new Set<string>();
   for (const t of threads) if (await visible(t.key)) shown.add(t.id);
   const query = c.req.query("q")?.trim().toLowerCase() ?? "";
+  if (query.includes("\0")) return c.json({ error: "Search contains an unsupported NUL character. Remove it and try again." }, 400);
   if (query.length > 500) return c.json({ error: "Search is too long. Use at most 500 characters." }, 400);
   // Search persisted chat text without downloading histories. The session was
   // authorized above; the visibility filter below also excludes private threads.
@@ -1249,7 +1250,11 @@ export async function loadDecisionSession(c: Context<AppEnv>, id: string, thread
     orgId: definition.orgId,
   };
   if (!(await canAnswerDecision(c, session, id))) return missing();
-  if (!(await runVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId, params: run.params }))) return missing();
+  const decisionApproverOnly = !await runVisible(c, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId, params: run.params });
+  if (decisionApproverOnly) {
+    const gates = await p.engineStore.listDecisionGates(id, threadId, "pending");
+    if (c.var.principal.type !== "user" || !gates.some(gate => gateApprover(gate)?.userId === c.var.principal.id)) return missing();
+  }
   // A guessed node ID must not materialize a new agent on a read request.
   if (!(await p.engineStore.getSession(id))) return missing();
   const engineSession = await ensureWorkflowSession({
@@ -1257,13 +1262,13 @@ export async function loadDecisionSession(c: Context<AppEnv>, id: string, thread
     host: p.engineHost, actionPluginByService: p.actionPluginByService,
     credentials: p.engineCredentials,
   }, id);
-  return { session, engineSession };
+  return { session: { ...session, decisionApproverOnly }, engineSession };
 }
 
 /** Pending gates on threads this request may see. Another pod may have made
  * the thread after this one loaded the session, so a thread missing here is
  * read from the store. A gate whose thread is gone stays hidden. */
-async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, engineSession: EngineSession) {
+async function visibleGates(c: Context<AppEnv>, session: { ownerType: string; decisionApproverOnly?: boolean }, engineSession: EngineSession) {
   const visible = threadsVisibleTo(c, session);
   const pending = await engineSession.pendingDecisionGates();
   const shown = await Promise.all(pending.map(async (gate) => {
@@ -1271,6 +1276,7 @@ async function visibleGates(c: Context<AppEnv>, session: { ownerType: string }, 
     // requester's thread is private to the requester.
     const approver = gateApprover(gate)?.userId;
     if (approver !== undefined && approver === viewerOf(c).userId) return true;
+    if (session.decisionApproverOnly) return false;
     const thread = engineSession.threadById(gate.threadId)
       ?? await c.var.providers.engineStore.getThread(engineSession.id, gate.threadId);
     return !!thread && visible(thread.key);

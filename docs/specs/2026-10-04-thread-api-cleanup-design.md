@@ -28,3 +28,5 @@ Runtime status reconciliation remains an invariant check, separate from obsolete
 Exercise both address families against persisted history.
 Verify thread-local gate resolution and withdrawal, private threads, team API keys, workflow decisions, and malformed addresses.
 Run client URL tests, API integration tests, typecheck, and the repository end-to-end scorecard.
+
+Thread search rejects NUL characters before querying Postgres. The response asks the caller to remove the character.

@@ -137,7 +137,10 @@ it("puts a gate asking for a member's shared account before that member alone", 
   expect((await resolve(asMember)).status).toBe(200);
 });
 
-it.each(["session", "thread"])("lets a named approver answer a private child gate by %s without exposing other content", async (addressKind) => {
+it.each([
+  { addressKind: "session", workflow: false }, { addressKind: "thread", workflow: false },
+  { addressKind: "session", workflow: true }, { addressKind: "thread", workflow: true },
+])("lets a named approver answer a private gate by $addressKind (workflow=$workflow) without exposing other content", async ({ addressKind, workflow }) => {
   api = await bootTestApi();
   const p = api.providers;
   await p.db.insert(teams).values({ id: "mine", orgId: "local-org", name: "Mine", createdAt: 1 });
@@ -149,9 +152,15 @@ it.each(["session", "thread"])("lets a named approver answer a private child gat
   const parentSession = await p.engineStore.getSession(parent.sessionId);
   const parentThread = await p.engineStore.getThread(parent.sessionId, parent.threadId);
   if (!parentSession || !parentThread) throw new Error("Missing parent fixture");
-  const childId = "private-child";
-  await p.db.insert(agentSessions).values({ id: childId, userId: "local-user", orgId: "local-org", workspace: "/",
-    ownerType: "team", ownerId: "mine", createdAt: 1, updatedAt: 1 });
+  const childId = workflow ? "wf:private-run:step" : "private-child";
+  if (workflow) {
+    await p.db.insert(workflowDefinitions).values({ id: "private-wf", orgId: "local-org", ownerType: "team", ownerId: "mine", name: "Private", definition: {}, createdAt: 1, updatedAt: 1 });
+    await p.workflowStore.createRun("private-run", { workflowId: "private-wf", definitionVersionId: "v1", origin: { assistantSessionId: parent.sessionId, threadId: parent.threadId } },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "mine" });
+  } else {
+    await p.db.insert(agentSessions).values({ id: childId, userId: "local-user", orgId: "local-org", workspace: "/",
+      ownerType: "team", ownerId: "mine", createdAt: 1, updatedAt: 1 });
+  }
   await p.engineStore.saveSession({ ...parentSession, id: childId, parentSessionId: parent.sessionId, parentThreadId: parent.threadId });
   for (const threadId of ["child-asked", "child-other"]) {
     await p.engineStore.saveThread(childId, { ...parentThread, id: threadId, sessionId: childId, key: `web:${threadId}` });
@@ -174,6 +183,7 @@ it.each(["session", "thread"])("lets a named approver answer a private child gat
   });
   const inbox = await (await request("notifications/decisions")).json() as ListNotificationDecisionsResponse;
   expect(inbox.items.map(item => item.gate.id)).toEqual(["borrow-child"]);
+  expect(inbox.items[0]?.canOpenThread).toBe(false);
   for (const address of [`sessions/${childId}`, "threads/child-asked"]) {
     const decisions = await request(`${address}/decisions`);
     expect(decisions.status).toBe(200);
@@ -189,9 +199,11 @@ it.each(["session", "thread"])("lets a named approver answer a private child gat
   expect((await request("threads/child-other/decisions/borrow-child/resolve", "POST", { actionId: "approve" })).status).toBe(404);
   const decisionPaths = [`sessions/${childId}/decisions`, "threads/child-asked/decisions"];
   // Naming an approver cannot bypass organization or current team membership.
-  await p.db.update(agentSessions).set({ orgId: "other-org" }).where(eq(agentSessions.id, childId));
+  if (workflow) await p.db.update(workflowDefinitions).set({ orgId: "other-org" }).where(eq(workflowDefinitions.id, "private-wf"));
+  else await p.db.update(agentSessions).set({ orgId: "other-org" }).where(eq(agentSessions.id, childId));
   for (const path of decisionPaths) expect((await request(path)).status).toBe(404);
-  await p.db.update(agentSessions).set({ orgId: "local-org" }).where(eq(agentSessions.id, childId));
+  if (workflow) await p.db.update(workflowDefinitions).set({ orgId: "local-org" }).where(eq(workflowDefinitions.id, "private-wf"));
+  else await p.db.update(agentSessions).set({ orgId: "local-org" }).where(eq(agentSessions.id, childId));
   await p.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
   for (const path of decisionPaths) expect((await request(path)).status).toBe(404);
   await p.db.insert(teamMembers).values({ teamId: "mine", userId: "test-member", role: "member" });

@@ -1833,7 +1833,7 @@ export interface ListNotificationsResponse {
 }
 
 export interface ListNotificationDecisionsResponse {
-  items: Array<{ sessionId: string; title: string; gate: DecisionGate }>;
+  items: Array<{ sessionId: string; title: string; gate: DecisionGate; canOpenThread?: boolean }>;
 }
 
 export interface NotificationPreferenceSummary {

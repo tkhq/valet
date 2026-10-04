@@ -69,3 +69,15 @@ it.each([
   expect((await p.db.select().from(actionInvocations))[0]?.status).toBe(firstApproval ? "approved" : "denied");
   expect(wake).toHaveBeenCalledTimes(firstApproval ? 2 : 1);
 });
+
+
+it("does not let a team principal borrow its minting user's account", async () => {
+  const { p, wake } = await setup();
+  const result = await resolveWorkflowApproval({ db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore },
+    { userId: "local-user", orgId: "local-org", principal: { type: "team", id: "atomic-team" } },
+    { runId: "run-atomic", nodeId: "step", approved: true, via: "web" });
+  expect(result).toBe("not_approver");
+  expect(await p.workflowStore.listSignals("run-atomic")).toEqual([]);
+  expect(await p.db.select().from(runtimeGrants)).toEqual([]);
+  expect(wake).not.toHaveBeenCalled();
+});

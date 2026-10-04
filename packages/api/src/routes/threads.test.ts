@@ -171,5 +171,10 @@ describe("thread content search", () => {
     expect(await search("%")).toEqual([content.id]);
     expect(await search("private needle")).toEqual([]);
     expect(await search("absent")).toEqual([]);
+    for (const path of ["threads", `sessions/${encodeURIComponent(content.sessionId)}/threads`]) {
+      const response = await fetch(`${api.baseUrl}/api/${path}?q=%00`);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "Search contains an unsupported NUL character. Remove it and try again." });
+    }
   });
 });

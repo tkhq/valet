@@ -1562,6 +1562,7 @@ export class ChannelHost {
     sessionId: string,
     orgId: string,
     userId: string,
+    gateId: string,
   ): Promise<
     | { ok: true; owner: SessionOwnerLike; orgId: string }
     | { ok: false; reason: "workflow_session_malformed" | "workflow_session_missing" | "workflow_session_deleted" | "workflow_session_cross_org" | "unauthorized" }
@@ -1599,8 +1600,10 @@ export class ChannelHost {
       : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
     if (!authorized) return { ok: false, reason: "unauthorized" };
     // A run from a private thread or a private Slack channel's event is that
-    // audience's, so only they answer its gates (`routes/_thread-access.ts#runVisible`).
-    if (owner.ownerType === "team") {
+    // audience's. A named account approver may answer only their pending gate.
+    const gate = await this.deps.engineStore.getDecisionGate(sessionId, gateId);
+    const namedApprover = gate?.status === "pending" && gateApprover(gate)?.userId === userId;
+    if (owner.ownerType === "team" && !namedApprover) {
       const access = { db: this.deps.db, engineCredentials: this.deps.engineCredentials, onePassword: this.deps.onePassword, engineStore: this.deps.engineStore };
       const viewer = { orgId: workflowOrgId, userId };
       if (!(await runOriginVisible(access, viewer, { ownerType: "team", origin: run.params.origin, actorUserId: run.actorUserId }))
@@ -1670,7 +1673,7 @@ export class ChannelHost {
     let workflow: Awaited<ReturnType<ChannelHost["authorizeWorkflowGate"]>> | null = null;
     try {
       workflow = mapped.sessionId.startsWith("wf:")
-        ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId)
+        ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId, mapped.gateId)
         : null;
     } catch (err) {
       console.error("[channels] workflow gate authorization failed", err);
@@ -1836,7 +1839,7 @@ export class ChannelHost {
             // can be broader than the resolver set (org admins for an
             // org-owned session), and a button that always answers "expired"
             // is worse than the plain summary.
-            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId))) {
+            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id))) {
               await this.sendAndRecordGatePrompt(
                 transport,
                 conversationKey,
@@ -1877,7 +1880,7 @@ export class ChannelHost {
    * plain summary, which carries the web link. Throwing here instead would
    * lose the whole notification for a run that is waiting on it.
    */
-  private async mayResolveGateOverDm(sessionId: string, userId: string): Promise<boolean> {
+  private async mayResolveGateOverDm(sessionId: string, userId: string, gateId: string): Promise<boolean> {
     try {
       const rows = await this.deps.db
         .select()
@@ -1895,6 +1898,7 @@ export class ChannelHost {
         sessionId,
         this.orgId ?? (await this.deps.resolveOrgId()),
         userId,
+        gateId,
       );
       return workflow.ok;
     } catch (err) {
