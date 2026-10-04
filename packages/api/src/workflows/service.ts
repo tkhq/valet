@@ -1891,13 +1891,8 @@ export async function resolveWorkflowApproval(
     if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
   }
 
-  // insertSignal is first-write-wins (ON CONFLICT DO NOTHING). Insert the signal
-  // first so two concurrent resolutions can only race here — the loser gets the
-  // existing row back with a different payload and returns "already_resolved"
-  // without writing any grants or audit rows. Grant/policy writes happen only
-  // after the insert confirms this caller won the race. wake() is called after
-  // all writes; the executor does not consume the signal until its next drive,
-  // so the ordering is safe.
+  // The signal's unique key selects one resolution winner. Only that caller
+  // writes grants, audit state, and the durable wake flag in the transaction.
   const submitted = {
     approved: input.approved,
     resolvedBy: owner.userId,
@@ -1918,36 +1913,48 @@ export async function resolveWorkflowApproval(
     createdAt: Date.now(),
   };
   const prepared = workflowPermission;
-  // The app and workflow store share Postgres. Commit the permanent grant,
+  // The app and workflow store share Postgres. Commit every grant,
   // resolution, audit, and durable wake flag together so crash recovery cannot
   // consume the approval without the permission it promised.
   let stored;
   try {
-    stored = prepared?.ok ? await deps.db.transaction(async (tx) => {
-    // Lock the definition and compare the steps again here: an edit that
-    // landed after the check above must not keep a grant for steps nobody
-    // reviewed. An edit that comes after waits on this lock, and its
-    // revoke-after-write then removes the grant.
-    if (input.scope === "workflow") {
-      const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions
-        WHERE id = ${run.params.workflowId} FOR UPDATE`) as { rows: Array<{ definition: unknown }> };
-      if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, run.definition)) throw new StaleWorkflowError();
-    }
-    const [inserted] = await tx.insert(workflowSignals).values(signal)
-      .onConflictDoNothing({ target: [workflowSignals.runId, workflowSignals.signalId] }).returning();
-    if (!inserted) {
-      // As the store's insertSignal does: return the existing row, so an
-      // identical retry after a lost response reads as success, not a conflict.
-      const [existing] = await tx.select().from(workflowSignals)
-        .where(and(eq(workflowSignals.runId, input.runId), eq(workflowSignals.signalId, signalId))).limit(1);
-      return existing ?? { payload: null };
-    }
-    await persistWorkflowPermissions(tx, prepared.grants);
-    await tx.update(actionInvocations).set({ status: "approved", resolvedBy: owner.userId })
-      .where(and(eq(actionInvocations.orgId, orgId), eq(actionInvocations.invocationId, `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`)));
-    await tx.update(workflowRuns).set({ wakeRequested: true }).where(eq(workflowRuns.id, input.runId));
-    return inserted;
-  }) : await deps.workflowStore.insertSignal(signal);
+    stored = await deps.db.transaction(async (tx) => {
+      // Lock the definition and compare the steps again here: an edit that
+      // landed after the check above must not keep a grant for steps nobody
+      // reviewed. An edit that comes after waits on this lock, and its
+      // revoke-after-write then removes the grant.
+      if (prepared?.ok) {
+        const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions
+          WHERE id = ${run.params.workflowId} FOR UPDATE`) as { rows: Array<{ definition: unknown }> };
+        if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, run.definition)) throw new StaleWorkflowError();
+      }
+      const [inserted] = await tx.insert(workflowSignals).values(signal)
+        .onConflictDoNothing({ target: [workflowSignals.runId, workflowSignals.signalId] }).returning();
+      if (!inserted) {
+        // As the store's insertSignal does: return the existing row, so an
+        // identical retry after a lost response reads as success, not a conflict.
+        const [existing] = await tx.select().from(workflowSignals)
+          .where(and(eq(workflowSignals.runId, input.runId), eq(workflowSignals.signalId, signalId))).limit(1);
+        return existing ?? { payload: null };
+      }
+      if (prepared?.ok) await persistWorkflowPermissions(tx, prepared.grants);
+      if (input.approved && approver && node && typeof node.service === "string") {
+        const service = deps.actionPluginByService?.get(node.service)?.actionPlugin.credentialService ?? node.service;
+        await writeBorrowGrant(tx, orgId, { sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
+      }
+      if (input.approved && isPolicyGate && input.scope === "run") {
+        const service = typeof node.service === "string" ? node.service : "";
+        const action = typeof node.action === "string" ? node.action : "";
+        const actionId = action.includes(".") ? action : `${service}.${action}`;
+        await writeExecutionGrant(tx, input.runId, { orgId, service, actionId, grantedBy: owner.userId, now: Date.now() });
+      }
+      if (isPolicyGate) {
+        await tx.update(actionInvocations).set({ status: input.approved ? "approved" : "denied", resolvedBy: owner.userId })
+          .where(and(eq(actionInvocations.orgId, orgId), eq(actionInvocations.invocationId, `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`)));
+      }
+      await tx.update(workflowRuns).set({ wakeRequested: true }).where(eq(workflowRuns.id, input.runId));
+      return inserted;
+    });
   } catch (err) {
     if (err instanceof StaleWorkflowError) return "stale_workflow";
     throw err;
@@ -1963,36 +1970,6 @@ export async function resolveWorkflowApproval(
     return "already_resolved";
   }
 
-  if (input.approved && approver && node && typeof node.service === "string") {
-    const service = deps.actionPluginByService?.get(node.service)?.actionPlugin.credentialService ?? node.service;
-    await writeBorrowGrant(deps.db, orgId, { sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
-  }
-
-  if (input.approved && isPolicyGate) {
-    const n = node as Record<string, unknown>;
-    const service = typeof n.service === "string" ? n.service : "";
-    const action = typeof n.action === "string" ? n.action : "";
-    const actionId = action.includes(".") ? action : `${service}.${action}`;
-    const now = Date.now();
-    if (input.scope === "run") {
-      await writeExecutionGrant(deps.db, input.runId, {
-        orgId,
-        service,
-        actionId,
-        grantedBy: owner.userId,
-        now,
-      });
-    }
-  }
-
-  if (isPolicyGate && !prepared?.ok) {
-    await updateInvocationOutcome(
-      deps.db,
-      `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`,
-      orgId,
-      { status: input.approved ? "approved" : "denied", resolvedBy: owner.userId },
-    );
-  }
   await deps.workflowRunHost.wake(input.runId);
   return "ok";
 }

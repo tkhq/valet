@@ -302,7 +302,7 @@ export async function writeSessionGrant(db: AppDb, sessionId: string, grant: Gra
 /** Workflow-execution-scoped twin of `writeSessionGrant` — backed by the
  *  `runtime_grants_execution_policy_key` partial unique index. */
 export async function writeExecutionGrant(
-  db: AppDb,
+  db: AppQueryable,
   workflowExecutionId: string,
   grant: GrantWrite,
 ): Promise<void> {
