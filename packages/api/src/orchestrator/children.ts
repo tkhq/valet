@@ -1021,10 +1021,11 @@ async function childReachableFrom(
 ): Promise<boolean> {
   if (readerThreadId === undefined || readerThreadId === watch.parentThreadId) return true;
   const result = await db.execute(sql`SELECT s.owner_type, ${sharedWithWholeTeamSql(watch.orgId,
-    governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`))} AS shared
+    governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`, "parent link"))} AS shared
     FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; shared: boolean }> };
   const parent = result.rows[0];
-  return parent?.owner_type !== "team" || parent.shared === true;
+  // A parent that is gone leaves nobody to say who may read its child.
+  return !!parent && (parent.owner_type !== "team" || parent.shared === true);
 }
 
 export function buildChildReader(deps: ChildrenDeps): ChildReader {

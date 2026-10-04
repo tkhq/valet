@@ -5,7 +5,7 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
+import { governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -138,6 +138,21 @@ it("judges a child session's threads by the thread that started it", async () =>
   }
   // A thread of the runtime itself decides by its own key.
   expect(await threadVisibility(api.providers, { ownerType: "team", id: "sess-p" }, { orgId: "local-org", userId: "other" })("web:default")).toBe(true);
+});
+
+it("keeps a child private when the thread that started it is gone", async () => {
+  api = await bootTestApi();
+  const { db } = api.providers;
+  await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+    ('thr-o', 'sess-o', 'web:default', 'idle', 'steer', 1, 1)`);
+  await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at) VALUES
+    ('sess-o', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'sess-gone', 'thr-gone', 1, 1)`);
+  for (const userId of ["member", "other"]) {
+    expect(await threadVisibility(api.providers, { ownerType: "team", id: "sess-o" }, { orgId: "local-org", userId })("web:default")).toBe(false);
+  }
+  // No thread at all is still the workspace's shared default.
+  const result = await db.execute(sql`SELECT ${sharedWithWholeTeamSql("local-org", governingThreadKeySql(sql`NULL`, sql`NULL`))} AS shared`) as { rows: Array<{ shared: boolean }> };
+  expect(result.rows[0]?.shared).toBe(true);
 });
 
 it("hides a channel never classified when Slack cannot answer", async () => {
