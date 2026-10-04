@@ -47,6 +47,9 @@ export interface EventLogQuery {
   before?: { at: number; id: string };
   limit: number;
   now?: number;
+  /** Whether the viewer may see a Slack channel (`slack:<id>`). A Slack event
+   * from a channel they may not see stays out of their Log, as its page does. */
+  channelVisible?: (channelKey: string) => Promise<boolean>;
 }
 
 function escapeLike(value: string): string {
@@ -73,6 +76,8 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
     const having = problemsOnly ? sql`HAVING ${EVENT_STATUS} = 'failed'` : sql``;
     const result = await db.execute(sql`
       SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
+        CASE WHEN e.service = 'slack' THEN COALESCE(e.refs->>'channel', e.payload->'item'->>'channel', e.payload->>'channel_id',
+          e.payload->'channel'->>'id', e.payload->>'channel') END AS slack_channel,
         MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason
       FROM events e JOIN event_deliveries d ON d.event_id = e.id JOIN event_subscriptions s ON s.id = d.subscription_id
       WHERE ${sql.join(where, sql` AND `)}
@@ -82,8 +87,10 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
       LIMIT ${take}`) as { rows: Array<{
         id: string; service: string; event_key: string; summary: string | null; actor: unknown;
         received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
+        slack_channel: string | null;
       }> };
     for (const row of result.rows) {
+      if (row.slack_channel && query.channelVisible && !(await query.channelVisible(`slack:${row.slack_channel}`))) continue;
       const actor = row.actor && typeof row.actor === "object" ? row.actor as { login?: string; externalId?: string } : null;
       eventRows.push({
         kind: "event", id: row.id, at: Number(row.received_at), status: row.status,

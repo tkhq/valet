@@ -342,6 +342,7 @@ eventsRouter.get("/events/log", async (c) => {
   const admin = await isOrgAdminUser(c);
   const { items, hasMore } = await listEventLog(db, {
     orgId: user.orgId, owner, admin, limit, problemsOnly, ...(q ? { q } : {}), ...(before ? { before } : {}),
+    channelVisible: channelsVisibleTo(c),
   });
   const last = items.at(-1);
   const resp: EventLogResponse = {

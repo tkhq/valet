@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { linkIdentity } from "../channels/identity-links.js";
-import { events, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { eventDeliveries, eventSubscriptions, events, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 
 let api: TestApi | undefined;
@@ -74,4 +74,26 @@ it("shows a workflow run a private Slack channel's event started only to the cha
   expect((await get("run-private")).status).toBe(200);
   expect((await get("run-private", "test-member")).status).toBe(404);
   expect((await get("run-public", "test-member")).status).toBe(200);
+});
+
+it("leaves a private Slack channel's events out of a non-member's Log", async () => {
+  api = await bootTestApi();
+  await connectSlack(api, { CPRIV: ["UMEMBER"] });
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UMEMBER", userId: "local-user" });
+  const db = api.providers.db;
+  await db.insert(teams).values({ id: "team-log", orgId: "local-org", name: "Log", createdAt: 1 });
+  await db.insert(teamMembers).values([
+    { teamId: "team-log", userId: "local-user", role: "member" },
+    { teamId: "team-log", userId: "test-member", role: "member" },
+  ]);
+  await db.insert(eventSubscriptions).values({ id: "sub-log", orgId: "local-org", ownerType: "team", ownerId: "team-log", name: "Slack", eventKeys: ["slack.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1 });
+  const now = Date.now();
+  for (const [id, channel] of [["log-private", "CPRIV"], ["log-public", "CPUB"]] as const) {
+    await db.insert(events).values({ id, orgId: "local-org", service: "slack", eventKey: "slack.message", dedupeKey: id, refs: { channel }, summary: `message in ${channel}`, payload: { channel }, occurredAt: now, receivedAt: now });
+    await db.insert(eventDeliveries).values({ id: `d-${id}`, eventId: id, subscriptionId: "sub-log", status: "delivered", attempts: 1, nextAttemptAt: now, createdAt: now });
+  }
+  const log = async (user?: string) => ((await (await fetch(`${api!.baseUrl}/api/events/log?ownerType=team&ownerId=team-log`,
+    user ? { headers: { "x-valet-test-user-id": user } } : {})).json()) as { items: Array<{ id: string }> }).items.map((i) => i.id).sort();
+  expect(await log()).toEqual(["log-private", "log-public"]);
+  expect(await log("test-member")).toEqual(["log-public"]);
 });
