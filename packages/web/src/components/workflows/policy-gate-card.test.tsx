@@ -244,8 +244,15 @@ describe("PolicyGateCard", () => {
     expect(screen.getByRole("status").textContent).toContain("Asked Ada for permission");
     expect(screen.queryByRole("button")).toBeNull();
     rerender(<PolicyGateCard runId="wfrun_1" gate={{ ...gate, approver: { userId: "me" } }} />);
-    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Allow for this run" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Allow for this workflow" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "More approval options" })).toBeNull();
+    expect(screen.getByText(/also lets Valet use your linear account for later actions in this workflow run/)).toBeTruthy();
+    expect(screen.getByText(/including actions requested by other teammates/)).toBeTruthy();
     expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Allow for this run" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({ nodeId: "node_1", body: { approved: true, scope: "run" } });
   });
 
 });

@@ -334,3 +334,16 @@ At narrow widths, the workflow header wraps and the node palette scrolls horizon
 On first load and in previews, partially positioned graphs place new nodes in a free column using the existing layout reconciliation. Saved node positions remain unchanged. The desktop workflow title grows into the space left by header actions.
 
 Mobile graph QA (2026-09-11): the editor permits zooming out to 10% so Fit View can show the whole graph on narrow screens. Saved viewport choices and zoom-in controls remain available.
+
+
+## Shared-account upgrade (2026-10-04)
+
+The upgrade moves each legacy `metadata.delegatedFrom` team row into `credential_shares`. It preserves the member's source credential and removes the secretless team reference. Direct team connections remain unchanged. Each member can share an account for the same service.
+
+The acting member's own share resolves first. The team's connection and permitted organization sources follow. For other services, another member's share requires that member's approval. Scheduled workflows can therefore pause for approval after upgrade when their actor differs from the sharer. The account owner must approve the request before the run continues.
+
+GitHub has an exception. Its policy paths do not request permission to borrow another member's account. The sharer's own GitHub actions still resolve their migrated share. Other actors use a direct team connection or the organization GitHub App. If a team previously relied on one member's GitHub delegation, install the organization GitHub App or store a team GitHub connection. The migration alone does not preserve that delegation's access for other actors.
+
+A shared-account approval applies to later actions for that service in the same thread or workflow run. It can cover later requests from other teammates in that scope. The approval card states this scope before the owner answers. A workflow account owner sees Allow for this run and Deny, without action-level or persistent workflow permission choices. This approval does not change the service's other action policies. Grant scope and credential resolution remain unchanged by this copy update.
+
+Regression coverage migrates an encrypted GitHub credential reference. It verifies that the sharer still resolves the live source credential and that another actor receives no GitHub borrow gate.

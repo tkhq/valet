@@ -378,7 +378,7 @@ describe("policyResolver seam: require_approval gate", () => {
 });
 
 describe("policyResolver seam: another member's shared account", () => {
-  it("asks only that member, with allow and deny and none of the session-wide choices", async () => {
+  it.each([["s1", "thread"], ["wf:run-1:node-1", "workflow run"]])("names the full borrow scope for %s and asks only that member", async (sessionId, scope) => {
     let gateReq: DecisionGateRequest | undefined;
     const { resolver } = makeResolver({
       decision: {
@@ -391,9 +391,11 @@ describe("policyResolver seam: another member's shared account", () => {
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
     await callTool.execute(
       { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
-      makeCtx({ policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
+      makeCtx({ sessionId, policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
     );
     expect(gateReq?.title).toBe("Let a teammate use your github account?");
+    expect(gateReq?.body).toContain(`later github actions in this ${scope}`);
+    expect(gateReq?.body).toContain("including actions requested by other teammates");
     expect(gateReq?.actions?.map((a) => a.id)).toEqual(["approve", "deny"]);
     expect((gateReq?.context as Record<string, unknown>)?.approver).toEqual({ userId: "bea", name: "Bea" });
   });

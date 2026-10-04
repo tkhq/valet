@@ -44,6 +44,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   const serviceAction = service && action ? `${service}.${action}` : gate.nodeId;
 
   const busy = resolve.isPending;
+  const borrowScopeCopy = `Approving this step also lets Valet use your ${service || "shared"} account for later actions in this workflow run, including actions requested by other teammates. Only you can approve use of your account.`;
 
   function fireApprove(scope: "once" | "run" | "workflow") {
     respond({ approved: true, scope }, confirmActions || scope === "workflow");
@@ -123,6 +124,10 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         </details>
       )}
 
+      {gate.approver && (
+        <p className="text-xs text-muted">{borrowScopeCopy}</p>
+      )}
+
       {/* Note input */}
       <Input
         aria-label="Optional note"
@@ -134,6 +139,9 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
 
       {/* Action buttons */}
       <div className="flex flex-wrap items-center gap-3">
+        {gate.approver ? (
+          <Button size="sm" onClick={() => fireApprove("run")} disabled={busy}>Allow for this run</Button>
+        ) : <>
         <Button size="sm" onClick={() => fireApprove("workflow")} disabled={busy}>Allow for this workflow</Button>
         {/* Split-button: Approve once + dropdown */}
         <div className="flex items-center">
@@ -175,6 +183,8 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           </DropdownMenu>
         </div>
 
+        </>}
+
         {/* Deny */}
         <Button size="sm" variant="danger" onClick={() => respond({ approved: false, scope: "once" }, confirmActions)} disabled={busy}>
           {busy && submitted?.approved === false ? <Spinner size={12} /> : null}
@@ -190,7 +200,9 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         onOpenChange={onConfirmationOpenChange}
         title={confirmation?.approved === false ? "Deny this tool action?" : "Allow this tool action?"}
         description={
-          confirmation?.scope === "workflow"
+          confirmation?.approved && gate.approver
+            ? borrowScopeCopy
+            : confirmation?.scope === "workflow"
             ? `Allow ${serviceAction} for future runs of this workflow only, until its saved permissions are reset. Existing policy restrictions remain in effect.`
             : confirmation?.scope === "run"
             ? `Valet runs ${serviceAction} now and allows later calls in this run.`

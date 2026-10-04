@@ -645,8 +645,9 @@ export async function invokeAction(
     const extras: DecisionAction[] = decision.approver ? [] : decision.extraGateActions ?? [];
     const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
     // Another member's account: only they answer, so the gate asks them.
+    const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
     const borrowed = decision.approver
-      ? { title: `Let a teammate use your ${entry.service} account?`, body: `${summary}\n\nValet would run ${entry.action.name} through your ${entry.service} account. Only you can answer.` }
+      ? { title: `Let a teammate use your ${entry.service} account?`, body: `${summary}\n\nValet would run ${entry.action.name} through your ${entry.service} account. Allowing this also permits later ${entry.service} actions in this ${borrowScope}, including actions requested by other teammates. Only you can answer.` }
       : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
