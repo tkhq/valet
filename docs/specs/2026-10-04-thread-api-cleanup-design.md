@@ -118,3 +118,12 @@ Shared workflows require an approved grant before borrowing a member's account.
 Legacy Slack channel-only keys use the same channel membership checks as current thread keys, including DMs and group DMs.
 Attention events referencing a missing team thread do not notify the team or send member DMs.
 A missing audience cannot establish sharing permission. Workspace-wide events with no thread reference retain their existing routing.
+
+### Shared sandbox Git credentials
+
+A shared app session resolves Git credentials as its stored team or organization owner.
+Its sandbox token names the first waker, not the actor of each later command.
+Without a thread-bound actor, shared app sandboxes cannot use member shares or personal credentials.
+Team-owned credentials and GitHub App installations remain available. Workflow sandboxes retain their run-scoped approval checks.
+
+Shared sandbox repository bindings retain their restrictions: App-only bindings never select team tokens; personal-account bindings fail visibly because a shared runtime has no trustworthy current member.

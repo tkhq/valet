@@ -17,9 +17,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { agentSessions, teamMembers, githubInstallations, orgs, sessionRepos, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { saveAppConfig } from "../services/github-app.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { seedWorkflowRun } from "../test-helpers/workflow-run.js";
 import type { PostSandboxGitCredentialResponse, SandboxGitCredential } from "../wire/types.js";
 
@@ -365,6 +366,34 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
       updatedAt: now,
     });
   }
+
+  it("a shared runtime never uses its first waker's personal or shared GitHub account", async () => {
+    api = await bootTestApi();
+    await saveUserCredential("ghp_first_waker");
+    await saveOrgPat("ghp_org_pat");
+    const sessionId = "assistant:shared-team";
+    const token = await tokenFor(sessionId, "local-user");
+    await api.providers.db.insert(teamMembers).values({ teamId: TEAM.id, userId: "local-user", role: "member" });
+    await shareCredential(api.providers.db, { teamId: TEAM.id, service: "github", userId: "local-user", createdAt: 1 });
+    await api.providers.db.insert(agentSessions).values({
+      id: sessionId, orgId: ORG, userId: "local-user", ownerType: "team", ownerId: TEAM.id,
+      workspace: "/workspace", createdAt: 1, updatedAt: 1,
+    });
+    for (const purpose of ["git", "api"]) {
+      expect(await (await post(token, { host: "github.com", owner: "acme", purpose })).json()).toEqual({ anonymous: true });
+    }
+    await api.providers.engineCredentials.save(TEAM, "github", { type: "oauth2", accessToken: "ghp_team_owned" });
+    expect(await (await post(token, { host: "github.com", owner: "acme" })).json()).toEqual({ username: "x-access-token", password: "ghp_team_owned" });
+
+    await bindRepo({ sessionId, auth: "app" });
+    expect((await post(token, { host: "github.com", owner: "acme", repo: "widgets" })).status).toBe(409);
+    await installApp("acme");
+    expect(await (await post(token, { host: "github.com", owner: "acme", repo: "widgets" })).json()).toEqual({
+      username: "x-access-token", password: INSTALLATION_TOKEN,
+    });
+    await bindRepo({ sessionId, fullName: "acme/personal", cloneUrl: "https://github.com/acme/personal.git", auth: "user", position: 1 });
+    expect((await post(token, { host: "github.com", owner: "acme", repo: "personal" })).status).toBe(409);
+  });
 
   it("a team run a member started never resolves that member's credential or the org PAT", async () => {
     api = await bootTestApi();
