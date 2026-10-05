@@ -34,7 +34,7 @@ stub applies. Provider variable pairs are all-or-none.
 | `BETTER_AUTH_URL` | Public base URL (default `http://localhost:8788`) |
 | `AUTH_TRUSTED_ORIGINS` | Extra CORS/trusted origins (`http://localhost:5173` is always included) |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Comma-separated signup domain allowlist |
-| `AUTH_ALLOW_SIGNUP` | `1` admits any new account without an invitation or allowed domain; new accounts get the member role. Default: invitation or domain admission only |
+| `AUTH_ALLOW_SIGNUP` | `1` admits uninvited accounts only when `AUTH_ALLOWED_EMAIL_DOMAINS` is empty; new accounts get the member role. Default: invitation or domain admission only |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
 | `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below. Prefer `auth.sso.teams.claim` in `valet.yaml` |
 | `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`). Prefer `auth.sso.teams.assertedClaim` |

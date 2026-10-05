@@ -200,6 +200,6 @@ Two credentials, one file, both independent of better-auth:
 
 ## Unrestricted signup
 
-`AUTH_ALLOW_SIGNUP=1` admits users without an invitation or allowed email domain. The default remains invitation/domain admission. Enable it only on a deployment that means to accept any account.
+`AUTH_ALLOW_SIGNUP=1` admits uninvited users only when `AUTH_ALLOWED_EMAIL_DOMAINS` is empty. A configured domain allowlist still restricts signup. The default remains invitation/domain admission. Enable it only on a deployment that means to accept any account.
 
 The first-user administrator bootstrap and explicit invitation roles keep their existing behavior. Other unrestricted signups receive the member role. Existing login, sessions, account records, and integration connections remain unchanged. Set the flag to `0` or remove it to require invitations again. Existing accounts remain valid after that change.
