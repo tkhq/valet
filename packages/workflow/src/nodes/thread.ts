@@ -32,7 +32,7 @@
 
 import type { ThreadNode } from '../dag/nodes.js';
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
-import { executeSubmissionNode, type SubmissionDispatch } from './submission-node.js';
+import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export interface ThreadDispatchedResult {
@@ -89,7 +89,7 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
       waitMode: node.wait?.mode,
       outputSchema: node.outputSchema,
       dispatch: async (id): Promise<SubmissionDispatch> => {
-        const promptText = renderText(node.prompt, templateContext);
+        const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
         const dispatched = await engine.promptOrchestrator(promptText, {
           dispatchId: id,
           queueMode: 'followup',
