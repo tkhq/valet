@@ -47,6 +47,20 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM credential_shares");
   });
 
+  it("preserves legacy memory while adding independent execution namespaces", async () => {
+    await db.query("ALTER TABLE memory_files DROP CONSTRAINT memory_files_pkey");
+    await db.query("ALTER TABLE memory_files DROP COLUMN namespace");
+    await db.query("ALTER TABLE memory_files ADD PRIMARY KEY(owner_type, owner_id, path)");
+    await db.query("INSERT INTO memory_files(owner_type, owner_id, path, content, created_at, updated_at) VALUES ('team', 'memory-upgrade', 'note.md', 'Legacy', 1, 1)");
+    await applyAppMigrations(db);
+    await db.query("INSERT INTO memory_files(owner_type, owner_id, namespace, path, content, created_at, updated_at) VALUES ('team', 'memory-upgrade', 'private', 'note.md', 'Private', 2, 2)");
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT namespace, content FROM memory_files WHERE owner_id = 'memory-upgrade' ORDER BY namespace")).rows).toEqual([
+      { namespace: "legacy", content: "Legacy" }, { namespace: "private", content: "Private" },
+    ]);
+    await db.query("DELETE FROM memory_files WHERE owner_id = 'memory-upgrade'");
+  });
+
   it("repairs a missing legacy behavior column before the boot report", async () => {
     await db.query("ALTER TABLE assistants DROP COLUMN behavior");
     await expect(applyAppMigrations(db)).resolves.toBeUndefined();

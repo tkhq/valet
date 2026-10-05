@@ -338,6 +338,15 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "assistant execution identities", probe: { kind: "table", table: "assistant_executions" }, sql: `CREATE TABLE "assistant_executions" (
+  "session_id" text PRIMARY KEY, "assistant_id" text NOT NULL,
+  "conversation_key" text NOT NULL, "governing_thread_id" text NOT NULL, "created_at" bigint NOT NULL
+)` },
+  { describe: "assistant execution conversation identity", probe: { kind: "index", index: "assistant_executions_conversation" }, sql: 'CREATE UNIQUE INDEX assistant_executions_conversation ON assistant_executions (assistant_id, conversation_key)' },
+  { describe: "memory execution namespace", probe: { kind: "column", table: "memory_files", column: "namespace" }, sql: `DO $$ BEGIN ALTER TABLE memory_files ADD COLUMN namespace text NOT NULL DEFAULT '';
+    UPDATE memory_files SET namespace = 'legacy' WHERE owner_type = 'team';
+    ALTER TABLE memory_files DROP CONSTRAINT memory_files_pkey;
+    ALTER TABLE memory_files ADD PRIMARY KEY (owner_type, owner_id, namespace, path); END $$` },
   { describe: "assistants.behavior column", probe: { kind: "column", table: "assistants", column: "behavior" }, sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "behavior" text' },
   { describe: "Slack webhook inbox", probe: { kind: "table", table: "slack_webhook_inbox" }, sql: 'CREATE TABLE "slack_webhook_inbox" ("id" text PRIMARY KEY, "org_id" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "next_attempt_at" bigint NOT NULL);' },
   { describe: "Slack inbox due index", probe: { kind: "index", index: "slack_webhook_inbox_due" }, sql: 'CREATE INDEX IF NOT EXISTS "slack_webhook_inbox_due" ON "slack_webhook_inbox" ("next_attempt_at")' },

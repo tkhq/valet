@@ -33,7 +33,7 @@ export function journalCompactionHook(db: AppDb, scope: MemoryScope): Compaction
       .where(
         and(
           eq(memoryFiles.ownerType, scope.owner.type),
-          eq(memoryFiles.ownerId, scope.owner.id),
+          eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
           eq(memoryFiles.path, path),
         ),
       )

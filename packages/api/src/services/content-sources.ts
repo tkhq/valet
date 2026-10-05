@@ -591,7 +591,7 @@ export async function deleteMirroredContent(tx: AppDb, orgId: string, sourceId: 
   // provenance — so the second scope is the mounted namespace they land in.
   await tx
     .delete(memoryFiles)
-    .where(and(eq(memoryFiles.sourceId, sourceId), like(memoryFiles.path, "lib/%")));
+    .where(and(eq(memoryFiles.sourceId, sourceId), eq(memoryFiles.namespace, ""), like(memoryFiles.path, "lib/%")));
   const mirrored = await tx
     .select({ id: workflowDefinitions.id })
     .from(workflowDefinitions)

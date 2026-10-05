@@ -576,6 +576,15 @@ export const assistants = pgTable(
   ],
 );
 
+/** Execution state is separate from the workspace assistant's identity. */
+export const assistantExecutions = pgTable("assistant_executions", {
+  sessionId: text("session_id").primaryKey(),
+  assistantId: text("assistant_id").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  governingThreadId: text("governing_thread_id").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [uniqueIndex("assistant_executions_conversation").on(t.assistantId, t.conversationKey)]);
+
 // ─── Child watches ───────────────────────────────────────────────────────────
 //
 // Durable record of a spawned child session's pending settlement (decision
@@ -834,6 +843,7 @@ export const memoryFiles = pgTable(
   {
     ownerType: text("owner_type").notNull(),
     ownerId: text("owner_id").notNull(),
+    namespace: text("namespace").notNull().default(""),
     path: text("path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
@@ -863,7 +873,7 @@ export const memoryFiles = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
+  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
 );
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────

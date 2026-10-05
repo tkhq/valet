@@ -5,6 +5,8 @@ import { orgMembers, orgs, users } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "./teams.js";
 import { parseConcept } from "../lib/okf.js";
 import {
+  exportFiles,
+  importFiles,
   linksForFile,
   listFiles,
   moveFile,
@@ -35,6 +37,31 @@ describe("memory service", () => {
   function scopeFor(userId: string): MemoryScope {
     return { owner: { type: "user", id: userId }, actorUserId: userId };
   }
+
+  it("isolates execution memory across mutation, search, export and team read unions", async () => {
+    const team = await createTeam(db, { orgId, name: "Isolated", creatorUserId: "u1" });
+    await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+    const shared: MemoryScope = { owner: { type: "team", id: team.id }, actorUserId: "u1" };
+    const alice = { ...shared, namespace: "execution-alice" };
+    const bob = { ...shared, actorUserId: "u2", namespace: "execution-bob" };
+    await writeFile(db, shared, { path: "notes/plan.md", content: "Shared plan" });
+    await writeFile(db, alice, { path: "notes/plan.md", content: "Confidential acquisition" });
+    await writeFile(db, bob, { path: "notes/plan.md", content: "Bob plan" });
+    expect(await searchFiles(db, bob, { query: "acquisition" })).toEqual([]);
+    expect(await searchFiles(db, scopeFor("u2"), { query: "acquisition" })).toEqual([]);
+    expect(await readFile(db, scopeFor("u2"), `team:${team.id}/notes/plan.md`)).toMatchObject({ kind: "file", file: { content: "Shared plan" } });
+    await patchFile(db, alice, { path: "notes/plan.md", oldString: "acquisition", newString: "merger" });
+    expect(await readFile(db, bob, "notes/plan.md")).toMatchObject({ kind: "file", file: { content: "Bob plan" } });
+    await moveFile(db, alice, { from: "notes/plan.md", to: "notes/private.md" });
+    expect((await listFiles(db, bob)).map(row => row.path)).toEqual(["notes/plan.md"]);
+    const exported = await exportFiles(db, alice);
+    expect(exported["notes/private.md"]?.content).toContain("Confidential merger");
+    expect(exported).not.toHaveProperty("notes/plan.md");
+    await importFiles(db, alice, { trusted: false, files: { "notes/plan.md": "Imported private" } });
+    expect(await readFile(db, shared, "notes/plan.md")).toMatchObject({ kind: "file", file: { content: "Shared plan" } });
+    await removeFile(db, alice, "notes/plan.md");
+    expect(await readFile(db, bob, "notes/plan.md")).toMatchObject({ kind: "file", file: { content: "Bob plan" } });
+  });
 
   describe("write / read", () => {
     it("creates a file and reads it back rendered", async () => {

@@ -331,6 +331,13 @@ CREATE UNIQUE INDEX "assistants_workspace" ON "assistants" ("org_id","owner_type
 --> statement-breakpoint
 CREATE INDEX "assistants_owner" ON "assistants" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
+CREATE TABLE "assistant_executions" (
+  "session_id" text PRIMARY KEY, "assistant_id" text NOT NULL,
+  "conversation_key" text NOT NULL, "governing_thread_id" text NOT NULL, "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "assistant_executions_conversation" ON "assistant_executions" ("assistant_id", "conversation_key");
+--> statement-breakpoint
 CREATE TABLE "child_watches" (
 	"child_session_id" text PRIMARY KEY NOT NULL,
 	"queue_item_id" text NOT NULL,
@@ -459,6 +466,7 @@ CREATE INDEX "channel_active_streams_started" ON "channel_active_streams" ("star
 CREATE TABLE "memory_files" (
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
+	"namespace" text DEFAULT '' NOT NULL,
 	"path" text NOT NULL,
 	"title" text DEFAULT '' NOT NULL,
 	"content" text NOT NULL,
@@ -485,7 +493,7 @@ CREATE TABLE "memory_files" (
 	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
-	PRIMARY KEY("owner_type", "owner_id", "path")
+	PRIMARY KEY("owner_type", "owner_id", "namespace", "path")
 );
 --> statement-breakpoint
 -- `search_vector` generated column (spec decision 9): weighted tsvector,
