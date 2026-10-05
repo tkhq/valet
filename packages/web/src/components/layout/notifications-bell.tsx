@@ -6,31 +6,7 @@ import { useWorkflowActionRequired } from "~/api/workflows";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, StatusDot } from "~/components/primitives";
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
-import { attentionSessionIds, isActionable } from "~/lib/use-attention-ping";
 import { relativeTime } from "~/lib/relative-time";
-
-export interface BellState {
-  unreadCount: number;
-  needsAttention: boolean;
-}
-
-/** Derive bell state from the poll and the live gate store. */
-export function deriveBellState(
-  notifications: NotificationSummary[] | undefined,
-  livePendingGates: Readonly<Record<string, boolean>>,
-): BellState {
-  const items = notifications ?? [];
-  const hasUnscopedAction = items.some((n) => isActionable(n) && n.sessionId === undefined);
-  return {
-    unreadCount: items.filter((n) => n.readAt === undefined).length,
-    needsAttention: hasUnscopedAction || attentionSessionIds(items, livePendingGates).size > 0,
-  };
-}
-
-/** Keep actionable notifications above general updates without changing recency within either group. */
-export function sortNotifications(notifications: readonly NotificationSummary[]): NotificationSummary[] {
-  return [...notifications].sort((a, b) => Number(isActionable(b)) - Number(isActionable(a)));
-}
 
 /** Unread updates, newest first, one row per title: a workflow that fails
  * every few minutes is one row with a count, not a list. Read updates leave
@@ -47,16 +23,6 @@ export function groupUpdates(updates: readonly NotificationSummary[]): Array<{ l
     }
   }
   return [...groups.values()].sort((a, b) => b.latest.createdAt - a.latest.createdAt);
-}
-
-/**
- * Pure `onOpenChange` handler, extracted so the open-refetch behavior is
- * unit-testable without rendering the Radix dropdown.
- */
-export function makeOpenChangeHandler(refetch: () => void): (open: boolean) => void {
-  return (open) => {
-    if (open) refetch();
-  };
 }
 
 export function NotificationsBell() {

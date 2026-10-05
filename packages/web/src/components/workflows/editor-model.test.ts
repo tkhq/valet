@@ -12,8 +12,6 @@ import {
   createNodeId,
   duplicateNode,
   estimateEdgeLabelWidth,
-  flowEdgeToWorkflowEdge,
-  fromFlow,
   graphSignature,
   isWorkflowDefinitionShape,
   positionNewNodes,
@@ -162,7 +160,7 @@ describe('NODE_META default nodes', () => {
   });
 });
 
-describe('toFlow / fromFlow round trip', () => {
+describe('toFlow', () => {
   it('converts a dag/v1 definition to flow nodes and edges with saved positions and viewport', () => {
     const definition = baseDefinition();
     const flow = toFlow(definition);
@@ -226,23 +224,9 @@ describe('toFlow / fromFlow round trip', () => {
     expect(flow.nodes.find((n) => n.id === 'start')!.position).toEqual({ x: LAYOUT_COLUMN_GAP, y: 0 });
   });
 
-  it('round-trips flow state back to a dag/v1 definition preserving node payloads and ui', () => {
-    const definition = baseDefinition();
-    const flow = toFlow(definition);
-    const roundTripped = fromFlow(flow);
-
-    expect(roundTripped.version).toBe('dag/v1');
-    expect(roundTripped.nodes).toEqual(definition.nodes);
-    expect(new Set(roundTripped.edges)).toEqual(new Set(definition.edges));
-    expect(roundTripped.ui?.viewport).toEqual(definition.ui?.viewport);
-    for (const node of definition.nodes) {
-      expect(roundTripped.ui?.nodes[node.id]?.position).toEqual(definition.ui?.nodes[node.id]?.position);
-    }
-  });
-
-  it('workflowEdgeToFlowEdge / flowEdgeToWorkflowEdge are inverses', () => {
+  it('projects edge branching and conditions into the canvas', () => {
     const edge = { from: 'a', to: 'b', fromOutput: 'false' as const, when: '{{true}}' };
-    expect(flowEdgeToWorkflowEdge(workflowEdgeToFlowEdge(edge))).toEqual(edge);
+    expect(workflowEdgeToFlowEdge(edge)).toEqual({ id: 'a:false->b', source: 'a', sourceHandle: 'false', target: 'b', data: { fromOutput: 'false', when: '{{true}}' } });
   });
 
   it('createEdgeId includes the fromOutput branch when present', () => {
@@ -711,9 +695,4 @@ describe('positionNewNodes', () => {
     expect(layout.draft?.x).toBe(LAYOUT_COLUMN_GAP);
     expect(layout.done?.x).toBe(LAYOUT_COLUMN_GAP * 2);
   });
-});
-
-it('does not propagate obsolete assistant routing through canvas saves', () => {
-  const definition = { ...baseDefinition(), assistantId: 'chosen' };
-  expect(fromFlow(toFlow(definition), definition)).not.toHaveProperty('assistantId');
 });

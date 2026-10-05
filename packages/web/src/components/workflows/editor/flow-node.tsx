@@ -29,7 +29,7 @@
  *   - source handle(s) (right): `if`/`approval` nodes carry
  *     `data.sourceOutputs: ['true', 'false']` and render two labeled
  *     handles whose `id` becomes the edge's `sourceHandle` (mapped to
- *     `fromOutput` by `flowEdgeToWorkflowEdge`); every other node except
+ *     `fromOutput` by the connection reducer); every other node except
  *     `stop` renders one unlabeled source handle; `stop` renders none.
  */
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
