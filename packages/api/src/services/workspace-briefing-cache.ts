@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, gt, lte, or, ne } from "drizzle-orm";
+import { and, eq, lte, or, ne } from "drizzle-orm";
 import type { CredentialStore, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { workspaceBriefingCache as cache } from "../schema/index.js";
@@ -79,7 +79,15 @@ export function createDurableBriefingCache(options: CacheOptions) {
       setWhere: and(lte(cache.leaseUntil,at),or(lte(cache.nextCheckAt,at),ne(cache.version,options.version))),
     }).returning();
     if (!claimed) return visible(await read());
-    const fence = () => and(scope,eq(cache.leaseToken,token),gt(cache.leaseUntil,now()));
+    // Ownership is the token, not the deadline. If no replica reclaimed an
+    // expired lease, the original worker may still publish instead of losing work.
+    const fence = () => and(scope,eq(cache.leaseToken,token));
+    let background = false;
+    const renewal = setInterval(() => {
+      void db.update(cache).set({ leaseUntil: now()+leaseMs }).where(fence())
+        .catch(err => console.error("workspace briefing lease renewal failed:", err));
+    }, Math.max(10, Math.floor(leaseMs/3)));
+    renewal.unref();
     try {
       const evidence = await options.collect(db,orgId,owner);
       const evidenceHash = briefingEvidenceHash(evidence);
@@ -98,6 +106,7 @@ export function createDurableBriefingCache(options: CacheOptions) {
             leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
           return visible(row ?? await read());
         }
+        background = true;
         void regenerate(evidence, evidenceHash, checkedAt, true);
         return visible(claimed);
       }
@@ -108,6 +117,8 @@ export function createDurableBriefingCache(options: CacheOptions) {
       return await regenerate(evidence, evidenceHash, checkedAt, false);
     } catch (err) {
       return await fail(err, false);
+    } finally {
+      if (!background) clearInterval(renewal);
     }
 
     async function regenerate(evidence: BriefingEvidence[], evidenceHash: string, checkedAt: number, keepShown: boolean) {
@@ -122,6 +133,8 @@ export function createDurableBriefingCache(options: CacheOptions) {
         return visible(published ?? await read());
       } catch (err) {
         return await fail(err, keepShown);
+      } finally {
+        clearInterval(renewal);
       }
     }
 

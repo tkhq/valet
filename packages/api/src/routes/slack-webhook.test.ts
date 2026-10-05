@@ -1015,7 +1015,11 @@ describe("Slack receipt diagnostics", () => {
     configureSlackIngress(api.providers);
     // Accepted requests remain valid after the network replay window.
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10 * 60_000);
-    try { await api.providers.eventDispatcher.pollOnce(); } finally { clock.mockRestore(); }
+    try {
+      await api.providers.eventDispatcher.pollOnce();
+      await expect.poll(() => eventCount(api!, "Ev-durable-recovery")).toBe(1);
+      await expect.poll(async () => (await api!.providers.db.select().from(slackWebhookInbox)).length).toBe(0);
+    } finally { clock.mockRestore(); }
     expect(await eventCount(api, "Ev-durable-recovery")).toBe(1);
     expect(await api.providers.db.select().from(slackWebhookInbox)).toEqual([]);
   });

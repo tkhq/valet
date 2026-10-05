@@ -676,6 +676,25 @@ describe("EventDispatcher", () => {
     expect((await getDelivery(deliveryId)).attempts).toBe(5);
   });
 
+  it("dispatches events while ingress waits without starting overlapping ingress drains", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ingress = vi.fn(() => gate);
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(),
+      workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver });
+    dispatcher.setIngressDrain(ingress);
+    try {
+      for (let i = 0; i < 2; i++) {
+        const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+        await dispatcher.pollOnce();
+        expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      }
+      expect(deliver).toHaveBeenCalledTimes(2);
+      expect(ingress).toHaveBeenCalledTimes(1);
+    } finally { release(); await dispatcher.stop(); }
+  });
+
   it("claimed rows are skipped by a concurrent pollOnce", async () => {
     const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
     // PGlite is single-connection, so the claim UPDATEs serialize and a

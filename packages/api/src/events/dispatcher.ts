@@ -141,6 +141,8 @@ export class EventDispatcher {
   private wakeRequested = false;
   private stopped = false;
   private drainIngress?: () => Promise<void>;
+  private ingressInFlight: Promise<void> | null = null;
+  private ingressWakeRequested = false;
 
   setIngressDrain(drain: () => Promise<void>): void { this.drainIngress = drain; }
 
@@ -157,11 +159,13 @@ export class EventDispatcher {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     while (this.draining) await new Promise((r) => setTimeout(r, 25));
+    await this.ingressInFlight;
   }
 
   /** In-process nudge from the ingest path. Arrow property so callers can pass it unbound. */
   nudge = (): void => {
     if (this.stopped) return;
+    if (this.ingressInFlight) this.ingressWakeRequested = true;
     if (this.draining) { this.wakeRequested = true; return; }
     void this.pollOnce().catch((err) => console.error("event dispatcher poll failed:", err));
   };
@@ -170,7 +174,16 @@ export class EventDispatcher {
     if (this.stopped || this.draining) return;
     this.draining = true;
     try {
-      await this.drainIngress?.();
+      // Slack media and sandbox startup must not stall unrelated deliveries.
+      // Keep one ingress drain in flight; durable claims cover process restarts.
+      if (this.drainIngress && !this.ingressInFlight) {
+        this.ingressInFlight = Promise.resolve().then(() => this.drainIngress?.())
+          .catch(err => console.error("event ingress drain failed:", err))
+          .finally(() => {
+            this.ingressInFlight = null;
+            if (this.ingressWakeRequested) { this.ingressWakeRequested = false; this.nudge(); }
+          });
+      }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
       // next_attempt_at forward in the same statement that selects them.

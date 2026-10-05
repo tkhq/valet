@@ -97,6 +97,31 @@ describe("durable workspace briefing cache", () => {
     expect((await another(db,"local-org",owner)).unavailable).toBeUndefined();
     expect(generate).toHaveBeenCalledTimes(2);
   });
+  it("renews a live refresh before another replica can duplicate generation", async () => {
+    const db = await setup(); let clock = 1000;
+    const pending = deferred<WorkspaceBriefingsResponse>();
+    const generate = vi.fn(() => pending.promise);
+    const options = { version: "v1", collect: async () => evidence, generate, validate: valid, now: () => clock, leaseMs: 60 };
+    const first = createDurableBriefingCache(options)(db,"local-org",owner);
+    try {
+      await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+      clock += 1000;
+      await vi.waitFor(async () => expect((await db.select().from(workspaceBriefingCache))[0].leaseUntil).toBeGreaterThan(clock));
+      expect(await createDurableBriefingCache(options)(db,"local-org",owner)).toMatchObject({ refreshing: true });
+      expect(generate).toHaveBeenCalledTimes(1);
+    } finally { pending.resolve(snapshot); await first; }
+  });
+
+  it("publishes slow work when no replica reclaimed its lease", async () => {
+    const db = await setup(); let clock = 1000;
+    const generate = vi.fn(async () => { clock += 35_000; return snapshot; });
+    const cached = createDurableBriefingCache({ version: "v1", collect: async () => evidence,
+      generate, validate: valid, now: () => clock });
+    expect((await cached(db,"local-org",owner)).generatedAt).toBe(1000);
+    expect((await cached(db,"local-org",owner)).generatedAt).toBe(1000);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
   it("fences an expired worker so it cannot overwrite a newer replica's result", async () => {
     const db = await setup(); let clock = 1000;
     const pending = deferred<WorkspaceBriefingsResponse>();

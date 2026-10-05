@@ -68,7 +68,7 @@ The sandbox reconciler retains working directories for identities marked `<owner
 It continues to report their age. Operators export retained data before explicitly deleting the sandbox.
 This retention does not make a retired sandbox available through terminal or file routes.
 The hibernation reaper also excludes legacy team roots. Isolated executions keep the normal retention policy.
-Artifacts without a verifiable source thread remain hidden. Restore their provenance only from verified publication receipts.
+Legacy team artifacts with an unknown source thread remain hidden on token, comment, version, and management routes as well as lists. Restore their provenance only from verified publication receipts.
 
 ## Shared briefing privacy
 
@@ -78,6 +78,7 @@ Expired classifications exclude evidence until a successful channel check refres
 
 ## Slack delivery recovery
 
+Slack ingress drains independently of workflow event delivery. One slow media download cannot block unrelated workflow events.
 The durable inbox retains an encrypted delivery after ten failed processing attempts.
 It records `failed_at` and a `slack_delivery_failed` problem. Automatic drains exclude these records.
 An operator inspects the delivery's receipt stages and repairs the failing consumer before replay.
@@ -115,3 +116,10 @@ Ask its owner to recover and republish it from an authorized conversation, or ex
 Never assign an arbitrary shared thread to clear this check.
 
 This procedure is a release gate, not an automatic backfill. A code review cannot certify the target database's recovery state.
+
+## Briefing refresh ownership
+
+A refresh renews its lease during collection, generation, and validation, including background refreshes.
+Only the worker holding the current lease token can publish or renew.
+If its deadline expires without another worker taking ownership, it can publish its validated result.
+A replaced worker cannot overwrite the new owner's result.

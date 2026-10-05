@@ -62,7 +62,7 @@ describe("team artifact privacy", () => {
       id: "foreign-source", userId: "test-member", orgId: "foreign-org", workspace: "fixture",
       ownerType: "user", ownerId: "test-member", createdAt: 1, updatedAt: 1,
     });
-    await db.update(artifacts).set({ sourceSessionId: "foreign-source" }).where(eq(artifacts.id, row.id));
+    await db.update(artifacts).set({ sourceSessionId: "foreign-source", sourceThreadId: "foreign-thread" }).where(eq(artifacts.id, row.id));
     const comments = await request(`/${row.token}/comments`);
     expect(comments.status).toBe(200);
     expect(await comments.json()).toMatchObject({ canSendToSession: false });
@@ -71,19 +71,20 @@ describe("team artifact privacy", () => {
     expect(await posted.json()).toMatchObject({ sent: false, comment: { sentToSession: null } });
   });
 
-  it("does not send legacy threadless artifact comments into a team runtime", async () => {
-    const { db, row, request } = await setup();
-    await db.insert(agentSessions).values({
-      id: "legacy-team-source", userId: "local-user", orgId: "local-org", workspace: "fixture",
-      ownerType: "team", ownerId: "private-team", createdAt: 1, updatedAt: 1,
-    });
+  it("quarantines legacy threadless team artifacts on token and management routes", async () => {
+    const { db, row, comment, request } = await setup();
     await db.update(artifacts).set({ sourceSessionId: "legacy-team-source", sourceThreadId: null }).where(eq(artifacts.id, row.id));
-    const comments = await request(`/${row.token}/comments`);
-    expect(comments.status).toBe(200);
-    expect(await comments.json()).toMatchObject({ canSendToSession: false });
-    const posted = await request(`/${row.token}/comments`, "test-member", "POST", { body: "Keep on the artifact", sendToSession: true });
-    expect(posted.status).toBe(200);
-    expect(await posted.json()).toMatchObject({ sent: false, comment: { sentToSession: null } });
+    for (const user of ["test-member", "local-user", "test-admin"]) {
+      for (const path of [`/${row.token}`, `/${row.token}/comments`, `/${row.id}/versions`]) {
+        expect((await request(path, user)).status, `${user} ${path}`).toBe(404);
+      }
+      expect((await request(`/${row.token}/comments`, user, "POST", { body: "Hidden", sendToSession: true })).status).toBe(404);
+      expect((await request(`/${row.token}/comments/${comment.id}/resolve`, user, "POST")).status).toBe(404);
+      expect((await request(`/${row.id}`, user, "PATCH", { sharedVersion: 1 })).status).toBe(404);
+      expect((await request(`/${row.id}`, user, "DELETE")).status).toBe(404);
+    }
+    expect(await listArtifactComments(db, row.id)).toHaveLength(1);
+    expect(await getArtifactById(db, row.id)).toMatchObject({ version: 1, revokedAt: null, sourceThreadId: null });
   });
 
   it("keeps internal team tool publications team-owned without borrowing actor authority", async () => {

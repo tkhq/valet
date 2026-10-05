@@ -200,6 +200,11 @@ async function resolveArtifactCaller(
   return { user: identity?.user, teamKey: false };
 }
 
+/** Legacy team publications need verified provenance before any browser access. */
+function hasUnknownTeamSource(artifact: ArtifactRow): boolean {
+  return artifact.ownerType === "team" && !!artifact.sourceSessionId && !artifact.sourceThreadId;
+}
+
 /** Resolve the artifact + caller for a token-addressed comment route.
  * Returns a Response for every failure so handlers stay linear. */
 async function loadCommentContext(
@@ -211,7 +216,7 @@ async function loadCommentContext(
     getArtifactByToken(db, c.req.param("token")),
     resolveArtifactCaller(c, auth),
   ]);
-  if (!artifact) return { error: c.json({ error: "not found" }, 404) };
+  if (!artifact || hasUnknownTeamSource(artifact)) return { error: c.json({ error: "not found" }, 404) };
   if (caller.teamKey) return { error: c.json({ error: TEAM_KEY_ARTIFACT_MESSAGE }, 403) };
   const { user } = caller;
   const allowPublic =
@@ -315,7 +320,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       getArtifactByToken(db, c.req.param("token")),
       resolveArtifactCaller(c, auth),
     ]);
-    if (!artifact) return c.json({ error: "not found" }, 404);
+    if (!artifact || hasUnknownTeamSource(artifact)) return c.json({ error: "not found" }, 404);
     const { user } = caller;
     // The opt-in only matters for `public` rows — skip the orgs read for
     // the default `org` visibility (`decideArtifactAccess` ignores it).
@@ -730,7 +735,7 @@ async function loadManagedArtifact(
 ): Promise<{ row: ArtifactRow } | { error: Response }> {
   const { db } = c.var.providers;
   const row = await getArtifactById(db, c.req.param("id"));
-  if (!row || row.orgId !== user.orgId || !(await hasArtifactTeamAccess(db, row, user))) {
+  if (!row || hasUnknownTeamSource(row) || row.orgId !== user.orgId || !(await hasArtifactTeamAccess(db, row, user))) {
     return { error: c.json({ error: "not found" }, 404) };
   }
   if (!(await hasArtifactManagerRole(db, row, user))) {
