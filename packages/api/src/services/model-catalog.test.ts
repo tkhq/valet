@@ -86,6 +86,30 @@ describe("model catalog", () => {
     }
   });
 
+  it("exposes supplemental models through normal provider eligibility and approval rules", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    try {
+      await setApprovedModels(db, orgId, ["openai/gpt-6.1-sol"]);
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      for (const id of ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5-5"]) {
+        expect(entries.filter((entry) => entry.id === id)).toHaveLength(1);
+        expect(entries.find((entry) => entry.id === id)).toMatchObject({
+          active: true, resolvable: true, approved: id === "openai/gpt-6.1-sol",
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        });
+        expect(catalogValidIds(entries).has(id)).toBe(true);
+      }
+      const row = await createLlmProvider(db, { orgId, kind: "openai", name: "OpenAI" });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+      const disabled = await buildOrgCatalog(db, credentials, orgId);
+      expect(disabled.find((entry) => entry.id === "openai/gpt-6.1-sol")?.active).toBe(false);
+      expect(catalogValidIds(disabled).has("openai/gpt-6.1-sol")).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   describe("union composition", () => {
     it("known kind, enabled, org key present → active, no secret leaked", async () => {
       const row = await createLlmProvider(db, { orgId, kind: "anthropic", name: "Anthropic" });
