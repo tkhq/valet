@@ -698,7 +698,8 @@ describe("buildActionInvoker", () => {
 
   it("team-owned run: asks the member whose shared account a step would use, then uses it once they allow it", async () => {
     const db = await makeDb();
-    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Borrow team", createdAt: 1 });
+    // A borrow needs the actor to be a current member of a team in the run's organization.
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
     await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
     await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
     const store = new FakeCredentialStore();
