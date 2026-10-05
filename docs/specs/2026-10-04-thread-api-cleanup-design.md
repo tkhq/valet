@@ -46,3 +46,9 @@ The navigation brand shows the Valet name without a runtime presence dot. The he
 ### Interaction recovery audit
 
 Stop and Escape interrupt failures now appear inline in the composer instead of only in the console. Failed approval, question-answer, and dismissal requests show an inline alert; retry clears it and a failed answer retains its text. Existing mutation and error-display helpers remain the source of behavior. Targeted composer and decision-card regressions cover recovery without adding a second interaction state machine.
+
+### Workflow run audience preservation
+
+Both run lists apply the same authorization as run details, including private-thread origins, private Slack events, and named approvers. Visible pages advance through bounded store pages; outgoing cursors name only authorized runs, since the store cursor contains a run ID and timestamp. Private rows neither appear as summaries nor become public continuation cursors.
+
+A supplied workflow origin that is missing, archived, or invalid now rejects a start or retry. The service no longer drops that audience boundary and starts a team-visible run with private input. Retries of event-triggered runs retain their event provenance so Slack channel visibility remains enforceable even without a thread origin. Callers can still start an ordinary unattended run by omitting an origin; doing so is distinct from retrying private input.

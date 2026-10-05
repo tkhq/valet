@@ -13,6 +13,8 @@ import {
   resolveTriggerInput,
   triggerDataSchema,
   validateWorkflowDefinition,
+  encodeRunCursor,
+  type ListRunsPage,
   type ListRunsFilter,
   type NodeCheckpoint,
   type RunParams,
@@ -1281,25 +1283,20 @@ export async function reapTeamWorkflows(tx: AppQueryable, teamId: string): Promi
  * records an origin — a manual start, an assistant's `start_run`, and a
  * retry, which re-passes the failed run's stored origin.
  *
- * A dropped origin is not an error. The run falls back to its own thread
- * (`signal:workflow:{runId}`), which is where an unattended run reports.
- * The alternative is a report delivered into a thread the person archived,
- * or a run that fails at its first orchestrator node.
+ * A supplied origin is an audience boundary. If it is unavailable, reject
+ * the start rather than publishing private input in an origin-less run.
  */
 async function activeWorkflowOrigin(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   runOwner: { ownerType: string; ownerId: string },
   origin: WorkflowRunOrigin,
-): Promise<WorkflowRunOrigin | undefined> {
-  if (origin.assistantSessionId.length === 0 || origin.threadId.length === 0) return undefined;
-  // A child reports through the ancestor thread that governs its audience.
-  // Never drop a broken child origin and silently publish its run to the team.
-  let inherited = false;
-  const invalidOrigin = (): undefined => {
-    if (inherited) throw new ValidationError("The child workflow origin is unavailable. Start from an active parent thread.");
-    return undefined;
+): Promise<WorkflowRunOrigin> {
+  const invalidOrigin = (): never => {
+    throw new ValidationError("The workflow origin is unavailable. Start from an active thread.");
   };
+  if (origin.assistantSessionId.length === 0 || origin.threadId.length === 0) return invalidOrigin();
+  // A child reports through the ancestor thread that governs its audience.
   const seen = new Set<string>();
   for (;;) {
     if (seen.has(origin.assistantSessionId) || seen.size >= 64) {
@@ -1310,7 +1307,6 @@ async function activeWorkflowOrigin(
     if (!session) return invalidOrigin();
     if (session.orgId !== owner.orgId) return invalidOrigin();
     if (!session.parentSessionId) break;
-    inherited = true;
     if (!session.parentThreadId || !(await deps.engineStore.getThread(origin.assistantSessionId, origin.threadId))) return invalidOrigin();
     origin = { assistantSessionId: session.parentSessionId, threadId: session.parentThreadId };
   }
@@ -1346,13 +1342,14 @@ async function activeWorkflowOrigin(
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an
  * `invalidInput` result when the caller's input fails the trigger's
- * declared dataSchema (routes map that to 400). Invalid origins are omitted. */
+ * declared dataSchema (routes map that to 400). Invalid origins are rejected. */
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
   input?: Record<string, unknown>,
   origin?: WorkflowRunOrigin,
+  triggerType: "manual" | "event" = "manual",
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1372,7 +1369,7 @@ export async function startWorkflowRun(
   if (resolved.errors.length > 0) return { invalidInput: resolved.errors };
 
   const trigger: WorkflowTriggerPayload = {
-    type: "manual",
+    type: triggerType,
     timestamp: new Date().toISOString(),
     data: resolved.input,
     metadata: {},
@@ -1469,12 +1466,37 @@ export async function listWorkflowRuns(
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
 
-  const result = await deps.workflowStore.listRuns({
+  const result = await visibleRunPage(deps, owner, {
     workflowIds: [workflowId],
     limit: clampRunLimit(page.limit),
     cursor: page.cursor,
   });
   return { runs: result.runs.map(toRunSummary), nextCursor: result.nextCursor };
+}
+
+/** Fill a visible page using bounded store pages. Only an authorized row
+ * may supply a public cursor: store cursors include the run id and time. */
+async function visibleRunPage(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  filter: ListRunsFilter,
+): Promise<ListRunsPage> {
+  const runs: WorkflowRunListItem[] = [];
+  let cursor = filter.cursor;
+  do {
+    const page = await deps.workflowStore.listRuns({ ...filter, cursor });
+    const access = await Promise.all(page.runs.map((run) => ownedRun(deps, owner, run.runId)));
+    for (const [index, run] of page.runs.entries()) {
+      if (!access[index]) continue;
+      runs.push(run);
+      if (runs.length === filter.limit) {
+        const hasMore = index < page.runs.length - 1 || page.nextCursor !== undefined;
+        return { runs, nextCursor: hasMore ? encodeRunCursor(run) : undefined };
+      }
+    }
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return { runs };
 }
 
 /** Filters the cross-workflow run list accepts, on top of `RunPageOptions`. */
@@ -1523,7 +1545,7 @@ export async function listRunsForOwner(
   }
   if (workflowIds.length === 0) return { runs: [] };
 
-  const result = await deps.workflowStore.listRuns({
+  const result = await visibleRunPage(deps, owner, {
     workflowIds,
     status: filter.status,
     outcome: filter.outcome,
@@ -1828,6 +1850,9 @@ export async function retryWorkflowRun(
     run.params.workflowId,
     triggerData(run.params.input),
     run.params.origin,
+    // Event provenance also carries the private-channel audience.
+    typeof run.params.input === "object" && run.params.input !== null
+      && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
   );
   if (!started) return "workflow_deleted";
   return started;

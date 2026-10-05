@@ -6,7 +6,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistants, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { workflowsActionPlugin } from "./actions.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
-import { copyWorkflowDefinition, createWorkflowDefinition, retryWorkflowRun, startWorkflowRun, updateWorkflowDefinition } from "./service.js";
+import { copyWorkflowDefinition, createWorkflowDefinition, listWorkflowRuns, listRunsForOwner, retryWorkflowRun, startWorkflowRun, updateWorkflowDefinition } from "./service.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -154,23 +154,19 @@ describe("workflow workspace routing", () => {
       origin: { assistantSessionId: "assistant:default-a", threadId: thread.id },
     });
 
-    // A session that is no assistant's carries no origin. The action does
-    // not decide that: it hands its session and thread to the service,
-    // which is the only validator.
-    expect((await action.execute({ workflow_id: created.id }, { ...ctx, sessionId: "child-session" })).success).toBe(true);
-    expect(start.mock.calls[1]?.[1]).not.toHaveProperty("origin");
+    // Missing origins fail closed instead of publishing to the team.
+    await expect(action.execute({ workflow_id: created.id }, { ...ctx, sessionId: "child-session" })).rejects.toThrow("origin is unavailable");
 
     // The service's thread checks reach the action path too.
     const archived = await session.createThread("web:archived-origin");
     await p.db.insert(sessionThreads).values({
       id: archived.id, sessionId: "assistant:default-a", createdAt: Date.now(), archivedAt: Date.now(),
     });
-    expect((await action.execute({ workflow_id: created.id }, { ...ctx, threadId: archived.id })).success).toBe(true);
-    expect(start.mock.calls[2]?.[1]).not.toHaveProperty("origin");
-    expect(await startWorkflowRun(deps, owner, created.id, undefined, {
+    await expect(action.execute({ workflow_id: created.id }, { ...ctx, threadId: archived.id })).rejects.toThrow("origin is unavailable");
+    await expect(startWorkflowRun(deps, owner, created.id, undefined, {
       assistantSessionId: "assistant:other", threadId: thread.id,
-    })).toBeTruthy();
-    expect(start.mock.calls[3]?.[1]).not.toHaveProperty("origin");
+    })).rejects.toThrow("origin is unavailable");
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   it.each(["app-assistant:local-user", "slack-events:PRIVATE"])("preserves %s as the governing origin of nested child workflows", async (key) => {
@@ -254,7 +250,7 @@ describe("workflow workspace routing", () => {
     })).rejects.toThrow("no longer a team member");
   });
 
-  it("drops an origin whose thread is archived and dispatches elsewhere", async () => {
+  it("rejects an origin whose thread is archived", async () => {
     const { p, deps } = await setup();
     const created = await createWorkflowDefinition(deps, owner, {
       name: "Archived origin", teamId: "team-a", definition: graph,
@@ -272,22 +268,10 @@ describe("workflow workspace routing", () => {
       await p.workflowStore.createRun(id, params, definition, params.definitionVersionId, runOwner);
     });
 
-    const started = await startWorkflowRun(deps, owner, created.id, undefined, {
+    await expect(startWorkflowRun(deps, owner, created.id, { secret: "private" }, {
       assistantSessionId: "assistant:default-a", threadId: thread.id,
-    });
-    if (!started || !("runId" in started)) throw new Error("Run not started");
-    const run = await p.workflowStore.getRun(started.runId);
-    expect(run?.params).not.toHaveProperty("origin");
-
-    const engine = buildWorkflowEngineDeps({
-      db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore,
-      actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials,
-    });
-    const receipt = await engine.promptOrchestrator("report", {
-      dispatchId: `workflow:${started.runId}:node1`, queueMode: "followup",
-      ownerHint: { ownerType: "team", ownerId: "team-a" },
-    });
-    expect(receipt.threadId).not.toBe(thread.id);
+    })).rejects.toThrow("origin is unavailable");
+    expect(p.workflowRunHost.start).not.toHaveBeenCalled();
   });
 
   it("reports an in-flight run from a retired assistant on the workspace runtime", async () => {
@@ -313,7 +297,7 @@ describe("workflow workspace routing", () => {
     expect(receipt.sessionId).toBe("assistant:personal");
   });
 
-  it("retries a run whose origin thread is gone, without the origin", async () => {
+  it("rejects retry when its origin thread is gone", async () => {
     const { p, deps } = await setup();
     const created = await createWorkflowDefinition(deps, owner, {
       name: "Gone origin", teamId: "team-a", definition: graph,
@@ -336,22 +320,60 @@ describe("workflow workspace routing", () => {
       await p.workflowStore.createRun(id, params, definition, params.definitionVersionId, runOwner);
     });
 
-    const retried = await retryWorkflowRun(deps, owner, runId);
-    if (typeof retried === "string" || !("runId" in retried)) throw new Error(`Retry refused: ${JSON.stringify(retried)}`);
-    const run = await p.workflowStore.getRun(retried.runId);
-    expect(run?.params).not.toHaveProperty("origin");
+    await expect(retryWorkflowRun(deps, owner, runId)).rejects.toThrow("origin is unavailable");
+    expect(p.workflowRunHost.start).not.toHaveBeenCalled();
+  });
 
-    // The retry must also be able to dispatch: the missing thread used to
-    // throw at the first orchestrator node.
-    const engine = buildWorkflowEngineDeps({
-      db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore,
-      actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials,
-    });
-    const receipt = await engine.promptOrchestrator("report", {
-      dispatchId: `workflow:${retried.runId}:node1`, queueMode: "followup",
-      ownerHint: { ownerType: "team", ownerId: "team-a" },
-    });
-    expect(receipt.threadId).toBeTruthy();
+  it("fills visible pages without exposing private ids in continuation cursors", async () => {
+    const { p, deps } = await setup();
+    await p.db.insert(teamMembers).values({ teamId: "team-a", userId: "test-member", role: "member" });
+    const created = await createWorkflowDefinition(deps, owner, { name: "Private pages", teamId: "team-a", definition: graph });
+    const session = await p.engineHost.assistantSessionFor("default-a", { actorUserId: owner.userId, orgId: owner.orgId }, { sessionId: "assistant:default-a" });
+    const thread = await session.createThread("app-assistant:local-user");
+    for (const id of ["a-old", "b-new", "z-private"]) {
+      await p.workflowStore.createRun(id, {
+        workflowId: created.id, definitionVersionId: "v1",
+        ...(id === "z-private" ? { origin: { assistantSessionId: "assistant:default-a", threadId: thread.id } } : {}),
+      }, graph, "v1", { ownerType: "team", ownerId: "team-a", actorUserId: owner.userId });
+    }
+    const other = { ...owner, userId: "test-member" };
+    const listPages = [
+      (cursor?: string) => listWorkflowRuns(deps, other, created.id, { limit: 1, cursor }),
+      (cursor?: string) => listRunsForOwner(deps, other, { limit: 1, cursor }),
+    ];
+    for (const list of listPages) {
+      const first = await list();
+      expect(first?.runs.map((run) => run.runId)).toEqual(["b-new"]);
+      expect(first?.nextCursor).toBeDefined();
+      expect(first?.nextCursor).not.toContain("z-private");
+      const second = await list(first?.nextCursor);
+      expect(second?.runs.map((run) => run.runId)).toEqual(["a-old"]);
+      expect(second?.nextCursor).toBeUndefined();
+    }
+  });
+
+  it("filters private helper runs from both lists and rejects retry after archive", async () => {
+    const { api, p, deps } = await setup();
+    await p.db.insert(teamMembers).values({ teamId: "team-a", userId: "test-member", role: "member" });
+    const created = await createWorkflowDefinition(deps, owner, { name: "Private retry", teamId: "team-a", definition: graph });
+    const session = await p.engineHost.assistantSessionFor("default-a", { actorUserId: owner.userId, orgId: owner.orgId }, { sessionId: "assistant:default-a" });
+    const thread = await session.createThread("app-assistant:local-user");
+    await p.workflowStore.createRun("private-retry", {
+      workflowId: created.id, definitionVersionId: "v1",
+      input: { type: "manual", data: { secret: "reused" }, metadata: {} },
+      origin: { assistantSessionId: "assistant:default-a", threadId: thread.id },
+    }, graph, "v1", { ownerType: "team", ownerId: "team-a", actorUserId: owner.userId });
+    await p.workflowStore.settleRun("private-retry", "failed");
+    const other = { ...owner, userId: "test-member" };
+    expect((await listWorkflowRuns(deps, other, created.id))?.runs).toEqual([]);
+    expect((await listRunsForOwner(deps, other))?.runs).toEqual([]);
+    expect((await listWorkflowRuns(deps, owner, created.id))?.runs).toHaveLength(1);
+    await p.db.insert(sessionThreads).values({ id: thread.id, sessionId: "assistant:default-a", createdAt: 1, archivedAt: 2 });
+    const start = vi.spyOn(p.workflowRunHost, "start").mockResolvedValue();
+    const response = await fetch(`${api.baseUrl}/api/workflows/runs/private-retry/retry`, { method: "POST" });
+    expect(response.status).toBe(400);
+    expect(start).not.toHaveBeenCalled();
+    expect((await listRunsForOwner(deps, other))?.runs).toEqual([]);
   });
 
   it("records the runtime session when a workflow Thread step wakes a team first", async () => {

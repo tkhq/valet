@@ -1010,9 +1010,8 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     await api.providers.workflowStore.settleRun(staleRunId, "failed");
     await api.providers.db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, assistant.id));
     const staleRetry = await fetch(`${api.baseUrl}/api/workflows/runs/${staleRunId}/retry`, { method: "POST" });
-    expect(staleRetry.status).toBe(201);
-    const { runId: staleRetryId } = await staleRetry.json() as RetryWorkflowRunResponse;
-    expect(stub.started.find((item) => item.runId === staleRetryId)?.params).not.toHaveProperty("origin");
+    expect(staleRetry.status).toBe(400);
+    expect(stub.started).toHaveLength(1);
 
     // A completed run is not retryable.
     const completedId = "wfrun_completed";

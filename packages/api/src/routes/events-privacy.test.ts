@@ -75,6 +75,27 @@ it("shows a workflow run a private Slack channel's event started only to the cha
   expect((await get("run-private")).status).toBe(200);
   expect((await get("run-private", "test-member")).status).toBe(404);
   expect((await get("run-public", "test-member")).status).toBe(200);
+  for (const path of ["/api/workflows/wf-ev/runs", "/api/workflows/runs"]) {
+    const response = await fetch(`${api!.baseUrl}${path}`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ runs: [{ runId: "run-public" }] });
+    const memberResponse = await fetch(`${api!.baseUrl}${path}`);
+    expect(await memberResponse.json()).toMatchObject({ runs: [expect.any(Object), expect.any(Object)] });
+  }
+
+  await p.workflowStore.settleRun("run-private", "failed");
+  vi.spyOn(p.workflowRunHost, "start").mockImplementation(async (id, params, definition, owner) => {
+    await p.workflowStore.createRun(id, params, definition, params.definitionVersionId, owner);
+  });
+  const retried = await fetch(`${api.baseUrl}/api/workflows/runs/run-private/retry`, { method: "POST" });
+  expect(retried.status).toBe(201);
+  const body = await retried.json();
+  if (!body || typeof body !== "object" || !("runId" in body) || typeof body.runId !== "string") throw new Error("Missing retry run ID");
+  const { runId } = body;
+  expect((await p.workflowStore.getRun(runId))?.params.input).toMatchObject({ type: "event" });
+  expect((await get(runId)).status).toBe(200);
+  expect((await get(runId, "test-member")).status).toBe(404);
+
 });
 
 it("leaves a private Slack channel's events out of a non-member's Log", async () => {
