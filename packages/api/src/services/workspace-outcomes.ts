@@ -2,6 +2,7 @@ import type { Principal } from "@valet/engine";
 import { sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { encodePageCursor } from "../lib/page-cursor.js";
+import { sharedBriefingRun } from "./workspace-briefing-visibility.js";
 import { governingThreadKeySql } from "./thread-access.js";
 import type { WorkspaceOutcome, WorkspaceOutcomesResponse } from "../wire/types.js";
 
@@ -39,8 +40,10 @@ export async function listWorkspaceOutcomes(
     // A write from a session with no recorded thread cannot be judged, so a
     // shared view leaves it out.
     ...(shared ? [sql`(outcomes.session_id IS NULL OR (outcomes.thread_id IS NOT NULL
-      AND ${shared(governingThreadKeySql(sql`outcomes.session_id`, sql`outcomes.thread_id`))}))`] : []),
+      AND ${shared(governingThreadKeySql(sql`outcomes.session_id`, sql`outcomes.thread_id`, "parent link"))}))`] : []),
   ];
+  const sharedRun = shared && owner.type === "team"
+    ? sql`(r.id IS NULL OR ${sharedBriefingRun(orgId, owner.id, sql`r.params`)})` : sql`true`;
   const after = conditions.length ? sql`WHERE ${sql.join(conditions, sql` AND `)}` : sql``;
   // Compact usage facts identify confirmed writes before touching source results.
   // Terminal parts are read only for entries that already have outcome markers.
@@ -74,7 +77,7 @@ export async function listWorkspaceOutcomes(
       CASE WHEN f.session_id LIKE 'wf:%' THEN split_part(f.session_id,':',2) END)
     LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
     WHERE f.org_id=${orgId}
-      AND f.outcome_kind IN ('pull_request_created','review_submitted','slack_message_sent','slack_dm_sent') AND ${owned}
+      AND f.outcome_kind IN ('pull_request_created','review_submitted','slack_message_sent','slack_dm_sent') AND ${owned} AND ${sharedRun}
     UNION ALL
     SELECT 'terminal:' || e.id || ':' || p.ordinality::text,
       CASE p.part->'result'->'details'->'outcome'->>'kind'
@@ -89,7 +92,7 @@ export async function listWorkspaceOutcomes(
     JOIN engine_entries e ON e.id=f.entry_id AND e.session_id=f.session_id
     CROSS JOIN LATERAL jsonb_array_elements(replace(e.parts,chr(92)||'u0000',chr(92)||'uFFFD')::jsonb)
       WITH ORDINALITY AS p(part,ordinality)
-    WHERE (f.pull_requests>0 OR f.reviews>0) AND ${owned}
+    WHERE (f.pull_requests>0 OR f.reviews>0) AND ${owned} AND ${sharedRun}
       AND p.part->>'type'='tool_call' AND p.part->>'toolName'='bash' AND p.part->>'status'='completed'
       AND p.part->'result'->'details'->'outcome'->>'kind' IN ('pull_request_created','review_submitted')
   ) SELECT * FROM outcomes ${after} ORDER BY occurred_at DESC,id DESC LIMIT ${limit + 1}`) as { rows: OutcomeRow[] };

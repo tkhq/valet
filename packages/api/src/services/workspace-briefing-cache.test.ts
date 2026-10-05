@@ -2,9 +2,9 @@ import { InMemoryCredentialStore } from "@valet/engine";
 import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, artifacts, sessionThreads, slackChannelPrivacy, workflowDefinitions, workflowRuns, workspaceBriefingCache } from "../schema/index.js";
+import { actionInvocations, agentSessions, artifacts, sessionThreads, slackChannelPrivacy, workflowDefinitions, workflowRuns, workspaceBriefingCache } from "../schema/index.js";
 import type { WorkspaceBriefingsResponse } from "../wire/types.js";
-import type { BriefingEvidence } from "./workspace-briefing-sources.js";
+import { collectWorkspaceBriefingSources, type BriefingEvidence } from "./workspace-briefing-sources.js";
 import { briefingEvidenceHash, createDurableBriefingCache } from "./workspace-briefing-cache.js";
 import { canReadCachedBriefingSources } from "./workspace-briefing-cache-access.js";
 
@@ -161,6 +161,66 @@ describe("durable workspace briefing cache", () => {
     expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
     await db.update(slackChannelPrivacy).set({ isPrivate: true }).where(eq(slackChannelPrivacy.channelId,"CFLIP"));
     expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(false);
+  });
+  it("rechecks stored run origins even when cached links omit the source thread", async () => {
+    const db = await setup();
+    const team = { type: "team" as const, id: "team-brief" };
+    await db.insert(agentSessions).values({ id: "rt", orgId: "local-org", userId: "local-user", ownerType: "team", ownerId: team.id, workspace: "w", createdAt: 1, updatedAt: 1 });
+    await db.insert(sessionThreads).values({ id: "th", sessionId: "rt", createdAt: 1 });
+    await db.execute(sql`INSERT INTO engine_threads (id,session_id,key,status,queue_mode,created_at,updated_at)
+      VALUES ('th','rt','app-assistant:local-user','idle','steer',1,1)`);
+    await db.insert(workflowDefinitions).values({ id: "w", orgId: "local-org", ownerType: "team", ownerId: team.id, name: "w", definition: {}, createdAt: 1, updatedAt: 1 });
+    await db.insert(workflowRuns).values({ id: "r", workflowId: "w", definitionVersionId: "v", definition: {}, params: {}, ownerType: "team", ownerId: team.id,
+      status: "parked", waitingOn: [{ kind: "signal", nodeId: "n", signalType: "approval:n" }], createdAt: 1, updatedAt: 1 });
+    const response: WorkspaceBriefingsResponse = { ...snapshot, briefings: [{ ...snapshot.briefings[0], latestThread: null,
+      sources: [{ id: "workflow:r", kind: "workflow", runId: "r", title: "r", updatedAt: 1 }] }] };
+    for (const [params, allowed] of [
+      [{}, true],
+      [{ origin: { assistantSessionId: "rt", threadId: "th" } }, false],
+      [{ origin: { assistantSessionId: "rt", threadId: "gone" } }, false],
+      [{ origin: { assistantSessionId: "rt" } }, false],
+    ] as const) {
+      await db.update(workflowRuns).set({ params }).where(eq(workflowRuns.id,"r"));
+      expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(allowed);
+      expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.runId === "r")).toBe(allowed);
+    }
+    await db.execute(sql`UPDATE engine_threads SET key='slack:CPUBLIC:1' WHERE session_id='rt' AND id='th'`);
+    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPUBLIC", isPrivate: false, checkedAt: 1 });
+    await db.update(workflowRuns).set({ params: { origin: { assistantSessionId: "rt", threadId: "th" } } }).where(eq(workflowRuns.id,"r"));
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
+    expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.runId === "r")).toBe(true);
+    await db.update(sessionThreads).set({ archivedAt: 2 }).where(eq(sessionThreads.id,"th"));
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(false);
+    expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.runId === "r")).toBe(false);
+    await db.insert(actionInvocations).values({ invocationId: "effect", sessionId: "wf:r:step", workflowExecutionId: "r",
+      orgId: "local-org", createdAt: 100, durationMs: 1, actionId: "github.create_pull_request", status: "completed",
+      result: { success: true, data: { title: "Private effect", html_url: "https://github.com/acme/app/pull/1" } } });
+    // Event-only runs have no presentation thread either.
+    await db.update(workflowRuns).set({ params: { input: { data: { key: "slack.message", refs: { channel: "CPUBLIC" } } } } }).where(eq(workflowRuns.id,"r"));
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
+    expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.id === "action:effect")).toBe(true);
+    await db.update(slackChannelPrivacy).set({ isPrivate: true }).where(eq(slackChannelPrivacy.channelId,"CPUBLIC"));
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(false);
+    expect(await collectWorkspaceBriefingSources(db,"local-org",team)).toEqual([]);
+  });
+  it("checks stored artifact origins when cached presentation links are absent", async () => {
+    const db = await setup();
+    const team = { type: "team" as const, id: "team-brief" };
+    await db.insert(artifacts).values({ id: "a", token: "token", orgId: "local-org", ownerType: "team", ownerId: team.id,
+      actorUserId: "local-user", sourceMemoryPath: "a", sourceSessionId: "gone", sourceThreadId: "gone", content: "private", createdAt: 1, updatedAt: 1 });
+    const response: WorkspaceBriefingsResponse = { ...snapshot, briefings: [{ ...snapshot.briefings[0], latestThread: null,
+      sources: [{ id: "artifact:a", kind: "artifact", token: "token", title: "a", updatedAt: 1 }] }] };
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(false);
+    expect(await collectWorkspaceBriefingSources(db,"local-org",team)).toEqual([]);
+    await db.insert(agentSessions).values({ id: "gone", orgId: "local-org", userId: "local-user", ownerType: "team", ownerId: team.id, workspace: "w", createdAt: 1, updatedAt: 1 });
+    await db.insert(sessionThreads).values({ id: "gone", sessionId: "gone", createdAt: 1 });
+    await db.execute(sql`INSERT INTO engine_entries(id,session_id,thread_id,entry_type,role,content,created_at)
+      VALUES ('orphan','gone','gone','message','user','Private orphan narrative',1)`);
+    expect(await collectWorkspaceBriefingSources(db,"local-org",team)).toEqual([]);
+    await db.execute(sql`INSERT INTO engine_threads (id,session_id,key,status,queue_mode,created_at,updated_at)
+      VALUES ('gone','gone','main','idle','steer',1,1)`);
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
+    expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.id === "artifact:a")).toBe(true);
   });
   it("hashes semantic changes but ignores source ordering and non-conversation heartbeats", () => {
     const run: BriefingEvidence = { source: { id: "run", kind: "workflow", title: "Run", runId: "r", updatedAt: 10 }, content: "Awaiting approval.", state: "needs_attention" };

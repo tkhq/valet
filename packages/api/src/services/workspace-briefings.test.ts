@@ -149,6 +149,8 @@ describe("workspace briefing evidence", () => {
       await db.execute(sql`INSERT INTO agent_sessions (id,org_id,user_id,owner_type,owner_id,workspace,created_at,updated_at)
         VALUES (${id},${orgId},'local-user',${ownerType},${ownerId},'w',1,1)`);
       await db.insert(sessionThreads).values({ id: `${id}-thread`, sessionId: id, title: `${id} goal`, createdAt: 1 });
+      await db.execute(sql`INSERT INTO engine_threads (id,session_id,key,status,queue_mode,created_at,updated_at)
+        VALUES (${`${id}-thread`},${id},'main','idle','steer',1,1)`);
       const parts = JSON.stringify([{ type: "text", text: `${id} goal evidence` }, { type: "tool_call", result: "SECRET TOOL PAYLOAD" }, { type: "thinking", text: "SECRET REASONING" }]);
       await db.execute(sql`INSERT INTO engine_entries(id,session_id,thread_id,entry_type,role,parts,created_at)
         VALUES (${id},${id},${`${id}-thread`},'message','user',${parts},1)`);

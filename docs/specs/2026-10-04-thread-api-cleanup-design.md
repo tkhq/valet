@@ -127,3 +127,7 @@ Without a thread-bound actor, shared app sandboxes cannot use member shares or p
 Team-owned credentials and GitHub App installations remain available. Workflow sandboxes retain their run-scoped approval checks.
 
 Shared sandbox repository bindings retain their restrictions: App-only bindings never select team tokens; personal-account bindings fail visibly because a shared runtime has no trustworthy current member.
+
+### Briefing source origins
+
+Team briefing generation and cache validation inspect persisted workflow and artifact origins, independently of optional links in the response. Missing, archived, private, or foreign workspace origins fail closed. Originless sources remain supported. Slack event-only runs are rechecked against current channel privacy on cache reads. Missing referenced outcome threads cannot become shared evidence.

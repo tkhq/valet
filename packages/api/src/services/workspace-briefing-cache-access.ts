@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { WorkspaceBriefingsResponse } from "../wire/types.js";
-import { governingThreadKeySql, sharedWithWholeTeamSql } from "./thread-access.js";
+import { sharedBriefingOrigin, sharedBriefingRun } from "./workspace-briefing-visibility.js";
 
 /** Check source IDs and ownership on every cache read, without fetching narrative text. */
 export async function canReadCachedBriefingSources(db: AppDb, orgId: string, owner: Principal, response: WorkspaceBriefingsResponse): Promise<boolean> {
@@ -30,7 +30,10 @@ export async function canReadCachedBriefingSources(db: AppDb, orgId: string, own
       -- be shared with the whole team: a channel that turned private, or a
       -- source with no thread to judge, fails the cached briefing.
       ${owner.type === "team" ? sql`AND (v.session_id IS NULL OR (v.thread_id IS NOT NULL
-        AND ${sharedWithWholeTeamSql(orgId, governingThreadKeySql(sql`v.session_id`, sql`v.thread_id`))}))` : sql``}
+        AND ${sharedBriefingOrigin(orgId, owner.id, sql`v.session_id`, sql`v.thread_id`)}))
+        AND (v.run_id IS NULL OR ${sharedBriefingRun(orgId, owner.id, sql`r.params`)})
+        AND (a.id IS NULL OR a.source_session_id IS NULL OR
+          ${sharedBriefingOrigin(orgId, owner.id, sql`a.source_session_id`, sql`a.source_thread_id`)})` : sql``}
       AND (v.run_id IS NULL OR d.id IS NOT NULL)
       AND (v.thread_id IS NULL OR t.id IS NOT NULL OR (v.session_id IS NULL AND d.id IS NOT NULL))
       AND CASE v.kind

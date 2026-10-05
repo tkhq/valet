@@ -5,6 +5,7 @@ import type { WorkspaceBriefingSource } from "../wire/types.js";
 import { sharedThreadKey } from "./thread-read-state.js";
 import { governingThreadKeySql, sharedWithWholeTeamSql } from "./thread-access.js";
 import { listWorkspaceOutcomes } from "./workspace-outcomes.js";
+import { sharedBriefingOrigin, sharedBriefingRun } from "./workspace-briefing-visibility.js";
 import { slackThreadUrl } from "./channel-messages.js";
 
 export interface BriefingEvidence {
@@ -35,7 +36,6 @@ interface ArtifactRow {
  */
 export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, owner: Principal): Promise<BriefingEvidence[]> {
   const teamShared = owner.type === "team" ? (key: SQL) => sharedWithWholeTeamSql(orgId, key) : undefined;
-  const shared = (key: SQL) => teamShared ? teamShared(key) : sql`true`;
   const threadKey = governingThreadKeySql;
   // The channel a Slack event names, whatever its shape: ingest copies it to
   // `refs.channel` (`plugin-slack/src/triggers.ts`), and a reaction keeps it at
@@ -58,7 +58,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
         WHERE e.session_id=s.id AND e.thread_id=t.id AND e.entry_type='message' AND e.role IN ('user','assistant') AND ${hasNarrative}
         ORDER BY e.created_at DESC,e.id DESC LIMIT 1) latest ON true
       WHERE ${scopedSession} AND t.archived_at IS NULL
-        AND ${teamShared ? teamShared(threadKey(sql`s.id`, sql`t.id`)) : sharedThreadKey(threadKey(sql`s.id`, sql`t.id`))}
+        AND ${teamShared ? sharedBriefingOrigin(orgId, owner.id, sql`s.id`, sql`t.id`) : sharedThreadKey(threadKey(sql`s.id`, sql`t.id`))}
       ORDER BY latest.created_at DESC,t.id DESC LIMIT 30
     ) SELECT t.*,m.role,m.text,m.created_at AS message_at,
       EXISTS(SELECT 1 FROM engine_queue_items q WHERE q.session_id=t.session_id AND q.thread_id=t.thread_id
@@ -90,8 +90,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
           WHERE newer.workflow_id=r.workflow_id AND newer.owner_type=r.owner_type AND newer.owner_id=r.owner_id
             AND (newer.created_at,newer.id) > (r.created_at,r.id))
         -- A run a private conversation or channel started reports what it read there.
-        AND ${shared(threadKey(sql`r.params->'origin'->>'assistantSessionId'`, sql`r.params->'origin'->>'threadId'`))}
-        AND (r.params->'input'->'data'->>'key' NOT LIKE 'slack.%' OR ${shared(sql`('slack:' || ${slackChannel} || ':')`)})
+        AND ${owner.type === "team" ? sharedBriefingRun(orgId, owner.id, sql`r.params`) : sql`true`}
       ORDER BY r.updated_at DESC,r.id DESC LIMIT 12
     ) SELECT r.id,r.title,r.updated_at,r.status,
       -- Only a thread in this same workspace: a team run started from a
@@ -123,7 +122,7 @@ export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, 
       LEFT JOIN session_threads t ON t.session_id=s.id AND t.id=a.source_thread_id
       WHERE a.org_id=${orgId} AND a.owner_type=${owner.type} AND a.owner_id=${owner.id} AND a.revoked_at IS NULL
         ${teamShared ? sql`AND (a.source_session_id IS NULL OR (a.source_thread_id IS NOT NULL
-          AND ${teamShared(threadKey(sql`a.source_session_id`, sql`a.source_thread_id`))}))` : sql``}
+          AND ${sharedBriefingOrigin(orgId, owner.id, sql`a.source_session_id`, sql`a.source_thread_id`)}))` : sql``}
       ORDER BY a.updated_at DESC,a.id DESC LIMIT 10`) as Promise<{ rows: ArtifactRow[] }>,
     listWorkspaceOutcomes(db,orgId,owner,15,undefined,teamShared),
   ]);
