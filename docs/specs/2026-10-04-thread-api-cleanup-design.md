@@ -78,3 +78,5 @@ Human-authored chat turns fail visibly when provider credentials are unavailable
 Named account approvers can answer only their exact gate on a private run. They cannot read or cancel that run or answer unrelated gates. Unattended team workflows can consume an approved account grant only for their stored team and while the lending member remains on that team.
 
 Team-key workflow starts use the team actor, never the key creator. Account checks preserve mounted composers after a verified identity on transient failures. Initial checks, account changes, and authentication failures still hide the previous account.
+
+Session creation with an initial prompt records admission durably. A missing credential settles that human prompt as failed and returns the session to idle. Tests assert this terminal state rather than racing the initial working badge.
