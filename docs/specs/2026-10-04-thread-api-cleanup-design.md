@@ -112,3 +112,9 @@ The saved creator remains audit attribution, not personal credential authority.
 The same rule applies when a teammate edits or manually fires a shared schedule.
 Personal automations retain their existing actor. Verified Slack mentions retain the linked sender and existing membership checks.
 Shared workflows require an approved grant before borrowing a member's account.
+
+### Legacy and missing thread audiences
+
+Legacy Slack channel-only keys use the same channel membership checks as current thread keys, including DMs and group DMs.
+Attention events referencing a missing team thread do not notify the team or send member DMs.
+A missing audience cannot establish sharing permission. Workspace-wide events with no thread reference retain their existing routing.

@@ -39,6 +39,8 @@ it("lets a thread read only what its audience may see", async () => {
   // A shared thread reads shared threads and public channels, never a private one.
   expect(await read("web:default", "slack:CREADPUB:1.1")).toBe(true);
   expect(await read("web:default", "slack:CREADPRIV:1.1")).toBe(false);
+  expect(await read("web:default", "slack:CREADPRIV")).toBe(false);
+  expect(await read("slack:CREADPRIV", "web:shared")).toBe(false);
   expect(await read("web:default", "app-assistant:member")).toBe(false);
   // An editor conversation from before per-person keys names nobody, so nobody else reads it.
   expect(await read("web:default", "workflow:wf_legacy")).toBe(false);
@@ -220,7 +222,7 @@ it("keeps a DM and a group DM to their members", async () => {
       : { ok: true, channel: channel.startsWith("D") ? { is_im: true } : { is_private: true, is_mpim: true } };
     return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
   });
-  for (const key of ["slack:G0MPIM:1700.1", "slack:D0DIRECT:1700.1"]) {
+  for (const key of ["slack:G0MPIM:1700.1", "slack:D0DIRECT:1700.1", "slack:G0MPIM", "slack:D0DIRECT"]) {
     const visibleTo = (userId: string | undefined) => threadVisibility(api!.providers, { ownerType: "team" }, { orgId: "local-org", userId })(key);
     expect(await visibleTo("member")).toBe(true);
     expect(await visibleTo("outsider-no-slack-link")).toBe(false);

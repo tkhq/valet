@@ -129,6 +129,15 @@ describe("routeAttention (DB-backed)", () => {
     const recipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
     expect(recipients.map((r) => r.userId)).toEqual(["test-member"]);
     expect(deliverTeam).not.toHaveBeenCalled();
+    await db.execute(sql`DELETE FROM engine_threads WHERE id='thr-helper' AND session_id='sess-team'`);
+    const deliver = vi.fn(async () => {});
+    await routeAttention({ db, channels: [{ deliver, deliverTeam }] }, {
+      kind: "notification", owner: { type: "team", id: "team-p" }, title: "Deleted private context",
+      sessionId: "sess-team", threadId: "thr-helper",
+    });
+    expect(await db.select().from(notifications).where(eq(notifications.kind, "notification"))).toHaveLength(1);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(deliverTeam).not.toHaveBeenCalled();
   });
 
   it("keeps a private Slack channel's attention to the channel's members, with no team channel post", async () => {

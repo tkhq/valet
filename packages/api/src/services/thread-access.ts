@@ -33,9 +33,9 @@ import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { Providers } from "../providers/types.js";
 import { agentSessions, slackChannelPrivacy } from "../schema/index.js";
 /** The Slack conversation a thread key names, DMs and group DMs included,
- * and a channel's events thread (`slackEventsThreadKey`). */
+ * legacy channel-only keys, and a channel's events thread (`slackEventsThreadKey`). */
 function slackConversation(key: string | null | undefined): { channelId: string } | null {
-  const match = /^slack:([^:]+):[^:]+$|^slack-events:([^:]+)(?::.+)?$/.exec(key ?? "");
+  const match = /^slack:([^:]+)(?::[^:]+)?$|^slack-events:([^:]+)(?::.+)?$/.exec(key ?? "");
   return match ? { channelId: (match[1] ?? match[2])! } : null;
 }
 

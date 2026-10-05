@@ -282,7 +282,8 @@ async function teamThreadKey(db: AppDb, event: AttentionEvent): Promise<string |
   if (event.owner.type !== "team") return undefined;
   if (event.audienceKey !== undefined) return event.audienceKey;
   if (!event.sessionId || !event.threadId) return undefined;
-  return governingThreadKey(db, event.sessionId, event.threadId);
+  // The event references a thread; a missing row cannot establish its audience.
+  return governingThreadKey(db, event.sessionId, event.threadId, "parent link");
 }
 
 /** Whether every member may see a team thread, from stored channel privacy. */
