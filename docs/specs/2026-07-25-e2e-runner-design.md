@@ -430,6 +430,6 @@ Do not rerun passing suites on unchanged code. Run broad CI for the release cand
 `make test` runs the root v2 suite once and propagates failures. `make test-integration` runs only the keyless integration row.
 The legacy `make test-e2e` target is not the v2 release command; use `make e2e`.
 
-CI currently typechecks in its typecheck job and again in each of four test shards because imports require emitted package files.
-Sharing those build artifacts could reduce work, but requires measuring transfer cost and validating identical dependency output first.
+CI performs semantic typechecking once in its required typecheck job. Each test shard uses `tsc --build --noCheck` only to emit imported packages.
+This keeps shards parallel without artifact-transfer dependencies. The aggregate check still requires typecheck and every test shard to pass.
 Test count alone is not grounds to remove coverage. Preserve distinct authorization, migration, recovery, and backend contract cases.
