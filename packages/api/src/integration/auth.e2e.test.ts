@@ -23,7 +23,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
-import { users } from "../schema/index.js";
+import { agentSessions, users } from "../schema/index.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import type {
   AuthConfigResponse,
@@ -133,6 +133,8 @@ describe("auth v2 — end-to-end deployment flow", () => {
     const adminRow = adminRows[0];
     expect(adminRow).toBeDefined();
 
+    await db.insert(agentSessions).values({ id: "e2e-sandbox-session", userId: adminRow!.id, orgId: adminMe.orgId,
+      ownerType: "user", ownerId: adminRow!.id, workspace: "w", createdAt: 1, updatedAt: 1 });
     const { token: sandboxToken } = await mintSandboxToken(db, {
       sessionId: "e2e-sandbox-session",
       userId: adminRow!.id,
