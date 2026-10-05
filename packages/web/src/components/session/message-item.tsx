@@ -1,5 +1,5 @@
-import { FileText, Reply } from "lucide-react";
-import { memo, useMemo } from "react";
+import { Braces, ChevronRight, FileText, Reply } from "lucide-react";
+import { memo, useMemo, useState } from "react";
 import type {
   MessagePart,
   MessageSkillInvocation,
@@ -9,6 +9,7 @@ import type {
 } from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Markdown } from "~/components/markdown";
+import { CodeBlock } from "~/components/code-block";
 import { CopyButton } from "./tool-renderers/tool-shell";
 import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
@@ -67,6 +68,8 @@ export const MessageItem = memo(function MessageItem({
 }) {
   if (isEmptyInterruption(message)) return null;
   const isUser = message.role === "user";
+  const collapseStructured = message.role === "assistant" && message.completed === true &&
+    message.stopReason !== "error" && !message.settledOutcome;
   const copyText = messageCopyText(message);
   // Defined only for another member's message on a shared session; the
   // viewer's own messages (and authorless rows) keep the "You" treatment.
@@ -128,7 +131,7 @@ export const MessageItem = memo(function MessageItem({
               <UserAttachmentStrip attachments={message.attachments} />
             )}
             {message.parts.length === 0 && message.content && (
-              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} />
+              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} collapseStructured={collapseStructured} />
             )}
             {message.parts.map((part, i) => (
               // Tool cards hold per-mount UI state (expansion, user-touch
@@ -142,6 +145,7 @@ export const MessageItem = memo(function MessageItem({
                 part={part}
                 skillMeta={isUser ? message.skill : undefined}
                 detectSkill={isUser}
+                collapseStructured={collapseStructured}
               />
             ))}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
@@ -230,14 +234,16 @@ function PartView({
   part,
   skillMeta,
   detectSkill,
+  collapseStructured,
 }: {
   part: MessagePart;
   skillMeta?: MessageSkillInvocation;
   detectSkill?: boolean;
+  collapseStructured?: boolean;
 }) {
   switch (part.kind) {
     case "text":
-      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} />;
+      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} collapseStructured={collapseStructured} />;
     case "thinking":
       return <Thinking text={part.text} />;
     case "tool_call":
@@ -249,6 +255,7 @@ function TextBlock({
   text,
   skillMeta,
   detectSkill = false,
+  collapseStructured = false,
 }: {
   text: string;
   /** Wire skill stamp from the enclosing message (user messages only). */
@@ -256,6 +263,7 @@ function TextBlock({
   /** True only for user messages — the dispatcher writes skill blocks
    *  nowhere else, and assistant prose that quotes one must stay prose. */
   detectSkill?: boolean;
+  collapseStructured?: boolean;
 }) {
   // Memoized so streaming re-renders elsewhere in the thread don't re-run
   // the extraction on static user text every frame.
@@ -263,7 +271,12 @@ function TextBlock({
     () => (detectSkill ? extractSkillInvocation(text, skillMeta) : null),
     [text, skillMeta, detectSkill],
   );
+  const structured = useMemo(
+    () => collapseStructured ? structuredText(text) : null,
+    [text, collapseStructured],
+  );
   if (!text) return null;
+  if (structured) return <StructuredTextCard result={structured} />;
   if (block) {
     return (
       <>
@@ -273,6 +286,68 @@ function TextBlock({
     );
   }
   return <Markdown>{text}</Markdown>;
+}
+
+interface StructuredText {
+  code: string;
+  count: string;
+  summary?: string;
+}
+
+function isStructuredDiagnostic(data: unknown): boolean {
+  return data !== null && typeof data === "object" && (
+    "error" in data || "errors" in data || ("ok" in data && data.ok === false) ||
+    ("status" in data && (data.status === "failed" || data.status === "error"))
+  );
+}
+
+/** Only complete JSON documents qualify. Prose and diagnostic output stay visible. */
+function structuredText(text: string): StructuredText | null {
+  if (text.length < 1500) return null;
+  const trimmed = text.trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*)\n```$/.exec(trimmed);
+  const json = fenced?.[1] ?? trimmed;
+  if (!json.startsWith("{") && !json.startsWith("[")) return null;
+  try {
+    const data: unknown = JSON.parse(json);
+    if (!data || typeof data !== "object") return null;
+    if (Array.isArray(data)) {
+      if (data.some(isStructuredDiagnostic)) return null;
+      return { code: json, count: `${data.length} items` };
+    }
+    if (isStructuredDiagnostic(data)) return null;
+    const count = "candidates" in data && Array.isArray(data.candidates)
+      ? `${data.candidates.length} candidates`
+      : `${Object.keys(data).length} fields`;
+    return {
+      code: json,
+      count,
+      ...("summary" in data && typeof data.summary === "string" ? { summary: data.summary } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function StructuredTextCard({ result }: { result: StructuredText }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="space-y-2">
+      {result.summary && <p className="line-clamp-3 text-sm text-ink">{result.summary}</p>}
+      <details className="group/result rounded-md border border-line bg-paper"
+        onToggle={(event) => setExpanded(event.currentTarget.open)}>
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden">
+          <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 transition-transform group-open/result:rotate-90" />
+          <Braces aria-hidden className="h-3.5 w-3.5 shrink-0" />
+          <span className="font-medium">Structured result</span>
+          <span className="ml-auto">{result.count}</span>
+        </summary>
+        {expanded && <div className="max-h-96 overflow-auto border-t border-line p-2">
+          <CodeBlock code={result.code} language="json" />
+        </div>}
+      </details>
+    </div>
+  );
 }
 
 /**
