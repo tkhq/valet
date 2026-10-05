@@ -433,3 +433,10 @@ The legacy `make test-e2e` target is not the v2 release command; use `make e2e`.
 CI performs semantic typechecking once in its required typecheck job. Each test shard uses `tsc --build --noCheck` only to emit imported packages.
 This keeps shards parallel without artifact-transfer dependencies. The aggregate check still requires typecheck and every test shard to pass.
 Test count alone is not grounds to remove coverage. Preserve distinct authorization, migration, recovery, and backend contract cases.
+
+### Integration listener allocation
+
+The API integration harness binds port zero and keeps that listener open.
+Engine callback URLs resolve the assigned port after listening starts.
+This removes the port probe and release window that caused parallel CI boots to collide.
+The production server adapter and test coverage remain unchanged.
