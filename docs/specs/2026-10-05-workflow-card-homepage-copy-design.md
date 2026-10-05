@@ -17,7 +17,8 @@ An assistant update does not imply that the user must reply.
 Archive labels describe the existing archive action.
 Briefings without a next step do not claim that nothing needs the user.
 A needs-attention briefing points to its linked sources, without assuming a conversation exists.
-Existing source links, result grouping, and access rules remain unchanged.
+Recent results starts collapsed. Expand it to see source links and paging controls.
+Questions, failures, and approvals remain visible. Result grouping and access rules stay unchanged.
 
 ## Validation
 

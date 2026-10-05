@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { FileText, GitPullRequest, MessageSquare, ArrowUpRight, CircleAlert, LoaderCircle, CheckCheck } from "lucide-react";
+import { FileText, GitPullRequest, MessageSquare, ArrowUpRight, CircleAlert, LoaderCircle, CheckCheck, ChevronRight } from "lucide-react";
 import type { ArtifactListItem, GlobalWorkflowRunSummary, WaitingThread, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
 import { useWorkspaceOutcomes, useWorkspaceActiveWork, useWaitingThreads, useFinishWaitingThread } from "~/api/catch-up";
 import { useArtifacts } from "~/api/artifacts";
 import { useDismissRun, useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
-import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection } from "~/components/primitives";
+import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection, WorkList } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
 
 export function WorkspaceActivity({ owner }: { owner: OwnerFilter }) {
@@ -130,14 +130,22 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
       {progressRuns.map(row => <RunRow key={row.runId} row={row} />)}
     </WorkSection>}
     {!activeWork.error && activeWork.hasNextPage && <Button variant="secondary" size="sm" disabled={activeWork.isFetchingNextPage} onClick={() => void activeWork.fetchNextPage()}>Load more active work</Button>}
-    {(resultGroups.length > 0 || outcomes.isPending || artifacts.isPending) && <WorkSection title="Recent results" icon={<CheckCheck className="h-4 w-4 text-moss" />} count={resultGroups.length}>
+    {(resultGroups.length > 0 || outcomes.isPending || artifacts.isPending || artifactCursor || artifacts.data?.nextCursor || outcomes.hasNextPage) && <section aria-label="Recent results"><details className="group/results">
+      <summary className="mb-3 flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+        <ChevronRight aria-hidden className="h-4 w-4 text-muted transition-transform group-open/results:rotate-90" />
+        <CheckCheck aria-hidden className="h-4 w-4 text-moss" />
+        <h2 className="font-display text-lg">Recent results</h2>
+        <span className="text-xs text-muted">{resultGroups.length}</span>
+      </summary>
+      <WorkList>
       {(outcomes.isPending || artifacts.isPending) && <LoadingRow label="Loading results…" />}
       {resultGroups.map(group => <ResultGroupRow key={group[0]!.id} group={group} />)}
-    </WorkSection>}
-    <div className="flex flex-wrap gap-3">
+      </WorkList>
+      <div className="mt-3 flex flex-wrap gap-3">
       {!outcomes.error && outcomes.hasNextPage && <Button size="sm" variant="secondary" disabled={outcomes.isFetchingNextPage} onClick={() => void outcomes.fetchNextPage()}>Load more results</Button>}
       {!artifacts.error && <PageControls cursor={artifactCursor} next={artifacts.data?.nextCursor} onPage={setArtifactCursor} label="artifacts" />}
-    </div>
+      </div>
+    </details></section>}
   </div>;
 }
 

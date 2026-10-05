@@ -26,8 +26,9 @@ it("groups PRs and published files under their work with real source links", asy
   vi.mocked(api.listWorkspaceOutcomes).mockResolvedValue({ items: [{ id: "pr", kind: "pull_request", title: "Route events PR", occurredAt: 5, sessionId: "s", threadId: "thread-a", url: "https://github.com/acme/app/pull/42" }, { id: "unsafe", kind: "review", title: "Unsafe link", occurredAt: 4, url: "javascript:alert(1)" }], nextCursor: null });
   vi.mocked(api.listArtifacts).mockResolvedValue({ artifacts: [{ id: "a", title: "Routing report", path: "report.md", format: "markdown", icon: "", ownerType: "user", version: 1, sharedVersion: null, token: "report-token", url: "https://api.example/a/report-token", visibility: "org", actorUserId: "u", revoked: false, createdAt: 2, updatedAt: 3, sourceSessionId: "s", sourceThreadId: "thread-a" }], nextCursor: null });
   setup();
+  const results = await screen.findByRole("region", { name: "Recent results" });
+  fireEvent.click(within(results).getByText("Recent results"));
   const pr = await screen.findByRole("link", { name: "Route events PR" });
-  const results = screen.getByRole("region", { name: "Recent results" });
   expect(pr.getAttribute("href")).toBe("https://github.com/acme/app/pull/42");
   expect(within(results).getByRole("link", { name: "Routing report" }).getAttribute("href")).toBe("/a/report-token");
   expect(within(results).getAllByRole("link", { name: "Open thread" })[0]?.getAttribute("href")).toBe("/threads/thread-a");
@@ -50,6 +51,7 @@ it("shows one result row per thread or pull request, saying what happened", asyn
   vi.mocked(api.listWorkspaceOutcomes).mockResolvedValue({ items: [...reviews, ...messages], nextCursor: null });
   setup();
   const results = await screen.findByRole("region", { name: "Recent results" });
+  fireEvent.click(within(results).getByText("Recent results"));
   expect(await within(results).findAllByText("Team Granola Integration Strategy")).toHaveLength(1);
   expect(within(results).getByText(/9 Slack messages/)).toBeTruthy();
   expect(within(results).getByRole("link", { name: "acme/app #42" }).getAttribute("href")).toBe("https://github.com/acme/app/pull/42");
@@ -134,4 +136,28 @@ it("puts Valet's questions under Needs attention and plain replies in their own 
   fireEvent.click(within(replies).getByRole("button", { name: "Archive Lockfile fix" }));
   await waitFor(() => expect(api.patchThread).toHaveBeenCalledWith("told", { archived: true }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "Conversation updates" })).toBeNull());
+});
+
+it("keeps recent results collapsed until expanded", async () => {
+  vi.mocked(api.listWorkspaceOutcomes).mockResolvedValue({ items: [{ id: "result", kind: "review", title: "Review submitted", occurredAt: 1, workflowRunId: "run", url: "https://github.com/acme/app/pull/42" }], nextCursor: null });
+  setup();
+  await waitFor(() => expect(screen.queryByText(/Loading results/)).toBeNull());
+  const results = await screen.findByRole("region", { name: "Recent results" });
+  expect(results.querySelector("details")?.open).toBe(false);
+  fireEvent.click(within(results).getByText("Recent results"));
+  expect(results.querySelector("details")?.open).toBe(true);
+  expect(within(results).getByRole("link", { name: "acme/app #42" })).toBeTruthy();
+});
+
+it("keeps navigation through empty filtered artifact pages", async () => {
+  vi.mocked(api.listArtifacts).mockImplementation(async (_scope, options) => ({ artifacts: [], nextCursor: options?.cursor ? null : "next" }));
+  setup();
+  await waitFor(() => expect(screen.queryByText(/Loading results/)).toBeNull());
+  const results = await screen.findByRole("region", { name: "Recent results" });
+  fireEvent.click(within(results).getByText("Recent results"));
+  fireEvent.click(within(results).getByRole("button", { name: "Next artifacts" }));
+  await waitFor(() => expect(api.listArtifacts).toHaveBeenCalledWith(owner, expect.objectContaining({ cursor: "next" })));
+  fireEvent.click(await within(results).findByRole("button", { name: "Latest artifacts" }));
+  await waitFor(() => expect(within(results).queryByRole("button", { name: "Latest artifacts" })).toBeNull());
+  expect(within(results).getByRole("button", { name: "Next artifacts" })).toBeTruthy();
 });
