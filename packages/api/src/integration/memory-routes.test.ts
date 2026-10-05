@@ -4,11 +4,12 @@
  * search/export/import round trip through real HTTP requests. Doesn't need
  * ANTHROPIC_API_KEY — the memory routes never touch the engine.
  */
+import { eq } from "drizzle-orm";
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { teamMembers, teams } from "../schema/index.js";
+import { agentSessions, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { GetMemoryTreeResponse } from "../wire/types.js";
 
 describe("api integration: memory routes", () => {
@@ -475,6 +476,40 @@ describe("api integration: memory owner scope", () => {
     expect(((await badType.json()) as { error: string }).error).toBe("ownerType must be 'user', 'team' or 'org'.");
   });
 
+  it.each(["local-user", "team:team_1"])("sandbox memory follows team ownership after first wake by %s", async (actor) => {
+    const target = api = await bootWithTeam([{ userId: "local-user", role: "admin" }]);
+    await target.providers.db.insert(agentSessions).values({ id: "team-runtime", userId: actor, orgId: "local-org",
+      ownerType: "team", ownerId: "team_1", workspace: "w", createdAt: 1, updatedAt: 1 });
+    const { token } = await mintSandboxToken(target.providers.db, { sessionId: "team-runtime", userId: actor, orgId: "local-org" });
+    const put = await fetch(`${target.baseUrl}/api/memory?ownerType=user&ownerId=local-user`, {
+      method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ path: "notes/runtime.md", content: "# Team runtime" }),
+    });
+    expect(put.status).toBe(200);
+    const read = (owner: string) => fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, {
+      headers: { "x-valet-internal": internalToken(), "x-valet-owner": owner, "x-valet-actor": "local-user" },
+    });
+    expect((await read("team:team_1")).status).toBe(200);
+    expect((await read("user:local-user")).status).toBe(404);
+    await target.providers.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, "team-runtime"));
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(404);
+    await target.providers.db.delete(agentSessions).where(eq(agentSessions.id, "team-runtime"));
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(404);
+  });
+
+  it("uses the stored workflow owner for sandbox memory", async () => {
+    const target = api = await bootWithTeam([{ userId: "local-user", role: "admin" }]);
+    await target.providers.db.insert(workflowDefinitions).values({ id: "memory-wf", orgId: "local-org", ownerType: "team",
+      ownerId: "team_1", name: "Memory", definition: {}, createdAt: 1, updatedAt: 1 });
+    await target.providers.db.insert(workflowRuns).values({ id: "memory-run", workflowId: "memory-wf", definitionVersionId: "v",
+      definition: {}, params: {}, ownerType: "team", ownerId: "team_1", createdAt: 1, updatedAt: 1 });
+    const { token } = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:step", userId: "local-user", orgId: "local-org" });
+    expect((await fetch(`${target.baseUrl}/api/memory`, { method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ path: "notes/workflow.md", content: "# Team workflow" }) })).status).toBe(200);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md&${TEAM_QUERY}`)).status).toBe(200);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`)).status).toBe(404);
+  });
+
   // The internal token and the sandbox token derive their owner from a
   // verified credential. Request-supplied owners must not reach either.
   it("ignores owner parameters on the internal-token branch", async () => {
@@ -503,6 +538,8 @@ describe("api integration: memory owner scope", () => {
 
   it("ignores owner parameters on the sandbox-token branch", async () => {
     api = await bootWithTeam([{ userId: "sbx-user", role: "admin" }]);
+    await api.providers.db.insert(agentSessions).values({ id: "sbx-sess", userId: "sbx-user", orgId: "local-org",
+      ownerType: "user", ownerId: "sbx-user", workspace: "w", createdAt: 1, updatedAt: 1 });
     const { token } = await mintSandboxToken(api.providers.db, {
       sessionId: "sbx-sess",
       userId: "sbx-user",

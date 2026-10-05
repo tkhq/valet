@@ -37,8 +37,9 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { ReservedPathError } from "../lib/okf.js";
-import { isTeamMember } from "../services/teams.js";
-import { memoryFiles } from "../schema/index.js";
+import { getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { workflowSessionOwner } from "../workflows/session-owner.js";
+import { agentSessions, memoryFiles } from "../schema/index.js";
 import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
@@ -193,14 +194,23 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
     return { owner, actorUserId: actorHeader };
   }
 
-  // Sandbox principal (Task 7): the owner tuple derives from the verified
-  // token, never from headers — a sandbox always acts as the session's
-  // owning user, so any `x-valet-owner`/`x-valet-actor` headers on this
-  // request are ignored. The `?ownerType=&ownerId=` parameters are ignored
-  // here for the same reason: a sandbox does not choose its own scope.
+  // The token actor is fixed at first wake. Resolve the durable session owner
+  // instead; neither query parameters nor headers may select another corpus.
   const sandbox = c.var.sandbox;
   if (sandbox) {
-    return { owner: { type: "user", id: sandbox.userId }, actorUserId: sandbox.userId };
+    const { db } = c.var.providers;
+    const [session] = await db.select().from(agentSessions)
+      .where(and(eq(agentSessions.id, sandbox.sessionId), eq(agentSessions.orgId, sandbox.orgId))).limit(1);
+    if (session?.status === "deleted") throw new NotFoundError("owner");
+    const owner = session
+      ? parsePrincipal(`${session.ownerType}:${session.ownerId || (session.ownerType === "user" ? session.userId : "")}`)
+      : await workflowSessionOwner(db, sandbox.sessionId, sandbox.orgId);
+    if (!owner || (owner.type === "user" && owner.id !== sandbox.userId)
+      || (owner.type === "org" && owner.id !== sandbox.orgId)
+      || (owner.type === "team" && !await getTeamInOrg(db, sandbox.orgId, owner.id))) {
+      throw new NotFoundError("owner");
+    }
+    return { owner, actorUserId: sandbox.userId };
   }
 
   const user = c.var.user;

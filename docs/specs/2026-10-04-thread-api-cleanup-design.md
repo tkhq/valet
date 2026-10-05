@@ -143,3 +143,7 @@ The runtime OpenAI tool credential resolver uses the same current actor and borr
 ### Missing source visibility
 
 Batch source visibility defaults to denial when the referenced engine thread cannot be resolved. Artifact lists and other batch consumers must not infer a public audience from a missing source key or return its bearer token. A team artifact with a source session but no source thread also fails closed; truly originless publications remain supported. Existing resolvable public and private threads retain their normal audience checks.
+
+### Sandbox memory ownership
+
+Sandbox memory resolves the durable app-session or workflow-run owner in the token organization. The frozen first-waker actor never chooses the corpus. Shared runtimes use their workspace corpus, including machine-first wakes. Missing/deleted owners and stale personal-owner tokens fail closed; request headers and query parameters cannot change the scope. This does not establish private execution namespaces, which remain a release blocker. Terminal access is not widened to solve machine-first ownership.
