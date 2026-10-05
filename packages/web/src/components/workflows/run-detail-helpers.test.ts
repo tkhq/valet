@@ -7,7 +7,6 @@ import {
   findPendingApproval,
   formatRunDuration,
   formatRunOutput,
-  jsonPreview,
   readTemplateDiagnostics,
   runNeedsApproval,
   statusByNodeId,
@@ -116,23 +115,6 @@ describe("runNeedsApproval", () => {
   it("returns false when status is not parked even with gates", () => {
     expect(runNeedsApproval({ status: "running" }, [gate])).toBe(false);
     expect(runNeedsApproval({ status: "settled" }, [gate])).toBe(false);
-  });
-});
-
-describe("jsonPreview", () => {
-  it("returns empty string for undefined", () => {
-    expect(jsonPreview(undefined)).toBe("");
-  });
-
-  it("pretty-prints small values in full", () => {
-    expect(jsonPreview({ a: 1 })).toBe('{\n  "a": 1\n}');
-  });
-
-  it("truncates long values with an ellipsis", () => {
-    const big = { text: "a".repeat(1000) };
-    const preview = jsonPreview(big, 50);
-    expect(preview.length).toBeLessThanOrEqual(51);
-    expect(preview.endsWith("…")).toBe(true);
   });
 });
 

@@ -138,19 +138,6 @@ export function runNeedsApproval(
   return run.status === "parked" && Array.isArray(pendingGates) && pendingGates.length > 0;
 }
 
-/** Truncated JSON preview for a checkpoint's `result`, mono-block friendly. */
-export function jsonPreview(value: unknown, max = 400): string {
-  if (value === undefined) return "";
-  let text: string;
-  try {
-    text = JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}…`;
-}
-
 // ─── settled-run result ──────────────────────────────────────────────────────
 
 import type { WorkflowRunOutcome } from "@valet/api/wire";

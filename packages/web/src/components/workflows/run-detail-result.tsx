@@ -47,7 +47,7 @@ const EMPTY_BODY: Record<RunResult["outcome"], string> = {
   completed:
     "The workflow finished without a result message. To summarize a run here, set a message on its stop node.",
   failed:
-    "No node recorded a reason. Read the checkpoints below to find the node that stopped the run.",
+    "No step recorded a reason. Expand the steps below to inspect their output and agent logs.",
   cancelled: "The run stopped where it was. To run the workflow again, select Retry run.",
 };
 

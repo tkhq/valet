@@ -135,6 +135,12 @@ notice instead of silently clobbering either side.
 
 ## 4. Run overlay + approvals
 
+The run page shows results, pending approvals, and compact expandable step rows.
+Running and waiting steps show their current state. Failed steps open their output.
+Steps follow the saved definition order. Repeated iterations keep separate rows. Each row links to its agent logs or child run.
+Expanded output stays complete; it is not a truncated preview.
+The optional Workflow diagram follows the steps and mounts only when expanded.
+
 - Per-node run states derived from the run row + checkpoints:
   `pending / running / succeeded / failed / skipped / waiting`.
 - Approval nodes in `waiting` render Approve/Reject actions in both the inline

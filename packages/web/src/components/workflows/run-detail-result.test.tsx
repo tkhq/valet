@@ -57,7 +57,7 @@ describe("RunResultPanel", () => {
 
   it("tells a reader where to look when a failure recorded no reason", () => {
     render(<RunResultPanel result={result({ outcome: "failed" })} />);
-    expect(screen.getByText(/Read the checkpoints below/i)).toBeTruthy();
+    expect(screen.getByText(/Expand the steps below/i)).toBeTruthy();
   });
 
   it("offers Retry as the action on a cancelled run", () => {

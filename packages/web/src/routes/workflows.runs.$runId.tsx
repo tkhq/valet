@@ -23,9 +23,9 @@ import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
 
 /**
- * `/workflows/runs/$runId` — the settled run's result first, then the canvas,
- * pending-gate cards and the checkpoint list, with a status header and Cancel
- * button (plan decision 19). Polls every 5s via `useRunDetail` (stops once
+ * `/workflows/runs/$runId` — the settled run's result first, then
+ * pending gates and expandable steps. The diagram is optional.
+ * Polls every 5s via `useRunDetail` (stops once
  * `run.status === 'settled'`).
  */
 export const Route = createFileRoute("/workflows/runs/$runId")({
@@ -103,13 +103,19 @@ export function RunDetailBody({
 }: RunDetailBodyProps) {
   // Cancel stops a run part-way and cannot be undone, so it asks first.
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [diagramOpen, setDiagramOpen] = useState(false);
   const { run, checkpoints } = data;
   const pendingGates = data.pendingGates ?? [];
   const needsApproval = runNeedsApproval(run, pendingGates);
   const nonTerminal = run.status !== "settled";
   const retryable =
     run.status === "settled" && (run.outcome === "failed" || run.outcome === "cancelled");
+  const definition = isWorkflowDefinitionShape(run.definition) ? run.definition : undefined;
+  const nodeOrder = definition?.nodes.flatMap((node) => node.type === "foreach" ? [node.id, node.body.id] : [node.id]);
   const nodeStatuses = statusByNodeId(run, checkpoints);
+  const activeSteps = Object.entries(nodeStatuses.status)
+    .filter(([, status]) => status === "running" || status === "waiting")
+    .map(([id]) => id);
   // The answer the person came for. Present only once the run has settled.
   const result = deriveRunResult(run, checkpoints);
   const duration = formatRunDuration(run.createdAt, run.updatedAt);
@@ -184,16 +190,13 @@ export function RunDetailBody({
           {/* `updatedAt` is the last write, not the current time. It gives a
               true duration only after the run stops writing. */}
           {run.status === "settled" && duration && ` · Ran for ${duration}`}
-          {` · ${checkpoints.length} ${checkpoints.length === 1 ? "checkpoint" : "checkpoints"}`}
+          {` · ${checkpoints.length} ${checkpoints.length === 1 ? "step" : "steps"}`}
         </p>
 
-        {isWorkflowDefinitionShape(run.definition) && (
-          <WorkflowPreview
-            definition={run.definition}
-            statusByNodeId={nodeStatuses.status}
-            badgeByNodeId={nodeStatuses.badges}
-            height={320}
-          />
+        {nonTerminal && activeSteps.length > 0 && (
+          <p role="status" className="text-sm text-ink">
+            {run.status === "parked" ? "Waiting at: " : "Running: "}{activeSteps.join(", ")}
+          </p>
         )}
 
         {/* Render ALL pending gates — approval gates first, then policy gates */}
@@ -220,10 +223,18 @@ export function RunDetailBody({
 
         <div>
           <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
-            Checkpoints
+            Steps
           </h2>
-          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} />
+          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} />
         </div>
+        {definition && (
+          <details onToggle={(event) => setDiagramOpen(event.currentTarget.open)}>
+            <summary className="min-h-11 cursor-pointer py-3 text-sm text-muted hover:text-ink">Workflow diagram</summary>
+            {diagramOpen && (
+              <WorkflowPreview definition={definition} statusByNodeId={nodeStatuses.status} badgeByNodeId={nodeStatuses.badges} height={320} />
+            )}
+          </details>
+        )}
       </div>
     </>
   );
