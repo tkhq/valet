@@ -28,6 +28,22 @@ describe("bundled model catalog", () => {
     });
   });
 
+  it("includes GPT-6.1 Sol and resolves the retired Sol model", () => {
+    expect(bundledModel("openai", "gpt-6.1-sol")).toMatchObject({
+      id: "gpt-6.1-sol",
+      name: "GPT-6.1 Sol",
+      api: "openai-responses",
+      provider: "openai",
+      contextWindow: 272_000,
+      maxTokens: 128_000,
+    });
+    expect(bundledModels("openai").map((model) => model.id)).not.toContain("gpt-5.6-sol");
+    expect(bundledModel("openai", "gpt-5.6-sol")).toMatchObject({
+      id: "gpt-5.6-sol",
+      name: "GPT-5.6 Sol",
+    });
+  });
+
   it("includes Astra with the Responses capabilities and tiered prices", () => {
     const astra = bundledModel("openai", "gpt-6-astra");
     expect(astra).toMatchObject({

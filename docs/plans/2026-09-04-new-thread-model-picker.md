@@ -321,13 +321,13 @@ git commit -m "feat: configure new-thread model behavior"
 Test a helper that scans tier targets in order and returns the first active catalog model, including bare and provider-qualified matches. Test a shared selected-value label that shows that model's name and falls back to the tier label only when no target resolves.
 
 ```ts
-expect(resolveTierModel("l", tierMap, models)?.name).toBe("GPT-5.6 Sol");
-expect(selectionLabel("l", tierMap, models)).toBe("GPT-5.6 Sol");
+expect(resolveTierModel("l", tierMap, models)?.name).toBe("GPT-6.1 Sol");
+expect(selectionLabel("l", tierMap, models)).toBe("GPT-6.1 Sol");
 ```
 
 - [ ] **Step 2: Add failing component tests**
 
-For both picker components, set the selected value to `l` and assert the closed control says `GPT-5.6 Sol`. For the chat picker, assert the thinking suffix remains separate, for example `GPT-5.6 Sol · medium`. Open each control and assert that its tier row still says `Large` with the concrete model as helper text.
+For both picker components, set the selected value to `l` and assert the closed control says `GPT-6.1 Sol`. For the chat picker, assert the thinking suffix remains separate, for example `GPT-6.1 Sol · medium`. Open each control and assert that its tier row still says `Large` with the concrete model as helper text.
 
 - [ ] **Step 3: Run the focused tests and verify failure**
 

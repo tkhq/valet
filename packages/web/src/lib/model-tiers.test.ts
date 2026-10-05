@@ -104,8 +104,8 @@ describe("resolved tier selections", () => {
       approved: true,
     },
     {
-      id: "openai/gpt-5.6-sol",
-      name: "GPT-5.6 Sol",
+      id: "openai/gpt-6.1-sol",
+      name: "GPT-6.1 Sol",
       providerId: "openai",
       providerKind: "openai",
       providerName: "OpenAI",
@@ -117,20 +117,20 @@ describe("resolved tier selections", () => {
     xs: [],
     s: [],
     m: [],
-    l: ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol"],
+    l: ["openai/gpt-5.6-luna", "openai/gpt-6.1-sol"],
     xl: [],
   };
 
   it("uses the first active configured target", () => {
-    expect(resolveTierModel("l", tierMap, models)?.name).toBe("GPT-5.6 Sol");
+    expect(resolveTierModel("l", tierMap, models)?.name).toBe("GPT-6.1 Sol");
   });
 
   it("shows a concrete model name for a selected tier", () => {
-    expect(selectionLabel("l", tierMap, models)).toBe("GPT-5.6 Sol");
+    expect(selectionLabel("l", tierMap, models)).toBe("GPT-6.1 Sol");
   });
 
   it("shows the catalog name for a selected concrete model", () => {
-    expect(selectionLabel("openai/gpt-5.6-sol", tierMap, models)).toBe("GPT-5.6 Sol");
+    expect(selectionLabel("openai/gpt-6.1-sol", tierMap, models)).toBe("GPT-6.1 Sol");
   });
 
   it("falls back to the tier label when no target resolves", () => {

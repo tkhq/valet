@@ -193,6 +193,29 @@ describe("ModelRegistry", () => {
     expect(registry.getModel("anthropic", "claude-brand-new")?.name).toBe("Claude Brand New");
   });
 
+  it("hides retired models from catalogs but resolves them for persisted references", async () => {
+    const retired = validModel({
+      id: "gpt-5.6-sol",
+      name: "GPT-5.6 Sol",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+    });
+    const current = { ...retired, id: "gpt-current" };
+    fetchMock.mockImplementation(async (url: string) => jsonResponse(
+      url.endsWith("/openai.json")
+        ? { "openai-responses": { [retired.id]: retired, [current.id]: current } }
+        : {},
+    ));
+
+    const registry = new ModelRegistry(db);
+    await registry.refresh();
+
+    expect(registry.listModels("openai").map((model) => model.id)).toContain(current.id);
+    expect(registry.listModels("openai").map((model) => model.id)).not.toContain(retired.id);
+    expect(registry.getModel("openai", retired.id)).toMatchObject({ id: retired.id, name: retired.name });
+  });
+
   it("lets the runtime catalog override supplemental Astra metadata", async () => {
     const registry = new ModelRegistry(db);
     const bundled = registry.getModel("openai", "gpt-6-astra");
@@ -375,6 +398,23 @@ describe("ModelRegistry", () => {
       expect(model?.api).toBe("anthropic-messages");
       expect(model?.contextWindow).toBe(1_000_000);
       expect(model?.maxTokens).toBe(128_000);
+    });
+
+    it("serves GPT-6.1 Sol and resolves hidden GPT-5.6 Sol", () => {
+      setModelRegistry(null);
+      const model = registryModelById("openai", "gpt-6.1-sol");
+      expect(registryModels("openai").map((entry) => entry.id)).toContain("gpt-6.1-sol");
+      expect(registryModelById("openai", "gpt-5.6-sol")).toMatchObject({
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+      });
+      expect(model).toMatchObject({
+        name: "GPT-6.1 Sol",
+        api: "openai-responses",
+        provider: "openai",
+        contextWindow: 272_000,
+        maxTokens: 128_000,
+      });
     });
 
     it("serves GPT-6 Astra with exact upstream metadata", () => {

@@ -284,8 +284,8 @@ describe("ModelPicker — Size tier group", () => {
     modelsData = {
       models: [
         {
-          id: "openai/gpt-5.6-sol",
-          name: "GPT-5.6 Sol",
+          id: "openai/gpt-6.1-sol",
+          name: "GPT-6.1 Sol",
           providerId: "openai",
           providerKind: "openai",
           providerName: "OpenAI",
@@ -294,10 +294,10 @@ describe("ModelPicker — Size tier group", () => {
         },
       ],
     };
-    tierMapData = { xs: [], s: [], m: [], l: ["openai/gpt-5.6-sol"], xl: [] };
+    tierMapData = { xs: [], s: [], m: [], l: ["openai/gpt-6.1-sol"], xl: [] };
     renderPicker({ currentId: "l", currentReasoning: "medium" });
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
-      "GPT-5.6 Sol · Medium",
+      "GPT-6.1 Sol · Medium",
     );
   });
 });

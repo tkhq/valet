@@ -56,11 +56,16 @@ import {
   type Model,
   type MutableModels,
 } from "@earendil-works/pi-ai";
-import { bundledModel, bundledModels } from "@valet/engine/model-catalog";
+import { bundledModel, bundledModels, isCatalogModel } from "@valet/engine/model-catalog";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { PgModelsStore } from "./models-store-pg.js";
-import { parseLastModified, parseRemoteCatalog, type RegistryModel } from "./model-registry-parse.js";
+import {
+  isRegistryModel,
+  parseLastModified,
+  parseRemoteCatalog,
+  type RegistryModel,
+} from "./model-registry-parse.js";
 
 /** The providers Valet reads a catalog for. These are exactly the kinds the
  * org catalog and the resolver understand (`services/model-catalog.ts`'s
@@ -111,6 +116,7 @@ export interface ModelRegistryStatus {
   remoteEnabled: boolean;
   providers: ModelRegistryProviderStatus[];
 }
+
 
 interface ProviderState {
   lastError: string | null;
@@ -185,7 +191,13 @@ export class ModelRegistry {
   ): Promise<RegistryModel[]> {
     const state = this.state.get(providerId);
     const stored = await this.store.read(providerId);
-    const keepStored = (): RegistryModel[] => (stored ? [...stored.models] : []);
+    const keepStored = (): RegistryModel[] => (
+      stored
+        ? stored.models.filter(
+            (model): model is RegistryModel => isRegistryModel(model) && isCatalogModel(providerId, model.id),
+          )
+        : []
+    );
 
     const base = modelRegistryUrl();
     if (!base) return keepStored();
@@ -218,7 +230,9 @@ export class ModelRegistry {
         return keepStored();
       }
 
-      const parsed = parseRemoteCatalog(providerId, await res.json());
+      const parsed = parseRemoteCatalog(providerId, await res.json()).filter((model) =>
+      isCatalogModel(providerId, model.id),
+    );
       if (parsed.length === 0) {
         this.recordError(providerId, "upstream catalog held no readable models");
         return keepStored();
@@ -256,11 +270,16 @@ export class ModelRegistry {
    * landed, bundled otherwise. Never empty for a registry provider. */
   listModels(providerId: RegistryProvider): RegistryModel[] {
     const live = this.models.getModels(providerId);
-    return live.length > 0 ? [...live] : bundledModels(providerId);
+    return live.length > 0
+      ? live.filter((model) => isCatalogModel(providerId, model.id))
+      : bundledModels(providerId);
   }
 
-  /** One model by provider and WIRE id, or undefined when the provider does
-   * not know it. Replaces the deprecated `getModel` compat read. */
+  /**
+   * One model by provider and wire id, or undefined when the provider does
+   * not know it. This lookup deliberately bypasses catalog visibility so a
+   * persisted session or default can keep using a retired model.
+   */
   getModel(providerId: RegistryProvider, modelId: string): Model<Api> | undefined {
     return this.models.getModel(providerId, modelId) ?? bundledModel(providerId, modelId);
   }

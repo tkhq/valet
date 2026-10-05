@@ -154,8 +154,8 @@ describe("ModelCombobox — Size tier group", () => {
     modelsData = {
       models: [
         {
-          id: "openai/gpt-5.6-sol",
-          name: "GPT-5.6 Sol",
+          id: "openai/gpt-6.1-sol",
+          name: "GPT-6.1 Sol",
           providerId: "openai",
           providerKind: "openai",
           providerName: "OpenAI",
@@ -164,9 +164,9 @@ describe("ModelCombobox — Size tier group", () => {
         },
       ],
     };
-    tierMapData = { xs: [], s: [], m: [], l: ["openai/gpt-5.6-sol"], xl: [] };
+    tierMapData = { xs: [], s: [], m: [], l: ["openai/gpt-6.1-sol"], xl: [] };
     render(<ModelCombobox value="l" onSelect={vi.fn()} onClear={vi.fn()} />);
-    expect(screen.getByDisplayValue("GPT-5.6 Sol")).toBeTruthy();
+    expect(screen.getByDisplayValue("GPT-6.1 Sol")).toBeTruthy();
     expect(screen.queryByText(/isn't in the current model registry/)).toBeNull();
   });
 });
