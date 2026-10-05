@@ -176,3 +176,25 @@ describe("question keyboard confirmation", () => {
     expect(resolveMutateAsync).not.toHaveBeenCalled();
   });
 });
+
+
+describe("DecisionGateCard — recovery", () => {
+  it.each(["Approve once", "Cancel and dismiss"])("shows failure for %s", async (label) => {
+    const mutation = label === "Approve once" ? resolveMutateAsync : withdrawMutateAsync;
+    mutation.mockRejectedValueOnce(new Error("Connection lost"));
+    renderCard();
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Connection lost");
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("preserves a typed answer when submission fails", async () => {
+    resolveMutateAsync.mockRejectedValueOnce(new Error("Connection lost"));
+    renderCard(gate({ type: "question", actions: [] }));
+    await userEvent.type(screen.getByRole("textbox"), "Keep the linked-account requirement");
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Connection lost");
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep the linked-account requirement");
+  });
+});

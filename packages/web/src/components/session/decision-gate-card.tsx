@@ -18,6 +18,7 @@ import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
 import { useMe } from "~/api/settings";
 import { formatChord } from "~/lib/chat-keybindings";
 import { cn } from "~/lib/cn";
+import { errorText } from "~/lib/error-text";
 
 // The gate action id the policy resolver offers on a `require_approval`
 // decision that grants an org-wide `allow` policy going forward — the API
@@ -40,35 +41,39 @@ export function DecisionGateCard({
   const meQ = useMe();
   const isAdmin = meQ.data?.orgRole === "admin";
   const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   const busy = resolve.isPending || withdraw.isPending;
 
   async function pickAction(actionId: string) {
     if (busy) return;
+    setError(null);
     try {
       await resolve.mutateAsync({ gateId: gate.id, body: { actionId } });
     } catch (err) {
-      console.error("resolve gate failed:", err);
+      setError(errorText(err));
     }
   }
 
   async function submitValue() {
     const v = value.trim();
     if (!v || busy) return;
+    setError(null);
     try {
       await resolve.mutateAsync({ gateId: gate.id, body: { value: v } });
       setValue("");
     } catch (err) {
-      console.error("resolve gate (value) failed:", err);
+      setError(errorText(err));
     }
   }
 
   async function cancel() {
     if (busy) return;
+    setError(null);
     try {
       await withdraw.mutateAsync({ gateId: gate.id });
     } catch (err) {
-      console.error("withdraw gate failed:", err);
+      setError(errorText(err));
     }
   }
 
@@ -107,6 +112,8 @@ export function DecisionGateCard({
           <X aria-hidden className="h-3.5 w-3.5" />
         </Button>
       </header>
+
+      {error && <p role="alert" className="px-3.5 py-2 text-sm text-danger-600">{error}</p>}
 
       {gate.body && (
         <div className="pl-10 pr-3.5 pb-2 text-sm text-muted whitespace-pre-wrap">

@@ -105,11 +105,11 @@ function renderComposer(
   queuedItemCount = queuedMessages.length,
 ) {
   const queryClient = new QueryClient();
-  const tree = (status: "idle" | "streaming") => (
+  const tree = (status: "idle" | "streaming", threadId = "thread-1") => (
     <QueryClientProvider client={queryClient}>
       <Composer
         sessionId="orchestrator:user-1"
-        threadId="thread-1"
+        threadId={threadId}
         agentStatus={status}
         queuedMessages={queuedMessages}
         queuedItemCount={queuedItemCount}
@@ -118,7 +118,7 @@ function renderComposer(
   );
   const view = render(tree(agentStatus));
   return Object.assign(view, {
-    rerenderComposer: (status: "idle" | "streaming" = agentStatus) => view.rerender(tree(status)),
+    rerenderComposer: (status: "idle" | "streaming" = agentStatus, threadId = "thread-1") => view.rerender(tree(status, threadId)),
   });
 }
 
@@ -329,6 +329,16 @@ describe("Composer — stop button", () => {
     expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", targetItemId: "q-0" });
   });
 
+  it("shows a failed Stop request and allows retry", async () => {
+    queueStateRef.current = queueState("followup");
+    abortMutateAsync.mockRejectedValueOnce(new Error("connection lost"));
+    renderComposer("streaming");
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    expect((await screen.findByRole("alert")).textContent).toContain("connection lost");
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
   // The reload-mid-tool case: the live `status` events were missed (the
   // client connected after they fired), so `agentStatus` still reads idle,
   // but the durable queue state says a submission is running. The Stop
@@ -428,6 +438,26 @@ describe("Composer — Escape interrupts the running turn", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(abortMutate).toHaveBeenCalledTimes(1);
     expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1", targetItemId: "q-0" });
+  });
+
+  it("shows a failed Escape interrupt", () => {
+    queueStateRef.current = queueState("followup");
+    renderComposer("streaming");
+    fireEvent.keyDown(window, { key: "Escape" });
+    act(() => abortMutate.mock.calls[0][1].onError(new Error("connection lost")));
+    expect(screen.getByRole("alert").textContent).toContain("connection lost");
+  });
+
+  it("keeps a delayed interrupt failure with its original thread", () => {
+    queueStateRef.current = queueState("followup");
+    const view = renderComposer("streaming");
+    fireEvent.keyDown(window, { key: "Escape" });
+    const reject = abortMutate.mock.calls[0][1].onError;
+    view.rerenderComposer("idle", "thread-2");
+    act(() => reject(new Error("Thread one connection lost")));
+    expect(screen.queryByRole("alert")).toBeNull();
+    view.rerenderComposer("streaming", "thread-1");
+    expect(screen.getByRole("alert").textContent).toContain("Thread one connection lost");
   });
 
   it("does nothing on Escape while idle", () => {

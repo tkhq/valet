@@ -287,7 +287,12 @@ export function Composer({
   // Item ids we have seen in `pendingIds`. Used so a lagging queue.state
   // (empty pending after POST) does not disarm Steer before the item lands.
   const followupSeenPendingRef = useRef<Record<string, string>>({});
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitErrors, setSubmitErrors] = useState<Record<string, string | null>>({});
+  const submitError = submitErrors[key] ?? null;
+  // Async responses belong to the thread where the request started.
+  const setSubmitError = useCallback((error: string | null) => {
+    setSubmitErrors((current) => ({ ...current, [key]: error }));
+  }, [key]);
   const [promotingItemId, setPromotingItemId] = useState<string | null>(null);
   const unresolvedQueuedCount = Math.max(0, queuedItemCount - queuedMessages.length);
 
@@ -648,9 +653,10 @@ export function Composer({
     const targetItemId = queueState?.activeItemId;
     if (!threadId || !targetItemId || abort.isPending) return;
     try {
+      setSubmitError(null);
       await abort.mutateAsync({ threadId, targetItemId });
     } catch (err) {
-      console.error("abort failed:", err);
+      setSubmitError(apiErrorDetail(err, "Could not stop the agent. Try Stop again."));
     }
   }
 
@@ -678,14 +684,15 @@ export function Composer({
       const targetItemId = queueState?.activeItemId;
       if (!working || !threadId || !targetItemId || abortPending) return;
       e.preventDefault();
+      setSubmitError(null);
       abortMutate(
         { threadId, targetItemId },
-        { onError: (err) => console.error("abort failed:", err) },
+        { onError: (err) => setSubmitError(apiErrorDetail(err, "Could not stop the agent. Try Stop again.")) },
       );
     }
     window.addEventListener("keydown", onEscape);
     return () => window.removeEventListener("keydown", onEscape);
-  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate]);
+  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {
