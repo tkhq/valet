@@ -517,3 +517,14 @@ It does not admit a second queue item. The original submission settles only
 after this continuation ends. A stale fenced prompt append stops the
 continuation before another model call. A child watcher therefore cannot report
 `child.settled` at the compaction boundary.
+
+
+### October 5: model selection feedback
+
+The header shows a pending model selection from the mutation variables. It labels the save as pending and disables duplicate submissions.
+A failed save shows the error and restores the saved selection. Pending selections and errors belong to their selected thread.
+An active submission keeps its actual model after the save; the configured pin controls later submissions.
+
+The thread PATCH response updates only the model field in cached thread lists. It preserves newer titles and activity fields.
+The model-switch event refreshes only the exact session and thread-list queries. It does not refetch transcripts or decisions.
+No permissions, provider validation, or running-submission model behavior changes.

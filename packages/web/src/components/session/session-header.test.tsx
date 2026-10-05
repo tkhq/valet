@@ -17,6 +17,9 @@ import { useStreamStore } from "~/stores/stream";
 const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const setModelMutate = vi.fn();
 const setThreadModelMutate = vi.fn();
+let threadModelPending = false;
+let threadModelVariables: { threadId: string; model: string | null } | undefined;
+let threadModelError: Error | null = null;
 const setReasoningMutate = vi.fn();
 const setThreadReasoningMutate = vi.fn();
 /** Threads for the header's thread-scoped model picker. Empty by default:
@@ -61,7 +64,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     ...actual,
     useDeleteSession: () => ({ isPending: false, mutateAsync: deleteMutateAsync }),
     useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
-    useSetThreadModel: () => ({ isPending: false, mutate: setThreadModelMutate }),
+    useSetThreadModel: () => ({ isPending: threadModelPending, variables: threadModelVariables, error: threadModelError, mutate: setThreadModelMutate }),
     useSetSessionReasoning: () => ({ isPending: false, mutate: setReasoningMutate }),
     useSetThreadReasoning: () => ({ isPending: false, mutate: setThreadReasoningMutate }),
     useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
@@ -164,6 +167,9 @@ beforeEach(() => {
   sessionRating = null;
   setModelMutate.mockClear();
   setThreadModelMutate.mockClear();
+  threadModelPending = false;
+  threadModelVariables = undefined;
+  threadModelError = null;
   setReasoningMutate.mockClear();
   setThreadReasoningMutate.mockClear();
   headerThreads = [];
@@ -188,6 +194,36 @@ describe("SandboxChip — suspended state", () => {
 });
 
 describe("SessionHeader — thread-scoped model picker", () => {
+  it("shows a pending selection immediately without changing the saved pin", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "s" }];
+    threadModelPending = true;
+    threadModelVariables = { threadId: "th-1", model: "claude-opus-4-7" };
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Opus 4.7");
+    expect(screen.getByRole("status").textContent).toContain("Saving model");
+    expect(headerThreads[0]?.model).toBe("s");
+  });
+
+  it("does not show another thread's pending selection or error", () => {
+    headerThreads = [{ id: "th-2", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" }];
+    threadModelPending = true;
+    threadModelVariables = { threadId: "th-1", model: "claude-opus-4-7" };
+    threadModelError = new Error("Model unavailable. Choose another model.");
+    renderHeader(undefined, "th-2");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Sonnet");
+    expect(screen.queryByText(/Saving model/)).toBeNull();
+    expect(screen.queryByText(/Model unavailable/)).toBeNull();
+  });
+
+  it("shows a rejected switch and retains the saved selection", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" }];
+    threadModelVariables = { threadId: "th-1", model: "claude-opus-4-7" };
+    threadModelError = new Error("Model unavailable. Choose another model.");
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Sonnet");
+    expect(screen.getByRole("alert").textContent).toContain("Model unavailable. Choose another model.");
+  });
+
   it("shows the selected thread's active submission model", () => {
     headerThreads = [
       { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" },

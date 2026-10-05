@@ -281,10 +281,19 @@ export function useSetThreadModel(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; model: string | null }>({
     mutationFn: ({ threadId, model }) => api.patchThread(threadId, { model }),
-    onSuccess: () => {
-      // Thread PATCH touches only the thread row; the session detail (and
-      // its default model) is unchanged — no session invalidation.
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+    onSuccess: async (saved) => {
+      // A GET started before the save must not overwrite its confirmed pin.
+      await qc.cancelQueries({ queryKey: qk.threads(sessionId) });
+      // PATCH confirms the pin. Update only that field so newer activity
+      // and title updates survive a slower model save.
+      qc.setQueriesData<ListThreadsResponse>(
+        { queryKey: qk.threads(sessionId) },
+        (current) => current && ({
+          ...current,
+          threads: current.threads.map((thread) =>
+            thread.id === saved.id ? { ...thread, model: saved.model } : thread),
+        }),
+      );
     },
   });
 }

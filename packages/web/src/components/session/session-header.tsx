@@ -123,7 +123,17 @@ export function SessionHeader({
   const activeThread = threads.data?.threads.find((t) => t.id === threadId);
   const threadScoped = threadId !== undefined;
   const modelConfigurationResolved = !threadScoped || activeThread !== undefined;
-  const configuredModel = activeThread ? (activeThread.model ?? session.model) : session.model;
+  const modelSaving = threadScoped
+    ? setThreadModel.isPending && setThreadModel.variables?.threadId === threadId
+    : setModel.isPending;
+  const pendingModel = threadScoped ? setThreadModel.variables?.model : setModel.variables;
+  const savedModel = activeThread ? (activeThread.model ?? session.model) : session.model;
+  // Mutation variables give immediate feedback without claiming the pin
+  // was saved. A rejected write leaves the query cache unchanged.
+  const configuredModel = modelSaving ? (pendingModel ?? session.model) : savedModel;
+  const modelSaveError = threadScoped
+    ? (setThreadModel.variables?.threadId === threadId ? setThreadModel.error : null)
+    : setModel.error;
   const configuredReasoning = activeThread
     ? (activeThread.reasoning ?? session.reasoning)
     : session.reasoning;
@@ -386,7 +396,7 @@ export function SessionHeader({
             <span className="min-w-0">
               <ModelPicker
                 currentId={configuredModel}
-                displayId={activeModel ?? configuredModel}
+                displayId={modelSaving ? configuredModel : (activeModel ?? configuredModel)}
                 ariaDescription={modelHint}
                 onSelect={(id) => {
                   if (threadScoped) {
@@ -415,6 +425,9 @@ export function SessionHeader({
               />
             </span>
           </Tooltip>
+        )}
+        {modelSaving && (
+          <span role="status" className="text-xs text-neutral-500">Saving model…</span>
         )}
         <div className="hidden sm:contents">
           <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
@@ -512,6 +525,11 @@ export function SessionHeader({
         </DropdownMenu>
         {summaryControl}
       </div>
+      {modelSaveError && (
+        <p role="alert" className="basis-full min-w-0 break-words text-xs text-danger-500">
+          {extractActionError(modelSaveError, "Could not save the model. Choose a model and try again.")}
+        </p>
+      )}
       {actionError && <p role="alert" className="basis-full min-w-0 break-words text-xs text-danger-500">{actionError}</p>}
       {moving && (
         <MoveSessionDialog
