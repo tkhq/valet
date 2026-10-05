@@ -834,7 +834,7 @@ sessionsRouter.post("/", async (c) => {
     try {
       queuedPrompt =
         (await submitSessionPrompt(c.var.providers, created, firstPrompt, {
-          author: promptAuthorFromUser(c.var.user),
+          author: promptAuthorFromUser(c.var.user, c.var.principal),
         })) !== null;
     } catch (err) {
       console.error(`session ${id}: initialPrompt enqueue failed:`, err);

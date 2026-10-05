@@ -148,6 +148,7 @@ describe("EngineHost session 1Password credential resolution", () => {
     });
     expect((await session.credentialProvider().get("acme-service"))?.accessToken).toBe("member-key");
     expect(await session.credentialProvider({ externalSender: true }).get("acme-service")).toBeNull();
+    expect(await session.credentialProvider({ actorId: "team:team-actor" }).get("acme-service")).toBeNull();
   });
 
   it("non-1Password row passes through byte-identical (the exact object the store returned, unmodified)", async () => {

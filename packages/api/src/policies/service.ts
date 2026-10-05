@@ -41,6 +41,7 @@ import { canBorrowCredential, writeBorrowGrant } from "../services/credential-bo
 import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
 import { membersSharing } from "../services/credential-shares.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import { isTeamMember } from "../services/teams.js";
 import { isOrgAdmin } from "../services/org.js";
 import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
@@ -679,6 +680,9 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       // Another member's account: they answer, and nobody else can.
       const approver = await sharedAccountApprover(input);
       if (approver) {
+        if (!input.externalSender && (!input.userId || !input.teamId || !await isTeamMember(deps.db, input.teamId, input.userId))) {
+          return { mode: "deny", provenance: { ...decision.provenance, source: "shared_account" } };
+        }
         return { mode: "require_approval", provenance: { ...decision.provenance, source: "shared_account" }, approver };
       }
       if (decision.mode !== "require_approval") return decision;

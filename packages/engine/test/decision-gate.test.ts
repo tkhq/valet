@@ -160,6 +160,38 @@ describe("decision gates: sender with no Valet account", () => {
   });
 });
 
+describe("tool actor identity", () => {
+  it.each(["orchestrator", "workflow", "child"] as const)("aligns policy and credentials for an authorless %s turn", async (purpose) => {
+    const faux = registerFauxProvider({ provider: `actor-${purpose}` });
+    const actors: string[] = [];
+    const credentialActors: (string | undefined)[] = [];
+    const tool: ToolDef = {
+      name: "inspect_actor", description: "Inspect the acting identity.", parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        actors.push(ctx.userId);
+        await ctx.credentials.get("linear");
+        return { text: "checked" };
+      },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("inspect_actor", {}, { id: "actor-check" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "runtime-creator", orgId: "o1", owner: { type: "team", id: "t1" }, purpose,
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+      credentialResolver: async (_owner, _service, use) => { credentialActors.push(use.actorId); return null; },
+    });
+    await session.prompt("inspect", {});
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+    const expected = purpose === "orchestrator" ? "team:t1" : "runtime-creator";
+    expect(actors).toEqual([expected]);
+    expect(credentialActors).toEqual([expected]);
+    faux.unregister();
+  });
+});
+
 describe("tools on a turn from a sender with no Valet account", () => {
   it("refuses a tool that acts as the workspace, and runs it for a member", async () => {
     const faux = registerFauxProvider({ provider: "external-sender-tools" });

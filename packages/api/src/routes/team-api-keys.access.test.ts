@@ -6,7 +6,7 @@
  * session-scoped surface is pinned here against one personal and one team
  * session minted by the same admin.
  */
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -126,6 +126,18 @@ function openWs(
 }
 
 describe("team API key reach", () => {
+  it("stamps key prompts as the team rather than the minting admin", async () => {
+    const f = await bootFixture();
+    const store = api!.providers.engineStore;
+    const save = vi.spyOn(store, "admitSubmission");
+    const response = await fetch(`${f.baseUrl}/api/sessions/${f.teamSessionId}/messages`, {
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": f.teamKey },
+      body: JSON.stringify({ text: "Inspect this workspace" }),
+    });
+    expect(response.status).toBe(202);
+    expect(save.mock.calls[0]?.[2].author).toEqual({ id: `team:${f.teamId}`, name: "Team API key" });
+  });
+
   it("reads its team's session and 404s the admin's personal session", async () => {
     const f = await bootFixture();
     const headers = { "x-api-key": f.teamKey };

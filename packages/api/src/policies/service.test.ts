@@ -527,7 +527,8 @@ describe("another member's shared account", () => {
     // The member's approval holds for this conversation.
     await resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 1 });
     expect((await resolver.resolve(input)).approver).toBeUndefined();
-    expect((await resolver.resolve({ ...input, userId: "outsider" })).approver).toEqual({ userId: MEMBER, name: "Member" });
+    expect(await resolver.resolve({ ...input, userId: "outsider" })).toMatchObject({ mode: "deny", provenance: { source: "shared_account" } });
+    expect(await resolver.resolve({ ...input, userId: `team:${TEAM}` })).toMatchObject({ mode: "deny" });
     // A Slack sender with no Valet account in the same thread does not ride it.
     expect((await resolver.resolve({ ...input, externalSender: true })).approver).toEqual({ userId: MEMBER, name: "Member" });
     expect((await resolver.resolve({ ...input, threadId: "thread-2" })).approver).toEqual({ userId: MEMBER, name: "Member" });

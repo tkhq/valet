@@ -4958,12 +4958,15 @@ export class Thread {
     const { signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
+    const actorId = this.runningItem?.author?.id
+      ?? (session.owner.type === "team" && session.options.purpose !== "workflow" && session.options.purpose !== "child"
+        ? `team:${session.owner.id}` : session.options.userId);
     const origin =
       runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
     return {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
-      userId: this.runningItem?.author?.id ?? session.options.userId,
+      userId: actorId,
       ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,
@@ -4973,7 +4976,7 @@ export class Thread {
       // The turn's author picks whose account a team read uses first. A
       // channel sender with no Valet account acts for nobody.
       credentials: session.credentialProvider({
-        ...(this.runningItem?.author && !this.runningItem.author.externalSender ? { actorId: this.runningItem.author.id } : {}),
+        ...(!this.runningItem?.author?.externalSender ? { actorId } : {}),
         ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
         threadId: this.id,
       }),
