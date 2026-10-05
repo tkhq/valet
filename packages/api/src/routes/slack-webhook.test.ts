@@ -8,11 +8,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, teams, orgMembers, teamMembers, userIdentityLinks } from "../schema/index.js";
-import { __resetSlackWebhookThrottle } from "./slack-webhook.js";
+import { slackWebhookInbox, eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, teams, orgMembers, teamMembers, userIdentityLinks } from "../schema/index.js";
+import { drainSlackIngress, configureSlackIngress, __resetSlackWebhookThrottle } from "./slack-webhook.js";
 import { __resetIngestDropThrottle } from "../events/ingest.js";
 import * as ingestModule from "../events/ingest.js";
 import * as followRouter from "../channels/follow-router.js";
@@ -845,6 +845,7 @@ describe("POST /api/channels/slack/webhook", () => {
     });
     const body = envelope(appMention(), "Ev-team-member");
     expect((await post(a.baseUrl, body, sign(body))).status).toBe(200);
+    await drainSlackIngress(a.providers);
     await expect.poll(() => deliveryCount(a, "Ev-team-member"), { timeout: 5_000 }).toBe(1);
     expect(await a.providers.engineCredentials.get({ type: "team", id: "team-mention" }, "slack")).toBeNull();
   });
@@ -972,7 +973,62 @@ describe("Slack receipt diagnostics", () => {
     expect(JSON.stringify(receipt.stages)).toMatch(/bot identity/i);
   });
 
-  it("acknowledges before the receipt write settles", async () => {
+  it("recovers accepted encrypted requests without a live request handler", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+    const nudge = vi.spyOn(api.providers.eventDispatcher, "nudge").mockImplementation(() => {});
+    const body = envelope({ ...humanChannelMessage(), text: secretBody }, "Ev-durable-recovery");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    expect(await eventCount(api, "Ev-durable-recovery")).toBe(0);
+    const stored = await api.providers.db.select().from(slackWebhookInbox);
+    expect(stored).toHaveLength(1);
+    expect(JSON.stringify(stored)).not.toContain(secretBody);
+    expect(JSON.stringify(stored)).not.toContain(SECRET);
+    // Duplicate transport deliveries share the pending request.
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    expect(await api.providers.db.select().from(slackWebhookInbox)).toHaveLength(1);
+    nudge.mockRestore();
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token", accessToken: "xoxb-test-token", metadata: { webhookSecret: "rotated-secret", teamId: TEAM_ID, botUserId: "U0BOT", botId: "BVALET" },
+    });
+    configureSlackIngress(api.providers);
+    // Accepted requests remain valid after the network replay window.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10 * 60_000);
+    try { await api.providers.eventDispatcher.pollOnce(); } finally { clock.mockRestore(); }
+    expect(await eventCount(api, "Ev-durable-recovery")).toBe(1);
+    expect(await api.providers.db.select().from(slackWebhookInbox)).toEqual([]);
+  });
+
+  it("keeps accepted requests for retry when ingestion fails", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+    vi.spyOn(ingestModule, "ingestEvent").mockRejectedValueOnce(new Error("temporary ingestion failure"));
+    const body = envelope(humanChannelMessage(), "Ev-durable-retry");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(async () => JSON.stringify((await api!.providers.db.select().from(eventReceipts)).map(r => r.stages)))
+      .toContain("ingestion");
+    expect(await eventCount(api, "Ev-durable-retry")).toBe(0);
+    await api.providers.eventDispatcher.stop();
+    const stored = await api.providers.db.select().from(slackWebhookInbox);
+    expect(stored).toHaveLength(1);
+    await api.providers.db.update(slackWebhookInbox).set({ nextAttemptAt: 0 });
+    await drainSlackIngress(api.providers);
+    expect(await eventCount(api, "Ev-durable-retry")).toBe(1);
+    expect(await api.providers.db.select().from(slackWebhookInbox)).toEqual([]);
+  });
+
+  it("does not acknowledge when durable acceptance cannot be saved", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await api.providers.db.execute(sql`DROP TABLE slack_webhook_inbox`);
+    const body = envelope(humanChannelMessage(), "Ev-storage-failure");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(500);
+    expect(await eventCount(api, "Ev-storage-failure")).toBe(0);
+  });
+
+  it("persists acceptance before acknowledging while diagnostic receipts can wait", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
     await seedSubscription(api, ["slack.message"]);
@@ -983,6 +1039,7 @@ describe("Slack receipt diagnostics", () => {
     const body = envelope(humanChannelMessage(), "Ev-slow-receipt");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
     await expect.poll(() => receipt.mock.calls.length, { timeout: 5_000 }).toBe(1);
+    expect(await api.providers.db.select().from(slackWebhookInbox)).toHaveLength(1);
     release();
     // Let the post-ack fan-out finish before the next test boots.
     await expect.poll(() => eventCount(api!, "Ev-slow-receipt"), { timeout: 5_000 }).toBe(1);

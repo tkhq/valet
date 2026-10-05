@@ -3,9 +3,9 @@ import { workspaceSenderIdentity } from "../services/workspace-sender.js";
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
  * Phase 7 / spec decisions 4-6, 10). `handleUpdate` is the single entry
  * point both the poll loop (Task 8) and the webhook route feed normalized
- * `InboundChannelEvent`s through. It never throws (rule 7): callers can
+ * `InboundChannelEvent`s through. By default it contains errors: callers can
  * fire-and-forget it from a poll loop or an HTTP handler without a
- * try/catch of their own.
+ * try/catch of their own. Durable ingress opts into propagated errors.
  *
  * Outbound (gate prompts, message edits on `decision_gate_resolved`) is
  * Task 7's job — this file only records enough state (`recordGatePrompt`)
@@ -1303,11 +1303,13 @@ export class ChannelHost {
     await writeDropLog(this.deps.db, { orgId, reason, conversationKey, detail });
   }
 
-  async handleUpdate(channelType: string, event: InboundChannelEvent): Promise<void> {
+  async handleUpdate(channelType: string, event: InboundChannelEvent, propagateErrors = false): Promise<void> {
     try {
       await this.routeUpdate(channelType, event);
     } catch (err) {
+      this.seenDispatchIds.delete(event.dispatchId);
       console.error("[channels] update failed", err);
+      if (propagateErrors) throw err;
     }
   }
 
@@ -1460,6 +1462,15 @@ export class ChannelHost {
       orgId,
     });
 
+    const alreadyAdmitted = async () => {
+      const rows = await this.deps.db.execute(sql`SELECT id FROM engine_queue_items
+        WHERE session_id=${session.id} AND dispatch_id=${event.dispatchId} LIMIT 1`) as { rows: Array<{ id: string }> };
+      return rows.rows.length > 0;
+    };
+    // A restart may replay after admission but before inbox deletion. Do not
+    // download attachments again: their filenames or contents may have changed.
+    if (await alreadyAdmitted()) return;
+
     // Ask the transport for the thread key when it owns the mapping, so this
     // half and `channelThreadFor`'s inverse cannot drift apart. The default
     // below is the same derivation Telegram has always used.
@@ -1509,7 +1520,7 @@ export class ChannelHost {
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
     };
-    await thread.submitPrompt(
+    try { await thread.submitPrompt(
       content,
       {
         dispatchId: event.dispatchId,
@@ -1521,7 +1532,10 @@ export class ChannelHost {
         // channel turn from a web turn on the same bound thread (TKAI-323).
         channel: { channelType, channelId: event.conversationKey },
       },
-    );
+    ); } catch (err) {
+      // A concurrent consumer may have admitted the same authenticated delivery.
+      if (!(err instanceof ConflictError) || !await alreadyAdmitted()) throw err;
+    }
 
     // Bump lastActivityAt so a long-lived channel-bound session rises in
     // the session list when it receives a message (TKAI-341).

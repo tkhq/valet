@@ -2769,3 +2769,12 @@ export const workflowActionGrants = pgTable("workflow_action_grants", {
   grantedBy: text("granted_by").notNull(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (t) => [index("workflow_action_grants_workflow").on(t.orgId, t.workflowId)]);
+
+/** Verified Slack requests waiting for durable consumer delivery. Payloads are encrypted. */
+export const slackWebhookInbox = pgTable("slack_webhook_inbox", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+}, t => [index("slack_webhook_inbox_due").on(t.nextAttemptAt)]);

@@ -138,14 +138,18 @@ interface SubscriptionTarget {
 export class EventDispatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private draining = false;
+  private wakeRequested = false;
   private stopped = false;
+  private drainIngress?: () => Promise<void>;
+
+  setIngressDrain(drain: () => Promise<void>): void { this.drainIngress = drain; }
 
   constructor(private readonly deps: EventDispatcherDeps) {}
 
   start(): void {
     if (this.timer) return;
     this.stopped = false;
-    this.timer = setInterval(() => void this.pollOnce(), POLL_MS);
+    this.timer = setInterval(this.nudge, POLL_MS);
   }
 
   async stop(): Promise<void> {
@@ -158,6 +162,7 @@ export class EventDispatcher {
   /** In-process nudge from the ingest path. Arrow property so callers can pass it unbound. */
   nudge = (): void => {
     if (this.stopped) return;
+    if (this.draining) { this.wakeRequested = true; return; }
     void this.pollOnce().catch((err) => console.error("event dispatcher poll failed:", err));
   };
 
@@ -165,6 +170,7 @@ export class EventDispatcher {
     if (this.stopped || this.draining) return;
     this.draining = true;
     try {
+      await this.drainIngress?.();
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
       // next_attempt_at forward in the same statement that selects them.
@@ -194,6 +200,7 @@ export class EventDispatcher {
       }
     } finally {
       this.draining = false;
+      if (this.wakeRequested) { this.wakeRequested = false; this.nudge(); }
     }
   }
 

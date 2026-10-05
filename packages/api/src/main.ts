@@ -1,3 +1,4 @@
+import { configureSlackIngress } from "./routes/slack-webhook.js";
 /**
  * Node server boot.
  *
@@ -576,6 +577,7 @@ async function runBootChain(): Promise<void> {
   // Event dispatcher (event-system plan Task 6): begin the delivery drain loop
   // so pending/failed event_deliveries left over from a prior process (and
   // freshly-ingested ones between nudges) get delivered.
+  configureSlackIngress(providers);
   providers.eventDispatcher.start();
 
   // Repository content sync: re-reads every tracked repository on its own

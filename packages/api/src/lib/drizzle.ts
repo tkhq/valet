@@ -338,6 +338,8 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "Slack webhook inbox", probe: { kind: "table", table: "slack_webhook_inbox" }, sql: 'CREATE TABLE "slack_webhook_inbox" ("id" text PRIMARY KEY, "org_id" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "next_attempt_at" bigint NOT NULL);' },
+  { describe: "Slack inbox due index", probe: { kind: "index", index: "slack_webhook_inbox_due" }, sql: 'CREATE INDEX IF NOT EXISTS "slack_webhook_inbox_due" ON "slack_webhook_inbox" ("next_attempt_at")' },
   { describe: "credential shares", probe: { kind: "table", table: "credential_shares" }, sql: `CREATE TABLE IF NOT EXISTS "credential_shares" (
   "team_id" text NOT NULL, "service" text NOT NULL, "user_id" text NOT NULL, "created_at" bigint NOT NULL,
   PRIMARY KEY ("team_id", "service", "user_id")
