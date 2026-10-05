@@ -156,7 +156,8 @@ describe("EngineHost session 1Password credential resolution", () => {
     const session = await h.sessionFor("sess-actor-newcomer", {
       userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: "team-actor", credentialOwnerMode: "actor",
     });
-    expect((await session.credentialProvider().get("acme-service"))?.accessToken).toBe("member-key");
+    expect((await session.credentialProvider({ actorId: userId }).get("acme-service"))?.accessToken).toBe("member-key");
+    expect(await session.credentialProvider().get("acme-service")).toBeNull();
     expect(await session.credentialProvider({ externalSender: true }).get("acme-service")).toBeNull();
     expect(await session.credentialProvider({ actorId: "team:team-actor" }).get("acme-service")).toBeNull();
   });
