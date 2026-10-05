@@ -429,8 +429,58 @@ describe('slack actions', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
     expect(result).toEqual({
       success: true,
-      data: { channels: [{ id: 'C1', name: 'general', is_private: false, num_members: undefined, topic: undefined, purpose: undefined }], total: 1 },
+      data: {
+        channels: [{ id: 'C1', name: 'general', is_private: false, num_members: undefined, topic: undefined, purpose: undefined }], total: 1,
+        scope: 'joined', visibility: 'public_only',
+        access_note: expect.stringContaining('Link Slack'),
+      },
     });
+  });
+
+  it.each(['team', 'org'] as const)('list_channels explains shared %s restrictions even with personal metadata', async (type) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      ok: true, channels: [
+        { id: 'C1', name: 'general', is_private: false },
+        { id: 'C2', name: 'secret', is_private: true },
+      ],
+    }));
+    const result = await action('slack.list_channels').execute({}, pluginCtx({
+      owner: { type, id: 'shared1' },
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U1' } }),
+    }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ success: true, data: {
+      channels: [{ id: 'C1' }], total: 1, visibility: 'public_only',
+      access_note: expect.stringContaining('Inviting the bot does not change this restriction'),
+    } });
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(JSON.stringify(result)).not.toContain('C2');
+  });
+
+  it('list_channels explains that all means public and joined is needed for authorized private channels', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [] }));
+    const result = await action('slack.list_channels').execute({ scope: 'all' }, pluginCtx({
+      owner: { type: 'user', id: 'u1' },
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U1' } }),
+    }));
+    expect(result).toMatchObject({ success: true, data: {
+      scope: 'all', visibility: 'public_only', access_note: expect.stringContaining('scope="joined"'),
+    } });
+    expect(fetchMock.mock.calls[0][0]).toContain('types=public_channel&');
+  });
+
+  it.each([true, false])('list_channels checks linked personal membership (member=%s)', async (member) => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C2', name: 'private-team', is_private: true }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C2', is_private: true } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, members: member ? ['U1'] : ['U2'] }));
+    const result = await action('slack.list_channels').execute({}, pluginCtx({
+      owner: { type: 'user', id: 'u1' },
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U1' } }),
+    }));
+    expect(result).toMatchObject({ success: true, data: {
+      channels: member ? [{ id: 'C2' }] : [], total: member ? 1 : 0, visibility: 'public_and_authorized_private',
+    } });
   });
 
   it('read_history reads channel history and filters noise subtypes by default', async () => {

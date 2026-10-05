@@ -7,7 +7,12 @@ description: How to effectively use Slack tools to read, understand, and interac
 
 ## Reading Channels
 
-Use `slack.list_channels` to find channel IDs. Use `slack.read_history` to read messages. Key parameters:
+Use `slack.list_channels` to find channel IDs. Read its `access_note` before concluding that a channel is missing.
+`scope="all"` lists public channels only. `scope="joined"` can include private channels for a linked personal channel member.
+Team and organization runs exclude private channels even when the bot was invited. Another invitation does not lift this restriction.
+Use a public channel or an authorized personal run. Do not borrow a member's access for a team workflow.
+
+Use `slack.read_history` to read messages. Key parameters:
 
 - **`filter`** -- case-insensitive keyword filter, useful for finding specific topics in noisy channels
 - **`threads_only`** -- only return messages with thread replies, good for finding discussions in alert channels

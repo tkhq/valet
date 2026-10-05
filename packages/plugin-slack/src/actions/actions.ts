@@ -460,7 +460,7 @@ const listChannels = action(Type.Object({
   }))({
   id: 'slack.list_channels',
   name: 'List Channels',
-  description: 'List Slack channels. By default lists only channels the bot has joined. Set scope to "all" to discover all public channels in the workspace. Use prefix to filter by channel name prefix (e.g. "eng-" or "team-").',
+  description: 'List Slack channels available to this run. "joined" lists bot member channels; "all" lists public channels only. Team and organization runs exclude private channels, even when the bot is invited. Personal runs require a linked Slack identity and channel membership for private access. Read access_note before suggesting another invitation. Use prefix to filter channel names.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -501,12 +501,14 @@ const listChannels = action(Type.Object({
 
     // Filter out private channels the owner doesn't have access to
     const ownerSlackId = ownerSlackUserId(cred);
-    if (ownerSlackId) {
+    const sharedOwner = ctx.owner?.type === 'team' || ctx.owner?.type === 'org';
+    if (!sharedOwner && ownerSlackId) {
       const privateChannels = channels.filter((ch) => ch.is_private === true);
       if (privateChannels.length > 0) {
         const accessChecks = await Promise.all(
           privateChannels.map(async (ch) => {
-            const result = await checkPrivateChannelAccess(token, ch.id as string, ownerSlackId);
+            if (typeof ch.id !== 'string') return { id: ch.id, allowed: false };
+            const result = await checkPrivateChannelAccess(token, ch.id, ownerSlackId, { ownerType: ctx.owner?.type });
             return { id: ch.id, allowed: result.allowed };
           }),
         );
@@ -514,11 +516,19 @@ const listChannels = action(Type.Object({
         channels = channels.filter((ch) => !deniedIds.has(ch.id));
       }
     } else {
-      // No linked identity — filter out all private channels
+      // Shared runs cannot borrow a member's private access.
       channels = channels.filter((ch) => ch.is_private !== true);
     }
 
-    return { success: true, data: { channels, total: channels.length } };
+    const visibility = wantAll || sharedOwner || !ownerSlackId ? 'public_only' : 'public_and_authorized_private';
+    const accessNote = sharedOwner
+      ? 'Team and organization runs exclude private channels. Inviting the bot does not change this restriction. Use a public channel or a personal run owned by a linked channel member.'
+      : !ownerSlackId
+        ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Settings → Connected accounts. Then use scope="joined".'
+        : wantAll
+          ? 'scope="all" lists public channels only. Use scope="joined" to find private channels where both the bot and personal owner are members.'
+          : 'Private channels are included only when the linked personal owner is a member. An absent channel is not proof that the bot needs an invitation.';
+    return { success: true, data: { channels, total: channels.length, scope: wantAll ? 'all' : 'joined', visibility, access_note: accessNote } };
   },
 });
 

@@ -280,6 +280,10 @@ Team- and org-owned runs get no enrichment. Private-channel actions require an
 authorized personal scope. A member's identity link does not grant access to a
 shared team run. The denial directs the caller to a public channel or a personal
 run owned by a linked channel member. It does not ask the team to link an identity.
+`slack.list_channels` returns its scope, visibility, and an access note.
+An empty list does not prove that the bot needs another invitation.
+`scope="all"` lists public channels only; personal private discovery uses `scope="joined"`.
+Shared owners exclude private channels even if a credential contains personal identity metadata.
 
 The org bot credential supports public-channel reads and `slack.dm_user` sends
 without a personal identity link. Shared runs cannot read DM or group DM history,
