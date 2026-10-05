@@ -1,5 +1,5 @@
 # XORS deployment: build dev-v2 in CI and install it on the Hetzner server
-# that runs valet.xors.xyz.
+# that serves both valet.xors.xyz and valet.xors.dev.
 #
 # The server never builds. This job builds the API bundle (with the web app)
 # and, only when its inputs change, the sandbox image. Both stream to the
@@ -80,5 +80,9 @@ jobs:
       - name: Install on the server
         run: tar -C "$RUNNER_TEMP/app" -czf - . | ssh valet "app $GITHUB_SHA ${{ steps.sandbox.outputs.hash }}"
 
-      - name: Check the public site
-        run: curl -sf --retry 5 --retry-delay 5 https://valet.xors.xyz/api/health
+      - name: Check both public domains
+        run: |
+          for domain in valet.xors.xyz valet.xors.dev; do
+            curl -sf --retry 5 --retry-delay 5 "https://$domain/api/health"
+          done
+          node scripts/check-xors-domains.mjs
