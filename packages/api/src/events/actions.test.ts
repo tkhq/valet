@@ -43,7 +43,8 @@ describe("eventsActionPlugin", () => {
     const rows = await db.select().from(eventSubscriptions);
     expect(rows).toHaveLength(1);
     await db.update(eventSubscriptions).set({ enabled: true }).where(eq(eventSubscriptions.id, rows[0]!.id));
-    expect(await tool.execute({ ...input, name: "Changed" }, context("member"))).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Pulls" } } } });
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Pulls" } } } });
+    expect(await tool.execute({ ...input, name: "Changed" }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("new proposal_key") });
     expect(await tool.execute(input, context("admin"))).toMatchObject({ success: true });
     expect(await db.select().from(eventSubscriptions)).toHaveLength(2);
     expect(await tool.execute(input, context("member", { owner: { type: "team", id: "foreign" } }))).toMatchObject({ success: false });

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
@@ -136,6 +137,10 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         ? await withAuthorizedTeamOwnership(db, { teamId: ownerId, orgId: ctx.orgId, userId, principalTeamId: ownerId, requireMembership: true }, insert)
         : await insert(db);
       if (!row) return { success: false, error: "Team is no longer available. Open an active team and retry." };
+      if (!isDeepStrictEqual(
+        [row.name, row.eventKeys, row.filters, row.target, row.audience, row.createdBy],
+        [values.name, values.eventKeys, values.filters, values.target, values.audience, values.createdBy],
+      )) return { success: false, error: "This proposal key already names a different subscription. Use a new proposal_key." };
       return { success: true, data: proposalResult("subscription", row.id, row.enabled, row) };
     },
   });

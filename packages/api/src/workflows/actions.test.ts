@@ -299,7 +299,8 @@ describe("DB-backed actions", () => {
     for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { kind: "schedule", enabled: false, reviewUrl: expect.stringContaining("/workflows?tab=scheduled&review=") } } });
     expect(await db.select().from(workflowSchedules)).toHaveLength(1);
     await db.update(workflowSchedules).set({ enabled: true });
-    expect(await tool.execute({ ...input, name: "Changed" }, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Morning" } } } });
+    expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Morning" } } } });
+    expect(await tool.execute({ ...input, prompt: "Different work" }, ctx())).toMatchObject({ success: false, error: expect.stringContaining("new proposal_key") });
     expect(await db.select().from(workflowSchedules)).toHaveLength(1);
   });
 

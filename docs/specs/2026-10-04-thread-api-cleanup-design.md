@@ -70,3 +70,5 @@ Team API-key prompts carry the team principal, not the administrator who created
 WebSocket frames with unresolved thread metadata fail closed and are checked again on the next frame. Run lists inspect at most ten store pages per request. A partial page continues from its last visible row. If no visible row exists within that budget, the request returns an explicit error instead of exposing a private cursor or reporting empty history.
 
 The API Helm deployment uses Recreate and clears rolling-update settings. The old API stops before the new process applies one-way schema repairs. This upgrade requires a short service interruption.
+
+Proposal retries must match the stored normalized configuration and creator. Reusing a key for different subscription or schedule content returns an error. Identical retries preserve the existing enablement state.

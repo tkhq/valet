@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 /**
  * Workflow cron schedules — CRUD + next-fire computation. The scheduler
  * loop (`scheduler.ts`) polls `workflow_schedules` for due rows and starts
@@ -210,6 +211,14 @@ export async function createWorkflowSchedule(
     updatedAt: now,
   };
 
+  const result = (row: typeof workflowSchedules.$inferSelect): Awaited<ReturnType<typeof createWorkflowSchedule>> => {
+    if (input.proposalKey && !isDeepStrictEqual(
+      [row.targetKind, row.workflowId, row.prompt, row.name, row.cron, row.timezone, row.input, row.createdBy],
+      [values.targetKind, values.workflowId, values.prompt, values.name, values.cron, values.timezone, values.input, values.createdBy],
+    )) return { ok: false, error: "This proposal key already names a different schedule. Use a new proposal_key." };
+    return { ok: true, schedule: rowToSummary(row) };
+  };
+
   if (scheduleOwner.ownerType === "team") {
     const inserted = await withAuthorizedTeamOwnership(
       db,
@@ -237,12 +246,12 @@ export async function createWorkflowSchedule(
       },
     );
     if (!inserted?.[0]) return { ok: false, error: "Team or schedule target is no longer available. Refresh and select an active target." };
-    return { ok: true, schedule: rowToSummary(inserted[0]) };
+    return result(inserted[0]);
   }
 
   const inserted = await db.insert(workflowSchedules).values(values).onConflictDoNothing().returning();
   const row = inserted[0] ?? (await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, values.id)))[0]!;
-  return { ok: true, schedule: rowToSummary(row) };
+  return result(row);
 }
 
 /** Pass `sets` when the caller already holds this request's
