@@ -71,7 +71,7 @@ describe("model catalog", () => {
     });
   });
 
-  it("lists Claude Fable 5.1 and GPT-6 Astra", async () => {
+  it("lists Claude Fable 5.1 and excludes Astra", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     try {
@@ -79,8 +79,8 @@ describe("model catalog", () => {
       const fable = entries.find((entry) => entry.id === "anthropic/claude-fable-5-1");
       expect(fable).toMatchObject({ name: "Claude Fable 5.1", contextWindow: 1_000_000, active: true });
       const astra = entries.find((entry) => entry.id === "openai/gpt-6-astra");
-      expect(astra).toMatchObject({ name: "GPT-6 Astra", contextWindow: 272_000, active: true });
-      expect(catalogValidIds(entries).has("openai/gpt-6-astra")).toBe(true);
+      expect(astra).toBeUndefined();
+      expect(catalogValidIds(entries).has("openai/gpt-6-astra")).toBe(false);
     } finally {
       vi.unstubAllEnvs();
     }

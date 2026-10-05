@@ -51,12 +51,12 @@ describe("shared team proxy key", () => {
       const url = input instanceof Request ? input.url : String(input);
       return url.startsWith("https://api.openai.com/") ? upstream(input, init) : nativeFetch(input, init);
     });
-    async function proxy(providerKey?: string) {
+    async function proxy(providerKey?: string, model = "gpt-4o-mini") {
       return fetch(`${baseUrl}/proxy/openai/v1/chat/completions`, {
         method: "POST", headers: {
           "content-type": "application/json", "x-api-key": key.key,
           ...(providerKey ? { authorization: `Bearer ${providerKey}` } : {}),
-        }, body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hello" }] }),
+        }, body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }] }),
       });
     }
     await setProxySettings(providers.db, team.orgId, { enabled: false, mode: "passthrough" });
@@ -64,6 +64,32 @@ describe("shared team proxy key", () => {
     expect(upstream).not.toHaveBeenCalled();
     await setProxySettings(providers.db, team.orgId, { enabled: true });
     expect((await proxy()).status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+    for (const model of ["gpt-6-astra", "openai/gpt-6-astra", "gpt-6-astra-20261001"]) {
+      const blocked = await proxy("approved-provider-key", model);
+      expect(blocked.status).toBe(403);
+      expect(await blocked.text()).toContain("Astra is disabled");
+      expect(upstream).not.toHaveBeenCalled();
+    }
+    for (const endpoint of ["/v1/batches", "/v1/batches/", "/v1/%62atches"]) {
+      const blocked = await fetch(`${baseUrl}/proxy/openai${endpoint}`, {
+        method: "POST", headers: { "content-type": "application/json", "x-api-key": key.key, authorization: "Bearer approved-provider-key" },
+        body: JSON.stringify({ input_file_id: "file-astra", endpoint: "/v1/responses", completion_window: "24h" }),
+      });
+      expect(blocked.status).toBe(403);
+      expect(upstream).not.toHaveBeenCalled();
+    }
+    const ambiguous = await fetch(`${baseUrl}/proxy/openai/v1/responses`, {
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": key.key, authorization: "Bearer approved-provider-key" },
+      body: JSON.stringify({ previous_response_id: "resp-astra", input: "continue" }),
+    });
+    expect(ambiguous.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+    const blockedFallback = await fetch(`${baseUrl}/proxy/openai/v1/chat/completions`, {
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": key.key, authorization: "Bearer approved-provider-key" },
+      body: JSON.stringify({ model: "gpt-6.1-sol", models: ["openai/gpt-6-astra"], messages: [] }),
+    });
+    expect(blockedFallback.status).toBe(403);
     expect(upstream).not.toHaveBeenCalled();
     const forwarded = await proxy("approved-provider-key");
     expect(forwarded.status).toBe(200);

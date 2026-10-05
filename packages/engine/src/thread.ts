@@ -9,7 +9,7 @@ import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
-import { bundledModel } from "./model-catalog.js";
+import { assertModelEnabled, bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
@@ -2294,6 +2294,7 @@ export class Thread {
    * runs. Throws `ValidationError` on an unknown spec.
    */
   private async validateModelSpec(spec: string): Promise<ResolvedModel | null> {
+    assertModelEnabled(spec);
     const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
     // Valid by construction, and deliberately NOT resolved: null tells the
     // caller "accepted without a lookup", which `applyModelToRunningTurn`
@@ -2449,6 +2450,7 @@ export class Thread {
    * model and credentials the user never chose.
    */
   private async resolveTurnModelForTurn(item?: QueueItem): Promise<PiModel> {
+    assertModelEnabled(this.turnModelSpec(item));
     this.assignedModelSpec = this.turnModelSpec(item);
     const resolver = this.session.options.resolveModel;
     if (!resolver) return this.resolveTurnModel(item);
@@ -4838,6 +4840,7 @@ export class Thread {
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
       streamFn: async (model, context, options) => {
+        assertModelEnabled(model.id);
         await this.persistSkillContextAttributions();
         const runtimeModelContext = this.modelSystemPrompt(undefined, model);
         const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");

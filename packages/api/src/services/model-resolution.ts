@@ -47,6 +47,7 @@
  */
 import { getEnvApiKey, type Api, type Model } from "@earendil-works/pi-ai/compat";
 import { registryModelById } from "./model-registry.js";
+import { assertModelEnabled } from "@valet/engine/model-catalog";
 import { NoCredentialsError, type CredentialOwner, type CredentialStore, type ResolvedModel } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";
@@ -177,6 +178,7 @@ export async function resolveModelSpec(
   orgId: string,
   spec: string,
 ): Promise<ResolvedModel | null> {
+  assertModelEnabled(spec);
   // Tier tokens (xs, s, m, l, xl) resolve through the org's tier map to a
   // concrete model spec, then recurse. canonicalId stays the tier token so
   // the engine persists the tier, not the resolved spec — re-pointing a

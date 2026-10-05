@@ -3,7 +3,7 @@ import * as builtinCatalog from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels, type TranscriptContext } from "@earendil-works/pi-ai";
 import { streamSimple as streamOpenAI } from "@earendil-works/pi-ai/api/openai-responses";
 import { streamSimple as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
-import { bundledModel, bundledModels } from "../src/model-catalog.js";
+import { bundledModel, bundledModels, isDisabledModel } from "../src/model-catalog.js";
 
 vi.mock("@earendil-works/pi-ai/providers/all", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@earendil-works/pi-ai/providers/all")>();
@@ -31,39 +31,10 @@ describe("bundled model catalog", () => {
     });
   });
 
-  it("includes Astra with the Responses capabilities and tiered prices", () => {
-    const astra = bundledModel("openai", "gpt-6-astra");
-    expect(astra).toMatchObject({
-      id: "gpt-6-astra",
-      api: "openai-responses",
-      provider: "openai",
-      contextWindow: 272000,
-      maxTokens: 128000,
-      cost: {
-        input: 10,
-        output: 50,
-        cacheRead: 1,
-        cacheWrite: 12.5,
-        tiers: [{ inputTokensAbove: 272000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
-      },
-      thinkingLevelMap: {
-        off: null,
-        minimal: null,
-        low: "low",
-        medium: "medium",
-        high: "high",
-        xhigh: "xhigh",
-        max: "max",
-      },
-      compat: {
-        supportsStrictMode: true,
-        supportsOpenAIGrammarTools: true,
-        supportsAdditionalTools: true,
-        supportsToolSearch: true,
-        supportsExplicitPromptCacheMode: true,
-      },
-    });
-    expect(bundledModels("openai").filter((model) => model.id === "gpt-6-astra")).toEqual([astra]);
+  it.each(["gpt-6-astra", "gpt-6-astra-20261001", "openai/gpt-6-astra", "openrouter/openai/gpt-6-astra", "openrouter/openai/gpt-6-astra:nitro", "openrouter/openai/gpt-6-astra:floor"])("excludes disabled Astra variant %s", (id) => {
+    expect(isDisabledModel(id)).toBe(true);
+    expect(bundledModel("openai", id)).toBeUndefined();
+    expect(bundledModels("openai").some((model) => isDisabledModel(model.id))).toBe(false);
   });
 
   it.each([["openai", "gpt-6.1-sol"], ["anthropic", "claude-sonnet-5-5"]] as const)("uses upstream metadata and deduplicates %s/%s", (provider, id) => {

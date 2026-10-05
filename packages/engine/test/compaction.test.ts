@@ -704,6 +704,21 @@ const SUMMARY_RESPONSE =
   "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
 
 describe("compaction: /compact instructions", () => {
+  it("rejects a held Astra summarizer without sending a request", async () => {
+    let calls = 0;
+    const faux = registerFauxProvider({ provider: "blocked-compaction", models: [{ id: "gpt-6-astra", name: "Astra", contextWindow: 100_000, maxTokens: 1000 }] });
+    faux.setResponses([() => { calls++; return fauxAssistantMessage(SUMMARY_RESPONSE); }]);
+    try {
+      const model = faux.getModel("gpt-6-astra");
+      if (!model) throw new Error("Missing faux model");
+      await expect(summarize({
+        model,
+        headEntries: [{ id: "e-blocked", sessionId: "s", threadId: "t", parentId: null, type: "message", role: "user", content: "summarize", createdAt: 1 }],
+      })).rejects.toThrow("Astra is disabled");
+      expect(calls).toBe(0);
+    } finally { faux.unregister(); }
+  });
+
   it("passes user instructions through to the summarizer prompt", async () => {
     const captured: string[] = [];
     const faux = registerFauxProvider({

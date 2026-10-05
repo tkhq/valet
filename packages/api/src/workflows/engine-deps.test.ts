@@ -760,7 +760,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
 describe("buildWorkflowEngineDeps: llmComplete", () => {
   it.each([
-    ["openai/gpt-6-astra", false], ["gpt-6-astra", false], ["gpt-6-astra", true],
+    ["openai/gpt-6.1-sol", false], ["gpt-6.1-sol", false], ["gpt-6.1-sol", true],
   ] as const)("completes with supplemental model %s (Anthropic disabled: %s)", async (model, disableAnthropic) => {
     vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
     const original = piAi.getApiProvider("openai-responses");
@@ -791,8 +791,8 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       const result = await deps.llmComplete({ runId, model, prompt: "hi" });
       expect(result.text).toBe("ok");
       expect(stream).toHaveBeenCalledWith(expect.objectContaining({
-        id: "gpt-6-astra", provider: "openai", contextWindow: 272_000,
-        compat: expect.objectContaining({ supportsToolSearch: true }),
+        id: "gpt-6.1-sol", provider: "openai", contextWindow: 1_050_000,
+        thinkingLevelMap: expect.objectContaining({ high: "high" }),
       }), expect.anything(), expect.anything());
     } finally {
       piAi.registerApiProvider(original);
@@ -815,9 +815,9 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       await db.update(orgs).set({ reasoningSettings: { default: "medium" } }).where(eq(orgs.id, LOCAL_ORG.id));
       const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
       await seedRun(api, "wfrun_reasoning", "wf_reasoning");
-      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6-astra", prompt: "hi" });
+      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6.1-sol", prompt: "hi" });
       expect(stream.mock.calls[0]![2]).toMatchObject({ reasoning: "medium" });
-      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6-astra", prompt: "hi", reasoning: "high" });
+      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6.1-sol", prompt: "hi", reasoning: "high" });
       expect(stream.mock.calls[1]![2]).toMatchObject({ reasoning: "high" });
     } finally { piAi.registerApiProvider(original); }
   });
@@ -838,7 +838,7 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
       const runId = `wfrun_provider_${stopReason}`;
       await seedRun(api, runId, `wf_provider_${stopReason}`);
-      await expect(deps.llmComplete({ runId, model: "openai/gpt-6-astra", prompt: "hi" })).rejects.toThrow('Provider rejected this model');
+      await expect(deps.llmComplete({ runId, model: "openai/gpt-6.1-sol", prompt: "hi" })).rejects.toThrow('Provider rejected this model');
     } finally { piAi.registerApiProvider(original); }
   });
 

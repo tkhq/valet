@@ -23,12 +23,33 @@ const supplementalModels: Model<Api>[] = [
   },
 ];
 
-/** Pi's bundled catalog, plus missing release metadata. */
-export function bundledModels(provider: string): Model<Api>[] {
+/** Astra is excluded across providers, aliases, and dated model IDs. */
+export function isDisabledModel(spec: string): boolean {
+  const id = spec.trim().toLowerCase().split("/").at(-1) ?? "";
+  return /(^|[^a-z0-9])astra($|[^a-z0-9])/.test(id);
+}
+
+export function assertModelEnabled(spec: string): void {
+  if (isDisabledModel(spec)) {
+    throw new Error("Astra is disabled in Valet. Choose GPT-6.1 Sol or Claude Opus 5.5.");
+  }
+}
+
+function bundledMetadata(provider: string): Model<Api>[] {
   const builtinProvider = getBuiltinProviders().find((id) => id === provider);
   const upstream = builtinProvider ? [...getBuiltinModels(builtinProvider)] : [];
   const ids = new Set(upstream.map((model) => model.id));
   return [...upstream, ...supplementalModels.filter((model) => model.provider === provider && !ids.has(model.id))];
+}
+
+/** Selectable bundled models. Disabled metadata remains available for billing. */
+export function bundledModels(provider: string): Model<Api>[] {
+  return bundledMetadata(provider).filter((model) => !isDisabledModel(model.id));
+}
+
+/** Historical usage pricing only; this lookup does not authorize execution. */
+export function bundledPricingModel(provider: string, modelId: string): Model<Api> | undefined {
+  return bundledMetadata(provider).find((model) => model.id === modelId);
 }
 
 /** One bundled model by provider and wire id, or undefined when unknown. */

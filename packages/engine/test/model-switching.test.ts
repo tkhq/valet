@@ -137,16 +137,13 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 3000): Pro
 }
 
 describe("engine: model switching", () => {
-  it("resolves Astra without a host registry using bare and provider-qualified ids", () => {
-    const astra = resolveModelId("gpt-6-astra");
-    expect(astra).toMatchObject({
-      id: "gpt-6-astra",
-      provider: "openai",
-      api: "openai-responses",
-      contextWindow: 272000,
-      maxTokens: 128000,
-    });
-    expect(resolveModelId("openai/gpt-6-astra")).toEqual(astra);
+  it("rejects Astra resolution and current-pin validation", async () => {
+    expect(resolveModelId("gpt-6-astra")).toBeUndefined();
+    expect(resolveModelId("openai/gpt-6-astra")).toBeUndefined();
+    const { engine, baseModel } = setup();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel, modelSpec: "openai/gpt-6-astra" });
+    const thread = await session.ensureDefaultThread();
+    await expect(thread.setModel("openai/gpt-6-astra")).rejects.toThrow("Astra is disabled");
   });
 
   it("keeps tool guidance consistent with supervisor-selected drafting and review tiers", () => {

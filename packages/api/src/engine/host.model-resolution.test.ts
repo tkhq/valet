@@ -77,10 +77,14 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
     });
   });
 
+  it.each(["gpt-6-astra", "openai/gpt-6-astra", "openrouter/openai/gpt-6-astra", "custom/gpt-6-astra-20261001", "openrouter/openai/gpt-6-astra:nitro"])("blocks disabled model %s before credentials", async (spec) => {
+    await expect(resolveModelSpec(db, credentials, orgId, spec)).rejects.toThrow("Astra is disabled");
+  });
+
   describe("new model resolution", () => {
     it.each([
       ["anthropic/claude-fable-5-1", "claude-fable-5-1", "anthropic", "ANTHROPIC_API_KEY"],
-      ["openai/gpt-6-astra", "gpt-6-astra", "openai", "OPENAI_API_KEY"],
+      ["openai/gpt-6.1-sol", "gpt-6.1-sol", "openai", "OPENAI_API_KEY"],
     ] as const)("resolves %s", async (spec, wireId, provider, envName) => {
       vi.stubEnv(envName, "test-key");
       const resolved = await resolveModelSpec(db, credentials, orgId, spec);

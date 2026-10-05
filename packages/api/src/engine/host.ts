@@ -1,4 +1,5 @@
 import { assistantExecutions } from "../schema/index.js";
+import { isDisabledModel } from "@valet/engine/model-catalog";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
@@ -3248,6 +3249,7 @@ export class EngineHost {
     if (!this.opts.db || prefs.length === 0) return undefined;
     const rows = await listLlmProviders(this.opts.db, orgId);
     for (const pref of prefs) {
+      if (isDisabledModel(pref)) continue;
       const { namespace } = parseModelId(pref);
       const row = rows.find((r) => providerNamespace(r) === namespace);
       let active: boolean;

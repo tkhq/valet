@@ -21,13 +21,16 @@ import {
 } from "./validation-env.js";
 
 describe("workflow model validation", () => {
-  it.each(["openai/gpt-6-astra", "gpt-6-astra"])("accepts the supplemental model %s", (spec) => {
+  it.each(["gpt-6-astra", "openai/gpt-6-astra"])("rejects disabled model %s", (spec) => {
+    expect(isKnownModelSpec(spec)).toBe(false);
+  });
+  it.each(["openai/gpt-6.1-sol", "gpt-6.1-sol"])("accepts the supplemental model %s", (spec) => {
     expect(isKnownModelSpec(spec)).toBe(true);
   });
 
   it("still rejects unknown models and providers", () => {
     expect(isKnownModelSpec("openai/unknown-model")).toBe(false);
-    expect(isKnownModelSpec("unknown-provider/gpt-6-astra")).toBe(false);
+    expect(isKnownModelSpec("unknown-provider/gpt-6.1-sol")).toBe(false);
   });
 });
 
@@ -86,15 +89,15 @@ describe("buildOrgValidateEnvironment", () => {
   it("keeps a bare OpenAI id valid while its provider is active and approved", async () => {
     vi.stubEnv("OPENAI_API_KEY", "env-openai");
     const isKnownModel = await orgEnv();
-    expect(isKnownModel("openai/gpt-6-astra")).toBe(true);
-    expect(isKnownModel("gpt-6-astra")).toBe(true);
+    expect(isKnownModel("openai/gpt-6.1-sol")).toBe(true);
+    expect(isKnownModel("gpt-6.1-sol")).toBe(true);
   });
 
   it("rejects a bare OpenAI id once the org stops approving it", async () => {
     vi.stubEnv("OPENAI_API_KEY", "env-openai");
     await setApprovedModels(db, orgId, ["openai/gpt-5.5"]);
     const isKnownModel = await orgEnv();
-    expect(isKnownModel("gpt-6-astra")).not.toBe(true);
+    expect(isKnownModel("gpt-6.1-sol")).not.toBe(true);
   });
 
   it("keeps a bare Google id valid while Google is active and approved", async () => {
@@ -152,7 +155,7 @@ describe("buildOrgValidateEnvironment", () => {
 
   it("accepts a size tier the org re-pointed at a provider it can use", async () => {
     vi.stubEnv("OPENAI_API_KEY", "env-openai");
-    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, m: ["openai/gpt-6-astra"] });
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, m: ["openai/gpt-6.1-sol"] });
     const isKnownModel = await orgEnv();
     expect(isKnownModel("m")).toBe(true);
     expect(isKnownModel("l")).not.toBe(true);
@@ -161,7 +164,7 @@ describe("buildOrgValidateEnvironment", () => {
   it("falls back to the bundled ids when no org set is supplied", () => {
     const env = buildValidateEnvironment();
     expect(env.isKnownModel?.("claude-haiku-4-5")).toBe(true);
-    expect(env.isKnownModel?.("gpt-6-astra")).toBe(true);
+    expect(env.isKnownModel?.("gpt-6.1-sol")).toBe(true);
     expect(env.isKnownModel?.("m")).toBe(true);
   });
 });

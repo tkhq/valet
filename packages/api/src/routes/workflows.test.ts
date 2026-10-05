@@ -747,7 +747,7 @@ describe("model validation on full workflow saves", () => {
   it("keeps a bare OpenAI id saveable while OpenAI is active", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
     api = await bootTestApi();
-    expect((await save(api.baseUrl, "gpt-6-astra")).status).toBe(201);
+    expect((await save(api.baseUrl, "gpt-6.1-sol")).status).toBe(201);
   });
 });
 
