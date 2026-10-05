@@ -97,3 +97,10 @@ External senders cannot use a teammate's borrow grant to discover tools.
 Release follow-up: interactive dynamic-only MCP services need approval before discovery can obtain another member's credential.
 Their current action gate follows discovery, so it cannot grant the initial access.
 Keep discovery denied until that approval path is implemented; do not restore unconditional borrowing.
+
+### Child steering identity
+
+Each child follow-up persists the steering member as its execution actor.
+The displayed sender is Valet because the agent composes the follow-up text.
+Shared-account reads use that actor instead of the original spawner, including children with legacy actor credential mode.
+The child retains its team owner and the original spawn identity.

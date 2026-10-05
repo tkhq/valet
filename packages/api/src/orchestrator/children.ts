@@ -1290,8 +1290,10 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // active even when the revived turn never touches the sandbox.
     await deps.engineHost.markSessionUsed(req.childSessionId);
 
-    // No `author` — agent-composed text, same reasoning as the spawn path.
+    // The agent writes the text, but the steering member supplies its authority.
+    // Persist that actor on the submission instead of inheriting the spawner.
     const receipt = await childSession.prompt(req.message, {
+      author: { id: ctx.actorUserId, name: "Valet" },
       queueMode: req.queue === true ? "followup" : "steer",
     });
 

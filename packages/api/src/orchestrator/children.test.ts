@@ -39,9 +39,10 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { eventsActionPlugin } from "../events/actions.js";
 
 let api: TestApi | undefined;
@@ -2182,12 +2183,13 @@ describe("parseTaskRepo", () => {
 // a send is the NEW submission's, never the superseded original's.
 describe("buildChildSender", () => {
   /** Hand-built child + watch row (watcher-test idiom): no LLM turn runs. */
-  async function seedChild(a: TestApi, opts: { childId: string; parentId: string; settled: boolean; queueItemId: string }) {
+  async function seedChild(a: TestApi, opts: { childId: string; parentId: string; settled: boolean; queueItemId: string; teamId?: string; credentialOwnerMode?: "owner" | "actor" }) {
     const { engineHost, engineStore, db } = a.providers;
     const parent = await engineHost.sessionFor(opts.parentId, {
       userId: "local-user",
       orgId: "local-org",
       workspace: "/tmp",
+      ...(opts.teamId ? { ownerType: "team", ownerTeamId: opts.teamId } : {}),
     });
     const parentThread = parent.thread("web:default");
     await parent.pause();
@@ -2197,7 +2199,8 @@ describe("buildChildSender", () => {
       parentThreadId: parentThread.id,
       actorUserId: "local-user",
       orgId: "local-org",
-      owner: { type: "user", id: "local-user" },
+      owner: opts.teamId ? { type: "team", id: opts.teamId } : { type: "user", id: "local-user" },
+      credentialOwnerMode: opts.credentialOwnerMode,
       workspace: "/tmp",
     });
     const childThread = child.thread("web:default");
@@ -2215,8 +2218,9 @@ describe("buildChildSender", () => {
       orgId: "local-org",
       workspace: "/tmp",
       status: "active",
-      ownerType: "user",
-      ownerId: "local-user",
+      ownerType: opts.teamId ? "team" : "user",
+      ownerId: opts.teamId ?? "local-user",
+      credentialOwnerMode: opts.credentialOwnerMode,
       createdAt: now,
       updatedAt: now,
     });
@@ -2243,6 +2247,30 @@ describe("buildChildSender", () => {
         (i.content as SignalContent).signalType === "child.settled",
     );
   }
+
+  it.each(["owner", "actor"] as const)("persists the steering teammate as actor in %s credential mode", async (credentialOwnerMode) => {
+    api = await bootTestApi();
+    const { db, engineStore, engineCredentials } = api.providers;
+    await db.insert(teams).values({ id: "steer-team", orgId: "local-org", name: "Steering", createdAt: 1 });
+    await db.insert(teamMembers).values([
+      { teamId: "steer-team", userId: "local-user", role: "member" },
+      { teamId: "steer-team", userId: "test-member", role: "member" },
+    ]);
+    await engineCredentials.save({ type: "user", id: "local-user" }, "linear", { type: "api_key", apiKey: "spawner-key" });
+    await shareCredential(db, { teamId: "steer-team", userId: "local-user", service: "linear", createdAt: 1 });
+    const { child, parentThread } = await seedChild(api, {
+      childId: "actor-child", parentId: "actor-parent", settled: false, queueItemId: "original-actor",
+      teamId: "steer-team", credentialOwnerMode,
+    });
+    const deps = childrenDeps(api);
+    const receipt = await buildChildSender(deps, new ChildWatcher(deps))(
+      { childSessionId: child.id, message: "Check Linear" },
+      { parentSessionId: "actor-parent", parentThreadId: parentThread.id, actorUserId: "test-member" },
+    );
+    const submission = (await engineStore.listUnsettledSubmissions(child.id)).find(item => item.id === receipt?.queueItemId);
+    expect(submission?.author).toEqual({ id: "test-member", name: "Valet" });
+    expect(await child.credentialProvider({ actorId: submission?.author?.id }).get("linear")).toBeNull();
+  });
 
   it("answers null for a session that is not this parent's child", async () => {
     api = await bootTestApi();
