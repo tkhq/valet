@@ -266,6 +266,11 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
   const existing = existingRows[0];
 
   if (existing) {
+    // Re-publishing must not relabel quarantined history as a new shared source.
+    // Recovery verifies the old provenance or publishes under a different key.
+    if (existing.ownerType === "team" && existing.sourceSessionId && !existing.sourceThreadId) {
+      throw new NotFoundError("artifact", existing.id);
+    }
     const reactivating = existing.revokedAt !== null;
     const nextVersion = existing.version + 1;
     const [row] = await db

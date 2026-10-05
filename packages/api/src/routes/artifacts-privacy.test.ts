@@ -84,6 +84,10 @@ describe("team artifact privacy", () => {
       expect((await request(`/${row.id}`, user, "DELETE")).status).toBe(404);
     }
     expect(await listArtifactComments(db, row.id)).toHaveLength(1);
+    await expect(publishArtifact(db, { owner: { type: "team", id: "private-team" }, actorUserId: "test-member" }, {
+      orgId: "local-org", key: row.sourceMemoryPath, content: "Replace provenance", format: "html",
+      sourceSessionId: "new-team-source", sourceThreadId: "new-thread",
+    })).rejects.toThrow();
     expect(await getArtifactById(db, row.id)).toMatchObject({ version: 1, revokedAt: null, sourceThreadId: null });
   });
 

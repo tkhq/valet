@@ -112,7 +112,8 @@ ORDER BY a.org_id, a.owner_id, a.id;
 A quoted URL in an ordinary message is not a publication receipt.
 The publishing actor and default thread are not proof of audience.
 If the latest version cannot be verified, keep the artifact quarantined.
-Ask its owner to recover and republish it from an authorized conversation, or explicitly accept quarantine in the deployment record.
+Ask its owner to recover and republish it under a new key from an authorized conversation, or explicitly accept quarantine.
+Record that disposition in the deployment record. Re-publication cannot replace an unknown source and expose its retained version history.
 Never assign an arbitrary shared thread to clear this check.
 
 This procedure is a release gate, not an automatic backfill. A code review cannot certify the target database's recovery state.
