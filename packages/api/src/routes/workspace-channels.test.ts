@@ -262,3 +262,33 @@ it("finds the thread that opened a pull request, and records the comment Valet p
     expect.objectContaining({ direction: "out", text: "Posted a review from the terminal." }),
   ]));
 });
+
+it("includes execution channel activity while excluding executions from another member's helper", async () => {
+  api = await bootTestApi();
+  await connectSlack(api);
+  const root = await teamRuntime(api);
+  const teamOwner = { type: "team" as const, id: root.assistant.ownerId };
+  const shared = await ensureAssistantExecution(api.providers, teamOwner,
+    { orgId: "local-org", actorUserId: "local-user" }, "slack:CEXEC:1800.1");
+  const hidden = await ensureAssistantExecution(api.providers, teamOwner,
+    { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:another-user");
+  const visibleThread = await shared.session.createThread("slack:CEXEC:1800.1");
+  // A public-looking child key must not bypass its private governing thread.
+  const hiddenThread = await hidden.session.createThread("slack:CEXEC:1800.2");
+  for (const [execution, thread, text] of [[shared, visibleThread, "execution reply"], [hidden, hiddenThread, "private execution draft"]] as const) {
+    await recordChannelMessage(api.providers.db, {
+      orgId: "local-org", sessionId: execution.sessionId, threadId: thread.id,
+      channelKey: "slack:CEXEC", conversationKey: thread.key!, providerMessageId: thread.id,
+      direction: "out", text,
+    });
+  }
+  const prefix = `${api.baseUrl}/api/workspaces/${teamOwner.id}`;
+  const list = await (await fetch(`${prefix}/channels`)).json() as ListChannelsResponse;
+  expect(list.channels.find(channel => channel.key === "slack:CEXEC")).toMatchObject({ messageCount: 1 });
+  const response = await fetch(`${prefix}/channel?key=slack:CEXEC`);
+  expect(response.status).toBe(200);
+  const detail = await response.json() as ChannelDetailResponse;
+  expect(detail.messages).toEqual([expect.objectContaining({ sessionId: shared.sessionId, threadId: visibleThread.id, text: "execution reply" })]);
+  expect(detail.conversations).toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: shared.sessionId, threadId: visibleThread.id })]));
+  expect(detail.conversations.some(conversation => conversation.sessionId === hidden.sessionId)).toBe(false);
+});

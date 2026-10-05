@@ -21,7 +21,7 @@ import { eq } from "drizzle-orm";
 import { assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
-import { loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
+import { ensureDefaultAssistantSession, loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
 
 let api: TestApi | undefined;
 
@@ -380,6 +380,52 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     engineHost.evictCache(receipt.sessionId);
     await expect(deps.abort(receipt.sessionId, receipt.threadId, receipt.queueItemId)).resolves.toBeUndefined();
     expect(receipt.sessionId).not.toBe(personalDefault.sessionId);
+  });
+
+  it.each(["app-assistant:local-user", "slack:C_PRIVATE:1.2"])("moves legacy team workflow origin %s into its isolated audience", async (key) => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Legacy origin", creatorUserId: LOCAL_USER.id });
+    const owner = { type: "team", id: team.id } as const;
+    const root = await ensureDefaultAssistantSession(api.providers, owner, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const originThread = await root.session.createThread(key);
+    const runId = "legacy-team-origin-run", workflowId = "legacy-team-origin-workflow", now = Date.now();
+    await db.insert(workflowDefinitions).values({ id: workflowId, orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Legacy", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: now, updatedAt: now });
+    await workflowStore.createRun(runId, { workflowId, definitionVersionId: "v1",
+      origin: { assistantSessionId: root.sessionId, threadId: originThread.id } },
+    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup", ownerHint: { ownerType: "team", ownerId: team.id } } as const;
+    const receipt = await deps.promptOrchestrator("report into the original audience", options);
+    expect(receipt.sessionId).not.toBe(root.sessionId);
+    expect(await engineStore.getSession(receipt.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: originThread.id });
+    expect(await engineStore.getThread(receipt.sessionId, receipt.threadId)).toMatchObject({ key });
+    expect(await deps.promptOrchestrator("report into the original audience", options)).toEqual(receipt);
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
+    // A pre-cutover admission whose workflow checkpoint was lost must not run again.
+    await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "old-admission", threadId: originThread.id,
+      dispatchId: `workflow:${runId}:old-report`, content: { kind: "signal", signalType: "workflow.request", body: "old report", attributes: { runId } },
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    engineHost.evictCache(root.sessionId);
+    const oldReceipt = await deps.promptOrchestrator("old report", { ...options, dispatchId: `workflow:${runId}:old-report` });
+    expect(oldReceipt).toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "old-admission" });
+    expect(await deps.awaitResult(oldReceipt.sessionId, oldReceipt.threadId, oldReceipt.queueItemId)).toMatchObject({ outcome: "aborted" });
+  });
+
+  it.each(["archived", "missing"])("fails closed for a supplied %s origin instead of using the default audience", async (state) => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const origin = await root.session.createThread("app-assistant:local-user");
+    const runId = "unavailable-origin";
+    await seedRun(api, runId, "unavailable-workflow", { assistantSessionId: state === "missing" ? "gone-session" : root.sessionId, threadId: origin.id });
+    if (state === "archived") await db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, root.assistant.id));
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await expect(deps.promptOrchestrator("private report", { dispatchId: `workflow:${runId}:node`, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id } })).rejects.toThrow("origin assistant is unavailable");
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
   });
 
   it("reuses the exact assistant thread recorded as the run origin", async () => {

@@ -1,7 +1,8 @@
 import { afterEach, expect, it } from "vitest";
 import type { NodeCheckpoint, WorkflowRun } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
+import { createTeam } from "../services/teams.js";
 import { buildRunOriginReport, runReport } from "./run-attention.js";
 
 let api: TestApi | undefined;
@@ -52,4 +53,30 @@ it("reports a settled run to the thread that started it, once", async () => {
   current = run();
   await report({ ...info, runId: "run-2" });
   expect((await api.providers.engineStore.listUnsettledSubmissions(sessionId)).filter((item) => item.threadId === thread.id)).toHaveLength(1);
+});
+
+it.each(["app-assistant:local-user", "slack:C_PRIVATE:1.2"])("reports a legacy team origin settlement inside its isolated %s audience", async (key) => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Report audience", creatorUserId: "local-user" });
+  const owner = { type: "team", id: team.id } as const;
+  const meta = { actorUserId: "local-user", orgId: "local-org" };
+  const root = await ensureDefaultAssistantSession(p, owner, meta);
+  const source = await root.session.createThread(key);
+  const execution = await ensureAssistantExecution(p, owner, meta, key);
+  const target = execution.session.thread(key);
+  await target.pause();
+  const run: WorkflowRun = { runId: "legacy-report", status: "settled", outcome: "failed", waitingOn: [], updatedAt: 2,
+    attempt: 1, wakeRequested: false, createdAt: 1, definition: { version: "dag/v1" }, definitionVersionId: "v1", actorUserId: "local-user",
+    params: { workflowId: "wf-legacy", definitionVersionId: "v1", origin: { assistantSessionId: root.sessionId, threadId: source.id } } };
+  const report = buildRunOriginReport({ db: p.db, engineHost: p.engineHost,
+    store: { getRun: async () => run, getCheckpoints: async () => [checkpoint("step", "failed", { error: "private failure" })] } });
+  const info = { runId: run.runId, workflowId: "wf-legacy", outcome: "failed", settledAt: 2 } as const;
+  await report(info);
+  await report(info);
+  expect(await p.engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
+  const queued = await p.engineStore.listUnsettledSubmissions(execution.sessionId);
+  expect(queued).toHaveLength(1);
+  expect(queued[0]).toMatchObject({ threadId: target.id, content: { signalType: "workflow.settled" } });
+  expect(await p.engineStore.getSession(execution.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: source.id });
 });

@@ -35,6 +35,11 @@ An explicit publication or memory copy remains a separate audience-changing oper
 
 Do not copy a legacy shared working directory into each new execution.
 Legacy mixed-audience runtimes retain read-only transcript access. New work starts in isolated execution sessions.
+On restoration, queued and interrupted legacy submissions settle as aborted with the migration reason.
+The engine withdraws their pending decision gates. It does not replay tools or resume their models.
+Workflow Thread nodes and settlement reports to a live legacy team thread use an isolated execution under the same thread key.
+Its governing thread preserves the original private helper or Slack audience. Missing threads and unavailable or archived explicit origins fail closed. They never fall back to a broader team audience.
+Retries retain prior legacy admission receipts, including aborted outcomes. They do not execute those submissions again.
 Block writes and terminal access to ambiguous legacy sandboxes until an operator exports or classifies their data.
 Retain old memory and artifacts for authorized recovery; never reinterpret ambiguous data as team-shared.
 Retired assistant state must remain exportable before sandbox cleanup can destroy it.
@@ -128,3 +133,14 @@ A refresh renews its lease during collection, generation, and validation, includ
 Only the worker holding the current lease token can publish or renew.
 If its deadline expires without another worker taking ownership, it can publish its validated result.
 A replaced worker cannot overwrite the new owner's result.
+
+Workspace channel lists and detail pages include the logical runtime and its registered execution sessions.
+Each session keeps its governing-thread visibility checks. Message queries match both session and thread IDs before applying the result limit.
+
+## Workflow report retention
+
+An originless team run uses one execution for its report thread. Separate runs do not share execution state.
+When the existing settlement hook archives that thread, it evicts the execution cache only after submissions and pending decisions finish.
+It leaves origin conversation executions cached. Durable mappings, transcripts, and files remain available under existing access checks and sandbox retention.
+No time-based deletion of workflow report history is introduced.
+If the run settles before its report finishes, the hook leaves that execution active; existing sandbox idle handling still applies.

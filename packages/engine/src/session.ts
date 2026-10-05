@@ -20,7 +20,7 @@ import type {
 } from "./commands/types.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type { PolicySandbox } from "./sandbox/policy.js";
-import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
+import { ConflictError, NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import {
   isReasoningLevel,
   parseReasoningLevel,
@@ -589,7 +589,10 @@ export class Session {
    * re-running is safe.
    */
   async reconcile(): Promise<void> {
-    if (this.options.readOnlyReason) return;
+    if (this.options.readOnlyReason) {
+      await this.settleReadOnlySubmissions(this.options.readOnlyReason);
+      return;
+    }
     const items = await this.providers.store.listUnsettledSubmissions(this.id);
     for (const item of items) {
       // startup: this instance is the definitive new owner (restoreSession's
@@ -622,6 +625,32 @@ export class Session {
     );
     for (const t of this.threads.values()) {
       if (queuedThreadIds.has(t.id)) void t.kick();
+    }
+  }
+
+  /** A cutover must terminate old work without restoring its tools or sandbox. */
+  private async settleReadOnlySubmissions(reason: string): Promise<void> {
+    const store = this.providers.store;
+    for (const item of await store.listUnsettledSubmissions(this.id)) {
+      try {
+        await store.forceSettle(this.id, item.id, "aborted", reason);
+      } catch (error) {
+        if (!(error instanceof ConflictError)) throw error;
+        continue; // Another restore already settled it.
+      }
+      await this.emit({ type: "submission_settled", sessionId: this.id, threadId: item.threadId,
+        queueItemId: item.id, outcome: { outcome: "aborted", error: reason } },
+      { eventKey: `settled:${item.id}`, queueItemId: item.id });
+    }
+    // Also repair a crash between settlement and gate cleanup. No gate is re-armed.
+    for (const gate of await store.listDecisionGates(this.id)) {
+      if (gate.status !== "pending" || !gate.queueItemId) continue;
+      const item = await store.getQueueItem(this.id, gate.queueItemId);
+      if (item?.outcome?.outcome !== "aborted" || item.outcome.error !== reason) continue;
+      await persistTerminalGate(store, this.id, gate.threadId, gate, { status: "withdrawn", reason: "cancel" });
+      await this.emit({ type: "decision_gate_withdrawn", threadId: gate.threadId, gateId: gate.id, reason: "cancel" },
+        { eventKey: `gate:${gate.id}:withdrawn`, queueItemId: item.id });
+      await store.clearSuspendedTurn(this.id, gate.threadId);
     }
   }
 

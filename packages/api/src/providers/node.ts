@@ -744,7 +744,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     store: workflowStore,
   });
   const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: [channelHost.attentionDeliverer()], access: { engineCredentials, onePassword } });
-  const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore });
+  const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost });
   const runOriginReport = buildRunOriginReport({ db, engineHost, store: workflowStore });
 
   const workflowRunHost = new LocalRunHost({

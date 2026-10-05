@@ -28,7 +28,8 @@ import type { AppDb } from "../lib/drizzle.js";
 import { ensureAssistantRuntime, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import { principalFromOwner, routeAttention, type AttentionChannelDeliverer, type AttentionDeps } from "../orchestrator/attention.js";
-import { sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { assistantExecutions, sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { resolveWorkflowReportTarget } from "./report-target.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
@@ -157,10 +158,13 @@ export function buildRunOriginReport(deps: RunOriginReportDeps): OnRunSettled {
       if (!assistant || assistant.archivedAt !== null) return;
       const actorUserId = run.actorUserId ?? (assistant.ownerType === "user" ? assistant.ownerId : undefined);
       if (!actorUserId) return;
-      const { session } = await ensureAssistantRuntime({ db: deps.db, engineHost: deps.engineHost }, assistant,
-        { actorUserId, orgId: assistant.orgId });
-      const thread = session.threadById(origin.threadId);
-      if (!thread) return;
+      const meta = { actorUserId, orgId: assistant.orgId };
+      const source = await ensureAssistantRuntime(deps, assistant, meta);
+      const sourceThread = source.session.threadById(origin.threadId);
+      if (!sourceThread) return;
+      const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
+        { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, `workflow-settled:${info.runId}`);
+      if (priorQueueItemId) return;
       const name = await workflowName(deps.db, info.workflowId);
       const checkpoints = await deps.store.getCheckpoints(info.runId);
       await thread.submitPrompt({
@@ -201,7 +205,8 @@ export interface RunThreadArchiveDeps {
   channels?: AttentionChannelDeliverer[];
   /** The engine's own session store, for the thread's key and creation time,
    * and for the state of the submission the node dispatched onto it. */
-  engineStore: Pick<SessionStore, "getThread" | "getQueueItem">;
+  engineStore: Pick<SessionStore, "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates">;
+  engineHost?: Pick<EngineHost, "liveSession" | "evictCache">;
 }
 
 /**
@@ -287,6 +292,18 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
             archivedAt: info.settledAt,
           })
           .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: info.settledAt } });
+        // Only a per-run report execution owns this cache lifetime. Preserve
+        // durable history, sandbox files, and ordinary origin conversations.
+        if (deps.engineHost) {
+          const [execution] = await deps.db.select().from(assistantExecutions)
+            .where(eq(assistantExecutions.sessionId, dispatch.sessionId)).limit(1);
+          if (execution?.conversationKey !== thread.key) continue;
+          if ((await deps.engineStore.listDecisionGates(dispatch.sessionId)).some(gate => gate.status === "pending")) continue;
+          if ((await deps.engineStore.listUnsettledSubmissions(dispatch.sessionId)).length > 0) continue;
+          const live = deps.engineHost.liveSession(dispatch.sessionId);
+          if (live?.listThreads().some(t => t.runningItemId() !== undefined)) continue;
+          deps.engineHost.evictCache(dispatch.sessionId);
+        }
       }
     } catch (err) {
       console.error(`workflow run thread archive failed for ${info.runId}:`, err);

@@ -1,10 +1,12 @@
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { restoreOneSession } from "../boot-restore.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { addMember, createTeam } from "../services/teams.js";
-import { assistants } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import { eq, sql } from "drizzle-orm";
-import { ensureAssistantExecution } from "./service.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession } from "./service.js";
 
 let api: TestApi;
 afterEach(async () => { await api?.cleanup(); });
@@ -93,4 +95,38 @@ it("keeps team helper files and memory separate across members and cache rebuild
   expect(restoredBob.sessionId).toBe(bob.sessionId);
   expect(JSON.stringify(restoredAlice.session.options.systemContext)).toContain("Private acquisition");
   expect(JSON.stringify(restoredBob.session.options.systemContext)).not.toContain("Private acquisition");
+});
+
+it("settles durable legacy team submissions as aborted at read-only restoration", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Cutover", creatorUserId: "local-user" });
+  const owner = { type: "team", id: team.id } as const;
+  const meta = { orgId: "local-org", actorUserId: "local-user" };
+  const root = await ensureDefaultAssistantSession(p, owner, meta);
+  const thread = await root.session.ensureDefaultThread();
+  const now = Date.now();
+  for (const id of ["legacy-running", "legacy-queued"]) {
+    await p.engineStore.admitSubmission(root.sessionId, thread.id, { id, threadId: thread.id, content: "old work",
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+  }
+  await p.engineStore.claimSubmission({ sessionId: root.sessionId, threadId: thread.id, itemId: "legacy-running",
+    attemptId: "old-attempt", ownerId: "old-process" });
+  p.engineHost.evictCache(root.sessionId);
+  // Follow the startup enumeration and generic restore path; no user opens the root.
+  const ids = await p.engineStore.listSessionIdsWithUnsettledSubmissions();
+  expect(ids).toContain(root.sessionId);
+  for (const id of ids) await restoreOneSession(id, {
+    ensureWorkflowSession: async () => { throw new Error("Not a workflow session"); },
+    lookupAgentSession: async sessionId => {
+      const [row] = await p.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId));
+      return row ? { ...await loadSessionMeta(p.db, row), profile: row.profile } : undefined;
+    },
+    sessionFor: (sessionId, sessionMeta) => p.engineHost.sessionFor(sessionId, sessionMeta),
+  });
+  expect(await p.engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
+  for (const id of ["legacy-running", "legacy-queued"]) {
+    expect(await p.engineStore.getQueueItem(root.sessionId, id)).toMatchObject({ status: "settled",
+      outcome: { outcome: "aborted", error: expect.stringContaining("read-only") } });
+  }
 });

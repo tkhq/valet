@@ -3,7 +3,7 @@
  * runtime talks in, who listens there, and the conversations and messages that
  * link Valet threads to the channel. A channel is derived, never stored.
  */
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { assistants, channelMessages, eventSubscriptions, teams } from "../schema/index.js";
@@ -15,6 +15,7 @@ import type {
 import {
   channelUrl, githubPullRequestKey, parseChannelKey, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl,
 } from "./channel-messages.js";
+import { workspaceSessionIds } from "../assistants/service.js";
 import { parsePullRequestUrl } from "./thread-pull-requests.js";
 
 /** Resolves Slack channel ids to names. Missing ids keep their id. */
@@ -26,10 +27,9 @@ interface ChannelState {
 }
 
 interface Loaded {
-  sessionId: string | null;
   channels: Map<string, ChannelState>;
-  /** The runtime's threads the viewer may see. */
-  shown: Set<string>;
+  /** Visible thread IDs grouped by session, including isolated executions. */
+  shownBySession: Map<string, Set<string>>;
 }
 
 /** The session of the workspace's runtime, or null before its first use. */
@@ -134,8 +134,9 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
     if (own) for (const id of ids) channelFor(slackChannelKey(id));
   }
 
-  let shown = new Set<string>();
-  if (sessionId) {
+  const shownBySession = new Map<string, Set<string>>();
+  const sessions = sessionId ? await workspaceSessionIds(db, orgId, sessionId) : [];
+  for (const sessionId of sessions) {
     // Slack conversations: the runtime's threads keyed by a Slack thread.
     const slackThreads = await db.execute(sql`
       SELECT et.id, et.key, et.updated_at, st.title FROM engine_threads et
@@ -146,7 +147,8 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
     // The runtime's threads this viewer may see; another person's helper
     // thread or a private channel's thread adds nothing (`thread-access.ts`).
     const ids = (await db.execute(sql`SELECT id FROM engine_threads WHERE session_id = ${sessionId}`) as { rows: Array<{ id: string }> }).rows.map((row) => row.id);
-    shown = await threadsShown(sessionId, ids);
+    const shown = await threadsShown(sessionId, ids);
+    shownBySession.set(sessionId, shown);
     for (const row of slackThreads.rows) {
       if (!shown.has(row.id)) continue;
       const conversation = slackConversationFromThreadKey(row.key);
@@ -224,7 +226,7 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
     state.summary.name = name ? `#${name.replace(/^#/, "")}` : parsed.channelId;
   }
   for (const state of channels.values()) state.summary.conversationCount = state.conversations.size;
-  return { sessionId, channels, shown };
+  return { channels, shownBySession };
 }
 
 /** Whether the viewer may see a channel. A private Slack channel takes membership. */
@@ -249,13 +251,15 @@ export async function getChannel(
   db: AppDb, orgId: string, owner: Principal, key: string, names: ChannelNames, canSee: ChannelVisibility, threadsShown: ThreadsShown, limit = 50,
 ): Promise<ChannelDetailResponse | null> {
   if (!parseChannelKey(key) || !(await canSee(key))) return null;
-  const { sessionId, channels, shown } = await loadChannels(db, orgId, owner, names, threadsShown);
+  const { channels, shownBySession } = await loadChannels(db, orgId, owner, names, threadsShown);
   const state = channels.get(key);
   if (!state) return null;
-  const messages: ChannelMessage[] = sessionId
+  // Match each thread to its session so equal IDs never widen another session's access.
+  const visibleSources = [...shownBySession].filter(([, ids]) => ids.size > 0).map(([sessionId, ids]) =>
+    and(eq(channelMessages.sessionId, sessionId), inArray(channelMessages.threadId, [...ids])));
+  const messages: ChannelMessage[] = visibleSources.length > 0
     ? (await db.select().from(channelMessages)
-      .where(and(eq(channelMessages.orgId, orgId), eq(channelMessages.sessionId, sessionId), eq(channelMessages.channelKey, key),
-        inArray(channelMessages.threadId, [...shown])))
+      .where(and(eq(channelMessages.orgId, orgId), eq(channelMessages.channelKey, key), or(...visibleSources)))
       .orderBy(desc(channelMessages.createdAt))
       .limit(limit)).map((row) => ({
         id: row.id, sessionId: row.sessionId, threadId: row.threadId, channelKey: row.channelKey,

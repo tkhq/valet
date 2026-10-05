@@ -667,6 +667,41 @@ function modelStatesFor(events: BusEvent[], queueItemId: string) {
   );
 }
 
+describe("read-only cutover reconciliation", () => {
+  it.each([false, true])("aborts queued and claimed legacy work without execution (gate=%s)", async (withGate) => {
+    const store = new InMemorySessionStore();
+    const { itemId, attemptId } = await seedCrashedRunningTurn(store, { withGate });
+    const now = Date.now();
+    await store.admitSubmission(SESSION, THREAD, {
+      id: "queued-cutover", threadId: THREAD, content: "must not run", status: "queued",
+      attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now,
+    });
+    const spy = spyTool();
+    const faux = registerFauxProvider({ provider: "read-only-cutover" });
+    const stream = new InMemoryEventStream();
+    const engine = new Engine({ providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() } });
+    const readOnlyReason = "This legacy team conversation is read-only. Start a new isolated conversation.";
+    try {
+      const restored = await engine.restoreSession({ sessionId: SESSION, options: {
+        userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spy.def], readOnlyReason,
+      } });
+      expect(await store.listUnsettledSubmissions(SESSION)).toEqual([]);
+      for (const id of [itemId, "queued-cutover"]) {
+        expect(await store.getQueueItem(SESSION, id)).toMatchObject({ status: "settled", outcome: { outcome: "aborted", error: readOnlyReason } });
+        expect(await restored.threadById(THREAD)?.awaitResult(id)).toMatchObject({ outcome: "aborted", error: readOnlyReason });
+      }
+      expect(await store.hasAttemptMarker(itemId, attemptId)).toBe(false);
+      if (withGate) {
+        expect(await store.getDecisionGate(SESSION, "g-crash")).toMatchObject({ status: "withdrawn" });
+        expect(await store.getSuspendedTurn(SESSION, THREAD)).toBeNull();
+      }
+      await restored.reconcile();
+      expect(spy.calls()).toBe(0);
+      expect(restored.threadById(THREAD)?.runningItemId()).toBeUndefined();
+    } finally { faux.unregister(); }
+  });
+});
+
 describe("reconciliation executor (integration)", () => {
   it.each(["resume", "replay"] as const)(
     "%s publishes the resolved model before continuation and clears it after success",

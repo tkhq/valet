@@ -78,6 +78,7 @@ import { resolveModelSpec } from "../services/model-resolution.js";
 import { workflowReasoningLevel } from "../services/reasoning.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { isTeamMember } from "../services/teams.js";
+import { resolveWorkflowReportTarget } from "./report-target.js";
 import { definitionVersionId } from "./definition-version.js";
 
 export interface WorkflowEngineDepsOpts {
@@ -475,15 +476,14 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // started. The lookup is by session id, so the loaded row always
       // carries the origin's own session id.
       //
-      // An origin whose assistant is archived cannot take the report. The
-      // singleton cutover archives every extra assistant a dev-v2 owner had,
-      // and a run started from one of those chats is still in flight. The
-      // run reports on its own thread in the workspace runtime instead, the
-      // same fallback `activeWorkflowOrigin` applies when a run starts.
+      // An unavailable explicit origin must not fall back to a broader team audience.
       const originAssistant = ctx.origin
         ? await loadAssistantBySessionId(opts.db, ctx.origin.assistantSessionId)
         : undefined;
-      const origin = originAssistant?.archivedAt === null ? ctx.origin : undefined;
+      if (ctx.origin && (!originAssistant || originAssistant.archivedAt !== null)) {
+        throw new Error("The workflow origin assistant is unavailable. Start a new run from an active assistant thread.");
+      }
+      const origin = ctx.origin;
       const assistant = origin ? originAssistant : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
       const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
       const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
@@ -501,7 +501,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // it, the run's threads and artifact publishing report "not found".
       const deps = { db: opts.db, engineHost: opts.host };
       const meta = { actorUserId: ctx.actorUserId, orgId: ctx.orgId };
-      const { session } = origin
+      let { session } = origin
         ? await ensureAssistantRuntime(deps, assistant, meta)
         : await ensureAssistantExecution(deps, principal, meta, workflowRunThreadKey(runId, ctx.slackChannel));
       // One thread per run. A thread is the engine's unit of serial
@@ -511,7 +511,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // archives the thread when the run settles, so the sidebar does not
       // fill up. An attended run reports into the thread it was started
       // from instead.
-      const thread = origin
+      let thread = origin
         ? session.threadById(origin.threadId)
         : session.thread(workflowRunThreadKey(runId, ctx.slackChannel));
       if (!thread) {
@@ -519,6 +519,20 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           `Workflow origin thread ${origin?.threadId} is missing from session ${session.id}. ` +
             "Start a new run from an active assistant thread.",
         );
+      }
+      if (origin) {
+        const target = await resolveWorkflowReportTarget(deps,
+          { type: assistant.ownerType, id: assistant.ownerId }, meta, session, thread, promptOpts.dispatchId);
+        if (target.priorQueueItemId) {
+          const item = await opts.engineStore.getQueueItem(session.id, target.priorQueueItemId);
+          const content = item?.content;
+          if (!content || typeof content === "string" || !("kind" in content) || content.kind !== "signal" ||
+              content.signalType !== "workflow.request" || content.body !== promptText || content.attributes?.runId !== runId) {
+            throw new Error("The legacy workflow dispatch has different content. Start a new workflow run.");
+          }
+          return { sessionId: session.id, threadId: thread.id, queueItemId: target.priorQueueItemId };
+        }
+        ({ session, thread } = target);
       }
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
