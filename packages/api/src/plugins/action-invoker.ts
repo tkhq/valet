@@ -691,7 +691,7 @@ function buildCredentialProvider(
   const mayBorrow = (svc: string) => async (memberId: string) =>
     ctx.workflowExecutionId && owner.type === "team" ? canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId: owner.id, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
   return {
-    async get(service?: string, purpose?: "discover"): Promise<Credential | null> {
+    async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
       // Escalation applies to THIS provider's own service only. An incidental
       // read of some other service must not reach the org's credentials, even
@@ -717,8 +717,8 @@ function buildCredentialProvider(
                 deps,
                 {
                   orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
-                  // Listing a service's tools may use a shared account; running one asks first.
-                  mayBorrow: purpose === "discover" ? async () => true : mayBorrow(svc),
+                  // Discovery can contact the provider, so it requires the same approval.
+                  mayBorrow: mayBorrow(svc),
                 },
                 svc,
                 fallback,

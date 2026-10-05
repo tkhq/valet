@@ -86,3 +86,14 @@ Session creation with an initial prompt records admission durably. A missing cre
 The decisions inbox excludes ordinary gates whose thread no longer exists.
 A missing thread cannot establish audience access, even when its session belongs to the viewer's team.
 Named account approvers retain their separate gate-only access.
+
+### Authenticated tool discovery
+
+Tool discovery requires the same member-account approval as execution.
+An authenticated MCP tools request can transmit a credential, even when it only returns metadata.
+Runtime and workflow credential readers therefore apply current borrow grants to discovery reads, including reads for another service.
+External senders cannot use a teammate's borrow grant to discover tools.
+
+Release follow-up: interactive dynamic-only MCP services need approval before discovery can obtain another member's credential.
+Their current action gate follows discovery, so it cannot grant the initial access.
+Keep discovery denied until that approval path is implemented; do not restore unconditional borrowing.

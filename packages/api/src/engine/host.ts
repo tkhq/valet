@@ -1895,7 +1895,7 @@ export class EngineHost {
           // org-scoped 1Password lookup. The sandbox git credential route
           // reads a team-owned workflow sandbox's row through the same
           // helper, so git and these tools agree.
-          const actor = use.actorId ?? runActor;
+          const actor = use.externalSender ? undefined : use.actorId ?? runActor;
           const teamRow = await usableTeamGithubRow(
             { credentials, onePassword, shares: (teamId, svc) => membersSharing(db, teamId, svc) },
             {
@@ -1937,16 +1937,16 @@ export class EngineHost {
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
       if (owner.type === "team") {
         // The acting member's own share first. Another member's share is
-        // used only to list tools, or once that member approved
+        // used once that member approved, including authenticated tool discovery
         // (`services/credential-borrow.ts`).
-        const actor = use.actorId ?? runActor;
+        const actor = use.externalSender ? undefined : use.actorId ?? runActor;
         return resolveTeamCredentialRead(
           { credentials, onePassword, ...(db ? { shares: (teamId: string, svc: string) => membersSharing(db, teamId, svc) } : {}) },
           {
             orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
             // A sender with no Valet account never rides a teammate's approval.
-            mayBorrow: async (memberId) => use.discover === true
-              || (!use.externalSender && db ? await canBorrowCredential(db, { orgId, teamId: owner.id, actorId: actor, sessionId, threadId: use.threadId, service, memberId }) : false),
+            mayBorrow: async (memberId) => !use.externalSender && db
+              ? await canBorrowCredential(db, { orgId, teamId: owner.id, actorId: actor, sessionId, threadId: use.threadId, service, memberId }) : false,
           },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read

@@ -720,6 +720,32 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(1);
   });
 
+  it("does not borrow a second service's member account during dynamic discovery", async () => {
+    const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "linear", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "linear", { type: "api_key", apiKey: "bea-key" });
+    const discovered = vi.fn();
+    const fixture = countingAction({ id: "demo.dyn" });
+    const plugin: ActionPlugin = {
+      service: "demo", actions: [],
+      resolveActions: async ({ credentials }) => {
+        discovered(await credentials.get("linear"));
+        return [fixture.action];
+      },
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", plugin) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, workflowExecutionId: "discovery-run" };
+    const request = { service: "demo", action: "dyn", params: { msg: "hello" }, invocationId: "workflow:discovery-run:step" };
+    await invoke(request, ctx);
+    expect(discovered).toHaveBeenLastCalledWith(null);
+    await writeBorrowGrant(db, "org1", { sessionId: "wf:discovery-run", service: "linear", memberId: "bea" });
+    await invoke({ ...request, invocationId: "workflow:discovery-run:approved" }, ctx);
+    expect(discovered).toHaveBeenLastCalledWith(expect.objectContaining({ accessToken: "bea-key" }));
+  });
+
   // Discovery reads the credential before any try/catch the invoker has. A
   // lease refusal raised there must come back as a failed result that names
   // the fix, not as a rejected promise the workflow node reports bare.

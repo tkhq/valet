@@ -96,7 +96,14 @@ describe("EngineHost session 1Password credential resolution", () => {
     const session = await h.sessionFor("borrow-session", {
       userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: teamId,
     });
+    const discover = (actorId: string, externalSender = false) =>
+      session.credentialProvider({ actorId, externalSender, threadId: "thread" }).get("linear", "discover");
+    expect(await discover("borrower")).toBeNull();
     await writeBorrowGrant(appDb, orgId, { sessionId: session.id, threadId: "thread", service: "linear", memberId: userId });
+    expect((await discover("borrower"))?.accessToken).toBe("shared-key");
+    expect(await discover("borrower", true)).toBeNull();
+    expect(await discover(userId, true)).toBeNull();
+    expect(await discover("outsider")).toBeNull();
     const read = (actorId?: string) => session.credentialProvider({ actorId, threadId: "thread" }).get("linear");
     expect((await read("borrower"))?.accessToken).toBe("shared-key");
     expect(await read("outsider")).toBeNull();
