@@ -91,7 +91,7 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 |---|---|
 | `typecheck` | root `pnpm typecheck` (all packages except frozen `worker`) |
 | `conventions` | `scripts/check-conventions.ts` — recurring review rules as executable checks: `@ts-ignore`/`@ts-expect-error` banned, `as unknown as` ratcheted via allowlist (`scripts/e2e/conventions.ts`), every `ws`-consuming package declares both `@types/ws` and `@types/node`. Legacy packages (worker, client, runner) excluded. |
-| `unit` | root `pnpm test --project '!@valet/engine'` (`shared`, `sdk`, `api`, `web`, and runner projects); engine runs once in `engine-unit` |
+| `unit` | root `pnpm test --project '!@valet/engine'` (`shared`, `sdk`, `api`, `web`, and e2e runner tests); engine and keyless integration files run only in their dedicated rows |
 | `engine-unit` | `pnpm --filter @valet/engine test` — store contract, compaction, gates, signals, kill-mid-turn, model switching |
 | `workflow-unit` | `pnpm --filter @valet/workflow test` — DAG interpreter, node executors, expression eval, checkpoints |
 | `gateway-unit` | `pnpm --filter @valet/sandbox-gateway test` — sandbox JWT mint/verify, WS proxy |
@@ -406,3 +406,30 @@ The live Kubernetes image-build smoke test uses a Git-capable base image and a
 unique resource ID for each run. It requires the image to reach `pushed`; a
 terminal failure no longer counts as success. This catches broken build execution
 instead of only checking that polling terminates.
+
+## Development validation scope (2026-10-04)
+
+Root CI excludes the frozen worker, client, and runner packages. Keep their tests outside the v2 development loop.
+The root suite still includes current API integration tests. During `make e2e`, exclude only the explicit `integration-core` file list from `unit`.
+The dedicated keyless integration row runs those files once, with the same credential scrub. Do not exclude new integration files by a directory wildcard.
+
+Use the smallest scope that covers the changed behavior during development:
+
+| Change | Local validation |
+|---|---|
+| Web component or store | `pnpm --filter @valet/web test <file-filter>`; inspect the changed UI |
+| Queue, steering, or provider recovery | Relevant engine queue/retry suites, API wire tests, and web stream tests |
+| Authorization, approvals, or credentials | Relevant API security suites and the owning engine/workflow tests |
+| Workflow interpreter | `pnpm --filter @valet/workflow test <file-filter>` plus API routing tests when affected |
+| Persistence or schema | Store contract, migration, and affected API suites; real Postgres before release |
+| Deployment or sandbox | Relevant chart/backend suites and the corresponding e2e row |
+| Documentation only | Docs lint; no application tests unless examples change behavior |
+
+Use `-t '<case name>'` for one regression while editing. Run the affected files before committing.
+Do not rerun passing suites on unchanged code. Run broad CI for the release candidate and full `make e2e` before release.
+`make test` runs the root v2 suite once and propagates failures. `make test-integration` runs only the keyless integration row.
+The legacy `make test-e2e` target is not the v2 release command; use `make e2e`.
+
+CI currently typechecks in its typecheck job and again in each of four test shards because imports require emitted package files.
+Sharing those build artifacts could reduce work, but requires measuring transfer cost and validating identical dependency output first.
+Test count alone is not grounds to remove coverage. Preserve distinct authorization, migration, recovery, and backend contract cases.

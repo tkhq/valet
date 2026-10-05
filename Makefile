@@ -526,15 +526,15 @@ typecheck: generate-registries ## Run TypeScript type checking
 # Testing
 # ==========================================
 
-test: test-unit test-integration ## Run all tests
+test: test-unit ## Run the root v2 test suite; use make e2e for release validation
 
 test-unit: ## Run unit tests
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	$(PNPM) run test:unit 2>/dev/null || echo "$(YELLOW)No unit tests configured$(NC)"
+	$(PNPM) run test:unit
 
 test-integration: ## Run integration tests
 	@echo "$(GREEN)Running integration tests...$(NC)"
-	$(PNPM) run test:integration 2>/dev/null || echo "$(YELLOW)No integration tests configured$(NC)"
+	$(PNPM) exec tsx scripts/e2e.ts --only integration-core
 
 test-e2e: wait-for-services ## Run end-to-end tests
 	@echo "$(GREEN)Running E2E tests...$(NC)"

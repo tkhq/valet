@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { INTEGRATION_LIST_FILES } from "../../scripts/e2e/lib.js";
 
 // Two projects so the systematic ambient-env scrub (vitest.setup.ts) can
 // apply to every test EXCEPT `src/integration/**`, whose suites are
@@ -17,6 +18,8 @@ export default defineConfig({
     exclude: [
       "**/node_modules/**",
       "**/dist/**",
+      // The e2e integration-core row owns these exact files. Root CI still runs them.
+      ...(process.env.VALET_E2E_DEDICATED_CORE === "1" ? INTEGRATION_LIST_FILES.core : []),
       // In CI, EXCLUDE infra-dependent e2e suites entirely (not merely skip):
       // some build a real k8s/docker client at module/collection scope, which
       // throws on the GitHub runner (no cluster/images) before a `describe.skip`

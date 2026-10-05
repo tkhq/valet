@@ -191,7 +191,7 @@ export const STEPS: StepDef[] = [
   // Advisory STE prose lint over maintained docs (CLAUDE.md "Writing").
   // Soft-skips when python3 is absent rather than failing the scorecard.
   { id: "docs-lint", group: "static", title: "STE prose lint (maintained docs)", command: ["bash", "-c", "command -v python3 >/dev/null || { echo 'python3 not found - skipping'; exit 0; }; python3 scripts/docs/docs_lint.py"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
-  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test", "--project", "!@valet/engine"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
+  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test", "--project", "!@valet/engine"], env: { VALET_E2E_DEDICATED_CORE: "1" }, needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
   { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "browser-runtime", group: "static", title: "browser runtime, cells, journal and page fixtures", command: ["pnpm", "--filter", "@valet/browser-runtime", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
