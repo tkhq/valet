@@ -618,10 +618,10 @@ function truthyQuery(value: string | undefined): boolean {
 async function keepVisibleSources<T extends { ownerType: string; sourceSessionId: string | null; sourceThreadId: string | null }>(
   c: Context<AppEnv>, rows: T[],
 ): Promise<T[]> {
-  const judged = rows.filter((row) => row.ownerType === "team" && row.sourceSessionId && row.sourceThreadId);
+  const judged = rows.filter((row) => row.ownerType === "team" && row.sourceSessionId);
   if (judged.length === 0) return rows;
   const shown = await visibleThreadIds(c.var.providers, { ownerType: "team" }, viewerOf(c),
-    judged.map((row) => ({ sessionId: row.sourceSessionId!, threadId: row.sourceThreadId! })));
+    judged.filter((row) => row.sourceThreadId).map((row) => ({ sessionId: row.sourceSessionId!, threadId: row.sourceThreadId! })));
   return rows.filter((row) => !judged.includes(row) || shown.has(`${row.sourceSessionId}:${row.sourceThreadId}`));
 }
 

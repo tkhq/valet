@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { artifacts, orgs, teamMembers, teams } from "../schema/index.js";
 import { publishArtifact } from "../services/artifacts.js";
@@ -55,11 +55,32 @@ async function list(target: TestApi, query: string, userId = "local-user") {
 }
 
 describe("workspace artifact lists", () => {
+  it("does not list artifact tokens from missing or deleted source threads", async () => {
+    const { target, teamRows } = await setup();
+    const db = target.providers.db;
+    for (const row of teamRows) await db.update(artifacts).set({ sourceSessionId: "source", sourceThreadId: "private" }).where(eq(artifacts.id, row.id));
+    const query = "ownerType=team&ownerId=team-a&limit=50";
+    const assertHidden = async () => {
+      const response = await list(target, query, "test-member");
+      for (const row of teamRows) expect(JSON.stringify(response)).not.toContain(row.token);
+    };
+    await assertHidden();
+    for (const row of teamRows) await db.update(artifacts).set({ sourceThreadId: null }).where(eq(artifacts.id, row.id));
+    await assertHidden();
+    for (const row of teamRows) await db.update(artifacts).set({ sourceThreadId: "private" }).where(eq(artifacts.id, row.id));
+    await db.execute(sql`INSERT INTO engine_threads(id,session_id,key,status,queue_mode,created_at,updated_at)
+      VALUES ('private','source','app-assistant:local-user','idle','steer',1,1)`);
+    await assertHidden();
+    await db.execute(sql`DELETE FROM engine_threads WHERE session_id='source'`);
+    await assertHidden();
+  });
   it("filters source work before pagination and binds the cursor to that work", async () => {
     const { target, teamRows } = await setup();
     for (const row of teamRows) {
       await target.providers.db.update(artifacts).set({ sourceSessionId: "work-one", sourceThreadId: "thread-one" }).where(eq(artifacts.id, row.id));
     }
+    await target.providers.db.execute(sql`INSERT INTO engine_threads(id,session_id,key,status,queue_mode,created_at,updated_at)
+      VALUES ('thread-one','work-one','web:shared','idle','steer',1,1)`);
     const query = "ownerType=team&ownerId=team-a&sourceSessionId=work-one&sourceThreadId=thread-one&limit=2";
     const first = await list(target, query, "test-member");
     expect(first.artifacts).toHaveLength(2);

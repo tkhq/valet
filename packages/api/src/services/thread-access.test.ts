@@ -5,7 +5,7 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
+import { visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -247,4 +247,17 @@ it("rechecks a stale public answer, and keeps it when Slack cannot answer", asyn
   resetThreadAccessCache();
   await connectSlack(api, { CWASPUBLIC: ["USOMEONE"] });
   expect(await visible()).toBe(false);
+});
+
+it("denies unresolved source pairs instead of treating them as shared", async () => {
+  api = await bootTestApi();
+  const db = api.providers.db;
+  await db.execute(sql`INSERT INTO engine_threads(id,session_id,key,status,queue_mode,created_at,updated_at)
+    VALUES ('public','source','web:shared','idle','steer',1,1),
+      ('private','source','app-assistant:someone-else','idle','steer',1,1)`);
+  const sources = ["public", "private", "missing"].map(threadId => ({ sessionId: "source", threadId }));
+  const viewer = { orgId: "local-org", userId: "local-user" };
+  expect(await visibleThreadIds(api.providers, { ownerType: "team" }, viewer, sources)).toEqual(new Set(["source:public"]));
+  await db.execute(sql`DELETE FROM engine_threads WHERE session_id='source'`);
+  expect(await visibleThreadIds(api.providers, { ownerType: "team" }, viewer, sources)).toEqual(new Set());
 });

@@ -27,6 +27,9 @@ async function setup() {
     { id: "team-work", ownerType: "team", ownerId: "team", orgId: "local-org", userId: "local-user", workspace: "w", createdAt: 1, updatedAt: 1 },
     { id: "foreign-work", ownerType: "user", ownerId: "local-user", orgId: "other-org", userId: "local-user", workspace: "w", createdAt: 1, updatedAt: 1 },
   ]);
+  await db.execute(sql`INSERT INTO engine_threads(id,session_id,key,status,queue_mode,created_at,updated_at)
+    VALUES ('team-work-thread','team-work','web:outcomes','idle','steer',1,1),
+      ('team-thread','team-work','web:active','idle','steer',1,1)`);
   return target;
 }
 async function list(target: TestApi, workspace = "user", query = "") {

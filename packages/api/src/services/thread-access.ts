@@ -301,15 +301,15 @@ export async function visibleThreadIds(
 ): Promise<Set<string>> {
   const pairs = new Map(threads.map((t) => [`${t.sessionId}:${t.threadId}`, t]));
   if (session.ownerType !== "team" || pairs.size === 0) return new Set(pairs.keys());
-  const result = await deps.db.execute(sql`SELECT t.session_id, t.thread_id, ${governingThreadKeySql(sql`t.session_id`, sql`t.thread_id`)} AS key
+  const result = await deps.db.execute(sql`SELECT t.session_id, t.thread_id, ${governingThreadKeySql(sql`t.session_id`, sql`t.thread_id`, "parent link")} AS key
     FROM (VALUES ${sql.join([...pairs.values()].map((t) => sql`(${t.sessionId}::text, ${t.threadId}::text)`), sql`, `)}) AS t(session_id, thread_id)`) as {
     rows: Array<{ session_id: string; thread_id: string; key: string | null }>;
   };
   const keys = new Map(result.rows.map((row) => [`${row.session_id}:${row.thread_id}`, row.key]));
   const visible = threadVisibility(deps, session, viewer);
   const shown = new Set<string>();
-  // A thread with no engine row has no key that narrows it.
-  for (const id of pairs.keys()) if (await visible(keys.get(id))) shown.add(id);
+  // A missing source is an unknown audience, never evidence of shared access.
+  for (const id of pairs.keys()) if (keys.has(id) && await visible(keys.get(id))) shown.add(id);
   return shown;
 }
 

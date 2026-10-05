@@ -139,3 +139,7 @@ Workflow tool and session execution IDs are not conversation origins. Agent-star
 ### OpenAI tool member shares
 
 The runtime OpenAI tool credential resolver uses the same current actor and borrow-grant checks as other tool services. A member may use their own shared account; another member requires an approved grant. External, missing, and removed actors cannot borrow. Organization LLM-provider and environment key precedence remain unchanged, and no chat-model provider configuration is changed.
+
+### Missing source visibility
+
+Batch source visibility defaults to denial when the referenced engine thread cannot be resolved. Artifact lists and other batch consumers must not infer a public audience from a missing source key or return its bearer token. A team artifact with a source session but no source thread also fails closed; truly originless publications remain supported. Existing resolvable public and private threads retain their normal audience checks.
