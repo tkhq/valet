@@ -1731,18 +1731,18 @@ function threadIdOf(effects: NodeCheckpoint["effects"]): string | undefined {
  */
 /** The member a tool gate waits on, when the step would use their shared
  * account (`plugins/action-invoker.ts#sharedAccountApprover`). */
-function approverFromEffects(effects: unknown): { userId: string; name?: string } | undefined {
+function approverFromEffects(effects: unknown): { userId: string; name?: string; shareGeneration?: string } | undefined {
   if (!effects || typeof effects !== "object" || !("approver" in effects)) return undefined;
   const raw = effects.approver;
   if (!raw || typeof raw !== "object" || !("userId" in raw) || typeof raw.userId !== "string") return undefined;
-  return { userId: raw.userId, ...("name" in raw && typeof raw.name === "string" ? { name: raw.name } : {}) };
+  return { userId: raw.userId, ...("shareGeneration" in raw && typeof raw.shareGeneration === "string" ? { shareGeneration: raw.shareGeneration } : {}), ...("name" in raw && typeof raw.name === "string" ? { name: raw.name } : {}) };
 }
 
 /** The members this parked run waits on to lend their accounts. */
-async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string }>> {
+async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string; shareGeneration?: string }>> {
   const waits = run.status === "parked" ? run.waitingOn.filter((w) => w.kind === "signal" && w.signalType.startsWith("approval:")) : [];
   if (waits.length === 0) return new Map();
-  const found = new Map<string, { userId: string; name?: string }>();
+  const found = new Map<string, { userId: string; name?: string; shareGeneration?: string }>();
   for (const cp of await deps.workflowStore.getCheckpoints(run.runId)) {
     const approver = cp.status === "intent" ? approverFromEffects(cp.effects) : undefined;
     if (approver) found.set(`${cp.nodeId}:${cp.iteration}`, approver);
@@ -2045,7 +2045,9 @@ export async function resolveWorkflowApproval(
       if (prepared?.ok) await persistWorkflowPermissions(tx, prepared.grants);
       if (input.approved && approver && node && typeof node.service === "string") {
         const service = deps.actionPluginByService?.get(node.service)?.actionPlugin.credentialService ?? node.service;
-        await writeBorrowGrant(tx, orgId, { sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
+        if (!approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
+        if (run.owner?.ownerType !== "team") throw new Error("The team is unavailable. Request account approval again.");
+        await writeBorrowGrant(tx, orgId, { teamId: run.owner.ownerId, shareGeneration: approver.shareGeneration, sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
       }
       if (input.approved && isPolicyGate && input.scope === "run") {
         const service = typeof node.service === "string" ? node.service : "";

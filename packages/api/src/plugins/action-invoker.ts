@@ -66,7 +66,7 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
-import { canBorrowCredential } from "../services/credential-borrow.js";
+import { shareGeneration, canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
@@ -750,7 +750,7 @@ async function sharedAccountApprover(
   ctx: ActionInvocationContext,
   teamId: string,
   service: string,
-): Promise<{ userId: string; name?: string } | undefined> {
+): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
   if (service === "github" || !ctx.workflowExecutionId) return undefined;
   const sharers = await membersSharing(opts.db, teamId, service);
   if (sharers.length === 0) return undefined;
@@ -771,7 +771,9 @@ async function sharedAccountApprover(
   }
   if (!approvalFrom) return undefined;
   const [member] = await opts.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
-  return { userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+  const generation = await shareGeneration(opts.db, teamId, service, approvalFrom);
+  if (!generation) return undefined;
+  return { shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
 }
 
 /**

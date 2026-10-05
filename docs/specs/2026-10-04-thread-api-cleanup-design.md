@@ -154,3 +154,5 @@ Team runtime discovery goes through the existing tool policy, named-lender appro
 
 The outcomes route checks each team workflow result against its persisted event audience, even when no origin thread exists. Private Slack results require current channel access. Missing or foreign runs fail closed. The bounded page uses one run lookup and reuses the existing event visibility policy.
 Team outcome continuation cursors encrypt hidden row identifiers with the instance key. Recognizable Slack events with no source channel fail closed across run visibility checks.
+
+Borrow approvals bind to a random credential-share generation, for both conversation and workflow scopes. Revocation, account deletion, and re-sharing cannot restore old approvals. Repeated sharing of an existing share preserves its generation. Upgrade assigns generations to existing shares; previous unversioned borrow approvals require fresh approval. Team-owned connections remain available to unattended automation without a personal-account lender gate.

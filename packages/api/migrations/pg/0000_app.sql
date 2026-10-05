@@ -807,6 +807,7 @@ CREATE TABLE "credential_shares" (
 	"service" text NOT NULL,
 	"user_id" text NOT NULL,
 	"created_at" bigint NOT NULL,
+	"generation" text NOT NULL DEFAULT gen_random_uuid()::text,
 	PRIMARY KEY("team_id", "service", "user_id")
 );
 --> statement-breakpoint

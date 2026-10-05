@@ -1100,7 +1100,7 @@ export interface PolicyDecision {
    * the approver in its `context.approver` so the host routes and authorizes
    * it to them alone.
    */
-  approver?: { userId: string; name?: string };
+  approver?: { userId: string; name?: string; shareGeneration?: string };
 }
 
 /**

@@ -11,11 +11,12 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { runtimeGrants } from "../schema/index.js";
+import { credentialShares, runtimeGrants } from "../schema/index.js";
 
 /** Where a borrow approval applies: a session's thread, or a workflow run
  * (a `wf:<runId>:<node>` session). */
 export interface BorrowScope {
+  teamId: string;
   sessionId: string;
   threadId?: string;
   service: string;
@@ -26,16 +27,30 @@ function workflowRunOf(sessionId: string): string | undefined {
   return sessionId.startsWith("wf:") ? sessionId.split(":")[1] || undefined : undefined;
 }
 
-function borrowKey(scope: BorrowScope): string {
-  const base = `credential:${scope.service}:${scope.memberId}`;
+export async function shareGeneration(db: AppQueryable, teamId: string, service: string, memberId: string): Promise<string | undefined> {
+  const [share] = await db.select({ generation: credentialShares.generation }).from(credentialShares)
+    .where(and(eq(credentialShares.teamId, teamId), eq(credentialShares.service, service),
+      eq(credentialShares.userId, memberId))).limit(1);
+  return share?.generation;
+}
+
+async function borrowKey(db: AppQueryable, scope: BorrowScope): Promise<string | undefined> {
+  const generation = await shareGeneration(db, scope.teamId, scope.service, scope.memberId);
+  return generation ? grantKey(scope, generation) : undefined;
+}
+
+function grantKey(scope: BorrowScope, generation: string): string {
+  const base = `credential:${scope.service}:${scope.memberId}:${generation}`;
   return workflowRunOf(scope.sessionId) ? base : `${base}:${scope.threadId ?? ""}`;
 }
 
 export async function hasBorrowGrant(db: AppQueryable, scope: BorrowScope): Promise<boolean> {
+  const key = await borrowKey(db, scope);
+  if (!key) return false;
   const runId = workflowRunOf(scope.sessionId);
   const rows = await db.select({ id: runtimeGrants.id }).from(runtimeGrants).where(and(
     runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
-    eq(runtimeGrants.policyKey, borrowKey(scope)),
+    eq(runtimeGrants.policyKey, key),
     isNull(runtimeGrants.revokedAt),
   )).limit(1);
   return rows.length > 0;
@@ -47,12 +62,14 @@ export async function canBorrowCredential(
   scope: BorrowScope & { orgId: string; teamId: string; actorId?: string },
 ): Promise<boolean> {
   if (!scope.actorId) return false;
+  const key = await borrowKey(db, scope);
+  if (!key) return false;
   const runId = workflowRunOf(scope.sessionId);
   const unattended = !!runId && scope.actorId === `team:${scope.teamId}`;
   const rows = await db.select({ id: runtimeGrants.id }).from(runtimeGrants).where(and(
     eq(runtimeGrants.orgId, scope.orgId),
     runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
-    eq(runtimeGrants.policyKey, borrowKey(scope)),
+    eq(runtimeGrants.policyKey, key),
     isNull(runtimeGrants.revokedAt),
     sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
       WHERE m.team_id = ${scope.teamId} AND m.user_id = ${unattended ? scope.memberId : scope.actorId} AND t.org_id = ${scope.orgId})`,
@@ -64,13 +81,14 @@ export async function canBorrowCredential(
 }
 
 /** Records `scope.memberId`'s approval. Approving again is a no-op. */
-export async function writeBorrowGrant(db: AppQueryable, orgId: string, scope: BorrowScope, now = Date.now()): Promise<void> {
-  if (await hasBorrowGrant(db, scope)) return;
+export async function writeBorrowGrant(db: AppQueryable, orgId: string, scope: BorrowScope & { shareGeneration: string }, now = Date.now()): Promise<void> {
+  const key = await borrowKey(db, scope);
+  if (!key || key !== grantKey(scope, scope.shareGeneration)) throw new Error("This account share changed. Request account approval again.");
   const runId = workflowRunOf(scope.sessionId);
   await db.insert(runtimeGrants).values({
     id: randomUUID(), orgId,
     sessionId: runId ? null : scope.sessionId,
     workflowExecutionId: runId ?? null,
-    policyKey: borrowKey(scope), mode: "allow", grantedBy: scope.memberId, createdAt: now, revokedAt: null,
+    policyKey: key, mode: "allow", grantedBy: scope.memberId, createdAt: now, revokedAt: null,
   }).onConflictDoNothing();
 }

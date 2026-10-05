@@ -117,7 +117,7 @@ export type WorkflowInvokeActionResult =
   | { ok: false; error: string }
   /** `approver`: the one member who may answer, because the action would use
    * their shared account. */
-  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string; approver?: { userId: string; name?: string } };
+  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string; approver?: { userId: string; name?: string; shareGeneration?: string } };
 
 /**
  * Engine surface available to node executors and the interpreter's cancel

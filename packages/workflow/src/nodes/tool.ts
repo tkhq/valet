@@ -218,7 +218,7 @@ async function openGate(
   renderedParams: Record<string, unknown>,
   riskLevel: string | undefined,
   provenance: string | undefined,
-  approver: { userId: string; name?: string } | undefined,
+  approver: { userId: string; name?: string; shareGeneration?: string } | undefined,
 ): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock, onApprovalPending } = args;
   const suffix = iterationSuffix(iteration);

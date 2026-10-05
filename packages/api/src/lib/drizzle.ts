@@ -342,6 +342,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   "team_id" text NOT NULL, "service" text NOT NULL, "user_id" text NOT NULL, "created_at" bigint NOT NULL,
   PRIMARY KEY ("team_id", "service", "user_id")
 )` },
+  { describe: "credential share generation", probe: { kind: "column", table: "credential_shares", column: "generation" }, sql: 'ALTER TABLE "credential_shares" ADD COLUMN IF NOT EXISTS "generation" text NOT NULL DEFAULT gen_random_uuid()::text' },
   // A share used to be a team credential row with `metadata.delegatedFrom`,
   // one per team and service. Move each into its own share row. This runs
   // until the index below exists, so it lands once, before that index.

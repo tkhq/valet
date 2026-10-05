@@ -24,7 +24,7 @@ import {
   type OnePasswordService,
 } from "../services/onepassword.js";
 import { eq } from "drizzle-orm";
-import { writeBorrowGrant } from "../services/credential-borrow.js";
+import { shareGeneration, writeBorrowGrant } from "../services/credential-borrow.js";
 import { shareCredential } from "../services/credential-shares.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgs, teamMembers, teams } from "../schema/index.js";
@@ -102,7 +102,7 @@ describe("EngineHost session 1Password credential resolution", () => {
       session.credentialProvider({ actorId, externalSender, threadId: "thread" }).get(service, "discover");
     expect((await discover(userId))?.accessToken).toBe("shared-key");
     expect(await discover("borrower")).toBeNull();
-    await writeBorrowGrant(appDb, orgId, { sessionId: session.id, threadId: "thread", service: service, memberId: userId });
+    await writeBorrowGrant(appDb, orgId, { teamId, shareGeneration: (await shareGeneration(appDb, teamId, service, userId))!, sessionId: session.id, threadId: "thread", service: service, memberId: userId });
     expect((await discover("borrower"))?.accessToken).toBe("shared-key");
     expect(await discover("borrower", true)).toBeNull();
     expect(await discover(userId, true)).toBeNull();

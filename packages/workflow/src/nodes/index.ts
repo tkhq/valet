@@ -41,7 +41,7 @@ export type OnApprovalPending = (info: {
   params?: unknown;
   iteration?: number;        // set only when > 0
   /** The one member who may answer: the action would use their shared account. */
-  approver?: { userId: string; name?: string };
+  approver?: { userId: string; name?: string; shareGeneration?: string };
 }) => Promise<void> | void;
 
 /** Host audit seam: the tool executor reports gate settlements the HTTP

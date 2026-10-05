@@ -647,6 +647,12 @@ export async function invokeAction(
     // same way isApprovedResolution does.
     const extras: DecisionAction[] = decision.approver ? [] : decision.extraGateActions ?? [];
     const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    if (decision.approver?.shareGeneration) {
+      const share = `:share:${decision.approver.shareGeneration}`;
+      baseReq.dedupeKey = `${qualifiedId(entry)}${share}`;
+      baseReq.resumeKey = `${baseReq.dedupeKey}:${boundedArgsKey(stableJson(args ?? {}))}`;
+      baseRecord.resumeKey = baseReq.resumeKey;
+    }
     // Another member's account: only they answer, so the gate asks them.
     const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
     const borrowed = decision.approver

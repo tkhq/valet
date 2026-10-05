@@ -1043,6 +1043,31 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     expect(requests[0].context?.tool_id).not.toBe(requests[1].context?.tool_id);
   });
 
+  it("does not reuse an approved gate after a credential share changes", async () => {
+    let generation = "old";
+    const requests: DecisionGateRequest[] = [];
+    const records: PolicyInvocationRecord[] = [];
+    const plugin: ActionPlugin = { service: "test", actions: [{ id: "test.run", name: "Run", description: "Run",
+      riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }) }] };
+    const policyResolver: PolicyResolver = { resolve: async () => ({ mode: "require_approval",
+      provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender", shareGeneration: generation } }), onInvocation: async record => { records.push(record); } };
+    const context = makeCtx({ policyResolver, requestDecision: async request => {
+      requests.push(request);
+      return { actionId: "approve", resolvedBy: "lender", resolvedAt: 1 };
+    } });
+    const catalog = buildPluginCatalog([plugin]);
+    await invokeAction(catalog, "test.run", {}, context, "Run");
+    generation = "new";
+    await invokeAction(catalog, "test.run", {}, context, "Run");
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect(request.resumeKey?.startsWith(`${request.dedupeKey}:`)).toBe(true);
+    expect(records.map(record => record.resumeKey)).toEqual(requests.map(request => request.resumeKey));
+    expect(requests[0].resumeKey).not.toBe(requests[1].resumeKey);
+    expect(requests[0].dedupeKey).not.toBe(requests[1].dedupeKey);
+    expect(requests[0].context?.approver).toMatchObject({ shareGeneration: "old" });
+    expect(requests[1].context?.approver).toMatchObject({ shareGeneration: "new" });
+  });
+
   it.each(["external", "denied", "grant-failed"])("does not contact discovery when %s", async (failure) => {
     const resolveActions = vi.fn(async () => []);
     const requestDecision = vi.fn(async (): Promise<DecisionResolution> =>

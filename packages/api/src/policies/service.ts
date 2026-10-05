@@ -37,7 +37,7 @@ import type {
 } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, users, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
-import { canBorrowCredential, writeBorrowGrant } from "../services/credential-borrow.js";
+import { shareGeneration, canBorrowCredential, writeBorrowGrant } from "../services/credential-borrow.js";
 import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
 import { membersSharing } from "../services/credential-shares.js";
 import type { OnePasswordService } from "../services/onepassword.js";
@@ -609,7 +609,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
   /** The member whose shared account this team action would use, when no
    * account of the acting member's or the team's own answers. GitHub has the
    * organization App behind the team's row, so it never borrows. */
-  async function sharedAccountApprover(input: PolicyResolveInput): Promise<{ userId: string; name?: string } | undefined> {
+  async function sharedAccountApprover(input: PolicyResolveInput): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
     const service = credentialServiceFor(input.service);
     if (!deps.credentials || !input.teamId || !input.orgId || service === "github") return undefined;
     const sharers = await membersSharing(deps.db, input.teamId, service);
@@ -633,7 +633,9 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
     }
     if (!approvalFrom) return undefined;
     const [member] = await deps.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
-    return { userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+    const generation = await shareGeneration(deps.db, input.teamId, service, approvalFrom);
+    if (!generation) return undefined;
+    return { shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
   }
 
   const pluginDefaultFor = (service: string): ApprovalMode | undefined =>
@@ -722,7 +724,10 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         if (resolution.resolvedBy !== decision.approver.userId) {
           throw new Error(`Only ${decision.approver.name ?? "the account's owner"} can allow use of their account.`);
         }
+        if (!decision.approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
+        if (!input.teamId) throw new Error("The team is unavailable. Request account approval again.");
         await writeBorrowGrant(deps.db, input.orgId, {
+          teamId: input.teamId, shareGeneration: decision.approver.shareGeneration,
           sessionId: input.sessionId, threadId: input.threadId, service: credentialServiceFor(input.service), memberId: decision.approver.userId,
         }, now);
         return;

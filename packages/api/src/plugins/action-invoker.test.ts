@@ -28,7 +28,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { shareCredential } from "../services/credential-shares.js";
-import { writeBorrowGrant } from "../services/credential-borrow.js";
+import { shareGeneration, writeBorrowGrant } from "../services/credential-borrow.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -709,10 +709,10 @@ describe("buildActionInvoker", () => {
     const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, workflowExecutionId: "run1" };
     const req = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:run1:step" };
 
-    expect(await invoke(req, ctx)).toEqual({ ok: false, requiresApproval: true, provenance: "shared_account", approver: { userId: "bea" } });
+    expect(await invoke(req, ctx)).toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account", approver: { userId: "bea" } });
     expect(fixture.calls()).toBe(0);
 
-    await writeBorrowGrant(db, "org1", { sessionId: "wf:run1", service: "demo", memberId: "bea" });
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "demo", "bea"))!, sessionId: "wf:run1", service: "demo", memberId: "bea" });
     expect((await invoke({ ...req, invocationId: "workflow:run1:step:again" }, ctx)).ok).toBe(true);
     expect(fixture.calls()).toBe(1);
     const outsider = await invoke({ ...req, invocationId: "workflow:run1:outsider" }, { ...ctx, userId: "outsider" });
@@ -741,7 +741,7 @@ describe("buildActionInvoker", () => {
     const request = { service: "demo", action: "dyn", params: { msg: "hello" }, invocationId: "workflow:discovery-run:step" };
     await invoke(request, ctx);
     expect(discovered).toHaveBeenLastCalledWith(null);
-    await writeBorrowGrant(db, "org1", { sessionId: "wf:discovery-run", service: "linear", memberId: "bea" });
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "linear", "bea"))!, sessionId: "wf:discovery-run", service: "linear", memberId: "bea" });
     await invoke({ ...request, invocationId: "workflow:discovery-run:approved" }, ctx);
     expect(discovered).toHaveBeenLastCalledWith(expect.objectContaining({ accessToken: "bea-key" }));
   });

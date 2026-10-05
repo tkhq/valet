@@ -33,6 +33,20 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM credentials WHERE owner_id = 'team-s'");
   });
 
+  it("assigns stable distinct generations to shares on upgrade", async () => {
+    await db.query("ALTER TABLE credential_shares DROP COLUMN generation");
+    await db.query(`INSERT INTO credential_shares(team_id, service, user_id, created_at)
+      VALUES ('generation-a', 'linear', 'member', 1), ('generation-b', 'linear', 'member', 1)`);
+    await applyAppMigrations(db);
+    const first = await db.query("SELECT generation FROM credential_shares ORDER BY team_id");
+    expect(first.rows).toHaveLength(2);
+    expect(first.rows[0]).not.toEqual(first.rows[1]);
+    expect(first.rows[0]).toMatchObject({ generation: expect.any(String) });
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT generation FROM credential_shares ORDER BY team_id")).rows).toEqual(first.rows);
+    await db.query("DELETE FROM credential_shares");
+  });
+
   it("names each workspace that keeps an integration allow-list", async () => {
     await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, created_at, behavior)
       VALUES ('limited', 'org-r', 'team', 'team-limited', 'limited-session', 1, '{"integrations":["github"]}'),

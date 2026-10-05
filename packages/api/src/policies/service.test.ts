@@ -12,7 +12,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pgDbFromPglite } from "@valet/store-postgres";
 import { InMemoryCredentialStore, type DecisionResolution, type PolicyInvocationRecord, type PolicyResolveInput } from "@valet/engine";
-import { shareCredential } from "../services/credential-shares.js";
+import { shareCredential, revokeShare } from "../services/credential-shares.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
 import {
@@ -530,8 +530,15 @@ describe("another member's shared account", () => {
     expect(await resolver.resolve({ ...input, userId: "outsider" })).toMatchObject({ mode: "deny", provenance: { source: "shared_account" } });
     expect(await resolver.resolve({ ...input, userId: `team:${TEAM}` })).toMatchObject({ mode: "deny" });
     // A Slack sender with no Valet account in the same thread does not ride it.
-    expect((await resolver.resolve({ ...input, externalSender: true })).approver).toEqual({ userId: MEMBER, name: "Member" });
-    expect((await resolver.resolve({ ...input, threadId: "thread-2" })).approver).toEqual({ userId: MEMBER, name: "Member" });
+    expect((await resolver.resolve({ ...input, externalSender: true })).approver).toMatchObject({ userId: MEMBER, name: "Member" });
+    expect((await resolver.resolve({ ...input, threadId: "thread-2" })).approver).toMatchObject({ userId: MEMBER, name: "Member" });
+    await revokeShare(db, { teamId: TEAM, service: "linear", userId: MEMBER });
+    await shareCredential(db, { teamId: TEAM, service: "linear", userId: MEMBER, createdAt: 1 });
+    await expect(resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 2 })).rejects.toThrow(/share changed/);
+    const fresh = await resolver.resolve(input);
+    expect(fresh.approver?.shareGeneration).not.toBe(decision.approver?.shareGeneration);
+    await resolver.onResolution!(input, fresh, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 3 });
+    expect((await resolver.resolve(input)).approver).toBeUndefined();
   });
 
   it("never asks the member acting on their own account", async () => {
