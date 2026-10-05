@@ -2,10 +2,8 @@ import { WorkspaceAssistantButton } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronDown, Menu, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
-import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { useSession } from "~/api/queries";
 import { pluginEnabledForCaller, useMe, useOrg, useTeams } from "~/api/settings";
-import { PresenceMark } from "~/components/assistant/presence-mark";
 import {
   WorkspaceSwitcher,
   workspaceOptions,
@@ -118,8 +116,6 @@ function SidebarToggle() {
 export function TopNav() {
   const mobileNav = useResponsiveOverlay("md");
   const scope = useWorkspaceScope();
-  const info = useWorkspaceRuntimeInfo(scope.key);
-  const presence = info.data?.presence ?? "idle";
 
   // The switcher reads the same three queries the rail does, so switching
   // costs no extra request — react-query serves all three from cache.
@@ -173,8 +169,6 @@ export function TopNav() {
     </span>
   );
 
-  // The logo is the PRODUCT (Valet). The presence dot reflects the
-  // workspace runtime's live state at a glance from anywhere in the app.
   return (
     <header className="max-sm:[--nav-height:3rem] h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-1 px-2 md:gap-4 md:px-3">
       <SidebarToggle />
@@ -187,7 +181,7 @@ export function TopNav() {
         <span className="text-moss text-base leading-none" aria-hidden>
           ◈
         </span>
-        <span className="hidden md:inline-flex"><PresenceMark name="Valet" state={presence} size="nav" /></span>
+        <span className="hidden font-display text-sm font-medium text-ink md:inline">Valet</span>
       </Link>
 
       {/* Beside the logo, not in the sidebar: it scopes the surfaces below

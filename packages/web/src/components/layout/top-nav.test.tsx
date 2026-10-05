@@ -21,7 +21,6 @@ import { TopNav } from "./top-nav";
 // read from `useOrg().data.plugins`. Mock the settings reads so the gate is
 // deterministic; `securityPlugins` is mutable per test.
 let navTeams: TeamSummary[] = [];
-const infoWorkspace = vi.fn();
 let securityPlugins: OrgPluginWire[] = [
   {
     name: "security",
@@ -45,18 +44,6 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useTeams: () => ({ data: { teams: navTeams }, isLoading: false, error: null }),
   };
 });
-
-vi.mock("~/api/workspace-runtime", () => ({
-  useWorkspaceRuntimeInfo: (workspace: string) => (infoWorkspace(workspace), {
-    data: {
-      sessionId: "orchestrator:user-1",
-      name: "Echo",
-      personality: null,
-      presence: "idle",
-      activeChildren: 0,
-    },
-  }),
-}));
 
 // The bell owns its own network calls (useNotifications) and is covered by
 // its own test — stub it here so this test stays focused on nav layout.
@@ -112,14 +99,6 @@ function renderNav(opts: { withSidebar?: boolean; workspace?: string } = {}) {
 }
 
 describe("TopNav", () => {
-  it("requests presence for the workspace in the URL", async () => {
-    navTeams = [{ id: "platform", orgId: "org", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 1, callerRole: "member", defaultModel: null }];
-    renderNav({ workspace: "platform" });
-    await screen.findByRole("link", { name: /Valet/ });
-    expect(infoWorkspace).toHaveBeenLastCalledWith("platform");
-    navTeams = [];
-  });
-
   beforeEach(() => {
     securityPlugins = [
       {

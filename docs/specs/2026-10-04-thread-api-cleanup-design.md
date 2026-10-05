@@ -40,3 +40,5 @@ The shell hides composers during identity verification on mount and focus. Succe
 ### Review authorization boundaries
 
 Slack event threads use the same outside-reader restrictions as Slack conversation threads, including child-work access. A team member's channel message cannot inherit the rule creator's personal credential authority; only the creator's own linked message runs without the external-sender restriction. Workflows started by child sessions resolve their origin through the parent chain to the governing assistant thread. Missing or cyclic child ancestry rejects the start instead of dropping its privacy scope.
+
+The navigation brand shows the Valet name without a runtime presence dot. The header no longer subscribes to runtime presence solely for that decoration.
