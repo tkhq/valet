@@ -23,8 +23,11 @@ import {
   type OnePasswordCtx,
   type OnePasswordService,
 } from "../services/onepassword.js";
+import { eq } from "drizzle-orm";
+import { writeBorrowGrant } from "../services/credential-borrow.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgs, teamMembers } from "../schema/index.js";
+import { orgs, teamMembers, teams } from "../schema/index.js";
 import { EngineHost, type EngineHostOpts } from "./host.js";
 
 const orgId = "op-org";
@@ -77,6 +80,30 @@ describe("EngineHost session 1Password credential resolution", () => {
     host = h;
     return h;
   }
+
+  it("limits a saved borrow approval to current teammates, never outsiders or authorless turns", async () => {
+    const { appDb } = await freshTestPgDb();
+    const teamId = "borrow-team";
+    await appDb.insert(teams).values({ id: teamId, orgId, name: "Borrow", createdAt: 1 });
+    await appDb.insert(teamMembers).values([
+      { teamId, userId, role: "member" },
+      { teamId, userId: "borrower", role: "member" },
+    ]);
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "linear", { type: "api_key", apiKey: "shared-key" });
+    await shareCredential(appDb, { teamId, userId, service: "linear", createdAt: 1 });
+    const h = makeHost(credentials, { db: appDb, onePassword: fakeOnePassword(async (row) => row) });
+    const session = await h.sessionFor("borrow-session", {
+      userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: teamId,
+    });
+    await writeBorrowGrant(appDb, orgId, { sessionId: session.id, threadId: "thread", service: "linear", memberId: userId });
+    const read = (actorId?: string) => session.credentialProvider({ actorId, threadId: "thread" }).get("linear");
+    expect((await read("borrower"))?.accessToken).toBe("shared-key");
+    expect(await read("outsider")).toBeNull();
+    expect(await read()).toBeNull();
+    await appDb.delete(teamMembers).where(eq(teamMembers.userId, "borrower"));
+    expect(await read("borrower")).toBeNull();
+  });
 
   it("1Password-backed row resolves through the service with the secret filled", async () => {
     // `Session.credentialProvider()` always reads through owner

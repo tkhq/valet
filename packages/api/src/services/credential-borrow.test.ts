@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { getWorkflowRunDetail, resolveWorkflowApproval } from "../workflows/service.js";
-import { hasBorrowGrant } from "./credential-borrow.js";
+import { canBorrowCredential, hasBorrowGrant, writeBorrowGrant } from "./credential-borrow.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -39,4 +39,17 @@ it("lets only the member whose account a workflow step would use answer it, for 
   expect(await hasBorrowGrant(p.db, { sessionId: "wf:run-borrow", service: "demo", memberId: "test-member" })).toBe(false);
   expect(await approve("test-member")).toBe("ok");
   expect(await hasBorrowGrant(p.db, { sessionId: "wf:run-borrow", service: "demo", memberId: "test-member" })).toBe(true);
+});
+
+it("does not reuse a borrow grant across organizations or conversations", async () => {
+  api = await bootTestApi();
+  const db = api.providers.db;
+  await db.insert(teams).values({ id: "borrow-scope-team", orgId: "local-org", name: "Borrow", createdAt: 1 });
+  await db.insert(teamMembers).values({ teamId: "borrow-scope-team", userId: "local-user", role: "member" });
+  const scope = { sessionId: "borrow-scope-session", threadId: "one", service: "linear", memberId: "test-member" };
+  await writeBorrowGrant(db, "local-org", scope);
+  const borrower = { ...scope, orgId: "local-org", teamId: "borrow-scope-team", actorId: "local-user" };
+  expect(await canBorrowCredential(db, borrower)).toBe(true);
+  expect(await canBorrowCredential(db, { ...borrower, orgId: "other-org" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...borrower, threadId: "two" })).toBe(false);
 });

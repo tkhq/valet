@@ -14,7 +14,7 @@ import { pgDbFromPglite } from "@valet/store-postgres";
 import { InMemoryCredentialStore, type DecisionResolution, type PolicyInvocationRecord, type PolicyResolveInput } from "@valet/engine";
 import { shareCredential } from "../services/credential-shares.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, users } from "../schema/index.js";
+import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
 import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
@@ -506,6 +506,7 @@ describe("another member's shared account", () => {
     userId: ADMIN, orgId: ORG, sessionId: SESSION, threadId: "thread-1", appliesIn: "session",
   };
   async function sharedByMember() {
+    await db.insert(teams).values({ id: TEAM, orgId: ORG, name: "Shared", createdAt: 1 }).onConflictDoNothing();
     await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "team", ownerId: TEAM, createdAt: 1, updatedAt: 1 });
     await pg.query(`INSERT INTO team_members(team_id, user_id, role) VALUES ('${TEAM}', '${MEMBER}', 'member'), ('${TEAM}', '${ADMIN}', 'admin') ON CONFLICT DO NOTHING`);
     await shareCredential(db, { teamId: TEAM, service: "linear", userId: MEMBER, createdAt: 1 });
@@ -526,6 +527,7 @@ describe("another member's shared account", () => {
     // The member's approval holds for this conversation.
     await resolver.onResolution!(input, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 1 });
     expect((await resolver.resolve(input)).approver).toBeUndefined();
+    expect((await resolver.resolve({ ...input, userId: "outsider" })).approver).toEqual({ userId: MEMBER, name: "Member" });
     // A Slack sender with no Valet account in the same thread does not ride it.
     expect((await resolver.resolve({ ...input, externalSender: true })).approver).toEqual({ userId: MEMBER, name: "Member" });
     expect((await resolver.resolve({ ...input, threadId: "thread-2" })).approver).toEqual({ userId: MEMBER, name: "Member" });

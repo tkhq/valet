@@ -65,7 +65,7 @@ import { credentialSecret } from "@valet/engine";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { sessionRepos } from "../schema/index.js";
 import { orgFallbackPolicy, onePasswordScopesFor } from "../services/credential-resolution.js";
-import { hasBorrowGrant } from "../services/credential-borrow.js";
+import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { ownerOf, repoOf, usableTeamGithubRow } from "../services/session-github-token.js";
 import { getTeamInOrg } from "../services/teams.js";
@@ -164,7 +164,7 @@ sandboxGitCredentialRouter.post("/git-credential", async (c) => {
         {
           orgId: sandbox.orgId, teamId: workflowOwner.id, userId: sandbox.userId, scopes: onePasswordScopesFor("team", workflowOwner.id),
           // A member's account backs git only after that member approved it for this run.
-          mayBorrow: async (memberId) => hasBorrowGrant(db, { sessionId: sandbox.sessionId, service: "github", memberId }),
+          mayBorrow: async (memberId) => canBorrowCredential(db, { orgId: sandbox.orgId, teamId: workflowOwner.id, actorId: sandbox.userId, sessionId: sandbox.sessionId, service: "github", memberId }),
         },
         orgFallbackPolicy(plugins, "github"),
       );

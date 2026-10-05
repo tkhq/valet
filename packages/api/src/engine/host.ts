@@ -35,7 +35,7 @@ import {
   type PluginStore,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
-import { hasBorrowGrant } from "../services/credential-borrow.js";
+import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { createBrowserPolicy, browserSessionHooks, prepareBrowserSandboxStop } from "../services/browser-host.js";
@@ -1899,7 +1899,7 @@ export class EngineHost {
             { credentials, onePassword, shares: (teamId, svc) => membersSharing(db, teamId, svc) },
             {
               orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
-              mayBorrow: async (memberId) => !use.externalSender && hasBorrowGrant(db, { sessionId, threadId: use.threadId, service: "github", memberId }),
+              mayBorrow: async (memberId) => !use.externalSender && canBorrowCredential(db, { orgId, teamId: owner.id, actorId: actor, sessionId, threadId: use.threadId, service: "github", memberId }),
             },
             orgFallbackPolicy(this.opts.plugins, "github"),
           );
@@ -1945,7 +1945,7 @@ export class EngineHost {
             orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
             // A sender with no Valet account never rides a teammate's approval.
             mayBorrow: async (memberId) => use.discover === true
-              || (!use.externalSender && db ? await hasBorrowGrant(db, { sessionId, threadId: use.threadId, service, memberId }) : false),
+              || (!use.externalSender && db ? await canBorrowCredential(db, { orgId, teamId: owner.id, actorId: actor, sessionId, threadId: use.threadId, service, memberId }) : false),
           },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read

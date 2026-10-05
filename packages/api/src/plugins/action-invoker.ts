@@ -66,7 +66,7 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
-import { hasBorrowGrant } from "../services/credential-borrow.js";
+import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
@@ -689,7 +689,7 @@ function buildCredentialProvider(
   // A run borrows another member's account only once that member approved it
   // for this run (`services/credential-borrow.ts`).
   const mayBorrow = (svc: string) => async (memberId: string) =>
-    ctx.workflowExecutionId ? hasBorrowGrant(opts.db, { sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
+    ctx.workflowExecutionId && owner.type === "team" ? canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId: owner.id, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
   return {
     async get(service?: string, purpose?: "discover"): Promise<Credential | null> {
       const svc = service ?? defaultService;
@@ -760,7 +760,7 @@ async function sharedAccountApprover(
       { credentials: opts.credentials, onePassword: opts.onePassword, shares: async () => sharers },
       {
         orgId: ctx.orgId, teamId, userId: ctx.userId, scopes: onePasswordScopesFor("team", teamId),
-        mayBorrow: (memberId) => hasBorrowGrant(opts.db, { sessionId: `wf:${ctx.workflowExecutionId}`, service, memberId }),
+        mayBorrow: (memberId) => canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service, memberId }),
       },
       service,
       orgFallbackPolicy(registryOf(opts), service),

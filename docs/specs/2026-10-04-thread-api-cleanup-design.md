@@ -62,3 +62,5 @@ Removed the obsolete boot report claiming organization-audience Slack rules admi
 ### Open shared-runtime privacy boundary
 
 Private transcript authorization does not isolate a team runtime's sandbox or workspace memory. The engine passes the session sandbox and owner into each thread's tool context, and memory tools use that owner as their default scope. Files or memory written from a private thread can therefore enter shared workspace state. Do not declare the release privacy-complete until the product boundary is decided and enforced: isolate private execution/storage, or explicitly define and communicate workspace files and memory as shared. No weaker boundary has been accepted as part of these fixes.
+
+Borrow approvals are reusable only by current members of the owning team in the grant organization. Chat, workflow, and sandbox Git readers check membership when consuming a grant. Missing actors and removed members cannot reuse it.

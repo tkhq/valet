@@ -9,7 +9,7 @@
  * borrows the account only while that grant stands.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { runtimeGrants } from "../schema/index.js";
 
@@ -37,6 +37,24 @@ export async function hasBorrowGrant(db: AppQueryable, scope: BorrowScope): Prom
     runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
     eq(runtimeGrants.policyKey, borrowKey(scope)),
     isNull(runtimeGrants.revokedAt),
+  )).limit(1);
+  return rows.length > 0;
+}
+
+/** A conversation grant is reusable only by a current teammate in its organization. */
+export async function canBorrowCredential(
+  db: AppQueryable,
+  scope: BorrowScope & { orgId: string; teamId: string; actorId?: string },
+): Promise<boolean> {
+  if (!scope.actorId) return false;
+  const runId = workflowRunOf(scope.sessionId);
+  const rows = await db.select({ id: runtimeGrants.id }).from(runtimeGrants).where(and(
+    eq(runtimeGrants.orgId, scope.orgId),
+    runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
+    eq(runtimeGrants.policyKey, borrowKey(scope)),
+    isNull(runtimeGrants.revokedAt),
+    sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
+      WHERE m.team_id = ${scope.teamId} AND m.user_id = ${scope.actorId} AND t.org_id = ${scope.orgId})`,
   )).limit(1);
   return rows.length > 0;
 }
