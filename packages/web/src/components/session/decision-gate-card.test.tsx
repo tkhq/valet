@@ -18,10 +18,12 @@ const resolveMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const withdrawMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 
 let meData: MeResponse | undefined;
+let resolvePending = false;
+let withdrawPending = false;
 
 vi.mock("~/api/queries", () => ({
-  useResolveDecision: () => ({ mutateAsync: resolveMutateAsync, isPending: false, variables: undefined }),
-  useWithdrawDecision: () => ({ mutateAsync: withdrawMutateAsync, isPending: false }),
+  useResolveDecision: () => ({ mutateAsync: resolveMutateAsync, isPending: resolvePending, variables: { gateId: "gate_1", body: { actionId: "approve_once" } } }),
+  useWithdrawDecision: () => ({ mutateAsync: withdrawMutateAsync, isPending: withdrawPending }),
 }));
 
 vi.mock("~/api/settings", () => ({
@@ -60,6 +62,8 @@ function renderCard(g: DecisionGate = gate()) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resolvePending = false;
+  withdrawPending = false;
   meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current" };
 });
 
@@ -196,5 +200,34 @@ describe("DecisionGateCard — recovery", () => {
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Connection lost");
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Keep the linked-account requirement");
+  });
+});
+
+
+describe("DecisionGateCard — response feedback", () => {
+  it.each(["resolve", "withdraw"])("announces %s progress and disables every action", (operation) => {
+    resolvePending = operation === "resolve";
+    withdrawPending = operation === "withdraw";
+    renderCard();
+    expect(screen.getByRole("dialog").getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("status").textContent).toBe(
+      operation === "resolve" ? "Sending response…" : "Dismissing request…",
+    );
+    for (const button of screen.getAllByRole("button")) {
+      expect(button.hasAttribute("disabled")).toBe(true);
+    }
+  });
+
+  it("keeps the full reason visible and describes the dialog with it", () => {
+    const body = "Send the customer report to the external address. This includes customer contact details.";
+    renderCard(gate({ body }));
+    const reason = screen.getByText(body);
+    expect(screen.getByRole("dialog").getAttribute("aria-describedby")).toBe(reason.id);
+  });
+
+  it("submits the denial action unchanged", async () => {
+    renderCard();
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(resolveMutateAsync).toHaveBeenCalledWith({ gateId: "gate_1", body: { actionId: "deny" } });
   });
 });

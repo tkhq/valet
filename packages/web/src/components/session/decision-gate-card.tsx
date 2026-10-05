@@ -11,7 +11,7 @@
  * back and answers — matching the engine's per-thread suspend model.
  */
 import { useState } from "react";
-import { AlertTriangle, HelpCircle, KeyRound, X } from "lucide-react";
+import { Hand, HelpCircle, KeyRound, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
 import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
@@ -27,6 +27,7 @@ import { errorText } from "~/lib/error-text";
 // it's a server-internal constant (`policies/service.ts`'s
 // `GATE_ACTION_ALWAYS_ALLOW`), not part of the wire contract.
 const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
+const gateColumnClass = "mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
 export function DecisionGateCard({
@@ -84,123 +85,135 @@ export function DecisionGateCard({
   const waitingOn = gate.approver && gate.approver.userId !== meQ.data?.id ? gate.approver : undefined;
   if (waitingOn) {
     return (
-      <div className={cn(cardClass, "mx-3 mt-3 px-3.5 py-3")} role="status" aria-live="polite">
-        <Badge variant={kind.variant}>Asked {waitingOn.name ?? "a teammate"} for permission</Badge>
-        <p className="mt-1.5 text-sm text-muted">
-          This needs {waitingOn.name ?? "a teammate"}'s shared account. Valet asked them, and continues once they allow it.
-        </p>
+      <div className={gateColumnClass}>
+        <div className={cn(cardClass, "px-5 py-3")} role="status" aria-live="polite">
+          <Badge variant={kind.variant}>Asked {waitingOn.name ?? "a teammate"} for permission</Badge>
+          <p className="mt-1.5 text-sm text-muted">
+            This needs {waitingOn.name ?? "a teammate"}'s shared account. Valet asked them, and continues once they allow it.
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div
-      className={cn(cardClass, "mx-3 mt-3")}
-      role="dialog"
-      aria-live="polite"
-      aria-labelledby={`gate-${gate.id}-title`}
-    >
-      <header className="flex items-start gap-2.5 px-3.5 pt-3 pb-1.5">
-        <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
-        <div className="min-w-0 flex-1">
-          <Badge variant={kind.variant}>{kind.label} · Valet is waiting</Badge>
-          <h3 id={`gate-${gate.id}-title`} className="mt-1.5 text-sm font-medium text-ink">
-            {gate.title}
-          </h3>
-        </div>
-        <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
-          <X aria-hidden className="h-3.5 w-3.5" />
-        </Button>
-      </header>
+    <div className={gateColumnClass}>
+      <div
+        className={cardClass}
+        role="dialog"
+        aria-live="polite"
+        aria-busy={busy}
+        aria-describedby={gate.body ? `gate-${gate.id}-body` : undefined}
+        aria-labelledby={`gate-${gate.id}-title`}
+      >
+        <header className="flex items-start gap-2.5 px-5 pt-3 pb-2">
+          <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
+          <div className="min-w-0 flex-1">
+            <Badge variant={kind.variant}>{kind.label}</Badge>
+            <h3 id={`gate-${gate.id}-title`} className="mt-1.5 break-words text-sm font-medium leading-relaxed text-ink">
+              {gate.title}
+            </h3>
+          </div>
+          <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
+            <X aria-hidden className="h-3.5 w-3.5" />
+          </Button>
+        </header>
 
-      {error && <p role="alert" className="px-3.5 py-2 text-sm text-danger-600">{error}</p>}
+        {error && <p role="alert" className="px-5 py-2 break-words text-sm text-danger-600">{error} Try again.</p>}
 
-      {gate.body && (
-        <div className="pl-10 pr-3.5 pb-2 text-sm text-muted whitespace-pre-wrap">
-          {gate.body}
-        </div>
-      )}
-
-      {gate.provenance && (
-        <div className="pl-10 pr-3.5 pb-2 text-xs text-muted" data-testid="gate-provenance">
-          {provenanceLine(gate.provenance)}
-        </div>
-      )}
-
-      {gate.type === "question" ? (
-        <>
-        {gate.actions.length > 0 && (
-          <div className="pl-10 pr-3.5 pb-2 flex flex-wrap gap-2">
-            {gate.actions.map((a) => (
-              <Button key={a.id} variant="secondary" size="sm" onClick={() => pickAction(a.id)} disabled={busy}>{a.label}</Button>
-            ))}
+        {gate.body && (
+          <div id={`gate-${gate.id}-body`} className="px-5 pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words">
+            {gate.body}
           </div>
         )}
-        <div className="pl-10 pr-3.5 pb-3 flex items-end gap-2">
-          <Textarea
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.repeat || event.nativeEvent.isComposing) return;
-              event.preventDefault();
-              event.stopPropagation();
-              void submitValue();
-            }}
-            placeholder={gate.actions.length > 0 ? "Or type a different answer…" : "Your answer…"}
-            rows={2}
-            className="flex-1"
-            disabled={busy}
-          />
-          <Button
-            size="sm"
-            onClick={submitValue}
-            title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
-            aria-keyshortcuts="Meta+Enter Control+Enter"
-            disabled={busy || value.trim().length === 0}
-          >
-            {busy ? <Spinner size={14} /> : "Submit"}
-          </Button>
-        </div>
-        </>
-      ) : (
-        <div className="pl-10 pr-3.5 pb-3 flex flex-wrap gap-2">
-          {gate.actions.map((a) => {
-            const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
-            const disabled = busy || (isAlwaysAllow && !isAdmin);
-            const button = (
-              <Button
-                key={a.id}
-                size="sm"
-                onClick={() => pickAction(a.id)}
-                disabled={disabled}
-                variant={
-                  a.style === "primary"
-                    ? "primary"
-                    : a.style === "danger"
-                      ? "danger"
-                      : "secondary"
-                }
-              >
-                {busy && resolve.variables?.gateId === gate.id ? (
-                  <Spinner size={14} />
-                ) : null}
-                <span>{a.label}</span>
-              </Button>
-            );
-            // `isAdmin` reads `false` while `useMe()` is still loading —
-            // fail-closed (disabled + tooltip) rather than briefly offering
-            // a button the API will 403.
-            if (isAlwaysAllow && !isAdmin) {
-              return (
-                <Tooltip key={a.id} content={ALWAYS_ALLOW_TOOLTIP}>
-                  <span>{button}</span>
-                </Tooltip>
+
+        {gate.provenance && (
+          <div className="px-5 pb-2 text-xs text-muted" data-testid="gate-provenance">
+            {provenanceLine(gate.provenance)}
+          </div>
+        )}
+
+        {busy && <p role="status" className="px-5 pb-2 text-xs text-muted">{withdraw.isPending ? "Dismissing request…" : "Sending response…"}</p>}
+
+        {gate.type === "question" ? (
+          <>
+          {gate.actions.length > 0 && (
+            <div className="px-5 pb-2 flex flex-wrap gap-2">
+              {gate.actions.map((a) => (
+                <Button key={a.id} variant="secondary" size="sm" onClick={() => pickAction(a.id)} disabled={busy}>{a.label}</Button>
+              ))}
+            </div>
+          )}
+          <div className="px-5 pb-3 flex items-end gap-2">
+            <Textarea
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.repeat || event.nativeEvent.isComposing) return;
+                event.preventDefault();
+                event.stopPropagation();
+                void submitValue();
+              }}
+              aria-label="Your answer"
+              placeholder={gate.actions.length > 0 ? "Or type a different answer…" : "Your answer…"}
+              rows={2}
+              className="flex-1"
+              disabled={busy}
+            />
+            <Button
+              size="sm"
+              aria-label="Submit"
+              onClick={submitValue}
+              title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
+              aria-keyshortcuts="Meta+Enter Control+Enter"
+              disabled={busy || value.trim().length === 0}
+            >
+              {busy ? <Spinner size={14} /> : "Submit"}
+            </Button>
+          </div>
+          </>
+        ) : (
+          <div className="px-5 pb-3 flex flex-wrap items-center justify-end gap-2">
+            {gate.actions.map((a) => {
+              const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
+              const disabled = busy || (isAlwaysAllow && !isAdmin);
+              const button = (
+                <Button
+                  key={a.id}
+                  size="sm"
+                  onClick={() => pickAction(a.id)}
+                  disabled={disabled}
+                  variant={
+                    a.id === "deny"
+                      ? "secondary"
+                      : a.style === "primary"
+                        ? "primary"
+                        : a.style === "danger"
+                          ? "danger"
+                          : "secondary"
+                  }
+                >
+                  {resolve.isPending && resolve.variables?.gateId === gate.id && resolve.variables.body.actionId === a.id ? (
+                    <Spinner size={14} />
+                  ) : null}
+                  <span>{a.label}</span>
+                </Button>
               );
-            }
-            return button;
-          })}
-        </div>
-      )}
+              // `isAdmin` reads `false` while `useMe()` is still loading —
+              // fail-closed (disabled + tooltip) rather than briefly offering
+              // a button the API will 403.
+              if (isAlwaysAllow && !isAdmin) {
+                return (
+                  <Tooltip key={a.id} content={ALWAYS_ALLOW_TOOLTIP}>
+                    <span>{button}</span>
+                  </Tooltip>
+                );
+              }
+              return button;
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -231,13 +244,13 @@ function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
 }
 
 const ICON_FOR_TYPE = {
-  approval: AlertTriangle,
+  approval: Hand,
   question: HelpCircle,
   credential_request: KeyRound,
 } as const;
 
 const KIND_FOR_TYPE: Record<DecisionGate["type"], { label: string; variant: "warning" | "accent" | "neutral" }> = {
-  approval: { label: "Approval needed", variant: "warning" },
+  approval: { label: "Approval requested", variant: "neutral" },
   question: { label: "Question", variant: "accent" },
   credential_request: { label: "Credential needed", variant: "neutral" },
 };
