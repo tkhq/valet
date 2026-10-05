@@ -16,6 +16,7 @@ import {
   VirtualSandboxProvider,
   formatTransientRetryMessage,
   type BusEvent,
+  type PromptContent,
 } from "../src/index.js";
 
 function makeEngine() {
@@ -207,7 +208,11 @@ describe("turn-level transient retry (TKAI-319)", () => {
     faux.unregister();
   });
 
-  it("settles a human orchestrator failure and accepts a fresh prompt without background retries", async () => {
+  it.each<{ label: string; content: PromptContent }>([
+    { label: "text", content: "go" },
+    { label: "file attachment", content: { text: "Read this", attachments: [{ type: "file", path: "/workspace/nda.docx", bytes: 10, sha256: "abc", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", name: "nda.docx" }] } },
+    { label: "image only", content: { attachments: [{ type: "image", data: new Uint8Array([1]), mimeType: "image/png" }] } },
+  ])("settles a human orchestrator failure and accepts a fresh prompt without background retries ($label)", async ({ content }) => {
     const faux = registerFauxProvider({ provider: "retry-human-orchestrator" });
     faux.setResponses([
       fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
@@ -220,7 +225,7 @@ describe("turn-level transient retry (TKAI-319)", () => {
       purpose: "orchestrator", turnRetry: { backoffMs: [1] },
     });
     await session.thread().pause();
-    const first = await session.prompt("first", { author: { id: "u" } });
+    const first = await session.prompt(content, { author: { id: "u" } });
     const queued = await session.prompt("already queued", { author: { id: "u" } });
     await session.thread().resume();
     await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === first.queueItemId));

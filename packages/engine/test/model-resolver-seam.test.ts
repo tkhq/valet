@@ -27,6 +27,7 @@ import {
   NoCredentialsError,
   VirtualSandboxProvider,
   type BusEvent,
+  type PromptContent,
   type DecisionGate,
   type MessageEntry,
   type ResolvedModel,
@@ -222,7 +223,11 @@ describe("host model resolver seam", () => {
     expect(okThread.toModel).toBe("prov_x/m1");
   });
 
-  it("fails an authored team chat immediately when provider credentials are unavailable", async () => {
+  it.each<{ label: string; content: PromptContent }>([
+    { label: "text", content: "go" },
+    { label: "file attachment", content: { text: "Read this", attachments: [{ type: "file", path: "/workspace/nda.docx", bytes: 10, sha256: "abc", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", name: "nda.docx" }] } },
+    { label: "image only", content: { attachments: [{ type: "image", data: new Uint8Array([1]), mimeType: "image/png" }] } },
+  ])("fails an authored team chat immediately when provider credentials are unavailable ($label)", async ({ content }) => {
     const faux = makeFaux("human-no-credentials");
     const model = faux.getModel();
     const { engine, store } = makeEngine();
@@ -230,12 +235,30 @@ describe("host model resolver seam", () => {
       userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model, purpose: "orchestrator",
       resolveModel: async () => { throw new NoCredentialsError("Connect a model provider in Settings.", model); },
     });
-    const receipt = await session.prompt("go", { author: { id: "u1" } });
+    const receipt = await session.prompt(content, { author: { id: "u1" } });
     await session.thread().kick();
     const item = await store.getQueueItem(session.id, receipt.queueItemId);
     expect(item?.status).toBe("settled");
     expect(item?.outcome).toMatchObject({ outcome: "failed", error: "Connect a model provider in Settings." });
     expect(await store.listUnsettledSubmissions(session.id)).toEqual([]);
+  });
+
+  it.each(["signal", "authorless attachment", "workflow attachment", "child attachment"] as const)("keeps %s turns on the unattended credential retry path", async (kind) => {
+    const faux = makeFaux(`unattended-${kind.replaceAll(" ", "-")}`);
+    const model = faux.getModel();
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model,
+      purpose: kind === "workflow attachment" ? "workflow" : kind === "child attachment" ? "child" : "orchestrator",
+      resolveModel: async () => { throw new NoCredentialsError("Connect a model provider in Settings.", model); },
+    });
+    const content: PromptContent = kind === "signal"
+      ? { kind: "signal", signalType: "schedule.tick", body: "Check updates" }
+      : { text: "Read this", attachments: [{ type: "image", data: new Uint8Array([1]), mimeType: "image/png" }] };
+    const receipt = await session.prompt(content, kind === "authorless attachment" ? {} : { author: { id: "u1" } });
+    await session.thread().kick();
+    expect((await store.getQueueItem(session.id, receipt.queueItemId))?.status).toBe("queued");
+    expect(await store.getEntries(session.id, receipt.threadId)).toEqual([]);
   });
 
   it("credential-less turns (resolver throws NoCredentialsError) release back to queued, then settle `failed` with the HOST's message at the cap — zero entries appended", async () => {

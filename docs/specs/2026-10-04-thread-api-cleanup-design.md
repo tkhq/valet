@@ -78,7 +78,7 @@ The API Helm deployment uses Recreate and clears rolling-update settings. The ol
 
 Proposal retries must match the stored normalized configuration and creator. Reusing a key for different subscription or schedule content returns an error. Identical retries preserve the existing enablement state.
 
-Human-authored chat turns fail visibly when provider credentials are unavailable or a transient provider failure exhausts transport retries. They do not inherit background orchestrator retry delays. Workflow and child retries remain bounded. Steering and Stop do not emit provider-error banners. Empty interrupted assistant rows stay hidden after reload; partial answers remain visible.
+Human-authored chat turns fail visibly when provider credentials are unavailable or a transient provider failure exhausts transport retries. This includes text, file attachments, and image-only prompts. They do not inherit background orchestrator retry delays. Signals and authorless prompts remain unattended. Workflow and child retries remain bounded. Steering and Stop do not emit provider-error banners. Empty interrupted assistant rows stay hidden after reload; partial answers remain visible.
 
 Named account approvers can answer only their exact gate on a private run. They cannot read or cancel that run or answer unrelated gates. Unattended team workflows can consume an approved account grant only for their stored team and while the lending member remains on that team.
 

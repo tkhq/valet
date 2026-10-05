@@ -4161,7 +4161,7 @@ export class Thread {
 
   private isUserPrompt(): boolean {
     const purpose = this.session.options.purpose;
-    return !!this.runningItem?.author && typeof this.runningItem.content === "string"
+    return !!this.runningItem?.author && !isSignalContent(this.runningItem.content)
       && purpose !== "workflow" && purpose !== "child";
   }
 
