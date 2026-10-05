@@ -380,7 +380,13 @@ export function slackEventChannel(event: { service: string; refs: unknown; paylo
  * shows only to that channel's members, the same as the event itself. */
 export async function runEventVisible(deps: AccessDeps, viewer: ThreadViewer, params: { input?: unknown }): Promise<boolean> {
   const channel = runEventChannel(params);
-  return channel === undefined || channelVisibility(deps, viewer)(`slack:${channel}`);
+  if (channel !== undefined) return channelVisibility(deps, viewer)(`slack:${channel}`);
+  const input = params.input;
+  if (input && typeof input === "object" && "type" in input && input.type === "event" && "data" in input) {
+    const data = input.data;
+    if (data && typeof data === "object" && "key" in data && typeof data.key === "string" && data.key.startsWith("slack.")) return false;
+  }
+  return true;
 }
 
 /** The Slack channel whose event started a workflow run, or undefined. The

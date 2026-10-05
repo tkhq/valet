@@ -5,14 +5,15 @@ import { workspaceOutcomesRouter } from "./workspace-outcomes.js";
 import { sql, eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { actionInvocations, agentSessions, teams, teamMembers, workflowDefinitions, workflowRuns, assistants, sessionThreads } from "../schema/index.js";
+import { actionInvocations, agentSessions, teams, teamMembers, workflowDefinitions, workflowRuns, assistants, sessionThreads, slackChannelPrivacy } from "../schema/index.js";
 import { encodePageCursor } from "../lib/page-cursor.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 import { safeOutcomeUrl } from "../services/workspace-outcomes.js";
 import { recordChannelMessage } from "../services/channel-messages.js";
 import type { WorkspaceOutcomesResponse, WorkspaceActiveWorkResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
-afterEach(async () => { await api?.cleanup(); api = undefined; });
+afterEach(async () => { resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
 async function setup() {
   const target = await bootTestApi(); api = target;
   const db = target.providers.db;
@@ -55,6 +56,33 @@ describe("workspace confirmed outcomes", () => {
       result: { success: true, data: { title: "Private change", html_url: "https://github.com/acme/app/pull/9" } },
     });
     expect((await list(target, "team")).items.map(i => i.id)).not.toContain("action:wf-step-pr");
+  });
+
+  it("hides private Slack event outcomes from nonmembers for actions and terminal writes", async () => {
+    const target = await setup(); const db = target.providers.db;
+    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPRIV", isPrivate: true, checkedAt: Date.now() });
+    await db.insert(workflowDefinitions).values({ id: "wf-event", orgId: "local-org", ownerType: "team", ownerId: "team", name: "Event", definition: {}, createdAt: 1, updatedAt: 1 });
+    await db.insert(workflowRuns).values({ id: "event-run", workflowId: "wf-event", definitionVersionId: "v1", definition: {}, ownerType: "team", ownerId: "team",
+      params: { input: { type: "event", data: { key: "slack.message", refs: { channel: "CPRIV" } } } }, createdAt: 1, updatedAt: 1 });
+    await db.insert(actionInvocations).values({ invocationId: "private-event-action", workflowExecutionId: "event-run", orgId: "local-org", createdAt: 100, durationMs: 1,
+      actionId: "github.create_pull_request", status: "completed", result: { success: true, data: { title: "Private title", html_url: "https://example.com/private" } } });
+    const parts = JSON.stringify([{ type: "tool_call", toolName: "bash", status: "completed", result: { details: { outcome: { kind: "review_submitted", url: "https://example.com/private" } } } }]);
+    await db.execute(sql`INSERT INTO engine_entries (id,session_id,thread_id,entry_type,role,parts,created_at)
+      VALUES ('private-event-entry','wf:event-run:step','step-thread','message','assistant',${parts},101)`);
+    const hiddenPage = await list(target, "team", "?limit=1");
+    expect(hiddenPage.items).toEqual([]);
+    expect(hiddenPage.nextCursor).toMatch(/^sealed:/);
+    expect(Buffer.from(hiddenPage.nextCursor!, "base64url").toString("utf8")).not.toContain("private-event");
+    const hiddenNext = await list(target, "team", `?limit=1&cursor=${encodeURIComponent(hiddenPage.nextCursor!)}`);
+    expect(hiddenNext.items).toEqual([]);
+    expect(hiddenNext.nextCursor).toBeNull();
+    await db.update(workflowRuns).set({ params: { input: { type: "event", data: { key: "slack.message", refs: {} } } } }).where(eq(workflowRuns.id, "event-run"));
+    expect((await list(target, "team")).items).toEqual([]);
+    await db.update(workflowRuns).set({ params: { input: { type: "event", data: { key: "slack.message", refs: { channel: "CPRIV" } } } } }).where(eq(workflowRuns.id, "event-run"));
+    // The same confirmed writes remain available when their source is public.
+    await db.update(slackChannelPrivacy).set({ isPrivate: false }).where(eq(slackChannelPrivacy.channelId, "CPRIV"));
+    resetThreadAccessCache();
+    expect((await list(target, "team")).items).toHaveLength(2);
   });
 
   it("titles a Slack message by the thread that sent it, and links the thread and the message", async () => {

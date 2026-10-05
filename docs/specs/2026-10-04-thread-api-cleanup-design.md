@@ -151,3 +151,6 @@ Sandbox memory resolves the durable app-session or workflow-run owner in the tok
 ### Dynamic tool discovery approval
 
 Team runtime discovery goes through the existing tool policy, named-lender approval, grant persistence, and audit pipeline before calling a remote tool catalog. Discovery is a low-risk service action; executing the selected remote action still undergoes its own policy check. Pending, denied, expired, or failed approvals do not make a discovery request. Dynamic catalog caches are scoped by service, actor, thread, and external-sender status. The internal __valet_discovery__ action name is reserved so its approval cannot collide with a remote tool.
+
+The outcomes route checks each team workflow result against its persisted event audience, even when no origin thread exists. Private Slack results require current channel access. Missing or foreign runs fail closed. The bounded page uses one run lookup and reuses the existing event visibility policy.
+Team outcome continuation cursors encrypt hidden row identifiers with the instance key. Recognizable Slack events with no source channel fail closed across run visibility checks.
