@@ -253,6 +253,7 @@ async function canSendToSourceSession(
     .limit(1);
   const row = rows[0];
   if (!row) return { ok: false };
+  if (row.ownerType === "team" && !artifact.sourceThreadId) return { ok: false };
   if (!(await canViewSession(db, row, userPrincipal(user.id)))) return { ok: false };
   const thread = artifact.sourceThreadId ? await providers.engineStore.getThread(row.id, artifact.sourceThreadId) : null;
   if (artifact.sourceThreadId && !thread) return { ok: false };

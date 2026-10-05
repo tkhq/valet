@@ -71,6 +71,21 @@ describe("team artifact privacy", () => {
     expect(await posted.json()).toMatchObject({ sent: false, comment: { sentToSession: null } });
   });
 
+  it("does not send legacy threadless artifact comments into a team runtime", async () => {
+    const { db, row, request } = await setup();
+    await db.insert(agentSessions).values({
+      id: "legacy-team-source", userId: "local-user", orgId: "local-org", workspace: "fixture",
+      ownerType: "team", ownerId: "private-team", createdAt: 1, updatedAt: 1,
+    });
+    await db.update(artifacts).set({ sourceSessionId: "legacy-team-source", sourceThreadId: null }).where(eq(artifacts.id, row.id));
+    const comments = await request(`/${row.token}/comments`);
+    expect(comments.status).toBe(200);
+    expect(await comments.json()).toMatchObject({ canSendToSession: false });
+    const posted = await request(`/${row.token}/comments`, "test-member", "POST", { body: "Keep on the artifact", sendToSession: true });
+    expect(posted.status).toBe(200);
+    expect(await posted.json()).toMatchObject({ sent: false, comment: { sentToSession: null } });
+  });
+
   it("keeps internal team tool publications team-owned without borrowing actor authority", async () => {
     const { request } = await setup();
     if (!api) throw new Error("Test API is unavailable");
