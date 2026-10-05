@@ -52,3 +52,13 @@ Stop and Escape interrupt failures now appear inline in the composer instead of 
 Both run lists apply the same authorization as run details, including private-thread origins, private Slack events, and named approvers. Visible pages advance through bounded store pages; outgoing cursors name only authorized runs, since the store cursor contains a run ID and timestamp. Private rows neither appear as summaries nor become public continuation cursors.
 
 A supplied workflow origin that is missing, archived, or invalid now rejects a start or retry. The service no longer drops that audience boundary and starts a team-visible run with private input. Retries of event-triggered runs retain their event provenance so Slack channel visibility remains enforceable even without a thread origin. Callers can still start an ordinary unattended run by omitting an origin; doing so is distinct from retrying private input.
+
+### Repository sync and deferred Slack access
+
+Repository workflow updates revoke action grants both before and after changed definitions are stored, matching product edits. The second revocation removes an approval committed against the old definition between the first revocation and the write. The collector regression injects that interleaving and verifies no grant survives.
+
+Removed the obsolete boot report claiming organization-audience Slack rules admit unlinked members. That access mode remains deferred; existing linked-account gate coverage remains.
+
+### Open shared-runtime privacy boundary
+
+Private transcript authorization does not isolate a team runtime's sandbox or workspace memory. The engine passes the session sandbox and owner into each thread's tool context, and memory tools use that owner as their default scope. Files or memory written from a private thread can therefore enter shared workspace state. Do not declare the release privacy-complete until the product boundary is decided and enforced: isolate private execution/storage, or explicitly define and communicate workspace files and memory as shared. No weaker boundary has been accepted as part of these fixes.

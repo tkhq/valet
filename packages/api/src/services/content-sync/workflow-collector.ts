@@ -400,6 +400,9 @@ class WorkflowPass implements CollectorPass {
           })
           .where(eq(workflowDefinitions.id, row.id));
         if (stepsChanged) {
+          // An approval can commit against the old definition after the first
+          // revocation. Clear it after the write, as product edits do.
+          await revokeWorkflowGrants(db, source.orgId, row.id);
           await snapshot(
             db,
             row.id,

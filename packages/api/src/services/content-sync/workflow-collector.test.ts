@@ -8,9 +8,10 @@ import linearEventPlugin from "@valet/plugin-linear/plugin";
  * rows alone. A mirror that loses a working workflow because someone pushed a
  * typo is worse than a mirror that lags a commit.
  */
+import * as workflowService from "../../workflows/service.js";
 import { shareCredential } from "../credential-shares.js";
 import { createHash } from "node:crypto";
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../../lib/drizzle.js";
 import { freshTestPgDb } from "../../test-helpers/pg-test-db.js";
@@ -394,8 +395,24 @@ describe("workflow collector", () => {
     // A different graph, still valid: the stop node is renamed, which moves
     // the definition hash and so mints a version.
     repo.files[".valet/workflows/nightly.yaml"] = workflowYaml("Nightly", "done");
-    const outcome = await serviceFor(f).syncOnce(id);
-    // A repository commit is not an approver's edit, so the grant goes.
+    const revoke = workflowService.revokeWorkflowGrants;
+    const revokeSpy = vi.spyOn(workflowService, "revokeWorkflowGrants");
+    revokeSpy.mockImplementation(async (...args) => {
+      await revoke(...args);
+      if (revokeSpy.mock.calls.length === 1) {
+        // An approval committed against the old definition after revocation.
+        await args[0].insert(workflowActionGrants).values({ id: "racing-grant", orgId: synced!.orgId, workflowId: synced!.id,
+          ownerType: synced!.ownerType, ownerId: synced!.ownerId, actionId: "slack.post_message", grantedBy: "admin", createdAt: 2 });
+      }
+    });
+    let outcome;
+    try {
+      outcome = await serviceFor(f).syncOnce(id);
+      expect(revokeSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      revokeSpy.mockRestore();
+    }
+    // A repository commit is not an approver's edit, so both grants go.
     expect(await db.select().from(workflowActionGrants)).toHaveLength(0);
     expect(outcome?.warnings).toEqual([]);
     expect(outcome?.status).toBe("ok");

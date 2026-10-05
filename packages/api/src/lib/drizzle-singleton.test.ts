@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, reportOrganizationSlackRules, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
+import { applyAppMigrations, missingSchemaRepairs, normalizeLegacyWorkflowDefinitions, reportRetiredAssistantSettings, stripRetiredAssistantTargets } from "./drizzle.js";
 
 describe("workspace singleton repair on an already migrated database", () => {
   const pglite = new PGlite();
@@ -41,19 +41,6 @@ describe("workspace singleton repair on an already migrated database", () => {
     expect(message).toContain("team:team-limited");
     expect(message).not.toContain("user:user-plain");
     await db.query("DELETE FROM assistants WHERE id IN ('limited', 'plain')");
-  });
-
-  it("names each enabled team Slack rule open to the whole organization", async () => {
-    expect(await reportOrganizationSlackRules(db)).toBeNull();
-    await db.query(`INSERT INTO event_subscriptions(id, org_id, owner_type, owner_id, name, event_keys, filters, target, audience, enabled, created_by, created_at, updated_at)
-      VALUES ('org-rule', 'org-r', 'team', 'team-a', 'Answer anyone', '["slack.app_mention"]', '[]', '{"kind":"orchestrator"}', 'organization', true, 'u', 1, 1),
-             ('team-rule', 'org-r', 'team', 'team-a', 'Team only', '["slack.app_mention"]', '[]', '{"kind":"orchestrator"}', 'team', true, 'u', 1, 1),
-             ('off-rule', 'org-r', 'team', 'team-a', 'Disabled', '["slack.app_mention"]', '[]', '{"kind":"orchestrator"}', 'organization', false, 'u', 1, 1)`);
-    const message = await reportOrganizationSlackRules(db);
-    expect(message).toContain('"Answer anyone" (org-rule, team team-a)');
-    expect(message).not.toContain("Team only");
-    expect(message).not.toContain("Disabled");
-    await db.query("DELETE FROM event_subscriptions WHERE id IN ('org-rule', 'team-rule', 'off-rule')");
   });
 
   it("keeps the oldest team on a shared home channel before it enforces one team per channel", async () => {

@@ -134,24 +134,6 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await normalizeLegacyWorkflowDefinitions(db);
   await syncAssistantSessionStatus(db);
   await reportRetiredAssistantSettings(db);
-  await reportOrganizationSlackRules(db);
-}
-
-/** A team Slack rule open to the whole organization now also answers a full
- * Slack workspace member with no Valet account (`team-slack-gate.ts`). Before,
- * it answered Valet members only. Name each enabled one at boot, so an admin
- * can narrow a rule that should not reach those people. */
-export async function reportOrganizationSlackRules(db: PgDb): Promise<string | null> {
-  const result = await db.query(
-    `SELECT id, name, owner_id FROM event_subscriptions WHERE owner_type = 'team' AND audience = 'organization' AND enabled = true
-      ORDER BY owner_id, id`,
-  );
-  if (result.rows.length === 0) return null;
-  const names = result.rows.map((row) => `"${String(row.name)}" (${String(row.id)}, team ${String(row.owner_id)})`);
-  const message = `[slack] ${names.length} team Slack rule(s) open to the whole organization also answer Slack workspace members `
-    + `with no Valet account: ${names.join(", ")}. To limit a rule to the team's members, set its audience to the team on the Events page.`;
-  console.warn(message);
-  return message;
 }
 
 /** A stored integration allow-list keeps limiting its workspace until an
