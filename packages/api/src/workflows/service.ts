@@ -1574,41 +1574,48 @@ export async function listWorkflowActionRequired(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
 ): Promise<ListWorkflowActionRequiredResponse> {
-  const summaries: GlobalWorkflowRunSummary[] = [];
+  const names = await ownedWorkflowNames(deps.db, owner);
+  if (names.size === 0) return { items: [], count: 0 };
+  const items: ListWorkflowActionRequiredResponse["items"] = [];
   let cursor: string | undefined;
+  let pagesRead = 0;
   do {
-    const page = await listRunsForOwner(deps, owner, {
-      status: ["parked"],
-      limit: RUN_PAGE_LIMIT_MAX,
-      cursor,
-    });
-    if (page === null) break;
-    summaries.push(...page.runs.filter((run) => run.needsApproval));
+    if (pagesRead++ === 10) throw new ValidationError("Too many pending workflow runs. Resolve existing approvals before loading more.");
+    const page = await deps.workflowStore.listRuns({ workflowIds: [...names.keys()], status: ["parked"], limit: RUN_PAGE_LIMIT_MAX, cursor });
+    for (const summary of page.runs) {
+      let run = await ownedRun(deps, owner, summary.runId, "act");
+      const canReadRun = run !== null;
+      if (!run) {
+        const candidate = await deps.workflowStore.getRun(summary.runId);
+        if (!candidate) continue;
+        for (const [key, approver] of await pendingApprovers(deps, candidate)) {
+          if (approver.userId !== owner.userId) continue;
+          const separator = key.lastIndexOf(":");
+          run = await ownedRun(deps, owner, summary.runId, "act", { nodeId: key.slice(0, separator), iteration: Number(key.slice(separator + 1)) });
+          if (run) break;
+        }
+      }
+      if (!run) continue;
+      const detail = await projectWorkflowRun(deps, run);
+      for (const gate of detail.pendingGates) {
+        if (gate.approver && (owner.principal?.type === "team" || gate.approver.userId !== owner.userId)) continue;
+        if (!canReadRun && gate.approver?.userId !== owner.userId) continue;
+        const iteration = gate.iteration ?? 0;
+        items.push({
+          id: `${summary.runId}:${gate.nodeId}:${iteration}`,
+          runId: summary.runId,
+          workflowId: run.params.workflowId,
+          workflowName: names.get(run.params.workflowId) ?? run.params.workflowId,
+          runCreatedAt: run.createdAt,
+          owner: detail.owner,
+          trigger: canReadRun ? workflowActionTrigger(run.params) : { type: "unknown" },
+          canReadRun,
+          gate,
+        });
+      }
+    }
     cursor = page.nextCursor;
   } while (cursor !== undefined);
-
-  const items: ListWorkflowActionRequiredResponse["items"] = [];
-  for (const summary of summaries) {
-    if (!(await ownedRun(deps, owner, summary.runId, "act"))) continue;
-    const detail = await getWorkflowRunDetail(deps, owner, summary.runId);
-    if (detail === null) continue;
-    const trigger = workflowActionTrigger(detail.run.params);
-    for (const gate of detail.pendingGates) {
-      // A gate asking to lend a member's account is that member's alone.
-      if (gate.approver && gate.approver.userId !== owner.userId) continue;
-      const iteration = gate.iteration ?? 0;
-      items.push({
-        id: `${summary.runId}:${gate.nodeId}:${iteration}`,
-        runId: summary.runId,
-        workflowId: summary.workflowId,
-        workflowName: summary.workflowName,
-        runCreatedAt: summary.createdAt,
-        owner: detail.owner,
-        trigger,
-        gate,
-      });
-    }
-  }
   items.sort((a, b) => (a.gate.waitingSince ?? a.runCreatedAt) - (b.gate.waitingSince ?? b.runCreatedAt));
   return { items, count: items.length };
 }
@@ -1704,6 +1711,7 @@ async function ownedRun(
   owner: WorkflowOwner,
   runId: string,
   scope: OwnerScope = "read",
+  approval?: { nodeId: string; iteration: number },
 ) {
   const run = await deps.workflowStore.getRun(runId);
   if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
@@ -1721,9 +1729,10 @@ async function ownedRun(
   // audience's alone.
   if (!(await runOriginVisible(access, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId }))
     || !(await runEventVisible(access, viewer, run.params))) {
-    // A member the run asks to lend their account sees it while it waits on them.
-    const approvers = await pendingApprovers(deps, run);
-    if (![...approvers.values()].some((a) => a.userId === viewer.userId)) return null;
+    // Lending an account permits only the named gate decision, never run access.
+    if (!approval || !person) return null;
+    const approver = (await pendingApprovers(deps, run)).get(`${approval.nodeId}:${approval.iteration}`);
+    if (!approver || approver.userId !== viewer.userId) return null;
   }
   return run;
 }
@@ -1897,9 +1906,9 @@ export async function resolveWorkflowApproval(
     via: "web" | "agent";
   },
 ): Promise<ResolveApprovalOutcome> {
-  const run = await ownedRun(deps, owner, input.runId, "act");
-  if (!run) return "not_found";
   const iter = input.iteration ?? 0;
+  const run = await ownedRun(deps, owner, input.runId, "act", { nodeId: input.nodeId, iteration: iter });
+  if (!run) return "not_found";
   const suffix = iter > 0 ? `:${iter}` : "";
   const signalType = `approval:${input.nodeId}${suffix}`;
 
@@ -2034,10 +2043,16 @@ export async function getWorkflowRunDetail(
 ): Promise<GetWorkflowRunResponse | null> {
   const run = await ownedRun(deps, owner, runId);
   if (!run) return null;
+  return projectWorkflowRun(deps, run);
+}
 
+async function projectWorkflowRun(
+  deps: WorkflowServiceDeps,
+  run: NonNullable<Awaited<ReturnType<WorkflowStore["getRun"]>>>,
+): Promise<GetWorkflowRunResponse> {
   const [checkpoints, signals] = await Promise.all([
-    deps.workflowStore.getCheckpoints(runId),
-    deps.workflowStore.listSignals(runId, { unconsumed: true }),
+    deps.workflowStore.getCheckpoints(run.runId),
+    deps.workflowStore.listSignals(run.runId, { unconsumed: true }),
   ]);
 
   // Build pendingGates from run.waitingOn entries that are approval signals.

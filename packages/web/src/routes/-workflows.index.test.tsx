@@ -416,6 +416,14 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.getByText("Started by schedule (sched_1)")).toBeTruthy();
   });
 
+  it("keeps private-run decisions available without a broken run link", () => {
+    const item = { ...actionRequiredData.items[1], canReadRun: false };
+    render(<TooltipProvider><WorkspaceScopeProvider><ul><WorkflowApprovalItem item={item} focused /></ul></WorkspaceScopeProvider></TooltipProvider>);
+    expect(screen.getByText("Private run")).toBeTruthy();
+    expect(screen.queryByText("Open run")).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+  });
+
   it("stacks action details at a narrow viewport without a minimum page width", () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,

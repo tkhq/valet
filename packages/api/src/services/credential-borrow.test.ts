@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { teamMembers, teams, workflowDefinitions } from "../schema/index.js";
@@ -52,4 +53,25 @@ it("does not reuse a borrow grant across organizations or conversations", async 
   expect(await canBorrowCredential(db, borrower)).toBe(true);
   expect(await canBorrowCredential(db, { ...borrower, orgId: "other-org" })).toBe(false);
   expect(await canBorrowCredential(db, { ...borrower, threadId: "two" })).toBe(false);
+});
+
+it("lets an unattended workflow borrow only for its stored team and current lender", async () => {
+  api = await bootTestApi();
+  const { db, workflowStore } = api.providers;
+  await db.insert(teams).values({ id: "unattended", orgId: "local-org", name: "Unattended", createdAt: 1 });
+  await db.insert(teamMembers).values({ teamId: "unattended", userId: "test-member", role: "member" });
+  await db.insert(workflowDefinitions).values({ id: "webhook-wf", orgId: "local-org", ownerType: "team", ownerId: "unattended", name: "Webhook", definition: {}, createdAt: 1, updatedAt: 1 });
+  await workflowStore.createRun("webhook-borrow", { workflowId: "webhook-wf", definitionVersionId: "v1" }, {}, "v1",
+    { ownerType: "team", ownerId: "unattended" });
+  const scope = { sessionId: "wf:webhook-borrow:step", service: "linear", memberId: "test-member",
+    orgId: "local-org", teamId: "unattended", actorId: "team:unattended" };
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+  await writeBorrowGrant(db, "local-org", scope);
+  expect(await canBorrowCredential(db, scope)).toBe(true);
+  expect(await canBorrowCredential(db, { ...scope, orgId: "elsewhere" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, teamId: "elsewhere", actorId: "team:elsewhere" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, actorId: "outsider" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, sessionId: "assistant:unattended" })).toBe(false);
+  await db.delete(teamMembers).where(eq(teamMembers.teamId, "unattended"));
+  expect(await canBorrowCredential(db, scope)).toBe(false);
 });

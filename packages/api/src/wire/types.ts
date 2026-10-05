@@ -2509,6 +2509,8 @@ export interface ListAllWorkflowRunsResponse {
 
 /** One active workflow gate that the calling principal can resolve. */
 export interface WorkflowActionRequiredItem {
+  /** False for a named account lender who can decide only this gate. */
+  canReadRun?: boolean;
   id: string;
   runId: string;
   workflowId: string;

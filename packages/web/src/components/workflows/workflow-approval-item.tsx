@@ -54,16 +54,16 @@ export function WorkflowApprovalItem({
         <div className="shrink-0 text-left text-xs text-muted sm:text-right">
           <div>Requested {relativeTime(gate.waitingSince ?? item.runCreatedAt)}</div>
           <div>
-            {item.trigger.type === "manual" ? "Started manually" : `Started by ${item.trigger.type}`}
-            {item.trigger.triggerId ? ` (${item.trigger.triggerId})` : ""}
+            {item.canReadRun === false ? "Private run" : item.trigger.type === "manual" ? "Started manually" : `Started by ${item.trigger.type}`}
+            {item.canReadRun !== false && item.trigger.triggerId ? ` (${item.trigger.triggerId})` : ""}
           </div>
-          <Link
+          {item.canReadRun !== false && <Link
             to="/workflows/runs/$runId"
             params={{ runId: item.runId }}
             className="inline-flex min-h-11 items-center underline sm:min-h-0"
           >
             Open run
-          </Link>
+          </Link>}
         </div>
       </div>
       <details className="group" open={focused || undefined}>

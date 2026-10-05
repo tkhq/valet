@@ -41,20 +41,24 @@ export async function hasBorrowGrant(db: AppQueryable, scope: BorrowScope): Prom
   return rows.length > 0;
 }
 
-/** A conversation grant is reusable only by a current teammate in its organization. */
+/** Grants require a current teammate, or an unattended run owned by the team. */
 export async function canBorrowCredential(
   db: AppQueryable,
   scope: BorrowScope & { orgId: string; teamId: string; actorId?: string },
 ): Promise<boolean> {
   if (!scope.actorId) return false;
   const runId = workflowRunOf(scope.sessionId);
+  const unattended = !!runId && scope.actorId === `team:${scope.teamId}`;
   const rows = await db.select({ id: runtimeGrants.id }).from(runtimeGrants).where(and(
     eq(runtimeGrants.orgId, scope.orgId),
     runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
     eq(runtimeGrants.policyKey, borrowKey(scope)),
     isNull(runtimeGrants.revokedAt),
     sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
-      WHERE m.team_id = ${scope.teamId} AND m.user_id = ${scope.actorId} AND t.org_id = ${scope.orgId})`,
+      WHERE m.team_id = ${scope.teamId} AND m.user_id = ${unattended ? scope.memberId : scope.actorId} AND t.org_id = ${scope.orgId})`,
+    unattended ? sql`EXISTS (SELECT 1 FROM workflow_runs r
+      WHERE r.id = ${runId} AND r.owner_type = 'team' AND r.owner_id = ${scope.teamId}
+        AND (r.actor_user_id IS NULL OR r.actor_user_id = ${scope.actorId}))` : undefined,
   )).limit(1);
   return rows.length > 0;
 }

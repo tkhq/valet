@@ -6,7 +6,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistants, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { workflowsActionPlugin } from "./actions.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
-import { copyWorkflowDefinition, createWorkflowDefinition, listWorkflowRuns, listRunsForOwner, retryWorkflowRun, startWorkflowRun, updateWorkflowDefinition } from "./service.js";
+import { listWorkflowActionRequired, cancelWorkflowRun, getWorkflowRunDetail, resolveWorkflowApproval, copyWorkflowDefinition, createWorkflowDefinition, listWorkflowRuns, listRunsForOwner, retryWorkflowRun, startWorkflowRun, updateWorkflowDefinition } from "./service.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -322,6 +322,43 @@ describe("workflow workspace routing", () => {
 
     await expect(retryWorkflowRun(deps, owner, runId)).rejects.toThrow("origin is unavailable");
     expect(p.workflowRunHost.start).not.toHaveBeenCalled();
+  });
+
+  it("limits a private run's named approver to the exact waiting gate", async () => {
+    const { p, deps } = await setup();
+    await p.db.insert(teamMembers).values({ teamId: "team-a", userId: "test-member", role: "member" });
+    const definition = { version: "dag/v1", nodes: [{ id: "start", type: "trigger" },
+      { id: "borrow", type: "tool", service: "demo", action: "ping", params: {} },
+      { id: "other", type: "approval" }], edges: [{ from: "start", to: "borrow" }, { from: "start", to: "other" }] };
+    const created = await createWorkflowDefinition(deps, owner, { name: "Private approval", teamId: "team-a", definition });
+    const session = await p.engineHost.assistantSessionFor("default-a", { actorUserId: owner.userId, orgId: owner.orgId }, { sessionId: "assistant:default-a" });
+    const thread = await session.createThread("app-assistant:local-user");
+    await p.workflowStore.createRun("private-approval", { workflowId: created.id, definitionVersionId: "v1",
+      origin: { assistantSessionId: "assistant:default-a", threadId: thread.id } }, definition, "v1",
+      { ownerType: "team", ownerId: "team-a", actorUserId: owner.userId });
+    await p.workflowStore.putIntent({ runId: "private-approval", nodeId: "borrow", iteration: 0,
+      status: "intent", attempt: 1, createdAt: 1,
+      effects: { gate: true, provenance: "shared_account", approver: { userId: "test-member" } } });
+    await p.workflowStore.parkRun("private-approval", 1, [
+      { kind: "signal", nodeId: "borrow", signalType: "approval:borrow" },
+      { kind: "signal", nodeId: "other", signalType: "approval:other" },
+    ]);
+    const approver = { ...owner, userId: "test-member" };
+    const terminate = vi.spyOn(p.workflowRunHost, "terminate").mockResolvedValue(undefined);
+    vi.spyOn(p.workflowRunHost, "wake").mockResolvedValue(undefined);
+    expect(await getWorkflowRunDetail(deps, approver, "private-approval")).toBeNull();
+    const inbox = await listWorkflowActionRequired(deps, approver);
+    expect(inbox.items).toHaveLength(1);
+    expect(inbox.items[0]).toMatchObject({ canReadRun: false, trigger: { type: "unknown" }, gate: { nodeId: "borrow" } });
+    expect(JSON.stringify(inbox)).not.toContain(thread.id);
+    expect((await listRunsForOwner(deps, approver))?.runs).toEqual([]);
+    expect(await cancelWorkflowRun(deps, approver, "private-approval")).toBe("not_found");
+    expect(terminate).not.toHaveBeenCalled();
+    expect(await resolveWorkflowApproval(deps, approver, { runId: "private-approval", nodeId: "other", approved: true, via: "web" })).toBe("not_found");
+    expect(await resolveWorkflowApproval(deps, approver, { runId: "private-approval", nodeId: "borrow", iteration: 1, approved: true, via: "web" })).toBe("not_found");
+    expect(await p.workflowStore.listSignals("private-approval")).toEqual([]);
+    expect(await resolveWorkflowApproval(deps, approver, { runId: "private-approval", nodeId: "borrow", approved: true, via: "web" })).toBe("ok");
+    expect(await getWorkflowRunDetail(deps, approver, "private-approval")).toBeNull();
   });
 
   it("fills visible pages without exposing private ids in continuation cursors", async () => {
