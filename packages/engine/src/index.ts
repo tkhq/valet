@@ -288,6 +288,11 @@ export {
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 export {
+  DOCX_DOCUMENT_MIME,
+  isDocxDocumentMime,
+  isDocxDocument,
+  extractDownloadedDocx,
+  type DocumentExtractor,
   MAX_PDF_DOCUMENT_BYTES,
   normalizeDocumentMime,
   isTextDocumentMime,

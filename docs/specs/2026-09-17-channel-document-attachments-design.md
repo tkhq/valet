@@ -73,8 +73,8 @@ session it builds, and `Thread.buildToolContext` threads it from
 `CreateSessionOptions`, the same way `pluginStoreFactory` is threaded.
 
 Contract: it returns `{ markdown }` for a document with text, `null` for a
-document with none and for any format other than PDF, and throws only when
-extraction is unavailable. The field is optional, so a host that wires no
+document with none and for unsupported formats. The API supports PDF and DOCX.
+Extraction throws when parsing fails or a resource limit prevents complete output. The field is optional, so a host that wires no
 extractor leaves plugin actions to degrade rather than fail.
 
 A `PluginActionContext` is built in exactly two places, and both set the
@@ -132,20 +132,46 @@ the Slack transport uses for a document. Extracted text is limited to
 
 Callers:
 
-- `slack.fetch_file`
+- `slack.fetch_file` reads PDF and DOCX in personal runs with the shared helpers. DOCX accepts
+  Word MIME or generic/ZIP MIME with a `.docx` filename. Other ZIP files stay metadata-only.
+  Team and organization runs are denied because a file URL does not prove shared access.
 - `drive.download_file`. Google Workspace files use metadata to select an
   export. Other files use the media response MIME type, not metadata, to
-  select PDF, generic, text, or binary handling. A declared PDF or generic
+  select PDF, DOCX, generic, text, or binary handling. A declared PDF or generic
   byte stream uses the 25 MB cap unless the caller sets `maxSizeBytes`. A
-  generic stream is extracted only when its bytes start with `%PDF-`. Text
-  stays at 1 MB.
+  generic stream is extracted as PDF when its bytes start with `%PDF-`.
+  DOCX also accepts generic media with a DOCX filename or Word metadata.
+  DOCX requires a ZIP signature and validated Word parts. Text stays at 1 MB.
+  Non-text Google Workspace exports are rejected before download.
 - `github.read_repo_file`. It requests raw Contents API media for a PDF or a
   Contents response without inline bytes. When metadata has a blob SHA, it uses
   the Git Blobs endpoint for raw bytes. The raw stream must have the PDF
   signature and stay within the 25 MB cap before extraction.
 
-A new downloader calls the same function. Adding a format other than PDF
-is still one branch, and that branch is `extractDocumentText`.
+A new downloader calls the shared PDF or DOCX helper. The host selects the
+parser through `extractDocumentText`.
+
+### DOCX extraction
+
+`extractDownloadedDocx` passes bytes and cancellation to the host. The host
+uses `yauzl` and `saxes` locally. It never resolves external relationships.
+It reads the main document, headers, footers, footnotes, endnotes, and comments.
+Paragraphs and table cells keep separators. Additional parts have named sections.
+Tracked revisions cause an error that asks the user to accept or reject them.
+Numbering and visual layout are not reconstructed.
+Images produce an explicit notice. Embedded objects and `altChunk` content cause
+an error that asks for a PDF export instead of returning incomplete text.
+
+The archive limit is 25 MB and 2,048 entries. Each selected XML part has
+an 8 MB expanded limit; selected parts together have a 32 MB limit.
+XML nesting is limited to 256 levels. Output is limited to 1,000,000 characters.
+The parser rejects doctypes, unknown entities, duplicate entries, and malformed XML.
+It supports UTF-8 and BOM-marked UTF-16 XML. It rejects invalid character encoding.
+Limit failures return errors; no result is silently truncated.
+Cancellation closes the ZIP reader and active part stream.
+
+These capabilities apply to explicit document download actions. Automatic upload
+sidecars remain PDF-only.
 
 ## Tests
 
@@ -170,9 +196,7 @@ is still one branch, and that branch is `extractDocumentText`.
 
 ## Not covered
 
-- Formats other than PDF. A spreadsheet or a Word file reaches the sandbox
-  and the agent can see its path, but nothing extracts its text. Adding a
-  format means one more branch in `extractDocumentText`.
+- Formats other than PDF and DOCX, including legacy Word `.doc` files and spreadsheets.
 - OCR for scanned PDFs. The stub sidecar names the limitation.
 - `ToolAttachment` still has no document variant, so a plugin cannot hand
   raw document bytes to the model. `extractDocument` covers the case that

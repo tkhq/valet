@@ -751,9 +751,8 @@ export interface ToolContext {
   pluginStoreFactory?: (pluginName: string) => PluginStore;
   /**
    * Host-provided text extraction for a document the model cannot read on
-   * its own. A PDF is the case that matters: no sandbox image carries a PDF
-   * text tool, and the extractor ships as a native binary beside the host,
-   * so a plugin action cannot do this itself.
+   * its own. The API supports PDF and DOCX. The host owns format parsers
+   * and resource limits, so plugins do not need parser dependencies.
    *
    * Returns `null` when the document holds no extractable text (a scanned
    * page), and throws when extraction is unavailable. Absent on hosts that
@@ -764,6 +763,7 @@ export interface ToolContext {
     data: Uint8Array;
     mimeType: string;
     name?: string;
+    signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /**
@@ -2475,6 +2475,7 @@ export interface CreateSessionOptions {
     data: Uint8Array;
     mimeType: string;
     name?: string;
+    signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
