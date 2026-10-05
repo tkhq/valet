@@ -69,6 +69,16 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const },
   });
 
+  it("creates a shared runtime with a machine actor and persists that identity", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, threadKey: "events",
+      signal: { kind: "signal", signalType: "github.issues.opened", body: "External issue" },
+      dispatchId: "machine-delivery", mismatchReason: "test",
+    });
+    expect(await firstUserEntry(deps, "events")).toMatchObject({ author: { id: `org:${ORG}` } });
+  });
+
   it("persists each delivery actor on a cached session without rebinding its owner", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });

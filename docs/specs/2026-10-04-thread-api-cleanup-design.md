@@ -104,3 +104,11 @@ Each child follow-up persists the steering member as its execution actor.
 The displayed sender is Valet because the agent composes the follow-up text.
 Shared-account reads use that actor instead of the original spawner, including children with legacy actor credential mode.
 The child retains its team owner and the original spawn identity.
+
+### Shared automation identity
+
+Team and organization schedules and non-mention events execute as their owning principal.
+The saved creator remains audit attribution, not personal credential authority.
+The same rule applies when a teammate edits or manually fires a shared schedule.
+Personal automations retain their existing actor. Verified Slack mentions retain the linked sender and existing membership checks.
+Shared workflows require an approved grant before borrowing a member's account.

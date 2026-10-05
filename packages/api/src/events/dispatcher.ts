@@ -244,7 +244,10 @@ export class EventDispatcher {
       } else if (target.kind === "orchestrator") {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
-        const actorUserId = teamMention ? await teamMentionActor(db, sub, event.payload) : sub.createdBy;
+        // A verified mention carries a human actor. Other shared event work
+        // acts as its owner, never as the member who created the rule.
+        const actorUserId = teamMention ? await teamMentionActor(db, sub, event.payload)
+          : sub.ownerType === "user" ? sub.createdBy : `${sub.ownerType}:${sub.ownerId}`;
         if (event.orgId !== sub.orgId || actorUserId === null) {
           // Name the membership this rule's audience actually requires, the
           // same split the drop log makes in `team-slack-gate.ts`.
@@ -336,7 +339,7 @@ export class EventDispatcher {
         const author = teamMention
           ? await newcomerAuthor(db, event.orgId, actorUserId, resolvePath(event.payload, "user"), attributes.sender)
           : sub.ownerType === "team" && event.service === "slack"
-            ? await channelMessageAuthor(db, sub.ownerId, actorUserId, event.payload, attributes.sender)
+            ? await channelMessageAuthor(db, sub.ownerId, event.payload, attributes.sender)
             : undefined;
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
@@ -427,7 +430,7 @@ export class EventDispatcher {
     deliveryId: string,
     event: typeof events.$inferSelect,
     refs: Record<string, string>,
-    /** Who set the rule up. The run acts for them: their own shared accounts first. */
+    /** Creator attribution applies only to personal workflows. */
     createdBy: string,
   ): Promise<void> {
     // Mirrors routes/workflows.ts POST /:id/runs: same run-id scheme, same
@@ -471,7 +474,7 @@ export class EventDispatcher {
     await this.deps.workflowRunHost.start(runId, params, def.definition, {
       ownerType: def.ownerType,
       ownerId: def.ownerId,
-      actorUserId: createdBy,
+      actorUserId: def.ownerType === "user" ? createdBy : `${def.ownerType}:${def.ownerId}`,
     });
   }
 

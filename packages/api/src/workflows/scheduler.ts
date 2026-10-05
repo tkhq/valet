@@ -104,9 +104,8 @@ export class WorkflowScheduler {
         orgId: schedule.orgId,
         ownerType: schedule.ownerType,
         ownerId: schedule.ownerId,
-        // The schedule's author, not its owner: on a team or org schedule
-        // the owner is not a user, and nobody is present when cron fires.
-        actorUserId: schedule.createdBy,
+        // Shared schedules never inherit their creator's personal authority.
+        actorUserId: schedule.ownerType === "user" ? schedule.createdBy : `${schedule.ownerType}:${schedule.ownerId}`,
         signal: {
           kind: "signal",
           signalType: "schedule",
@@ -164,12 +163,12 @@ export class WorkflowScheduler {
       // `def` (the workflow definition row) is already fetched above.
       // Matches `events/dispatcher.ts`'s workflow-target fire, which
       // never had this bug.
-      // The run acts for whoever set the schedule up: their own shared
-      // accounts first (`services/credential-shares.ts`).
+      // A shared workflow uses a machine actor even when manually fired.
+      // Editing or firing its schedule grants no personal account authority.
       await workflowRunHost.start(runId, params, def.definition, {
         ownerType: def.ownerType,
         ownerId: def.ownerId,
-        actorUserId: schedule.createdBy,
+        actorUserId: def.ownerType === "user" ? schedule.createdBy : `${def.ownerType}:${def.ownerId}`,
       });
     }
     return "ok";

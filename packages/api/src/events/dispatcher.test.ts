@@ -165,14 +165,14 @@ describe("EventDispatcher", () => {
     expect((await getDelivery(deliveryId)).status).toBe("delivered");
   });
 
-  it("delivers a workflow-target delivery: RunHost.start gets the event trigger payload; row -> delivered", async () => {
+  it.each(["user", "team", "org"] as const)("delivers a workflow-target delivery: RunHost.start gets the event trigger payload; row -> delivered", async (ownerType) => {
     const db = tdb.appDb;
     const now = Date.now();
     const definition = { nodes: [], edges: [] };
     await db.insert(workflowDefinitions).values({
       id: "wf-1",
       orgId: ORG,
-      ownerType: "user",
+      ownerType,
       ownerId: "user-1",
       name: "on issue",
       definition,
@@ -198,8 +198,8 @@ describe("EventDispatcher", () => {
     // Derived, not minted: retried claims must resolve to the same run.
     expect(runId).toBe(`wfrun_evt_${deliveryId}`);
     expect(def).toEqual(definition);
-    // The run acts for whoever set the rule up.
-    expect(owner).toEqual({ ownerType: "user", ownerId: "user-1", actorUserId: "user-1" });
+    // The workflow owner determines shared automation identity.
+    expect(owner).toEqual({ ownerType, ownerId: "user-1", actorUserId: ownerType === "user" ? "user-1" : `${ownerType}:user-1` });
     expect(params.workflowId).toBe("wf-1");
     expect(params.triggerId).toBe(subscriptionId);
     const trigger = params.input as WorkflowTriggerPayload;
@@ -726,11 +726,8 @@ describe("EventDispatcher", () => {
  * dispatcher is owner-agnostic — it forwards the subscription's principal
  * straight through — so these pin the two values that are easy to get wrong.
  *
- * `actorUserId` is the one that was wrong: it used to be `ownerId`, which is
- * a real user id only on a personal subscription. On a team or org one it
- * handed a team/org id to `ensureDefaultAssistantSession`, which writes it to
- * `agent_sessions.user_id` — a user column. Nobody is at a keyboard when an
- * event fires, so the subscription's author is the only real user available.
+ * Machine deliveries use a synthetic team or organization actor. A saved
+ * rule creator is attribution, not permission to use their personal share.
  */
 describe("EventDispatcher — team-owned subscriptions", () => {
   let tdb: TestPgDb;
@@ -799,18 +796,16 @@ describe("EventDispatcher — team-owned subscriptions", () => {
     expect(args.ownerId).toBe("team_1");
   });
 
-  it("acts as the subscription's author, never as the team id", async () => {
+  it("uses a team actor instead of the subscription creator", async () => {
     const deliver = await deliverWith("team", "team_1");
     const args = deliver.mock.calls[0][0];
-    expect(args.actorUserId).toBe("author-user");
-    expect(args.actorUserId).not.toBe("team_1");
+    expect(args.actorUserId).toBe("team:team_1");
   });
 
-  it("acts as the author on an org subscription too — the same bug, one owner type over", async () => {
+  it("uses an organization actor instead of the subscription creator", async () => {
     const deliver = await deliverWith("org", ORG);
     const args = deliver.mock.calls[0][0];
-    expect(args.actorUserId).toBe("author-user");
-    expect(args.actorUserId).not.toBe(ORG);
+    expect(args.actorUserId).toBe(`org:${ORG}`);
   });
 
   it("still acts as the owner on a personal subscription, where owner and author are the same person", async () => {

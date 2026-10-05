@@ -321,21 +321,20 @@ describe("newcomerAuthor", () => {
 });
 
 describe("channelMessageAuthor", () => {
-  it("keeps creator credentials unavailable to another channel sender, including team members", async () => {
+  it("keeps member tools available without lending the creator identity", async () => {
     const tdb = await freshTestPgDb();
     await tdb.appDb.insert(teamMembers).values({ teamId: "team-msg", userId: "member-a", role: "member" });
     await tdb.appDb.insert(userIdentityLinks).values([
       { id: "link-a", provider: "slack", externalId: "U_A", userId: "member-a", createdAt: Date.now() },
       { id: "link-x", provider: "slack", externalId: "U_X", userId: "outsider", createdAt: Date.now() },
     ]);
-    const author = (payload: Record<string, unknown>) => channelMessageAuthor(tdb.appDb, "team-msg", "creator", payload, "Sam");
-    // Even a linked team member cannot spend the rule creator's account.
-    expect(await author({ user: "U_A", text: "hi" })).toMatchObject({ id: "creator", externalSender: true });
-    expect(await channelMessageAuthor(tdb.appDb, "team-msg", "member-a", { user: "U_A" })).toBeUndefined();
-    // So does a bot's post: the rule's creator chose to act on it.
+    const author = (payload: Record<string, unknown>) => channelMessageAuthor(tdb.appDb, "team-msg", payload, "Sam");
+    // Membership controls tool restrictions; the machine actor supplies authority.
+    expect(await author({ user: "U_A", text: "hi" })).toBeUndefined();
+    // Bot events also execute as the team.
     expect(await author({ user: "U_BOT", bot_id: "B1", text: "alert" })).toBeUndefined();
     // An unlinked sender, or one linked to someone off the team, does not lend the creator's authority.
-    expect(await author({ user: "U_NEW", text: "hi" })).toEqual({ id: "creator", name: "Sam", externalSender: true });
+    expect(await author({ user: "U_NEW", text: "hi" })).toEqual({ id: "team:team-msg", name: "Sam", externalSender: true });
     expect(await author({ user: "U_X", text: "hi" })).toMatchObject({ externalSender: true });
   });
 });

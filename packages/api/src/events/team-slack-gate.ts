@@ -32,21 +32,16 @@ export async function newcomerAuthor(
   return { id: actorUserId, name: name || "Slack member", externalSender: true };
 }
 
-/**
- * The author of a team rule's Slack message that is not a mention: a rule
- * on a channel's messages runs as the person who set it up. A message from
- * anyone other than the current team member acting as the rule creator keeps the
- * newcomer limits (`newcomerAuthor`), so the rule never lends its creator's
- * authority to them. A bot's post, which has no human sender, runs as set up.
- */
+/** Non-mention rules execute as the team. Linked members retain normal tools;
+ * unlinked or non-member senders retain external-sender restrictions. */
 export async function channelMessageAuthor(
-  db: AppDb, teamId: string, actorUserId: string, payload: unknown, name?: string,
+  db: AppDb, teamId: string, payload: unknown, name?: string,
 ): Promise<PromptAuthor | undefined> {
   const externalId = resolvePath(payload, "user");
   if (typeof externalId !== "string" || !externalId || resolvePath(payload, "bot_id")) return undefined;
   const identity = await identityForExternal(db, "slack", externalId);
-  if (identity?.userId === actorUserId && await isTeamMember(db, teamId, actorUserId)) return undefined;
-  return { id: actorUserId, name: name || "Slack member", externalSender: true };
+  if (identity && await isTeamMember(db, teamId, identity.userId)) return undefined;
+  return { id: `team:${teamId}`, name: name || "Slack member", externalSender: true };
 }
 
 /**
