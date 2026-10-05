@@ -1870,13 +1870,17 @@ export class EngineHost {
         // env. `null` keeps the openai tools hidden in list_tools
         // (requiresCredential gating). Without a db the generic read below
         // is the same call this branch used to make.
+        const actor = use.externalSender ? undefined : use.actorId ?? runActor;
         return resolveOpenAiCredential(
           db,
           credentials,
           {
             orgId,
             owner,
-            ...(owner.type === "user" ? { userId: owner.id } : {}),
+            ...(owner.type === "user" ? { userId: owner.id } : owner.type === "team" && actor ? { userId: actor } : {}),
+            shares: (teamId, svc) => membersSharing(db, teamId, svc),
+            mayBorrow: async (memberId) => owner.type === "team" && !use.externalSender
+              && canBorrowCredential(db, { orgId, teamId: owner.id, actorId: actor, sessionId, threadId: use.threadId, service: "openai", memberId }),
             scopes,
             // The team read runs under the same policy a team workflow's
             // openai node reads with, so both reach the org-scoped item.

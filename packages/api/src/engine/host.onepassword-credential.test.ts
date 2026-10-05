@@ -8,7 +8,7 @@
  * `Session.credentialProvider()` — the same seam a plugin action's
  * `ctx.credentials.get()` hits.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InMemoryEventStream,
   InMemorySessionStore,
@@ -59,6 +59,7 @@ describe("EngineHost session 1Password credential resolution", () => {
   afterEach(() => {
     host?.evictAll();
     host = undefined;
+    vi.unstubAllEnvs();
   });
 
   function makeHost(
@@ -81,7 +82,8 @@ describe("EngineHost session 1Password credential resolution", () => {
     return h;
   }
 
-  it("limits a saved borrow approval to current teammates, never outsiders or authorless turns", async () => {
+  it.each(["linear", "openai"])("limits %s borrow approvals to current teammates, never outsiders or authorless turns", async (service) => {
+    vi.stubEnv("OPENAI_API_KEY", "");
     const { appDb } = await freshTestPgDb();
     const teamId = "borrow-team";
     await appDb.insert(teams).values({ id: teamId, orgId, name: "Borrow", createdAt: 1 });
@@ -90,21 +92,22 @@ describe("EngineHost session 1Password credential resolution", () => {
       { teamId, userId: "borrower", role: "member" },
     ]);
     const credentials = fakeCredentialStore();
-    await credentials.save({ type: "user", id: userId }, "linear", { type: "api_key", apiKey: "shared-key" });
-    await shareCredential(appDb, { teamId, userId, service: "linear", createdAt: 1 });
+    await credentials.save({ type: "user", id: userId }, service, { type: "api_key", apiKey: "shared-key" });
+    await shareCredential(appDb, { teamId, userId, service: service, createdAt: 1 });
     const h = makeHost(credentials, { db: appDb, onePassword: fakeOnePassword(async (row) => row) });
     const session = await h.sessionFor("borrow-session", {
       userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: teamId,
     });
     const discover = (actorId: string, externalSender = false) =>
-      session.credentialProvider({ actorId, externalSender, threadId: "thread" }).get("linear", "discover");
+      session.credentialProvider({ actorId, externalSender, threadId: "thread" }).get(service, "discover");
+    expect((await discover(userId))?.accessToken).toBe("shared-key");
     expect(await discover("borrower")).toBeNull();
-    await writeBorrowGrant(appDb, orgId, { sessionId: session.id, threadId: "thread", service: "linear", memberId: userId });
+    await writeBorrowGrant(appDb, orgId, { sessionId: session.id, threadId: "thread", service: service, memberId: userId });
     expect((await discover("borrower"))?.accessToken).toBe("shared-key");
     expect(await discover("borrower", true)).toBeNull();
     expect(await discover(userId, true)).toBeNull();
     expect(await discover("outsider")).toBeNull();
-    const read = (actorId?: string) => session.credentialProvider({ actorId, threadId: "thread" }).get("linear");
+    const read = (actorId?: string) => session.credentialProvider({ actorId, threadId: "thread" }).get(service);
     expect((await read("borrower"))?.accessToken).toBe("shared-key");
     expect(await read("outsider")).toBeNull();
     expect(await read()).toBeNull();

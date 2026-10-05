@@ -135,3 +135,7 @@ Team briefing generation and cache validation inspect persisted workflow and art
 ### Workflow chaining audience
 
 Workflow tool and session execution IDs are not conversation origins. Agent-started chained runs inherit the parent run's stored origin, scoped to its organization and execution owner, and validate it through the normal active-origin check. Missing parents and unavailable private origins fail closed. Originless scheduled runs can chain. Team Slack event runs remain blocked from agent-started chaining until the child can carry the channel audience independently; they must not silently become team-public.
+
+### OpenAI tool member shares
+
+The runtime OpenAI tool credential resolver uses the same current actor and borrow-grant checks as other tool services. A member may use their own shared account; another member requires an approved grant. External, missing, and removed actors cannot borrow. Organization LLM-provider and environment key precedence remain unchanged, and no chat-model provider configuration is changed.
