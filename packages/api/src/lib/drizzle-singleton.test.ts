@@ -160,6 +160,117 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
   });
 
+  it("preserves linked workflows and transcripts through duplicate retirement and a second boot", async () => {
+    await restorePreviousSchema();
+    // These table names and predicates are fixed test data, never request input.
+    const preservedTables = ["engine_sessions", "engine_threads", "engine_entries", "workflow_runs", "workflow_schedules"];
+    const allTables = [...preservedTables, "assistants", "agent_sessions", "workflow_definitions", "workflow_versions", "event_subscriptions"];
+    async function snapshot() {
+      const rows: Record<string, unknown[]> = {};
+      for (const table of allTables) {
+        rows[table] = (await db.query(`SELECT * FROM ${table} WHERE id LIKE 'preserve-%' ORDER BY id`)).rows;
+      }
+      rows.workflow_checkpoints = (await db.query("SELECT * FROM workflow_checkpoints WHERE run_id LIKE 'preserve-%' ORDER BY run_id, node_id, iteration")).rows;
+      return rows;
+    }
+    try {
+      for (const ownerType of ["user", "team"] as const) {
+        const owner = `preserve-${ownerType}`;
+        for (const variant of ["main", "extra"] as const) {
+          const id = `${owner}-${variant}`;
+          await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, is_default, created_at)
+            VALUES ($1, 'preserve-org', $2, $3, $4, $5, $6)`, [id, ownerType, owner, `${id}-session`, variant === "main", variant === "main" ? 1 : 2]);
+          await db.query(`INSERT INTO agent_sessions(id, user_id, org_id, workspace, owner_type, owner_id, created_at, updated_at)
+            VALUES ($1, 'preserve-user', 'preserve-org', '/workspace', $2, $3, 1, 1)`, [`${id}-session`, ownerType, owner]);
+          await db.query(`INSERT INTO engine_sessions(id, user_id, org_id, workspace, owner_type, owner_id, purpose, status, metadata, created_at, updated_at)
+            VALUES ($1, 'preserve-user', 'preserve-org', '/workspace', $2, $3, 'orchestrator', 'active', '{"legacy":true}', 1, 1)`, [`${id}-session`, ownerType, owner]);
+          await db.query(`INSERT INTO engine_threads(id, session_id, key, status, queue_mode, active_leaf_entry_id, created_at, updated_at)
+            VALUES ($1, $2, 'main', 'idle', 'followup', $3, 1, 1)`, [`${id}-thread`, `${id}-session`, `${id}-answer`]);
+          await db.query(`INSERT INTO engine_entries(id, session_id, thread_id, entry_type, role, content, author, attachments, created_at)
+            VALUES ($1, $2, $3, 'message', 'user', 'Review the attached agreement', '{"id":"preserve-user","name":"Owner"}',
+              '[{"id":"attachment-1","name":"agreement.docx","url":"blob:agreement"}]', 1)`, [`${id}-question`, `${id}-session`, `${id}-thread`]);
+          await db.query(`INSERT INTO engine_entries(id, session_id, thread_id, parent_id, entry_type, role, content, parts, usage, created_at)
+            VALUES ($1, $2, $3, $4, 'message', 'assistant', 'Reviewed agreement.',
+              '[{"type":"text","text":"Reviewed agreement."},{"type":"tool-result","toolCallId":"read-1","result":{"clauses":3}}]',
+              '{"input":42,"output":17}', 1)`, [`${id}-answer`, `${id}-session`, `${id}-thread`, `${id}-question`]);
+        }
+        const definition = { version: "dag/v1", assistantId: `${owner}-extra`,
+          nodes: [{ id: "review", type: "orchestrator", prompt: "Review {{params.document}}" }], edges: [] };
+        await db.query(`INSERT INTO workflow_definitions(id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+          VALUES ($1, 'preserve-org', $2, $3, 'Agreement review', $4, 1, 2)`, [`${owner}-workflow`, ownerType, owner, JSON.stringify(definition)]);
+        for (const version of [1, 2]) {
+          await db.query(`INSERT INTO workflow_versions(id, workflow_id, version, name, definition, created_at)
+            VALUES ($1, $2, $3, 'Agreement review', $4, 1)`, [`${owner}-version-${version}`, `${owner}-workflow`, version, JSON.stringify(definition)]);
+        }
+        for (const outcome of ["success", "failure"]) {
+          const runId = `${owner}-run-${outcome}`;
+          await db.query(`INSERT INTO workflow_runs(id, workflow_id, definition_version_id, definition, params, status, outcome, owner_type, owner_id, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, '{"document":"agreement.docx"}', 'settled', $5, $6, $7, 3, 4)`,
+          [runId, `${owner}-workflow`, `${owner}-version-1`, JSON.stringify(definition), outcome, ownerType, owner]);
+          await db.query(`INSERT INTO workflow_checkpoints(run_id, node_id, attempt, status, result, effects, error, created_at)
+            VALUES ($1, 'review', 1, $2, '{"clauses":3}', $3, $4, 4)`,
+          [runId, outcome === "success" ? "completed" : "failed", JSON.stringify({ sessionId: `${owner}-extra-session`, threadId: `${owner}-extra-thread` }), outcome === "failure" ? "Provider unavailable" : null]);
+        }
+        await db.query(`INSERT INTO workflow_schedules(id, org_id, owner_type, owner_id, name, cron, next_fire_at, workflow_id, input, created_by, created_at, updated_at)
+          VALUES ($1, 'preserve-org', $2, $3, 'Daily review', '0 9 * * *', 1000, $4, '{"document":"agreement.docx"}', 'preserve-user', 1, 2)`,
+        [`${owner}-schedule`, ownerType, owner, `${owner}-workflow`]);
+        for (const kind of ["workflow", "orchestrator"] as const) {
+          const target = kind === "workflow" ? { kind, workflowId: `${owner}-workflow` }
+            : { kind, orchestrator: ownerType, assistantId: `${owner}-extra`, follow: true };
+          await db.query(`INSERT INTO event_subscriptions(id, org_id, owner_type, owner_id, name, event_keys, filters, target, created_by, created_at, updated_at)
+            VALUES ($1, 'preserve-org', $2, $3, 'Review on push', '["github.push"]', '[{"path":"ref","op":"eq","value":"main"}]', $4, 'preserve-user', 1, 2)`,
+          [`${owner}-subscription-${kind}`, ownerType, owner, JSON.stringify(target)]);
+        }
+      }
+      const before = await snapshot();
+      await applyAppMigrations(db);
+      const after = await snapshot();
+      for (const table of [...preservedTables, "workflow_checkpoints"]) {
+        expect(after[table], table).toEqual(before[table]);
+      }
+      for (const table of ["workflow_definitions", "workflow_versions"]) {
+        expect(after[table]).toHaveLength(table === "workflow_versions" ? 4 : 2);
+        // Every other field, including IDs, version numbers and timestamps, survives.
+        expect(after[table]).toEqual(before[table]?.map((row) => {
+          const original = row as { definition: Record<string, unknown> };
+          const { assistantId: _retired, ...definition } = original.definition;
+          return { ...original, definition };
+        }));
+      }
+      for (const ownerType of ["user", "team"]) {
+        const owner = `preserve-${ownerType}`;
+        expect(after.assistants).toContainEqual(expect.objectContaining({ id: `${owner}-main`, owner_id: owner, archived_at: null }));
+        expect(after.assistants).toContainEqual(expect.objectContaining({ id: `${owner}-extra`, owner_id: `${owner}:retired:${owner}-extra`, archived_at: expect.any(Number) }));
+        expect(after.agent_sessions).toContainEqual(expect.objectContaining({ id: `${owner}-main-session`, status: "active" }));
+        expect(after.agent_sessions).toContainEqual(expect.objectContaining({ id: `${owner}-extra-session`, status: "deleted" }));
+      }
+      expect(after.assistants).toEqual(before.assistants?.map((row) => {
+        const original = row as { id: string; owner_id: string };
+        return original.id.endsWith("-extra")
+          ? { ...original, owner_id: `${original.owner_id}:retired:${original.id}`, archived_at: expect.any(Number) }
+          : original;
+      }));
+      expect(after.agent_sessions).toEqual(before.agent_sessions?.map((row) => {
+        const original = row as { id: string };
+        return original.id.endsWith("-extra-session")
+          ? { ...original, status: "deleted", updated_at: expect.any(Number) }
+          : original;
+      }));
+      expect(after.event_subscriptions).toEqual(before.event_subscriptions?.map((row) => {
+        const original = row as { target: Record<string, unknown> };
+        if (!("assistantId" in original.target)) return original;
+        const { assistantId: _retired, ...target } = original.target;
+        return { ...original, target, updated_at: expect.any(Number) };
+      }));
+      await applyAppMigrations(db);
+      expect(await snapshot()).toEqual(after);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    } finally {
+      await db.query("DELETE FROM workflow_checkpoints WHERE run_id LIKE 'preserve-%'");
+      for (const table of [...allTables].reverse()) await db.query(`DELETE FROM ${table} WHERE id LIKE 'preserve-%'`);
+    }
+  });
+
   it("drops assistantId from stored workflows", async () => {
     const legacy = JSON.stringify({ version: "dag/v1", assistantId: "asst_old",
       nodes: [{ id: "o", type: "orchestrator", prompt: "hi" }], edges: [] });
