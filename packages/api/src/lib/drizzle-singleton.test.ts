@@ -47,6 +47,13 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM credential_shares");
   });
 
+  it("repairs a missing legacy behavior column before the boot report", async () => {
+    await db.query("ALTER TABLE assistants DROP COLUMN behavior");
+    await expect(applyAppMigrations(db)).resolves.toBeUndefined();
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    await expect(reportRetiredAssistantSettings(db)).resolves.toBeNull();
+  });
+
   it("names each workspace that keeps an integration allow-list", async () => {
     await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, created_at, behavior)
       VALUES ('limited', 'org-r', 'team', 'team-limited', 'limited-session', 1, '{"integrations":["github"]}'),

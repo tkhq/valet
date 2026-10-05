@@ -18,6 +18,8 @@ Installed CLI versions can still require the two orchestrator POST aliases.
 These aliases share the workspace runtime handler. Remove them after the supported CLI floor uses workspace runtime URLs.
 Session conversation aliases remain until external clients migrate to thread URLs.
 
+The upgrade restores a missing legacy assistant behavior column before reading retained integration restrictions. Existing restrictions remain unchanged.
+
 Stored assistant target conversions remain available during upgrades from older binaries.
 They must not become unconditional data deletion or bypass runtime permission checks.
 A recorded conversion boundary can replace repeat scans only after deployments prohibit old writers.
