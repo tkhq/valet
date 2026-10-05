@@ -14,7 +14,12 @@ export const TOOL_USE_RULES =
   "is not possible, call list_tools (with a query when you have one) and " +
   "check for a matching action. If the needed integration is not " +
   "connected, say so and name the fix (connect it in Settings) — never " +
-  "present a missing connection as a missing capability.";
+  "present a missing connection as a missing capability. " +
+  "For slide or presentation edits, load the matching installed skill and " +
+  "discover dedicated editing actions first. Use those actions when available. " +
+  "Use browser editing only if the user requests it or the dedicated tools " +
+  "cannot perform the required operation. Explain that limitation before " +
+  "using the browser. Do not create a tunnel just to edit a hosted slide deck.";
 
 /**
  * Cheap and strong models both treat a prose promise as work unless the

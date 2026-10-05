@@ -1,6 +1,6 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
-import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
 // utils and is only re-exported from the package root. It carries the
@@ -80,6 +80,7 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
+  estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
   estimateSummaryEntryTokens,
@@ -562,6 +563,8 @@ export class Thread {
   private agentModelSwitch?: string;
   /** Snapshot at turn resolution: a user can change the next turn's pin while this one runs. */
   private assignedModelSpec?: string;
+  /** Last conversational request model; a switch must recheck the live context. */
+  private lastRequestModel: PiModel;
   /** Set only after a role model resolves and is applied. Never persisted. */
   private roleModelSpec?: string;
   /**
@@ -594,6 +597,7 @@ export class Thread {
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
     this.activeLeafEntryId = data.activeLeafEntryId;
+    this.lastRequestModel = session.options.model;
     this.agent = this.buildAgent();
   }
 
@@ -3915,7 +3919,7 @@ export class Thread {
       // Proactive compaction: if this turn pushed us past usable, run a
       // compaction pass before yielding back to the queue. Reactive
       // compaction (overflow retry) is handled inline in runAgent.
-      if (this.shouldCompactProactive()) {
+      if (this.shouldCompactProactive() && await this.canRunCurrentSubmission()) {
         await this.runProactiveCompaction();
       }
     } finally {
@@ -4144,13 +4148,11 @@ export class Thread {
           this.bumpCompactionFailureBreaker();
           return;
         }
-        // Drop the failed assistant message from the agent transcript and retry.
+        if (!(await this.canRunCurrentSubmission())) return;
+        // The rebuilt transcript already contains the user prompt and any tool
+        // results. Continue it instead of appending that prompt a second time.
         this.agent.state.messages = this.agent.state.messages.slice(0, -1);
-        await this.agent.prompt({
-          role: "user",
-          content,
-          timestamp: Date.now(),
-        });
+        await this.agent.continue();
         await this.agent.waitForIdle();
       } finally {
         this.overflowRetryInProgress = false;
@@ -4392,6 +4394,62 @@ export class Thread {
     return estimated >= usable;
   }
 
+  /** Model changes can shrink the window while the thread or tool loop stays hot. */
+  private async fitContextAfterModelChange(
+    context: AgentContext,
+    model: PiModel,
+    signal?: AbortSignal,
+  ): Promise<AgentContext | undefined> {
+    if (model === this.lastRequestModel) return undefined;
+    const cfg = this.session.options.compaction;
+    const budget = usableTokens(model, cfg);
+    if (budget === 0) return undefined;
+    const messages = context.messages.filter(
+      (message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+    );
+    const prompt = () => this.modelSystemPrompt(this.agent.state.systemPrompt, model);
+    const toolTokens = estimateTokens(JSON.stringify((context.tools ?? []).map((tool) => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
+    const freshEstimate = (current: readonly Message[]) => estimateContextTokens(prompt(), current) + toolTokens;
+    // Prior usage cannot account for new role instructions or tool definitions.
+    let tokens = Math.max(estimateLiveContextTokens(prompt(), messages), freshEstimate(messages));
+    if (tokens < budget) return undefined;
+
+    // Each checkpoint covers only the history it actually inspected. A bounded
+    // sequence can cover deferred head entries without losing older history.
+    if (cfg?.enabled !== false && this.consecutiveCompactionFailures < MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+      for (let pass = 0; pass < MAX_CONSECUTIVE_COMPACTION_FAILURES; pass++) {
+        if (signal?.aborted || !(await this.canRunCurrentSubmission())) {
+          throw new Error("Turn cancelled before context preparation completed.");
+        }
+        let outcome: CompactionOutcome;
+        try {
+          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal });
+        } catch (error) {
+          if (signal?.aborted || !(await this.canRunCurrentSubmission())) throw error;
+          this.turnCompactionBlocked = true;
+          this.bumpCompactionFailureBreaker();
+          throw new Error("Could not prepare context for the selected model. Run /compact or choose a model with a larger context.", { cause: error });
+        }
+        if (signal?.aborted || !(await this.canRunCurrentSubmission())) {
+          throw new Error("Turn cancelled before context preparation completed.");
+        }
+        const rebuilt = this.agent.state.messages.filter(
+          (message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+        );
+        // Pruning invalidates the old usage anchor. Measure the rebuilt payload.
+        const nextTokens = freshEstimate(rebuilt);
+        if (nextTokens < budget) return { ...context, messages: this.agent.state.messages.slice() };
+        if (outcome === "noop" || outcome === "insufficient" || outcome === "coverage_gap" || nextTokens >= tokens) break;
+        tokens = nextTokens;
+      }
+    }
+    this.turnCompactionBlocked = true;
+    this.bumpCompactionFailureBreaker();
+    throw new Error("The conversation does not fit the selected model. Run /compact, shorten the message, or choose a larger context.");
+  }
+
   /**
    * Run a compaction pass: prune cheap stale tool outputs, then if the
    * result still doesn't fit, summarize older messages into a
@@ -4402,6 +4460,7 @@ export class Thread {
     mode: "proactive" | "reactive" | "manual";
     /** Free-text steer for the summarizer (manual `/compact <text>`). */
     instructions?: string;
+    signal?: AbortSignal;
     /**
      * Force-suppress the proactive auto-continue follow-up. Set by the
      * pre-turn rehydration pass — its turn is about to run anyway, so a
@@ -4431,6 +4490,7 @@ export class Thread {
     opts: {
       mode: "proactive" | "reactive" | "manual";
       instructions?: string;
+      signal?: AbortSignal;
       autoContinue?: false;
     },
     span?: Span,
@@ -4650,6 +4710,7 @@ export class Thread {
             attributeAuthors: this.attributeAuthors,
             previousSummary,
             instructions: opts.instructions,
+            signal: opts.signal,
             // Reactive compaction fires WITHIN a claimed turn (and proactive
             // just after runAgent, still before the turn's finally clears it),
             // so `turnApiKey` is live here. Without this, a BYO-key session
@@ -4841,6 +4902,7 @@ export class Thread {
       // upstream knob forever.
       streamFn: async (model, context, options) => {
         assertModelEnabled(model.id);
+        this.lastRequestModel = model;
         await this.persistSkillContextAttributions();
         const runtimeModelContext = this.modelSystemPrompt(undefined, model);
         const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
@@ -4913,6 +4975,10 @@ export class Thread {
       // streaming against the model it started on. Returning the live state
       // here is what makes "takes effect on the next LLM call" true.
       prepareNextTurn: () => ({ model: this.agent.state.model }),
+      prepareRequest: async ({ context, model }, signal) => {
+        const fitted = await this.fitContextAfterModelChange(context, model, signal);
+        return fitted ? { context: fitted } : undefined;
+      },
       // A stale fenced publication means a successor owns this submission.
       // abort() is best-effort while a tool is executing, so also end at the
       // turn boundary before the loop can start another provider request.

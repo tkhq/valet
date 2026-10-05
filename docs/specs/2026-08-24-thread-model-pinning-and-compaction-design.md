@@ -27,6 +27,32 @@ Two related gaps in the v2 model/compaction stack:
 
 ## Decisions
 
+### October 5: protect live model changes before requests
+
+The provider request hook checks context after a model change.
+This includes thread pins, submission models, role models, and in-turn switches.
+The check includes pending prompts, tool results, current instructions, and tool definitions.
+It uses the larger of prior usage and a fresh payload estimate.
+Prior usage alone cannot measure instructions added by a new role.
+
+A bounded compaction sequence preserves unsummarized history across checkpoints.
+If context still exceeds the budget, the submission fails before the conversational provider request.
+The error names manual compaction, shorter input, and a larger context as recovery options.
+Provider tokenization can differ from the estimate, so reactive recovery remains available.
+Reactive recovery continues the rebuilt transcript without adding the user prompt again.
+
+Cancellation aborts preparation and does not count as a compaction failure.
+A cancelled submission cannot start post-turn compaction or an overflow retry.
+These changes do not remove stored workflows, sessions, or conversation history.
+
+The shared tool guidance directs presentation edits to installed skills and dedicated actions first.
+Browser editing requires a missing operation or an explicit user request.
+The agent must explain the missing operation before using browser editing.
+It must not create a tunnel just to edit a hosted deck.
+
+Regression coverage uses mock providers for all four model-selection paths,
+oversized role instructions with prior usage, prompt deduplication, failed-switch recovery, and repeated cancellation.
+
 ### 1. `Session.thread()` stamps the pin at creation
 
 `Session.thread()` is the single creation seam — default (`web:default`),
