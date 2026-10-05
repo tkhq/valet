@@ -827,6 +827,46 @@ describe("POST /api/channels/slack/webhook", () => {
     await expect.poll(() => deliveryCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
   });
 
+  it.each([false, true])("privately explains an unlinked team mention without retrying work (notice failure: %s)", async (fail) => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    await a.providers.eventDispatcher.stop();
+    await seedRunningTransport(a);
+    const transport = a.providers.channelHost.transportFor("slack");
+    if (!transport?.sendPrivateNotice) throw new Error("Expected Slack private notices");
+    const notice = vi.spyOn(transport, "sendPrivateNotice").mockImplementation(async () => {
+      if (fail) throw new Error("Slack rejected notice");
+    });
+    const now = Date.now();
+    await a.providers.db.insert(teams).values({ id: "notice-team", orgId: "local-org", name: "Team", createdAt: now });
+    await a.providers.db.insert(eventSubscriptions).values(["one", "two"].map((id): typeof eventSubscriptions.$inferInsert => ({
+      id, orgId: "local-org", ownerType: "team", ownerId: "notice-team", name: id,
+      eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: `C_NOTICE_${fail}` }],
+      target: { kind: "orchestrator", follow: true }, createdBy: "creator", enabled: true, createdAt: now, updatedAt: now,
+    })));
+    const event = { ...appMention(), channel: `C_NOTICE_${fail}`, user: "U_UNLINKED_NOTICE" };
+    for (const [id, workspace, payload] of [
+      ["foreign", "OTHER", event], ["ambient", TEAM_ID, { ...event, type: "message" }],
+    ] as const) {
+      const body = envelope(payload, id, workspace);
+      await post(a.baseUrl, body, sign(body));
+      await drainSlackIngress(a.providers);
+    }
+    expect(notice).not.toHaveBeenCalled();
+    const body = envelope(event, `Ev-notice-${fail}`);
+    await post(a.baseUrl, body, sign(body));
+    await drainSlackIngress(a.providers);
+    await post(a.baseUrl, body, sign(body));
+    await drainSlackIngress(a.providers);
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(event.channel, event.user, expect.stringContaining("sign up"));
+    expect(await eventCount(a, `Ev-notice-${fail}`)).toBe(0);
+    expect(await a.providers.db.select().from(slackWebhookInbox)).toHaveLength(0);
+    const receipts = await a.providers.db.select().from(eventReceipts);
+    const stages = receipts.flatMap(r => r.stages);
+    expect(stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "account_link_notice", outcome: fail ? "failed" : "sent" })]));
+  });
+
   it("routes another team member through the org bot without a team credential", async () => {
     const a = await bootTestApi({ plugins: [slackPlugin] });
     api = a;

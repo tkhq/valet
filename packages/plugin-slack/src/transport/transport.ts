@@ -989,6 +989,10 @@ export class SlackTransport implements ChannelTransport {
     this.gateRetainedTexts.delete(key);
   }
 
+  async sendPrivateNotice(channelId: string, userId: string, text: string): Promise<void> {
+    await this.api.postEphemeral({ channel: channelId, user: userId, text });
+  }
+
   /**
    * Tell the clicker why their approval click did nothing.
    *

@@ -45,6 +45,8 @@ export interface IngestResult {
   /** True when an enabled subscription names the normalized key, regardless
    * of whether its filters admitted this occurrence. */
   namedSubscription?: boolean;
+  /** At least one matching team mention rule denied this sender. */
+  authorizationDenied?: boolean;
 }
 
 /**
@@ -257,7 +259,7 @@ export async function ingestEvent(
     }
     if (matched.length === 0) {
       await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No delivery was requested. Source payload was not stored. Review the subscription decisions." });
-      return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription };
+      return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription, authorizationDenied };
     }
 
     phase = "event and delivery persistence";
@@ -309,7 +311,7 @@ export async function ingestEvent(
       deps.onIngest?.();
       await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "Delivery records are pending. Enqueueing does not mean a workflow has completed." });
     }
-    return { eventId: result.eventId, duplicate: result.duplicate, deliveries: result.deliveries };
+    return { eventId: result.eventId, duplicate: result.duplicate, deliveries: result.deliveries, authorizationDenied };
   } catch (error) {
     await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Check server logs using this receipt reference; no exception payload is retained here.` });
     console.error(`[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);

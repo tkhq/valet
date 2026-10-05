@@ -386,6 +386,8 @@ export interface ChannelTransport {
   send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
   /** Start a new message in a provider channel, without changing inbound subscriptions. */
   sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
+  /** Send a notice visible only to one channel member. Failures must reject. */
+  sendPrivateNotice?(channelId: string, userId: string, text: string): Promise<void>;
   sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef>;
   sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef>;
   updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void>;

@@ -19,6 +19,8 @@ export interface FollowRouterDeps {
   botUserId?: string;
   db: AppDb;
   engineHost: EngineHost;
+  /** Verified ingress may privately explain an unlinked sender denial. */
+  onSenderDenied?: () => Promise<void>;
   /**
    * Resolve the sender's display name and clean the message text, so an
    * overheard line names the person and drops raw ids / Slack markup. Wired from
@@ -127,7 +129,10 @@ async function routeFollowedMessage(
   // more stops the thread until an authorized mention re-binds it.
   if (!(await followBindingAuthorized(deps.db, follow))) return;
   const actorUserId = await followedMessageActor(deps.db, follow, f.user);
-  if (actorUserId === null) return;
+  if (actorUserId === null) {
+    if (follow.ownerType === "team") await deps.onSenderDenied?.();
+    return;
+  }
 
   const threadKey = `slack:${f.channel}:${f.threadTs}`;
   const normalized = (await deps.normalizeChannelMessage?.("slack", { userId: f.user, text: f.text })) ?? {

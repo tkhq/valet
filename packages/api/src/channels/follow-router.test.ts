@@ -164,6 +164,20 @@ describe("handleFollowedMessage", () => {
     expect(await followedMessageActor(testDb.appDb, follow, "OTHER")).toBeNull();
   });
 
+  it("explains a denied team follow without delivering or advancing its cursor", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-follow", orgId: ORG, name: "Team", createdAt: Date.now() });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "team-follow", userId: USER, role: "member" });
+    await upsertFollowedThread(testDb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "team", ownerId: "team-follow", createdBy: USER, lastSeenTs: "1.3" });
+    const onSenderDenied = vi.fn(async () => {});
+    const normalizeChannelMessage = vi.fn(async () => ({ text: "must not deliver" }));
+    await handleFollowedMessage({ db: testDb.appDb, engineHost, onSenderDenied, normalizeChannelMessage }, { orgId: ORG,
+      raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "UNLINKED", text: "help" }) });
+    expect(onSenderDenied).toHaveBeenCalledTimes(1);
+    expect(normalizeChannelMessage).not.toHaveBeenCalled();
+    expect(await findFollowedThread(testDb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" })).toMatchObject({ lastSeenTs: "1.3" });
+  });
+
   it.each(["non-member", "removed", "foreign-org"])(
     "does not route a linked %s sender under the binding actor's authority",
     async (mode) => {

@@ -80,6 +80,7 @@ import type { EngineHost } from "../engine/host.js";
 import { handleFollowedMessage } from "../channels/follow-router.js";
 import { channelMessageNormalizer } from "../events/channel-origin.js";
 import { channelThreadWindowFetcher } from "../events/channel-thread-context.js";
+import { maybeNotifyUnlinkedSlackSender } from "../channels/slack-link-notice.js";
 import { resolveSlackBotIdentity } from "../services/slack-bot-identity.js";
 import type { SlackWorkspaceIdentity } from "../services/slack-connect.js";
 
@@ -190,6 +191,7 @@ async function logClassifierRejection(deps: FanOutDeps, raw: RawChannelUpdate): 
 }
 
 interface FanOutDeps {
+  workspaceId: string;
   verifiedReceivedAt?: number;
   botUserId?: string;
   botId?: string;
@@ -255,6 +257,10 @@ async function recordVerifiedReceipt(
 
 async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: string | undefined): Promise<void> {
   let failed = false;
+  // This callback is created only after signature and workspace verification.
+  const notifyUnlinked = () => maybeNotifyUnlinkedSlackSender({
+    db: deps.db, transport: deps.transport, orgId: deps.orgId, workspaceId: deps.workspaceId, raw, receiptId, botUserId: deps.botUserId,
+  });
   try {
     await appendReceiptStage(deps.db, receiptId, { stage: "channel", outcome: "started", detail: "Direct-channel processing started." });
     const event = deps.transport.parseUpdate(raw);
@@ -291,6 +297,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
         { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest },
         { orgId: deps.orgId, service: "slack", event: normalized, receiptId },
       );
+      if (normalized.key === "slack.app_mention" && ingestResult.authorizationDenied) await notifyUnlinked();
       // A bot-message subscription that matched or excluded this event owns
       // its diagnostic. Only a classifier miss with no named bot subscription
       // should suggest that a slack.message subscription use slack.bot_message.
@@ -326,6 +333,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
         engineHost: deps.engineHost,
         normalizeChannelMessage: channelMessageNormalizer(deps.channelHost),
         fetchThreadWindow: channelThreadWindowFetcher(deps.channelHost),
+        onSenderDenied: notifyUnlinked,
       },
       { orgId: deps.orgId, raw },
     );
@@ -497,7 +505,7 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
       const accessToken = credentialSecret(credential);
       const rawBody = Buffer.from(payload.rawBody, "base64");
       const deps: FanOutDeps = {
-        db, plugins: providers.plugins, transport, channelHost: providers.channelHost, engineHost: providers.engineHost,
+        db, workspaceId: credentialTeamId, plugins: providers.plugins, transport, channelHost: providers.channelHost, engineHost: providers.engineHost,
         orgId: row.orgId, webhookSecret: payload.webhookSecret, headers, rawBody,
         verifiedReceivedAt: payload.verifiedReceivedAt,
         botUserId: typeof credential.metadata?.botUserId === "string" ? credential.metadata.botUserId : undefined,
