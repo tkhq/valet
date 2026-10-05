@@ -90,7 +90,7 @@ it("links the run, not an invented conversation, when only workflow evidence exi
 it("never pairs a needs-attention badge with nothing to do", async () => {
   vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, nextAction: undefined }], generatedAt: 100, coverage: "recent" });
   setup();
-  expect(await screen.findByText("Open the thread to see what it needs.")).toBeTruthy();
+  expect(await screen.findByText("Review the linked sources for details.")).toBeTruthy();
   expect(screen.queryByText("Nothing waits on you.")).toBeNull();
 });
 it("prepares without an unscoped request while identity is unresolved", () => {
@@ -158,4 +158,13 @@ it("shows pending shared generation as loading rather than an error", async () =
   setup();
   expect(await screen.findByText("Updating your briefing…")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+});
+
+
+it("does not claim an update needs a reply when no next step is provided", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, status: "updated", nextAction: undefined }], generatedAt: 100, coverage: "recent" });
+  setup();
+  expect(await screen.findByText("No next step listed.")).toBeTruthy();
+  expect(screen.queryByText("Next:")).toBeNull();
+  expect(screen.queryByText("Nothing waits on you.")).toBeNull();
 });

@@ -106,7 +106,7 @@ it("only accepts explicit HTTP result links", () => {
   expect(safeResultUrl("/relative/path")).toBeUndefined();
   expect(safeResultUrl("https://example.com/report")).toBe("https://example.com/report");
 });
-it("puts Valet's questions under Needs attention and plain replies in their own list, with Reply and Done", async () => {
+it("puts Valet's questions under Needs attention and plain replies in their own list, with Reply, Open thread, and Archive", async () => {
   vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads: [
     { sessionId: "s", threadId: "ask", title: "Dependency bump", lastAgentActivityAt: 5, unread: true, question: "Should I merge it once CI passes?" },
     { sessionId: "s", threadId: "told", title: "Lockfile fix", lastAgentActivityAt: 4, unread: false, preview: "The lockfile pins typebox again." },
@@ -122,13 +122,16 @@ it("puts Valet's questions under Needs attention and plain replies in their own 
   expect(within(attention).queryByRole("img", { name: "Unread" })).toBeNull();
   expect(within(attention).queryByText("Lockfile fix")).toBeNull();
   expect(within(attention).getAllByRole("link", { name: "Also active" })).toHaveLength(1);
-  const replies = screen.getByRole("region", { name: "Unanswered replies" });
+  const replies = screen.getByRole("region", { name: "Conversation updates" });
   expect(within(replies).getByText(/The lockfile pins typebox again\./)).toBeTruthy();
+  expect(within(replies).getByRole("link", { name: "Open thread" }).getAttribute("href")).toContain("told");
+  expect(within(replies).queryByRole("link", { name: "Reply" })).toBeNull();
+  expect(within(attention).getByRole("link", { name: "Reply" })).toBeTruthy();
   // The server stops listing an archived thread.
   vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads: [
     { sessionId: "s", threadId: "ask", title: "Dependency bump", lastAgentActivityAt: 5, unread: true, question: "Should I merge it once CI passes?" },
   ] });
-  fireEvent.click(within(replies).getByRole("button", { name: "Done with Lockfile fix" }));
+  fireEvent.click(within(replies).getByRole("button", { name: "Archive Lockfile fix" }));
   await waitFor(() => expect(api.patchThread).toHaveBeenCalledWith("told", { archived: true }));
-  await waitFor(() => expect(screen.queryByRole("region", { name: "Unanswered replies" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Conversation updates" })).toBeNull());
 });

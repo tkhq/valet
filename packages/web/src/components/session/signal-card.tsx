@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
+import { ChevronRight, Workflow } from "lucide-react";
 import type { Message, MessageSignal } from "@valet/api/wire";
 import { Badge } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
@@ -110,41 +111,37 @@ function ChildSettledCard({
   );
 }
 
-/**
- * A workflow run's report, with a link back to the run.
- *
- * The generic envelope labelled this "workflow.request" and stopped there,
- * so a person reading their assistant could see that a workflow had said
- * something but not which one, nor open it. `promptOrchestrator` now sets
- * `attributes.runId` (`api/src/workflows/engine-deps.ts`); a signal that
- * predates that still renders through the envelope below.
- */
-function WorkflowRequestCard({ message, runId, outcome }: { message: Message; runId: string; outcome?: string }) {
+/** Workflow operations stay compact; expansion preserves the complete report. */
+function WorkflowRequestCard({ message, signal }: { message: Message; signal: MessageSignal }) {
+  const runId = signal.attributes?.runId;
+  const outcome = signal.attributes?.outcome;
   return (
-    <CardShell>
-      <div className="flex items-center gap-2">
-        <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
-          workflow
-        </span>
-        {outcome && <OutcomeBadge outcome={outcome} />}
-        <Link
-          to="/workflows/runs/$runId"
-          params={{ runId }}
-          className="text-[11px] text-muted hover:underline"
-        >
-          Open run
-        </Link>
+    <div className="mx-auto my-2 w-full min-w-0 max-w-[52rem] px-5 sm:px-8">
+      <div className="relative">
+        <details className="group rounded-md border border-line border-l-2 border-l-moss bg-paper text-sm">
+          <summary className={`flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs text-muted hover:text-ink [&::-webkit-details-marker]:hidden ${runId ? "pr-24" : ""}`}>
+            <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" />
+            <Workflow aria-hidden className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 truncate font-medium">{signal.signalType === "workflow.settled" ? "Workflow result" : "Workflow request"}</span>
+            {outcome && <OutcomeBadge outcome={outcome} />}
+          </summary>
+          <div className="border-t border-line px-3 py-3 text-ink">
+            {message.content ? <Markdown>{message.content}</Markdown> : <p className="text-muted">No report text.</p>}
+          </div>
+        </details>
+        {runId && <Link to="/workflows/runs/$runId" params={{ runId }}
+          className="absolute right-3 top-1.5 text-xs leading-4 text-muted hover:underline">Open run</Link>}
       </div>
-      {message.content && <SignalBody content={message.content} />}
-    </CardShell>
+    </div>
   );
 }
 
 function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   // A run's report (`workflow.request`) and its settle report back to the
   // thread that started it (`workflow.settled`, `run-attention.ts`).
-  const runId = signal.signalType === "workflow.request" || signal.signalType === "workflow.settled" ? signal.attributes?.runId : undefined;
-  if (runId) return <WorkflowRequestCard message={message} runId={runId} outcome={signal.attributes?.outcome} />;
+  if (signal.signalType === "workflow.request" || signal.signalType === "workflow.settled") {
+    return <WorkflowRequestCard key={message.id} message={message} signal={signal} />;
+  }
   return (
     <CardShell>
       <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">

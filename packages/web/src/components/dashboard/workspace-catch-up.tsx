@@ -102,9 +102,9 @@ const STATUS: Record<WorkspaceBriefing["status"], { label: string; variant: "war
 
 /** Shown when the brief names no next action, so the text never contradicts the status. */
 const NO_ACTION: Record<WorkspaceBriefing["status"], string> = {
-  needs_attention: "Open the thread to see what it needs.",
+  needs_attention: "Review the linked sources for details.",
   in_progress: "Valet is still working on this.",
-  updated: "Nothing waits on you.",
+  updated: "No next step listed.",
 };
 
 function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: WorkspaceBriefing; onDismiss: () => void; dismissing: boolean }) {

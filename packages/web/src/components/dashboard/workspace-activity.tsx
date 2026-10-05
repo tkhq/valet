@@ -93,9 +93,9 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   }
   const activeThreads = [...activeThreadMap.values()];
   const needsYou = activeThreads.filter(row => row.state === "needs_you" || row.state === "failed");
-  // Threads waiting on a reply, unless active work already lists the thread.
+  // Recent assistant messages, unless active work already lists the thread.
   const waiting = (waitingQ.data?.threads ?? []).filter(row => !activeThreadMap.has(`${row.sessionId}:${row.threadId}`));
-  // A question needs an answer. A plain reply only needs a look, so it waits in a quieter list.
+  // Separate detected questions from updates that do not necessarily need a reply.
   const questions = waiting.filter(row => row.question);
   const replies = waiting.filter(row => !row.question);
   const finish = useFinishWaitingThread(owner);
@@ -109,7 +109,7 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   const resultGroups = groupResults(resultItems);
   const loading = activeWork.isPending || workflows.isPending || gates.isPending;
   const errors = [
-    { label: "active work", query: activeWork }, { label: "threads waiting on you", query: waitingQ }, { label: "results", query: outcomes }, { label: "artifacts", query: artifacts },
+    { label: "active work", query: activeWork }, { label: "conversation updates", query: waitingQ }, { label: "results", query: outcomes }, { label: "artifacts", query: artifacts },
     { label: "workflows", query: workflows }, { label: "approval details", query: gates },
   ].filter(entry => entry.query.error);
   const incomplete = !activeWork.error && activeWork.hasNextPage;
@@ -122,7 +122,7 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
       {questions.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
       {attentionRuns.map(row => <RunRow key={row.runId} row={row} prompt={gates.error ? undefined : gates.data?.items.find(item => item.runId === row.runId && item.owner.type === owner.ownerType && item.owner.id === owner.ownerId)?.gate.prompt} />)}
     </WorkSection>}
-    {replies.length > 0 && <WorkSection title="Unanswered replies" icon={<MessageSquare className="h-4 w-4 text-muted" />} count={replies.length}>
+    {replies.length > 0 && <WorkSection title="Conversation updates" icon={<MessageSquare className="h-4 w-4 text-muted" />} count={replies.length}>
       {replies.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
     </WorkSection>}
     {(inProgress.length + progressRuns.length > 0) && <WorkSection title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} count={inProgress.length + progressRuns.length}>
@@ -152,8 +152,8 @@ function WaitingRow({ row, onDone }: { row: WaitingThread; onDone: () => void })
     time={row.lastAgentActivityAt}
     detail={detail && <>{row.question ? <span className="font-medium text-ink">Valet asks: </span> : null}{detail}</>}
     actions={<>
-      <Button asChild variant="secondary" size="sm"><Link to="/threads/$threadId" params={{ threadId: row.threadId }}>Reply</Link></Button>
-      <Button variant="ghost" size="sm" onClick={onDone} title="Archive this thread. It leaves this list and the sidebar." aria-label={`Done with ${row.title}`}>Done</Button>
+      <Button asChild variant="secondary" size="sm"><Link to="/threads/$threadId" params={{ threadId: row.threadId }}>{row.question ? "Reply" : "Open thread"}</Link></Button>
+      <Button variant="ghost" size="sm" onClick={onDone} title="Archive this thread. It leaves this list and the sidebar." aria-label={`Archive ${row.title}`}>Archive</Button>
     </>} />;
 }
 function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: string }) {
