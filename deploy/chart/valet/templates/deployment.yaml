@@ -9,6 +9,10 @@ spec:
   # Pinned to 1 — see values.yaml's api.replicas comment. The engine is a
   # stateful singleton (in-memory submission claim loop); do not scale.
   replicas: {{ .Values.api.replicas }}
+  # Stop the old API before the new process applies one-way schema repairs.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
   progressDeadlineSeconds: {{ .Values.api.progressDeadlineSeconds | default 2100 }}
   selector:
     matchLabels:

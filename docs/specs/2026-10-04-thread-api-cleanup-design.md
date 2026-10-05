@@ -68,3 +68,5 @@ Borrow approvals are reusable only by current members of the owning team in the 
 Team API-key prompts carry the team principal, not the administrator who created the key. Authorless team turns use the team identity for policy and credential reads. Workflow and child turns retain their explicit delegated actor. Team API keys and authorless team signals cannot receive personal-account approval gates. Machine principals use team connections instead of personal accounts.
 
 WebSocket frames with unresolved thread metadata fail closed and are checked again on the next frame. Run lists inspect at most ten store pages per request. A partial page continues from its last visible row. If no visible row exists within that budget, the request returns an explicit error instead of exposing a private cursor or reporting empty history.
+
+The API Helm deployment uses Recreate and clears rolling-update settings. The old API stops before the new process applies one-way schema repairs. This upgrade requires a short service interruption.
