@@ -76,7 +76,7 @@ The existing session view re-mounted for the assistant session id (threads, gate
 
 ### `/memory` and `/memory/$` — memory explorer
 
-Two panes:
+Two panes. The Files/Graph tabs keep their width; long workspace names truncate to one line, with the full name in the existing tooltip.
 
 - **Tree** (left): directories collapsed/expandable, pinned files marked 📌, `journal/` sorted newest-first with "today" highlighted. Data from the new JSON tree endpoint. A search field above the tree runs FTS (`GET /api/memory/search`) and swaps the tree for a result list (path, type badge, description) while active.
 - **Document** (right): the rendered OKF doc — title in the display face, `type`/`tags`/`sensitivity`/`origin` as quiet badges, body as book-like rendered markdown (Newsreader). Frontmatter never shown raw. Footer affordance: **"Ask {name} to update this"** → navigates to `/chat` with the composer pre-filled (`Update memory file {path}: …`).
