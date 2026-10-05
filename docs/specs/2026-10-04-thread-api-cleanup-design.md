@@ -80,3 +80,9 @@ Named account approvers can answer only their exact gate on a private run. They 
 Team-key workflow starts use the team actor, never the key creator. Account checks preserve mounted composers after a verified identity on transient failures. Initial checks, account changes, and authentication failures still hide the previous account.
 
 Session creation with an initial prompt records admission durably. A missing credential settles that human prompt as failed and returns the session to idle. Tests assert this terminal state rather than racing the initial working badge.
+
+### Deleted-thread approval visibility
+
+The decisions inbox excludes ordinary gates whose thread no longer exists.
+A missing thread cannot establish audience access, even when its session belongs to the viewer's team.
+Named account approvers retain their separate gate-only access.

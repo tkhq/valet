@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
@@ -12,8 +12,12 @@ afterEach(async () => { await api?.cleanup(); api = undefined; });
 async function pendingGate(a: TestApi, sessionId: string, ownerType: "user" | "team", ownerId: string, userId: string) {
   await a.providers.db.insert(agentSessions).values({ id: sessionId, userId, orgId: "local-org", workspace: "/",
     ownerType, ownerId, createdAt: 1, updatedAt: 1 });
-  await a.providers.engineStore.saveDecisionGate(sessionId, "t", {
-    id: `gate-${sessionId}`, sessionId, threadId: "t", queueItemId: "q", resumeKey: `rk-${sessionId}`, ordinal: 0,
+  const threadId = `thread-${sessionId}`;
+  await a.providers.engineStore.saveThread(sessionId, {
+    id: threadId, sessionId, key: `web:${threadId}`, status: "active", queueMode: "steer", createdAt: 1, updatedAt: 1,
+  });
+  await a.providers.engineStore.saveDecisionGate(sessionId, threadId, {
+    id: `gate-${sessionId}`, sessionId, threadId, queueItemId: "q", resumeKey: `rk-${sessionId}`, ordinal: 0,
     type: "approval", title: "Approve?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
   });
 }
@@ -54,6 +58,11 @@ it("keeps another member's helper-thread approvals out of the inbox, and the vie
   }
   const body = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
   expect(body.items.map((item) => item.gate.id)).toEqual(["gate-own"]);
+  // Removing the private thread must not turn its surviving gate into a
+  // whole-team approval. Its title and body still contain private context.
+  await api.providers.db.execute(sql`DELETE FROM engine_threads WHERE session_id=${theirs.sessionId} AND id=${theirs.threadId}`);
+  const afterDeletion = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
+  expect(afterDeletion.items.map((item) => item.gate.id)).toEqual(["gate-own"]);
 });
 
 it("keeps a team workflow's approvals with the private thread that started the run", async () => {

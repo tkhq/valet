@@ -67,7 +67,7 @@ notificationsRouter.get("/decisions", async (c) => {
       const approver = gateApprover(gate);
       if (approver && (caller.type !== "user" || approver.userId !== caller.id)) continue;
       if (!approver) {
-        if (!keys.has(gate.threadId)) keys.set(gate.threadId, engineStore.getThread(session.id, gate.threadId).then((t) => visible(t?.key)));
+        if (!keys.has(gate.threadId)) keys.set(gate.threadId, engineStore.getThread(session.id, gate.threadId).then((t) => t ? visible(t.key) : false));
         if (!await keys.get(gate.threadId)) continue;
       }
       const thread = await engineStore.getThread(session.id, gate.threadId);
