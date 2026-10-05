@@ -263,8 +263,11 @@ export function pinnedToolName(actionId: string): string | undefined {
   return actionId.replace(".", "__");
 }
 
-/** TTL for the dynamic `resolveActions` cache, keyed per plugin service. */
+/** TTL for dynamic action discovery within an actor and thread scope. */
 export const RESOLVE_TTL_MS = 300_000;
+
+// Reserved from plugin action names: discovery approval is never execution approval.
+const DISCOVERY_ACTION_NAME = "__valet_discovery__";
 
 /**
  * Applies TypeBox `Value.Default` to a cloned copy of `params`, then
@@ -755,7 +758,7 @@ interface Catalog {
   byId: Map<string, CatalogEntry>;
   /** Plugins with a `resolveActions` seam, resolved on demand (not eagerly at catalog build). */
   dynamicPlugins: ActionPlugin[];
-  /** TTL cache of resolved dynamic actions, keyed by plugin service. */
+  /** TTL cache of dynamic actions, scoped to service, actor, thread, and sender class. */
   resolved: Map<string, ResolvedDynamic>;
   serviceAvailability: readonly ServiceAvailability[];
   resolveServiceAvailability?: PluginCatalogAvailabilityOptions["resolveServiceAvailability"];
@@ -770,6 +773,9 @@ function buildEntries(
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
   for (const action of actions) {
+    if (action.id === DISCOVERY_ACTION_NAME || action.id.endsWith(`.${DISCOVERY_ACTION_NAME}`)) {
+      throw new Error("Plugin action uses the reserved discovery identity");
+    }
     const entry: CatalogEntry = { service, plugin, action };
     entries.push(entry);
     const fqid = action.id.includes(".") ? action.id : `${service}.${action.id}`;
@@ -873,7 +879,8 @@ async function resolveDynamic(
   ctx: ToolContext,
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
-  const cached = catalog.resolved.get(plugin.service);
+  const cacheKey = JSON.stringify([plugin.service, ctx.userId, ctx.threadId, ctx.externalSender === true]);
+  const cached = catalog.resolved.get(cacheKey);
   if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) {
     return cached;
   }
@@ -881,12 +888,44 @@ async function resolveDynamic(
   const resolveActions = plugin.resolveActions;
   if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
   const credentialService = plugin.credentialService ?? plugin.service;
-  const actions = await resolveActions({
+  const discover = () => resolveActions({
     credentials: scopedCredentialProvider(ctx, credentialService, "discover"),
   });
+  let actions: PluginAction[];
+  if (ctx.owner?.type === "team" && ctx.policyResolver) {
+    // Discovery can transmit a member's credential before any remote action
+    // schema is known. Reuse the ordinary policy/gate/audit pipeline first.
+    let discovered: PluginAction[] | undefined;
+    const action: PluginAction = {
+      id: `${plugin.service}.${DISCOVERY_ACTION_NAME}`, name: `Discover ${plugin.service} tools`,
+      description: "Read the tools available through this account.", riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => {
+        discovered = await discover();
+        return { success: true };
+      },
+    };
+    const entry: CatalogEntry = { service: plugin.service, plugin, action };
+    const outcome = await invokeAction(
+      { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
+      action.id, {}, ctx, `Read available ${plugin.service} tools using this account.`,
+    );
+    if (outcome.kind !== "ok" || !outcome.result.success || !discovered) {
+      const reason = outcome.kind === "ok" ? outcome.result.error ?? "discovery failed" : outcome.kind;
+      throw new Error(`Tool discovery requires permitted account access: ${reason}`);
+    }
+    actions = discovered;
+  } else {
+    actions = await discover();
+  }
   const built = buildEntries(plugin.service, plugin, actions);
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
-  catalog.resolved.set(plugin.service, result);
+  // Actor/thread scoping can create many keys in a long-lived runtime.
+  if (!catalog.resolved.has(cacheKey) && catalog.resolved.size >= 200) {
+    const oldest = catalog.resolved.keys().next().value;
+    if (oldest !== undefined) catalog.resolved.delete(oldest);
+  }
+  catalog.resolved.set(cacheKey, result);
   return result;
 }
 

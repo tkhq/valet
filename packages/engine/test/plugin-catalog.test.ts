@@ -1013,6 +1013,84 @@ function makeDynamicPlugin(
 }
 
 describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
+  it("bounds discovery cache growth across long-lived thread histories", async () => {
+    const resolveActions = vi.fn(async () => []);
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    for (let i = 0; i < 201; i++) await list.execute({ service: "remote" }, makeCtx({ threadId: `thread-${i}` }));
+    await list.execute({ service: "remote" }, makeCtx({ threadId: "thread-200" }));
+    expect(resolveActions).toHaveBeenCalledTimes(201);
+    await list.execute({ service: "remote" }, makeCtx({ threadId: "thread-0" }));
+    expect(resolveActions).toHaveBeenCalledTimes(202);
+  });
+
+  it("separates discovery approval from a remote discover_tools action", async () => {
+    const requests: DecisionGateRequest[] = [];
+    const execute = vi.fn(async () => ({ success: true }));
+    const plugin = makeDynamicPlugin("remote", async () => [{ id: "discover_tools", name: "Remote discovery action",
+      description: "Remote action", riskLevel: "high", parameters: Type.Object({}), execute }]);
+    const context = makeCtx({ owner: { type: "team", id: "team" }, policyResolver: {
+      resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "plugin_default" } }),
+    }, requestDecision: async (request) => {
+      requests.push(request);
+      return { actionId: "approve", resolvedBy: "u1", resolvedAt: 1 };
+    } });
+    const outcome = await invokeAction(buildPluginCatalog([plugin]), "remote.discover_tools", {}, context, "Run remote action");
+    expect(outcome.kind).toBe("ok");
+    expect(execute).toHaveBeenCalledOnce();
+    expect(requests).toHaveLength(2);
+    expect(requests[0].resumeKey).not.toBe(requests[1].resumeKey);
+    expect(requests[0].dedupeKey).not.toBe(requests[1].dedupeKey);
+    expect(requests[0].context?.tool_id).not.toBe(requests[1].context?.tool_id);
+  });
+
+  it.each(["external", "denied", "grant-failed"])("does not contact discovery when %s", async (failure) => {
+    const resolveActions = vi.fn(async () => []);
+    const requestDecision = vi.fn(async (): Promise<DecisionResolution> =>
+      ({ actionId: "approve", resolvedBy: "lender", resolvedAt: 1 }));
+    const policyResolver: PolicyResolver = {
+      resolve: async () => ({ mode: failure === "denied" ? "deny" : "require_approval",
+        provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }),
+      onResolution: async () => { throw new Error("could not persist grant"); },
+    };
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      externalSender: failure === "external", policyResolver, requestDecision }));
+    expect(resolveActions).not.toHaveBeenCalled();
+    expect(requestDecision).toHaveBeenCalledTimes(failure === "grant-failed" ? 1 : 0);
+  });
+
+  it("does not reuse another actor or thread's dynamic catalog", async () => {
+    const resolveActions = vi.fn(async () => []);
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    for (const context of [{ userId: "alice", threadId: "a" }, { userId: "bob", threadId: "a" },
+      { userId: "bob", threadId: "b" }, { userId: "bob", threadId: "b", externalSender: true }]) {
+      await list.execute({ service: "remote" }, makeCtx(context));
+    }
+    expect(resolveActions).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(["approve", "deny", "pending"])("checks account approval before remote discovery: %s", async (answer) => {
+    let approved = false;
+    const resolveActions = vi.fn(async () => {
+      if (!approved) throw new Error("credential unavailable before lender approval");
+      return [];
+    });
+    const resolver: PolicyResolver = {
+      resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" },
+        approver: { userId: "lender" } }),
+      onResolution: async (_input, _decision, resolution) => { approved = resolution.actionId === "approve"; },
+    };
+    const requestDecision = vi.fn(async (request: DecisionGateRequest): Promise<DecisionResolution> => {
+      expect(resolveActions).not.toHaveBeenCalled();
+      expect(request.context?.approver).toEqual({ userId: "lender" });
+      return { actionId: answer, resolvedBy: "lender", resolvedAt: 1 };
+    });
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" }, policyResolver: resolver, requestDecision }));
+    expect(requestDecision).toHaveBeenCalledOnce();
+    expect(resolveActions).toHaveBeenCalledTimes(answer === "approve" ? 1 : 0);
+  });
+
   it("list_tools merges resolveActions results with static actions", async () => {
     const { plugin: staticPlugin } = makeMockPlugin();
     const dynamicAction: PluginAction = {

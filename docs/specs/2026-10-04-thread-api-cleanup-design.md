@@ -147,3 +147,7 @@ Batch source visibility defaults to denial when the referenced engine thread can
 ### Sandbox memory ownership
 
 Sandbox memory resolves the durable app-session or workflow-run owner in the token organization. The frozen first-waker actor never chooses the corpus. Shared runtimes use their workspace corpus, including machine-first wakes. Missing/deleted owners and stale personal-owner tokens fail closed; request headers and query parameters cannot change the scope. This does not establish private execution namespaces, which remain a release blocker. Terminal access is not widened to solve machine-first ownership.
+
+### Dynamic tool discovery approval
+
+Team runtime discovery goes through the existing tool policy, named-lender approval, grant persistence, and audit pipeline before calling a remote tool catalog. Discovery is a low-risk service action; executing the selected remote action still undergoes its own policy check. Pending, denied, expired, or failed approvals do not make a discovery request. Dynamic catalog caches are scoped by service, actor, thread, and external-sender status. The internal __valet_discovery__ action name is reserved so its approval cannot collide with a remote tool.
