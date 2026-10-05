@@ -168,7 +168,7 @@ async function spawningThread(db: Providers["db"], sessionId: string): Promise<{
 }
 
 /** Conversations whose readers need not be on the team. */
-const OUTSIDE_THREAD_KEY = /^(slack|telegram|github):/;
+const OUTSIDE_THREAD_KEY = /^(slack(?:-events)?|telegram|github):/;
 
 /** Whether people outside the team read this conversation (Slack, Telegram, GitHub). */
 export function isOutsideThreadKey(key: string | null | undefined): boolean {

@@ -35,7 +35,7 @@ export async function newcomerAuthor(
 /**
  * The author of a team rule's Slack message that is not a mention: a rule
  * on a channel's messages runs as the person who set it up. A message from
- * someone who is not a current member of the team, linked or not, keeps the
+ * anyone other than the current team member acting as the rule creator keeps the
  * newcomer limits (`newcomerAuthor`), so the rule never lends its creator's
  * authority to them. A bot's post, which has no human sender, runs as set up.
  */
@@ -45,7 +45,7 @@ export async function channelMessageAuthor(
   const externalId = resolvePath(payload, "user");
   if (typeof externalId !== "string" || !externalId || resolvePath(payload, "bot_id")) return undefined;
   const identity = await identityForExternal(db, "slack", externalId);
-  if (identity && await isTeamMember(db, teamId, identity.userId)) return undefined;
+  if (identity?.userId === actorUserId && await isTeamMember(db, teamId, actorUserId)) return undefined;
   return { id: actorUserId, name: name || "Slack member", externalSender: true };
 }
 

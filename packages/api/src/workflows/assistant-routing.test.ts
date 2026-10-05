@@ -1,3 +1,4 @@
+import { runOriginVisible } from "../services/thread-access.js";
 import type { PluginActionContext } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -170,6 +171,34 @@ describe("workflow workspace routing", () => {
       assistantSessionId: "assistant:other", threadId: thread.id,
     })).toBeTruthy();
     expect(start.mock.calls[3]?.[1]).not.toHaveProperty("origin");
+  });
+
+  it.each(["app-assistant:local-user", "slack-events:PRIVATE"])("preserves %s as the governing origin of nested child workflows", async (key) => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, { name: "Child origin", teamId: "team-a", definition: graph });
+    const session = await p.engineHost.assistantSessionFor("default-a", { actorUserId: owner.userId, orgId: owner.orgId }, { sessionId: "assistant:default-a" });
+    const thread = await session.createThread(key);
+    const parent = await p.engineStore.getSession("assistant:default-a");
+    const parentThread = await p.engineStore.getThread("assistant:default-a", thread.id);
+    if (!parent || !parentThread) throw new Error("Missing parent");
+    await p.engineStore.saveSession({ ...parent, id: "child", parentSessionId: parent.id, parentThreadId: thread.id });
+    await p.engineStore.saveThread("child", { ...parentThread, id: "child-thread", sessionId: "child", key: "web:default" });
+    await p.engineStore.saveSession({ ...parent, id: "grandchild", parentSessionId: "child", parentThreadId: "child-thread" });
+    await p.engineStore.saveThread("grandchild", { ...parentThread, id: "grandchild-thread", sessionId: "grandchild", key: "web:default" });
+    const start = vi.spyOn(p.workflowRunHost, "start").mockResolvedValue();
+    const origin = { assistantSessionId: "grandchild", threadId: "grandchild-thread" };
+    await startWorkflowRun(deps, owner, created.id, undefined, origin);
+    const savedOrigin = start.mock.calls[0]?.[1].origin;
+    expect(savedOrigin).toEqual({ assistantSessionId: parent.id, threadId: thread.id });
+    expect(await runOriginVisible(p, { orgId: owner.orgId, userId: "another-member" }, { ownerType: "team", origin: savedOrigin, actorUserId: owner.userId })).toBe(false);
+    start.mockClear();
+    // Broken ancestry must reject the start, not drop its privacy boundary.
+    for (const [id, parentSessionId, error] of [["orphan", "missing", "origin is unavailable"], ["cycle", "cycle", "invalid parent chain"]]) {
+      await p.engineStore.saveSession({ ...parent, id, parentSessionId, parentThreadId: `${id}-thread` });
+      await p.engineStore.saveThread(id, { ...parentThread, id: `${id}-thread`, sessionId: id, key: "web:default" });
+      await expect(startWorkflowRun(deps, owner, created.id, undefined, { assistantSessionId: id, threadId: `${id}-thread` })).rejects.toThrow(error);
+      expect(start).not.toHaveBeenCalled();
+    }
   });
 
   it("starts a team workflow from a personal assistant on the originating thread", async () => {

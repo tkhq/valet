@@ -47,6 +47,11 @@ it("lets a thread read only what its audience may see", async () => {
   // People outside the team read Slack, Telegram, and GitHub threads, so those
   // threads read no team web thread. A Slack thread still reads public channels.
   expect(await read("slack:CREADPRIV:2.2", "web:shared")).toBe(false);
+  for (const reader of ["slack-events:CREADPRIV", "slack-events:CREADPRIV:run-1"]) {
+    expect(await read(reader, "web:shared")).toBe(false);
+    expect(await read(reader, "slack:CREADPRIV:1.1")).toBe(true);
+    expect(await read(reader, "slack:CREADPUB:1.1")).toBe(true);
+  }
   expect(await read("slack:CREADPUB:2.2", "web:shared")).toBe(false);
   expect(await read("slack:CREADPRIV:2.2", "slack:CREADPUB:1.1")).toBe(true);
   expect(await read("telegram:dm:99", "web:shared")).toBe(false);

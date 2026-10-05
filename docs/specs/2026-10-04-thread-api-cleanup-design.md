@@ -36,3 +36,7 @@ Thread search rejects NUL characters before querying Postgres. The response asks
 Draft persistence is scoped by authenticated organization and user, then session and thread. The signed-in shell waits for that account namespace before mounting composers. Switching accounts empties in-memory attachments and restores only that account's text. Late upload callbacks and storage events with another account's key are ignored. Legacy drafts have no provable author and are not restored. Signing out clears the active in-memory namespace; the owner's text remains available on their next sign-in.
 
 The shell hides composers during identity verification on mount and focus. Successful sign-in, sign-up, and sign-out reload the document and notify other tabs to reload, so cached identity and in-flight requests cannot survive an account change performed in the app.
+
+### Review authorization boundaries
+
+Slack event threads use the same outside-reader restrictions as Slack conversation threads, including child-work access. A team member's channel message cannot inherit the rule creator's personal credential authority; only the creator's own linked message runs without the external-sender restriction. Workflows started by child sessions resolve their origin through the parent chain to the governing assistant thread. Missing or cyclic child ancestry rejects the start instead of dropping its privacy scope.

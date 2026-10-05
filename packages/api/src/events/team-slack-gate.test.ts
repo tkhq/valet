@@ -321,7 +321,7 @@ describe("newcomerAuthor", () => {
 });
 
 describe("channelMessageAuthor", () => {
-  it("keeps the newcomer limits for a channel message from anyone who is not on the team", async () => {
+  it("keeps creator credentials unavailable to another channel sender, including team members", async () => {
     const tdb = await freshTestPgDb();
     await tdb.appDb.insert(teamMembers).values({ teamId: "team-msg", userId: "member-a", role: "member" });
     await tdb.appDb.insert(userIdentityLinks).values([
@@ -329,8 +329,9 @@ describe("channelMessageAuthor", () => {
       { id: "link-x", provider: "slack", externalId: "U_X", userId: "outsider", createdAt: Date.now() },
     ]);
     const author = (payload: Record<string, unknown>) => channelMessageAuthor(tdb.appDb, "team-msg", "creator", payload, "Sam");
-    // A team member's message runs as the rule was set up.
-    expect(await author({ user: "U_A", text: "hi" })).toBeUndefined();
+    // Even a linked team member cannot spend the rule creator's account.
+    expect(await author({ user: "U_A", text: "hi" })).toMatchObject({ id: "creator", externalSender: true });
+    expect(await channelMessageAuthor(tdb.appDb, "team-msg", "member-a", { user: "U_A" })).toBeUndefined();
     // So does a bot's post: the rule's creator chose to act on it.
     expect(await author({ user: "U_BOT", bot_id: "B1", text: "alert" })).toBeUndefined();
     // An unlinked sender, or one linked to someone off the team, does not lend the creator's authority.

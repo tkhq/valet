@@ -1293,16 +1293,37 @@ async function activeWorkflowOrigin(
   origin: WorkflowRunOrigin,
 ): Promise<WorkflowRunOrigin | undefined> {
   if (origin.assistantSessionId.length === 0 || origin.threadId.length === 0) return undefined;
+  // A child reports through the ancestor thread that governs its audience.
+  // Never drop a broken child origin and silently publish its run to the team.
+  let inherited = false;
+  const invalidOrigin = (): undefined => {
+    if (inherited) throw new ValidationError("The child workflow origin is unavailable. Start from an active parent thread.");
+    return undefined;
+  };
+  const seen = new Set<string>();
+  for (;;) {
+    if (seen.has(origin.assistantSessionId) || seen.size >= 64) {
+      throw new ValidationError("The child workflow origin contains an invalid parent chain.");
+    }
+    seen.add(origin.assistantSessionId);
+    const session = await deps.engineStore.getSession(origin.assistantSessionId);
+    if (!session) return invalidOrigin();
+    if (session.orgId !== owner.orgId) return invalidOrigin();
+    if (!session.parentSessionId) break;
+    inherited = true;
+    if (!session.parentThreadId || !(await deps.engineStore.getThread(origin.assistantSessionId, origin.threadId))) return invalidOrigin();
+    origin = { assistantSessionId: session.parentSessionId, threadId: session.parentThreadId };
+  }
   const [assistant] = await deps.db.select().from(assistants)
     .where(and(eq(assistants.sessionId, origin.assistantSessionId), eq(assistants.orgId, owner.orgId)))
     .limit(1);
-  if (!assistant || assistant.archivedAt !== null) return undefined;
+  if (!assistant || assistant.archivedAt !== null) return invalidOrigin();
   const callerOwner = owner.principal?.type === "team"
     ? { ownerType: "team", ownerId: owner.principal.id }
     : { ownerType: "user", ownerId: owner.userId };
   const belongsToCaller = assistant.ownerType === callerOwner.ownerType && assistant.ownerId === callerOwner.ownerId;
   const belongsToRun = assistant.ownerType === runOwner.ownerType && assistant.ownerId === runOwner.ownerId;
-  if (!belongsToCaller && !belongsToRun) return undefined;
+  if (!belongsToCaller && !belongsToRun) return invalidOrigin();
 
   // Archive state lives in the app mirror row, not in the engine: the
   // PATCH that archives a thread stamps `session_threads.archived_at` and
@@ -1314,13 +1335,13 @@ async function activeWorkflowOrigin(
     .from(sessionThreads)
     .where(and(eq(sessionThreads.id, origin.threadId), eq(sessionThreads.sessionId, origin.assistantSessionId)))
     .limit(1);
-  if (mirror?.archivedAt != null) return undefined;
+  if (mirror?.archivedAt != null) return invalidOrigin();
 
   // The thread itself must still exist. A retry re-passes the stored
   // origin of a run that failed months ago, and the delivery side has no
   // fallback: a missing thread fails the orchestrator node.
   const thread = await deps.engineStore.getThread(origin.assistantSessionId, origin.threadId);
-  return thread ? origin : undefined;
+  return thread ? origin : invalidOrigin();
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an
