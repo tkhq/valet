@@ -442,11 +442,11 @@ describe("WorkflowsIndexPage", () => {
     expect(rows[1].className).toContain("ring-2");
   });
 
-  it("confirms an explicit approval before it resolves", () => {
+  it("submits an explicit approval directly without a second dialog", () => {
     renderApprovals();
     fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]);
-    expect(resolveMutate).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Approve step" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(resolveMutate).toHaveBeenCalledTimes(1);
     expect(resolveMutate).toHaveBeenCalledWith({
       nodeId: "review",
       body: { approved: true, note: undefined, iteration: undefined },

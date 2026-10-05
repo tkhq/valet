@@ -38,8 +38,10 @@ Only an org admin can select **Always allow**.
 That action writes persistent org policy and links to policy settings.
 The UI does not send a person to settings for per-run approval.
 
-The action-required surface confirms approve and deny actions.
-Each confirmation states the immediate effect.
+Workflow approval cards submit Approve or Deny directly; the card itself presents the decision.
+They do not ask for the same decision again in a dialog.
+Both buttons stay disabled while the response is pending.
+Tool policy confirmations retain their scope-specific explanation.
 The existing server route derives policy grants from the parked node.
 The client cannot request a grant for a different action.
 
@@ -116,7 +118,7 @@ Buttons keep the existing mobile touch target.
 | AR-2 | Another user owns a parked approval              | List as the caller         | The response excludes the run and does not change the count.                    |
 | AR-3 | The caller posts to the other user's gate        | Approve                    | The route returns `404`.                                                        |
 | AR-4 | A notification contains a run and node target    | Open the deep link         | The action-required tab opens and highlights that row.                          |
-| AR-5 | An approval node is visible                      | Select Approve             | No request occurs before confirmation. The confirmed request approves the node. |
+| AR-5 | An approval node is visible                      | Select Approve             | One request approves the node without another dialog. Both buttons disable while pending. |
 | AR-6 | A policy gate is visible                         | Inspect actions            | The UI shows tool permission scopes and policy-specific consequences.           |
 | AR-7 | A resolution succeeds or races                   | Observe query cache        | The action-required query invalidates and refreshes.                            |
 | AR-8 | The viewport is narrow                           | Render the tab             | Cards stack, identifiers wrap, and controls retain touch targets.               |

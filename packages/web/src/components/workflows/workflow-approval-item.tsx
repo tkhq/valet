@@ -86,7 +86,6 @@ export function WorkflowApprovalItem({
           summary={gate.summary}
           details={gate.details}
           iteration={gate.iteration}
-          confirmActions
         />
       )}
         </div>

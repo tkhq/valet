@@ -24,7 +24,7 @@
  */
 import { Hand } from "lucide-react";
 import { useApprovalResponse } from "./use-approval-response";
-import { Button, ConfirmDialog, Input } from "~/components/primitives";
+import { Button, Input } from "~/components/primitives";
 
 interface ApprovalCardProps {
   runId: string;
@@ -33,11 +33,10 @@ interface ApprovalCardProps {
   summary?: string;
   details?: unknown;
   iteration?: number;
-  confirmActions?: boolean;
 }
 
-export function ApprovalCard({ runId, nodeId, prompt, summary, details, iteration, confirmActions = false }: ApprovalCardProps) {
-  const { note, setNote, confirmation, resolve, respond, confirm, onConfirmationOpenChange } =
+export function ApprovalCard({ runId, nodeId, prompt, summary, details, iteration }: ApprovalCardProps) {
+  const { note, setNote, resolve, respond } =
     useApprovalResponse(runId, nodeId, iteration);
 
   return (
@@ -62,30 +61,18 @@ export function ApprovalCard({ runId, nodeId, prompt, summary, details, iteratio
         aria-label="Optional note"
       />
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" onClick={() => respond({ approved: true }, confirmActions)} disabled={resolve.isPending}>
+        <Button size="sm" onClick={() => respond({ approved: true }, false)} disabled={resolve.isPending}>
           Approve
         </Button>
         <Button
           size="sm"
           variant="danger"
-          onClick={() => respond({ approved: false }, confirmActions)}
+          onClick={() => respond({ approved: false }, false)}
           disabled={resolve.isPending}
         >
           Deny
         </Button>
       </div>
-      <ConfirmDialog
-        open={confirmation !== null}
-        onOpenChange={onConfirmationOpenChange}
-        title={confirmation?.approved ? "Approve this workflow step?" : "Deny this workflow step?"}
-        description={
-          confirmation?.approved
-            ? "The run continues past this step."
-            : "The run stops at this step unless the workflow handles denial."
-        }
-        confirmLabel={confirmation?.approved ? "Approve step" : "Deny step"}
-        onConfirm={confirm}
-      />
       {resolve.isError && <div className="text-xs text-danger-500">Failed to record response — try again.</div>}
     </div>
   );
