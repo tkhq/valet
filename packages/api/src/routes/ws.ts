@@ -180,6 +180,8 @@ export function registerWsRoutes(
                 if (hit && Date.now() - hit.at < THREAD_ACCESS_RECHECK_MS) return hit.shown;
                 const key = engineSession.threadById(threadId)?.key
                   ?? (await providers.engineStore.getThread(sessionId, threadId))?.key;
+                // An unresolved thread has no audience yet. Recheck the next frame.
+                if (key === undefined) return false;
                 const shown = visible(key);
                 checked.set(threadId, { shown, at: Date.now() });
                 return shown;

@@ -1483,7 +1483,13 @@ async function visibleRunPage(
 ): Promise<ListRunsPage> {
   const runs: WorkflowRunListItem[] = [];
   let cursor = filter.cursor;
+  let pagesRead = 0;
   do {
+    if (pagesRead++ === 10) {
+      const lastVisible = runs.at(-1);
+      if (lastVisible) return { runs, nextCursor: encodeRunCursor(lastVisible) };
+      throw new ValidationError("Run history exceeds the visibility scan limit. Narrow the workflow, status, or date filters in the run list.");
+    }
     const page = await deps.workflowStore.listRuns({ ...filter, cursor });
     const access = await Promise.all(page.runs.map((run) => ownedRun(deps, owner, run.runId)));
     for (const [index, run] of page.runs.entries()) {

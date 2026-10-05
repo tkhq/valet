@@ -95,7 +95,12 @@ it("streams a private Slack thread's events only to the channel's members", asyn
   api = await bootTestApi();
   const created = await createTeam(api.providers.db, { orgId: "local-org", name: "Stream", creatorUserId: "local-user" });
   const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: created.id }, { actorUserId: "local-user", orgId: "local-org" });
+  const unresolved = await session.createThread("web:unresolved");
   const hidden = await session.createThread("slack:CSTREAM:1700.1");
+  const findThread = session.threadById.bind(session);
+  const getThread = api.providers.engineStore.getThread.bind(api.providers.engineStore);
+  const liveLookup = vi.spyOn(session, "threadById").mockImplementation((id) => id === unresolved.id ? null : findThread(id));
+  const storedLookup = vi.spyOn(api.providers.engineStore, "getThread").mockImplementation((sid, id) => id === unresolved.id ? Promise.resolve(null) : getThread(sid, id));
   const shown = await session.createThread("web:shared");
   await connectSlack(api, { CSTREAM: ["USTREAM"] });
 
@@ -112,6 +117,23 @@ it("streams a private Slack thread's events only to the channel's members", asyn
   });
   // Seeds come out in thread order through one chain, so every frame for the
   // hidden thread would have arrived by now.
+  expect(frames.some((frame) => "threadId" in frame && frame.threadId === unresolved.id)).toBe(false);
+  liveLookup.mockRestore();
+  storedLookup.mockRestore();
+  // Missing metadata must not cache an authorization result. Once the public
+  // thread resolves, its next frame is admitted on this same connection.
+  const received = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("resolved thread frame was not delivered")), 5_000);
+    ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data));
+      if (frame.type === "model.state" && frame.threadId === unresolved.id) { clearTimeout(timeout); resolve(); }
+    });
+  });
+  await api.providers.eventStream.append({
+    sessionId, threadId: unresolved.id, userId: "local-user", timestamp: Date.now(),
+    event: { type: "model_state", threadId: unresolved.id, model: "anthropic/claude-haiku-4-5", queueItemId: "resolved-queue" },
+  }, "resolved-thread");
+  await received;
   ws.close();
   const threadIds = frames.flatMap((frame) => "threadId" in frame && typeof frame.threadId === "string" ? [frame.threadId] : []);
   expect(threadIds).toContain(shown.id);

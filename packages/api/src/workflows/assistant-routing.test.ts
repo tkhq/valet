@@ -352,6 +352,24 @@ describe("workflow workspace routing", () => {
     }
   });
 
+  it("bounds hidden-history scans instead of walking every inaccessible run", async () => {
+    const { p, deps } = await setup();
+    await p.db.insert(teamMembers).values({ teamId: "team-a", userId: "test-member", role: "member" });
+    const created = await createWorkflowDefinition(deps, owner, { name: "Hidden history", teamId: "team-a", definition: graph });
+    const session = await p.engineHost.assistantSessionFor("default-a", { actorUserId: owner.userId, orgId: owner.orgId }, { sessionId: "assistant:default-a" });
+    const thread = await session.createThread("app-assistant:local-user");
+    for (let i = 0; i < 12; i++) {
+      await p.workflowStore.createRun(`hidden-${i}`, {
+        workflowId: created.id, definitionVersionId: "v1",
+        origin: { assistantSessionId: "assistant:default-a", threadId: thread.id },
+      }, graph, "v1", { ownerType: "team", ownerId: "team-a", actorUserId: owner.userId });
+    }
+    const list = vi.spyOn(p.workflowStore, "listRuns");
+    await expect(listWorkflowRuns(deps, { ...owner, userId: "test-member" }, created.id, { limit: 1 }))
+      .rejects.toThrow("visibility scan limit");
+    expect(list).toHaveBeenCalledTimes(10);
+  });
+
   it("filters private helper runs from both lists and rejects retry after archive", async () => {
     const { api, p, deps } = await setup();
     await p.db.insert(teamMembers).values({ teamId: "team-a", userId: "test-member", role: "member" });
