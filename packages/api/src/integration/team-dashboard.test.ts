@@ -61,6 +61,9 @@ async function seedChild(
     createdAt: opts.createdAt,
     updatedAt: opts.createdAt,
   });
+  await db.execute(sql`INSERT INTO engine_threads(id,session_id,key,status,queue_mode,created_at,updated_at)
+    VALUES ('th-1',${opts.parentSessionId},'web:shared','idle','steer',1,1)
+    ON CONFLICT DO NOTHING`);
   await db.insert(childWatches).values({
     childSessionId: opts.childId,
     queueItemId: `qi-${opts.childId}`,
