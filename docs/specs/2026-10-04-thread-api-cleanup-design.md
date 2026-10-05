@@ -61,6 +61,9 @@ Removed the obsolete boot report claiming organization-audience Slack rules admi
 
 ### Open shared-runtime privacy boundary
 
+Team runtimes do not copy compaction summaries into shared journals. Summaries remain in their original thread history. Personal runtimes retain journal summaries.
+This prevents automatic publication of private summaries. It does not isolate sandbox files or explicit memory writes, which remain release blockers.
+
 Private transcript authorization does not isolate a team runtime's sandbox or workspace memory. The engine passes the session sandbox and owner into each thread's tool context, and memory tools use that owner as their default scope. Files or memory written from a private thread can therefore enter shared workspace state. The release default is to preserve private execution and storage boundaries. Shared files and memory must not silently receive private-thread data. Isolation remains a release blocker until implemented and verified; this no longer awaits a product decision.
 
 Borrow approvals are reusable only by current members of the owning team in the grant organization. Chat, workflow, and sandbox Git readers check membership when consuming a grant. Missing actors and removed members cannot reuse it.
