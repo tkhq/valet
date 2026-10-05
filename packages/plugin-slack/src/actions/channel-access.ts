@@ -13,20 +13,19 @@ export interface ChannelAccessResult {
 
 /**
  * Check if a user has access to a Slack channel.
- * Public channels, DMs, and group DMs are always allowed.
+ * Public channels are allowed. Shared owners cannot access DMs or group DMs.
  * Private channels require the user to be a member (via conversations.members).
  *
- * NOTE: Org orchestrators may need an exemption here in the future,
- * since they aren't tied to a single user.
+ * Team and organization runs cannot use a member’s private-channel access.
  */
 export async function checkPrivateChannelAccess(
   token: string,
   channelId: string,
   ownerSlackUserId: string | undefined,
   /** Treat a direct or group direct message like a private channel: only its
-   * members pass. Slack actions leave this off; a team's shared views need it,
-   * since the whole team must not read one person's DM. */
-  opts: { directIsPrivate?: boolean } = {},
+   * members pass. Shared owners always treat DMs as private, regardless of
+   * this option. Personal callers can require a membership check too. */
+  opts: { directIsPrivate?: boolean; ownerType?: "user" | "team" | "org" } = {},
 ): Promise<ChannelAccessResult> {
   // 1. Get channel info
   const infoRes = await slackGet('conversations.info', token, { channel: channelId });
@@ -47,10 +46,10 @@ export async function checkPrivateChannelAccess(
 
   const name = typeof channel.name === 'string' ? channel.name : undefined;
 
-  // 2. DMs and group DMs are always allowed, unless the caller treats them
-  // as private.
+  // 2. Shared owners cannot use the bot token to read personal conversations.
+  const sharedOwner = opts.ownerType === "team" || opts.ownerType === "org";
   const direct = channel.is_im ? "im" : channel.is_mpim ? "mpim" : undefined;
-  if (direct && !opts.directIsPrivate) {
+  if (direct && !opts.directIsPrivate && !sharedOwner) {
     return { allowed: true, isPrivate: false, name, direct };
   }
 
@@ -59,12 +58,21 @@ export async function checkPrivateChannelAccess(
     return { allowed: true, isPrivate: false, name };
   }
 
-  // 4. Private channel — need owner's Slack identity
+  // 4. Shared runs cannot borrow a member’s private-channel access.
+  if (sharedOwner) {
+    return {
+      allowed: false,
+      isPrivate: true,
+      error: 'This run cannot access private Slack conversations. Use a public channel or a personal run owned by a linked conversation member.',
+    };
+  }
+
+  // Private channel — need owner's Slack identity
   if (!ownerSlackUserId) {
     return {
       allowed: false,
       isPrivate: true,
-      error: 'Owner has not linked their Slack identity. Link it in Settings > Integrations > Slack.',
+      error: 'Owner has not linked their Slack identity. Link Slack in Settings → Connected accounts.',
     };
   }
 

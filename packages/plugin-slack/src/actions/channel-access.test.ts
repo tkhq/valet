@@ -66,8 +66,30 @@ describe('checkPrivateChannelAccess', () => {
     expect(result).toEqual({
       allowed: false,
       isPrivate: true,
-      error: 'Owner has not linked their Slack identity. Link it in Settings > Integrations > Slack.',
+      error: 'Owner has not linked their Slack identity. Link Slack in Settings → Connected accounts.',
     });
+    expect(slackGetMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['team', 'org'] as const)('denies private channels for %s owners even with member metadata', async (ownerType) => {
+    slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'C123', is_private: true } }));
+    const result = await checkPrivateChannelAccess('xoxb-token', 'C123', 'UMEMBER', { ownerType });
+    expect(result).toEqual({
+      allowed: false,
+      isPrivate: true,
+      error: 'This run cannot access private Slack conversations. Use a public channel or a personal run owned by a linked conversation member.',
+    });
+    expect(slackGetMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each((['team', 'org'] as const).flatMap((ownerType) =>
+    ['im', 'mpim'].map((direct) => ({ ownerType, direct })),
+  ))('denies $direct for $ownerType even with linked member metadata', async ({ ownerType, direct }) => {
+    slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: {
+      id: 'D123', is_private: true, is_im: direct === 'im', is_mpim: direct === 'mpim',
+    } }));
+    const result = await checkPrivateChannelAccess('xoxb-token', 'D123', 'UMEMBER', { ownerType });
+    expect(result).toMatchObject({ allowed: false, isPrivate: true });
     expect(slackGetMock).toHaveBeenCalledTimes(1);
   });
 

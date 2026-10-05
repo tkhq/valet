@@ -547,6 +547,76 @@ describe("buildActionInvoker", () => {
     }
   });
 
+  it("team workflow sends an explicit DM without borrowing the invoking member's identity", async () => {
+    const db = await makeDb();
+    await linkIdentity(db, { provider: "slack", externalId: "UMEMBER", userId: "u1" });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]) });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: "DRECIPIENT" } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, ts: "1.2", channel: "DRECIPIENT" })));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await invoke(
+        { service: "slack", action: "dm_user", params: { user: "URECIPIENT", text: "Hello" }, invocationId: "team-explicit-dm" },
+        { userId: "u1", orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+      expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "DRECIPIENT" } });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][0]).toContain("conversations.open");
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ users: "URECIPIENT" });
+      expect(fetchMock.mock.calls[1][0]).toContain("chat.postMessage");
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channel: "DRECIPIENT", text: "Hello" });
+      for (const [, init] of fetchMock.mock.calls) {
+        expect(init.headers).toMatchObject({ Authorization: "Bearer org-bot" });
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each((["team", "org"] as const).flatMap((ownerType) =>
+    (["read_history", "read_thread"] as const).flatMap((action) => [
+      { channel: "CPUBLIC", isPrivate: false, isIm: false, isMpim: false, allowed: true },
+      { channel: "DDIRECT", isPrivate: true, isIm: true, isMpim: false, allowed: false },
+      { channel: "GMPIM", isPrivate: true, isIm: false, isMpim: true, allowed: false },
+      { channel: "CPRIVATE", isPrivate: true, isIm: false, isMpim: false, allowed: false },
+    ].map((conversation) => ({ ...conversation, ownerType, action }))
+  )))("$ownerType workflow $action enforces access for $channel without a personal identity", async ({ channel, isPrivate, isIm, isMpim, allowed, ownerType, action }) => {
+    const db = await makeDb();
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]) });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: channel, is_private: isPrivate, is_im: isIm, is_mpim: isMpim } })));
+    if (allowed) fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, messages: [{ text: "Visible message", ts: "1.2" }], has_more: false })));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await invoke(
+        { service: "slack", action, params: { channel, ...(action === "read_thread" ? { thread_ts: "1.2" } : {}) }, invocationId: `${ownerType}-${action}-${channel}` },
+        { userId: "team:t1", orgId: "org1", owner: { type: ownerType, id: ownerType === "org" ? "org1" : "t1" } },
+      );
+      if (allowed) {
+        expect(result).toMatchObject({ ok: true, result: { channel, messages: [{ text: "Visible message", ts: "1.2" }] } });
+        expect(fetchMock.mock.calls[1][0]).toContain(action === "read_thread" ? "conversations.replies" : "conversations.history");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } else {
+        expect(result).toEqual({ ok: false, error: "This run cannot access private Slack conversations. Use a public channel or a personal run owned by a linked conversation member." });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("workflow slack.send_message uses org credentials and the bot identity for a personal owner", async () => {
     const db = await makeDb();
     const assistant = await seedWorkspaceAssistant(db, "org1", { type: "user", id: "u1" });
@@ -1231,7 +1301,7 @@ describe("buildActionInvoker", () => {
 
       expect(result).toEqual({
         ok: false,
-        error: "Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.",
+        error: "This run has no personal Slack recipient. Use slack.dm_user with the intended recipient’s Slack user ID.",
       });
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {

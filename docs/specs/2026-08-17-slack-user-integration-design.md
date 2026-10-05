@@ -251,22 +251,14 @@ single decision point for a session's credentials and already branches on
 `service === "github"`. Add a branch for `service === "slack"`:
 
 The Slack bot token is org-shared by design. `PUT
-/api/credentials/slack?scope=org` stores it under `{ type: "org", id:
-orgId }`. The engine's session always calls the resolver with a user owner
-(`{ type: "user", id: userId }`), so a plain exact-owner read returns null
-for every production session.
+/api/credentials/slack?scope=org` stores it under `{ type: "org", id: orgId }`.
+Session and workflow credentials resolve from the durable workspace owner.
+A team run never uses the workflow creator or first caller as its personal owner.
 
-The resolver reads the user credential first (a personal credential, if
-ever present, takes precedence). When the user-scoped read returns null,
-the resolver escalates to the org owner and reads from there. Whichever
-credential resolves — user or org — is then enriched: the resolver looks up
-the session user's `user_identity_links` row for provider `slack` and
-merges `owner_slack_user_id: externalId` into the credential metadata.
-Unlinked user → no metadata key, and the plugin's existing behavior (deny
-private-channel reads) holds. No credential at either scope → `null`.
-
-This org-owner escalation is specific to `slack`. All other services keep
-the exact-owner read with no fallback.
+Personal runs enrich the resolved bot credential with the owner's linked Slack
+user ID as `metadata.owner_slack_user_id`. Team and organization runs receive
+no personal identity enrichment. An unlinked personal owner cannot use private
+channels. A missing bot credential remains a separate integration error.
 
 The identity link is the single source of truth, whether it arrived via
 OAuth auto-link or the code flow. The resolver never reads the
@@ -284,9 +276,27 @@ session resolver). Without it, private-channel reads and `slack.dm_owner`
 fail with "Owner has not linked their Slack identity" even when the owner
 is linked — the failure mode of run `wfrun_mt1kva4i5wqesi`.
 
-Team- and org-owned runs get no enrichment: no single person's channel
-membership can authorize a private-channel read, so those actions keep
-failing closed.
+Team- and org-owned runs get no enrichment. Private-channel actions require an
+authorized personal scope. A member's identity link does not grant access to a
+shared team run. The denial directs the caller to a public channel or a personal
+run owned by a linked channel member. It does not ask the team to link an identity.
+
+The org bot credential supports public-channel reads and `slack.dm_user` sends
+without a personal identity link. Shared runs cannot read DM or group DM history,
+even when the bot can access those conversations. `slack.dm_user`
+uses its explicit recipient. It does not infer the workflow creator as recipient.
+`slack.dm_owner` requires a personal owner. For team and organization runs, its
+error directs the caller to `slack.dm_user` with the intended Slack user ID.
+Shared runs also cannot use `slack.fetch_file`. A private file URL alone does not
+prove that the shared audience can read the file. The action denies access before
+any download. Use an authorized personal assistant or a team Google Drive
+connection. Slack DOCX extraction is available to personal runs. Shared Slack
+file support requires a separate authorization check before it can be enabled.
+
+A team workflow failure still requires the recorded action name, arguments,
+owner, and error to diagnose. A successful mention reply proves that inbound
+routing and bot posting work. It does not prove private-channel authorization
+or a valid implicit DM recipient.
 
 ## 6. Compliance sweep
 

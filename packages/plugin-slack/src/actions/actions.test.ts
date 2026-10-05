@@ -13,7 +13,15 @@ import { slackPlugin } from './actions.js';
 import { clearChannelNameCache } from './channel-names.js';
 import { SLACK_TEXT_LIMIT } from '../message-chunking.js';
 
-type FakeSandbox = Partial<Sandbox> & { id: string };
+function makeSandbox(overrides: Partial<Sandbox> = {}): Sandbox {
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected sandbox call in Slack action test'); };
+  return {
+    id: 'sb-1', readFile: unsupported, readBinary: unsupported,
+    writeFile: unsupported, writeBinary: unsupported, readdir: unsupported,
+    stat: unsupported, mkdir: unsupported, rm: unsupported, exec: unsupported,
+    ...overrides,
+  };
+}
 
 function makeCredentials(cred: Credential | null): CredentialProvider {
   return {
@@ -25,14 +33,14 @@ function makeCredentials(cred: Credential | null): CredentialProvider {
 }
 
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
-  const sandbox: FakeSandbox = { id: 'sb-1' };
+  const sandbox = makeSandbox();
   return {
     userId: 'u1',
     orgId: 'o1',
     sessionId: 's1',
     threadId: 't1',
     credentials: makeCredentials({ accessToken: 'xoxb-test-token' }),
-    sandbox: sandbox as Sandbox,
+    sandbox,
     requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
       throw new Error('not implemented in test stub');
     },
@@ -125,7 +133,7 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       success: false,
-      error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.',
+      error: 'Owner has not linked their Slack identity. Ask them to link Slack in Settings → Connected accounts.',
     });
   });
 
@@ -242,7 +250,7 @@ describe('slack actions', () => {
 
     expect(result).toEqual({
       success: false,
-      error: 'Owner has not linked their Slack identity. Link it in Settings > Integrations > Slack.',
+      error: 'Owner has not linked their Slack identity. Link Slack in Settings → Connected accounts.',
     });
   });
 
@@ -343,11 +351,11 @@ describe('slack actions', () => {
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F1' }))
       .mockResolvedValueOnce(new Response('', { status: 200 }))
       .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
-    const sandbox = {
+    const sandbox = makeSandbox({
       id: 'sb-file',
       stat: async () => ({ isFile: true, isDirectory: false, size: 3 }),
       readBinary: async () => new Uint8Array([1, 2, 3]),
-    } as Sandbox;
+    });
 
     const result = await action('slack.reply_file_to_origin').execute(
       { path: '/workspace/report.pdf', mime_type: 'application/pdf', caption: 'Report' },
@@ -370,10 +378,10 @@ describe('slack actions', () => {
   });
 
   it('reply_file_to_origin rejects a directory before calling Slack', async () => {
-    const sandbox = {
+    const sandbox = makeSandbox({
       id: 'sb-directory',
       stat: async () => ({ isFile: false, isDirectory: true, size: 0 }),
-    } as Sandbox;
+    });
     const result = await action('slack.reply_file_to_origin').execute(
       { path: '/workspace/output' },
       pluginCtx({ sandbox, origin: { channelType: 'slack', threadKey: 'slack:C1:1.2' } }),
@@ -762,6 +770,67 @@ describe('slack actions', () => {
     expect(result.attachments).toEqual([
       { type: 'image', data: bytes, mimeType: 'image/png', name: 'pic.png' },
     ]);
+  });
+
+  it.each(['team', 'org'] as const)('fetch_file denies %s owners before accessing a private file URL', async (type) => {
+    const extractDocument = vi.fn();
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/nda.docx' },
+      pluginCtx({ owner: { type, id: 'shared-owner' }, extractDocument }),
+    );
+    expect(result).toEqual({ success: false, error: 'Shared runs cannot verify access to this Slack file. Use an authorized personal assistant or a team Google Drive connection.' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(extractDocument).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'agreement'],
+    ['application/octet-stream', 'nda.docx'],
+    ['application/zip', 'nda.docx'],
+  ])('fetch_file extracts DOCX for %s and %s', async (mime, name) => {
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0]);
+    fetchMock.mockResolvedValueOnce(new Response(bytes, { headers: { 'Content-Type': mime } }));
+    const extractDocument = vi.fn().mockResolvedValue({ markdown: 'Mutual NDA terms' });
+    const result = await action('slack.fetch_file').execute(
+      { url: `https://files.slack.com/files-pri/T1-F1/${name}` },
+      pluginCtx({ extractDocument }),
+    );
+    expect(result).toEqual({ success: true, data: {
+      content: 'Mutual NDA terms', mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', filename: name,
+    } });
+    expect(extractDocument).toHaveBeenCalledWith(expect.objectContaining({
+      data: bytes, name, mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }));
+  });
+
+  it('fetch_file leaves arbitrary ZIP archives unsupported', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04]), { headers: { 'Content-Type': 'application/zip' } }));
+    const extractDocument = vi.fn();
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/archive.zip' }, pluginCtx({ extractDocument }),
+    );
+    expect(result).toMatchObject({ success: true, data: { mimetype: 'application/zip' } });
+    expect(extractDocument).not.toHaveBeenCalled();
+  });
+
+  it('fetch_file rejects a DOCX label without a ZIP signature', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('sign in', { headers: { 'Content-Type': 'application/octet-stream' } }));
+    const extractDocument = vi.fn();
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/nda.docx' }, pluginCtx({ extractDocument }),
+    );
+    expect(result).toEqual({ success: false, error: 'This file is not a valid DOCX document. Upload a DOCX file exported from Word.' });
+    expect(extractDocument).not.toHaveBeenCalled();
+  });
+
+  it('fetch_file reports the host DOCX extraction failure', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04]), { headers: { 'Content-Type': 'application/octet-stream' } }));
+    const extractDocument = vi.fn().mockRejectedValue(new Error('Invalid DOCX package'));
+    const result = await action('slack.fetch_file').execute(
+      { url: 'https://files.slack.com/files-pri/T1-F1/nda.docx' }, pluginCtx({ extractDocument }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Invalid DOCX package');
   });
 
   it('fetch_file returns extracted text for a PDF', async () => {
