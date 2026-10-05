@@ -22,7 +22,7 @@ import type {
   ValetPlugin,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import { createSkill } from "../services/skills.js";
 import { writeFile } from "../services/memory.js";
 
@@ -200,6 +200,32 @@ describe("workspace runtime configuration", () => {
     expect((await (await fetch(`${api.baseUrl}/api/workspaces/user/integration-limit`)).json() as WorkspaceIntegrationLimitResponse).services).toBeNull();
     const { session: rebuilt } = await ensureDefaultAssistantSession({ db, engineHost }, owner, { actorUserId: USER, orgId: ORG });
     expect(await listToolIds(rebuilt.options.tools)).toContain("slack.post_message");
+  });
+
+  it("refreshes every cached team conversation when its integration limit is cleared", async () => {
+    api = await bootTestApi({ plugins: [fixturePlugin] });
+    const { db, engineHost } = api.providers;
+    const team = await createTeam(db, { orgId: ORG, name: "Limited executions", creatorUserId: USER });
+    const owner = { type: "team", id: team.id } as const;
+    const row = await seedWorkspaceAssistant(db, ORG, owner);
+    const behavior = JSON.stringify({ integrations: { mode: "allowlist", entries: [{ service: "github" }] } });
+    await db.execute(sql`UPDATE assistants SET behavior = ${behavior} WHERE id = ${row.id}`);
+    const meta = { actorUserId: USER, orgId: ORG };
+    const root = await ensureDefaultAssistantSession({ db, engineHost }, owner, meta);
+    const first = await ensureAssistantExecution({ db, engineHost }, owner, meta, "app-assistant:local-user");
+    const second = await ensureAssistantExecution({ db, engineHost }, owner, meta, "slack:C1:1.2");
+    const unrelated = await ensureDefaultAssistantSession({ db, engineHost }, { type: "user", id: USER }, meta);
+    for (const execution of [first, second]) {
+      expect(execution.sessionId).not.toBe(root.sessionId);
+      expect(await listToolIds(execution.session.options.tools)).not.toContain("slack.post_message");
+    }
+    expect((await fetch(`${api.baseUrl}/api/workspaces/${team.id}/integration-limit`, { method: "DELETE" })).status).toBe(204);
+    for (const prior of [root, first, second]) expect(engineHost.liveSession(prior.sessionId)).toBeNull();
+    expect(engineHost.liveSession(unrelated.sessionId)).toBe(unrelated.session);
+    for (const key of ["app-assistant:local-user", "slack:C1:1.2"]) {
+      const rebuilt = await ensureAssistantExecution({ db, engineHost }, owner, meta, key);
+      expect(await listToolIds(rebuilt.session.options.tools)).toContain("slack.post_message");
+    }
   });
 
   it("lets only a team admin clear a team's integration limit", async () => {

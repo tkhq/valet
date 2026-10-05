@@ -46,7 +46,8 @@ workspaceRuntimeRouter.get("/:workspace/integration-limit", async (c) => {
 });
 
 // Clearing widens what every session of the workspace can call, so it takes a
-// workspace admin. The cached runtime is evicted so its next turn sees it.
+// workspace admin. Evict the root and every isolated conversation so their
+// next turns rebuild the tool catalog from the cleared limit.
 workspaceRuntimeRouter.delete("/:workspace/integration-limit", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
@@ -56,7 +57,9 @@ workspaceRuntimeRouter.delete("/:workspace/integration-limit", async (c) => {
   }
   await clearIntegrationLimit(db, c.var.user.orgId, owner);
   const assistant = await findDefaultAssistant(db, c.var.user.orgId, owner);
-  if (assistant) engineHost.evictCache(assistant.sessionId);
+  if (assistant) {
+    for (const id of await workspaceSessionIds(db, c.var.user.orgId, assistant.sessionId)) engineHost.evictCache(id);
+  }
   return c.body(null, 204);
 });
 

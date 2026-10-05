@@ -17,6 +17,8 @@ Concurrent creation uses a unique database constraint. Restart resolves the same
 New helper, editor, web, event, and workflow-report conversations resolve their execution before uploads or prompt admission.
 Children retain separate sandboxes and memory namespaces. Their reader audience follows the parent conversation.
 Credential ownership remains the workspace owner; execution isolation does not grant access to personal credentials.
+When an administrator clears a workspace integration limit, evict its root runtime and every mapped execution from the cache.
+Existing conversations rebuild their tool catalogs on their next turn. Other workspaces keep their cached sessions.
 
 ## Data access
 
@@ -68,6 +70,8 @@ The sandbox reconciler retains working directories for identities marked `<owner
 It continues to report their age. Operators export retained data before explicitly deleting the sandbox.
 This retention does not make a retired sandbox available through terminal or file routes.
 The hibernation reaper also excludes legacy team roots. Isolated executions keep the normal retention policy.
+Artifact publication verifies that the publisher can access the source thread, including inherited execution ancestry.
+Team ownership alone cannot authorize source attribution to another member's private helper. Internal publication uses its verified actor identity.
 Legacy team artifacts with an unknown source thread remain hidden on token, comment, version, and management routes as well as lists. Restore their provenance only from verified publication receipts.
 
 ## Shared briefing privacy

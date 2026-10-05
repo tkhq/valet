@@ -551,14 +551,23 @@ artifactsRouter.post("/share", async (c) => {
     if (sourceSessionId !== undefined) {
       // Source metadata controls discovery and comment delivery. The verified
       // publishing scope must own it, including calls with an internal token.
-      const [source] = await db.select({ id: agentSessions.id }).from(agentSessions).where(and(
+      const [source] = await db.select({ id: agentSessions.id, ownerType: agentSessions.ownerType }).from(agentSessions).where(and(
         eq(agentSessions.id, sourceSessionId), eq(agentSessions.orgId, orgId),
         eq(agentSessions.ownerType, scope.owner.type), eq(agentSessions.ownerId, scope.owner.id),
       )).limit(1);
       if (!source) return c.json({ error: "Source work not found. Publish from work in this workspace." }, 404);
-      if (sourceThreadId !== undefined &&
-          !(await c.var.providers.engineStore.getThread(sourceSessionId, sourceThreadId))) {
-        return c.json({ error: "Source thread not found. Publish from a thread in the source work." }, 404);
+      if (sourceThreadId !== undefined) {
+        const thread = await c.var.providers.engineStore.getThread(sourceSessionId, sourceThreadId);
+        // Team ownership does not grant access to another member's helper.
+        // Internal requests carry a trusted actor; team keys have no personal audience.
+        const principal = requirePrincipal(c);
+        const visible = threadVisibility(c.var.providers, source, {
+          orgId,
+          userId: principal?.type === "team" ? undefined : principal?.id ?? scope.actorUserId,
+        });
+        if (!thread || !await visible(thread.key)) {
+          return c.json({ error: "Source thread not found. Publish from a thread you can access in the source work." }, 404);
+        }
       }
     }
 
