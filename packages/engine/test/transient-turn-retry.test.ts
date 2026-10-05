@@ -207,6 +207,36 @@ describe("turn-level transient retry (TKAI-319)", () => {
     faux.unregister();
   });
 
+  it("settles a human orchestrator failure and accepts a fresh prompt without background retries", async () => {
+    const faux = registerFauxProvider({ provider: "retry-human-orchestrator" });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
+      fauxAssistantMessage("queued response"),
+      fauxAssistantMessage("fresh response"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(),
+      purpose: "orchestrator", turnRetry: { backoffMs: [1] },
+    });
+    await session.thread().pause();
+    const first = await session.prompt("first", { author: { id: "u" } });
+    const queued = await session.prompt("already queued", { author: { id: "u" } });
+    await session.thread().resume();
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === first.queueItemId));
+    expect((await store.getQueueItem(session.id, first.queueItemId))?.outcome?.outcome).toBe("failed");
+    expect(events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")).toBe(false);
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === queued.queueItemId));
+    expect((await store.getQueueItem(session.id, queued.queueItemId))?.outcome?.outcome).toBe("completed");
+    expect(await store.listUnsettledSubmissions(session.id)).toEqual([]);
+    const next = await session.prompt("fresh request", { author: { id: "u" } });
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === next.queueItemId));
+    expect((await store.getQueueItem(session.id, next.queueItemId))?.outcome?.outcome).toBe("completed");
+    const entries = await session.readEntries("web:default");
+    expect(entries.some((e) => e.type === "message" && e.queueItemId === next.queueItemId && e.content === "fresh response")).toBe(true);
+    faux.unregister();
+  });
+
   it("an interactive session does not auto-retry", async () => {
     const faux = registerFauxProvider({
       provider: "retry-interactive",

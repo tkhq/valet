@@ -154,7 +154,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     createdAt: wireCreatedAt(e.createdAt),
     sequence: e.sequence,
     queueItemId: e.queueItemId,
-    ...(role === "assistant" ? { completed: e.stopReason === "end_turn" } : {}),
+    ...(role === "assistant" ? { completed: e.stopReason === "end_turn", stopReason: e.stopReason } : {}),
     replyTo: replyReferenceFromMetadata(e.metadata, role),
     signal: engineSignalToWire(e.signal),
     model: e.model,

@@ -1174,6 +1174,8 @@ export interface Message {
   queueItemId?: string;
   /** True once an assistant message ends its turn normally (`stopReason: "end_turn"`). False for an errored or aborted message, which is not a valid reply target. */
   completed?: boolean;
+  /** Terminal assistant state, preserved for live and reloaded interruption handling. */
+  stopReason?: "end_turn" | "error" | "abort";
   /** Assistant message that this user message addresses. */
   replyTo?: MessageReplyReference;
   /**

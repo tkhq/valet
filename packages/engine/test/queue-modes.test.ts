@@ -292,6 +292,7 @@ describe("queue mode: steer (abort + new)", () => {
         e.type === "message" && e.role === "assistant" && e.queueItemId === r2.queueItemId,
     );
     expect(sAssistant?.content).toBe("steer-done");
+    expect(events.filter((e) => e.event.type === "error")).toEqual([]);
 
     faux.unregister();
   });

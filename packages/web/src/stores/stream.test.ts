@@ -195,6 +195,7 @@ describe("stream store reducer", () => {
       .getState()
       .bySession[SESSION].messages.find((m) => m.id === "m2");
     expect(m2?.completed).toBe(false);
+    expect(m2?.stopReason).toBe("abort");
   });
 
   it("populates the queue.state slice for the thread", () => {
@@ -1508,6 +1509,12 @@ describe("turn error visibility", () => {
       recoverable: true,
     };
   }
+
+  it("does not display legacy intentional-abort events as errors", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, { ...errorEvent(1), code: "aborted", message: "Request was aborted" });
+    expect(useStreamStore.getState().bySession[SESSION].errorByThread[THREAD]).toBeUndefined();
+  });
 
   it("keeps the error through turn_end so a failed turn stays visible", () => {
     const { ingest } = useStreamStore.getState();

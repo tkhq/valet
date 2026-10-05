@@ -222,6 +222,22 @@ describe("host model resolver seam", () => {
     expect(okThread.toModel).toBe("prov_x/m1");
   });
 
+  it("fails an authored team chat immediately when provider credentials are unavailable", async () => {
+    const faux = makeFaux("human-no-credentials");
+    const model = faux.getModel();
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model, purpose: "orchestrator",
+      resolveModel: async () => { throw new NoCredentialsError("Connect a model provider in Settings.", model); },
+    });
+    const receipt = await session.prompt("go", { author: { id: "u1" } });
+    await session.thread().kick();
+    const item = await store.getQueueItem(session.id, receipt.queueItemId);
+    expect(item?.status).toBe("settled");
+    expect(item?.outcome).toMatchObject({ outcome: "failed", error: "Connect a model provider in Settings." });
+    expect(await store.listUnsettledSubmissions(session.id)).toEqual([]);
+  });
+
   it("credential-less turns (resolver throws NoCredentialsError) release back to queued, then settle `failed` with the HOST's message at the cap — zero entries appended", async () => {
     const faux = makeFaux("seam-nocreds");
     const model = faux.getModel();

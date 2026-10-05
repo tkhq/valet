@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { buildSkillBlock } from "@valet/shared";
 import type { StreamMessage } from "~/stores/stream";
-import { isEmptyAssistantMessage, messageCopyText, senderLabel } from "./message-item";
+import { isEmptyInterruption, isEmptyAssistantMessage, messageCopyText, senderLabel } from "./message-item";
 
 function msg(over: Partial<StreamMessage>): StreamMessage {
   return {
@@ -34,6 +34,15 @@ describe("isEmptyAssistantMessage", () => {
     expect(
       isEmptyAssistantMessage(msg({ parts: [{ kind: "text", text: "hi" }] })),
     ).toBe(false);
+  });
+});
+
+describe("intentional interruptions", () => {
+  it("hides an empty interrupted reply but keeps partial output and real failures", () => {
+    expect(isEmptyInterruption(msg({ stopReason: "abort" }))).toBe(true);
+    expect(isEmptyInterruption(msg({ stopReason: "abort", content: "Partial answer" }))).toBe(false);
+    expect(isEmptyInterruption(msg({ stopReason: "error" }))).toBe(false);
+    expect(isEmptyInterruption(msg({ role: "user", stopReason: "abort" }))).toBe(false);
   });
 });
 

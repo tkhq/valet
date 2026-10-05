@@ -359,3 +359,10 @@ describe("entryToMessage — author projection", () => {
     expect(entryToMessage(assistant, "sess", "th")?.author).toBeUndefined();
   });
 });
+
+it("preserves interruption state when loading message history", () => {
+  const aborted = entryToMessage(baseEntry({ role: "assistant", content: "", stopReason: "abort" }), "sess", "th");
+  expect(aborted).toMatchObject({ completed: false, stopReason: "abort" });
+  const failed = entryToMessage(baseEntry({ role: "assistant", content: "", stopReason: "error" }), "sess", "th");
+  expect(failed).toMatchObject({ completed: false, stopReason: "error" });
+});

@@ -65,6 +65,7 @@ export const MessageItem = memo(function MessageItem({
   /** Selects a completed assistant text message as the composer reply target. */
   onReply?: (target: MessageReplyReference) => void;
 }) {
+  if (isEmptyInterruption(message)) return null;
   const isUser = message.role === "user";
   const copyText = messageCopyText(message);
   // Defined only for another member's message on a shared session; the
@@ -145,8 +146,7 @@ export const MessageItem = memo(function MessageItem({
             ))}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
               <p className="text-xs italic text-muted">
-                (no response — the turn failed or was interrupted before any
-                output; see the error above or the server logs)
+                No response. Try again or choose another model.
               </p>
             )}
           </div>
@@ -155,6 +155,10 @@ export const MessageItem = memo(function MessageItem({
     </article>
   );
 });
+
+export function isEmptyInterruption(message: StreamMessage): boolean {
+  return message.stopReason === "abort" && isEmptyAssistantMessage(message);
+}
 
 /**
  * A persisted assistant row with no parts and no content is what a turn
@@ -385,16 +389,16 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
 /**
  * Terminal-outcome badge for a queued submission, per Task 7 design point 4:
  * superseded/merged read as muted (the turn was cleanly folded away by a
- * later prompt); failed/aborted read as a subtle failure signal.
+ * later prompt); stopped is neutral, while failed signals an error.
  */
 function SettledBadge({ outcome }: { outcome: SettledOutcome }) {
-  const isFailure = outcome === "failed" || outcome === "aborted";
+  const isFailure = outcome === "failed";
   const label =
     outcome === "superseded"
       ? "superseded"
       : outcome === "merged"
         ? "merged into next"
-        : outcome;
+        : outcome === "aborted" ? "stopped" : outcome;
   return (
     <span
       className={cn(

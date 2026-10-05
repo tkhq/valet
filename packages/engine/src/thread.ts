@@ -3797,7 +3797,7 @@ export class Thread {
     try {
       turnModel = await this.resolveTurnModelForTurn(item);
     } catch (err) {
-      if (err instanceof NoCredentialsError) {
+      if (err instanceof NoCredentialsError && !this.isUserPrompt()) {
         this.credentialError = err;
         return;
       }
@@ -4157,6 +4157,12 @@ export class Thread {
     await this.retryTransientTurnError();
   }
 
+  private isUserPrompt(): boolean {
+    const purpose = this.session.options.purpose;
+    return !!this.runningItem?.author && typeof this.runningItem.content === "string"
+      && purpose !== "workflow" && purpose !== "child";
+  }
+
   /**
    * Turn-level retry for transient provider errors (TKAI-319). Engages only
    * when the turn settled with a classified-transient error AND the session
@@ -4171,7 +4177,7 @@ export class Thread {
   private async retryTransientTurnError(): Promise<void> {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
-    const unattended = purpose === "orchestrator" || purpose === "workflow" || purpose === "child";
+    const unattended = !this.isUserPrompt() && (purpose === "orchestrator" || purpose === "workflow" || purpose === "child");
     const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
     if (maxAttempts <= 0) return;
     // An explicitly configured empty backoff list means "no wait", not
@@ -5423,7 +5429,7 @@ export class Thread {
             }
           }
         }
-        if (errorMessage) {
+        if (errorMessage && stopReason !== "aborted") {
           // Same stdout mirror as `emitError`: the event is best-effort (a
           // dead WS drops it), and this is the path provider failures take
           // (bad key, exhausted credits, 4xx/5xx) — without a log line the
