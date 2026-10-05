@@ -10,6 +10,8 @@ import {
   type DecisionGate,
   type SessionEntry,
   type ToolDef,
+  type PromptContent,
+  type ToolContext,
   type WriteFence,
 } from "../src/index.js";
 import { findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
@@ -1421,5 +1423,32 @@ describe("decision gates: durable expiry sweep", () => {
     expect((await store.getQueueItem(SID, itemId))?.status).toBe("settled");
 
     faux2.unregister();
+  });
+});
+
+
+describe("interactive actor provenance", () => {
+  it.each(["direct", "authorless", "external", "signal", "workflow", "child"] as const)("marks only a direct authenticated prompt (%s)", async (kind) => {
+    const faux = registerFauxProvider({ provider: `interactive-author-${kind}` });
+    const seen: Array<ToolContext["interactiveActor"]> = [];
+    const tool: ToolDef = {
+      name: "inspect_interactive_actor", description: "Inspect test context", parameters: Type.Object({}), policyChecked: true,
+      execute: async (_args, ctx) => { seen.push(ctx.interactiveActor); return { text: "checked" }; },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("inspect_interactive_actor", {}, { id: "inspect-author" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "admin-creator", orgId: "o1", owner: { type: "team", id: "t1" },
+      purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator",
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+    });
+    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" } : "inspect";
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author: { id: "admin", ...(kind === "external" ? { externalSender: true } : {}) } });
+    await session.thread().awaitResult(receipt.queueItemId);
+    expect(seen).toEqual([kind === "direct" ? { id: "admin" } : undefined]);
+    faux.unregister();
   });
 });

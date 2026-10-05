@@ -67,6 +67,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.patch_workflow",
       "workflows.propose_schedule",
       "workflows.propose_trigger",
+      "workflows.request_workflow_deletion",
       "workflows.resolve_approval",
       "workflows.save_workflow",
       "workflows.start_run",

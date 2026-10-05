@@ -270,3 +270,28 @@ Regression tests cover an oldest pending request behind 100 newer closed
 requests (including duplicate submission), all 105 pending requests across
 pages with tied timestamps, deletion of the cursor row, expired-history
 filtering, invalid inputs, tenant scope, and UI paging/filter/recovery behavior.
+
+
+### Direct chat deletion authority
+
+A direct authenticated prompt carries `interactiveActor` from its persisted author.
+Signals, external senders, and workflow or child sessions never set this field.
+The assistant creator and an ordinary tool approval cannot supply this authority.
+
+For workflow deletion, every tool call passes explicit `deletionAuthority`.
+This identifies its matching direct author or marks the call as automated. The service preserves the exact team scope and checks the
+current organization and team roles under its existing transaction locks.
+A current admin deletes directly. This does not require a second deletion request.
+An automated tool call remains refused for team resources, even when its personal
+owner or team creator is an admin. Authenticated HTTP deletion keeps its role check.
+
+Members can use `workflows.request_workflow_deletion` from direct web chat.
+The action uses the existing request service, including target ownership checks,
+duplicate detection, expiry, and admin-only decision rules. Its result explicitly
+reports `deleted: false`, the pending request ID, and the team review URL.
+A generic tool approval never approves this request or changes the person's role.
+Other-team and cross-organization targets remain hidden. Removed members cannot
+open requests; existing requests remain available to current administrators.
+
+Channel messages encoded as signals do not carry direct interactive authority.
+Their corrective action is to continue in signed-in web chat or team settings.

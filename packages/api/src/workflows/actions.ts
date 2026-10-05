@@ -11,6 +11,8 @@ import type {
   PluginActionContext,
   PluginActionResult,
 } from "@valet/engine";
+import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
+import { submitDeletionRequest } from "../services/team-deletion-requests.js";
 import { proposalResult } from "../events/proposals.js";
 import { ValetError } from "@valet/shared";
 import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
@@ -409,12 +411,30 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Delete workflow",
     description:
       "Permanently delete a workflow definition. Refused (with an error) while the workflow " +
-      "has non-settled runs — cancel them first. Settled run history is kept.",
+      "has non-settled runs — cancel them first. Settled run history is kept. Team deletion requires " +
+      "a current admin in direct web chat. Members can use request_workflow_deletion for admin review.",
     riskLevel: "medium",
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const result = await deleteWorkflowDefinition(getDeps(), owner, workflow_id);
+      const directActor = ctx.interactiveActor?.id === owner.userId &&
+        ctx.sessionPurpose !== "workflow" && ctx.sessionPurpose !== "child";
+      let result;
+      try {
+        result = await deleteWorkflowDefinition(getDeps(), { ...owner, deletionAuthority: directActor ? { type: "interactive", userId: owner.userId } : { type: "automated" } }, workflow_id);
+      } catch (error) {
+        if (!(error instanceof TeamAdminRequiredError)) throw error;
+        return {
+          success: false,
+          error: directActor
+            ? "Only a team admin can delete this workflow. Use workflows.request_workflow_deletion to request admin review."
+            : "Team workflow deletion requires a signed-in person in direct web chat. Ask a team admin there or open team settings.",
+          data: { code: error.code, teamId: error.teamId,
+            reviewUrl: `/settings/organization/teams?teamId=${encodeURIComponent(error.teamId)}`,
+            ...(directActor ? { nextAction: "workflows.request_workflow_deletion" } : {}),
+          },
+        };
+      }
       if (result === "not_found") {
         return { success: false, error: `workflow not found: ${workflow_id}` };
       }
@@ -425,6 +445,33 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         };
       }
       return { success: true, data: { workflowId: workflow_id, deleted: true } };
+    },
+  });
+
+  const requestWorkflowDeletion = action(Type.Object({
+    workflow_id: Type.String(),
+    reason: Type.Optional(Type.String({ maxLength: 2000 })),
+  }))({
+    id: "workflows.request_workflow_deletion",
+    name: "Request workflow deletion",
+    description: "Open or reuse a team workflow deletion request for an admin to review. This does not delete the workflow. Requires a signed-in person in direct web chat.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, reason }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      if (ctx.interactiveActor?.id !== owner.userId || ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child") {
+        return { success: false, error: "Open a deletion request from signed-in web chat or team settings. Automated turns cannot submit requests for a person." };
+      }
+      const deps = getDeps();
+      const workflow = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!workflow) return { success: false, error: `workflow not found: ${workflow_id}` };
+      if (workflow.ownerType !== "team") return { success: false, error: "Deletion requests are for team workflows. Use workflows.delete_workflow for your personal workflow." };
+      const { request, created } = await submitDeletionRequest(deps.db,
+        { orgId: owner.orgId, userId: owner.userId, teamId: workflow.ownerId }, "workflow", workflow_id, reason);
+      return { success: true, data: {
+        workflowId: workflow_id, deleted: false, requestId: request.id, status: request.status, created,
+        reviewUrl: `/settings/organization/teams?teamId=${encodeURIComponent(workflow.ownerId)}`,
+      } };
     },
   });
 
@@ -1240,6 +1287,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       updateModel,
       addAggregate,
       deleteWorkflow,
+      requestWorkflowDeletion,
       startRun,
       getRun,
       getNodeResult,

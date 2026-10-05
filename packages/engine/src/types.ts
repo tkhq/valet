@@ -682,6 +682,9 @@ export interface ToolContext {
   threadId: string;
   sessionPurpose?: SessionPurpose;
   actor?: { id: string; name?: string; email?: string };
+  /** Authenticated author of a direct interactive prompt, never a signal creator
+   * or delegated workflow/child actor. Does not confer any resource role. */
+  interactiveActor?: { id: string };
   /** This turn came from a channel sender with no Valet account, running as
    * `userId` (`PromptAuthor.externalSender`). */
   externalSender?: boolean;

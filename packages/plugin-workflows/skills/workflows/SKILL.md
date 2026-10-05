@@ -16,7 +16,8 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
 - `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
 - `workflows.update_model` — set an approved model or org size tier on selected `llm` and `session` nodes
-- `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept)
+- `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept). Team deletion requires a current admin in direct web chat.
+- `workflows.request_workflow_deletion` — open or reuse a team workflow deletion request for admin review. Requires a signed-in person in direct web chat. This does not delete the workflow.
 - `workflows.start_run` — start a run; returns `runId`
 - `workflows.get_run` — run status, per-node checkpoints, pending waits
 - `workflows.get_node_result` — a node's FULL checkpoint output, for debugging failures
@@ -133,3 +134,17 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 - `tool` nodes can park WITHOUT an approval node in the definition: when org policy resolves the action to require_approval, the node raises a policy gate and parks on `approval:<nodeId>` until a human resolves it (optional `approvalTimeout`, `onDeny` on the tool node). `list_runs` shows each parked run's `waitingOn`.
 - Debug a surprising node with `get_node_result` — it returns the checkpoint result verbatim, the same value templates read via `nodes.<id>.result` (oversized results come back as `{ truncated: true, jsonPrefix }`).
 - A run is finished when `status: "settled"`; report the `outcome`.
+
+
+### Team workflow deletion
+
+An ordinary tool approval does not grant team administration rights. In direct web
+chat, `delete_workflow` checks the authenticated author's current admin role.
+Members use `request_workflow_deletion` with the exact `workflow_id` and an optional
+`reason`. Report its `deleted: false` and pending status accurately. The returned
+`reviewUrl` opens team settings, where an admin decides the request.
+
+Automated workflows, child sessions, signals, and unlinked channel senders cannot
+borrow a creator's admin role or submit a deletion request as that person. Ask a
+signed-in person to continue in web chat or team settings. Do not repeat an
+ordinary tool approval as a substitute for the resource's admin check.

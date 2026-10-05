@@ -4975,6 +4975,10 @@ export class Thread {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       userId: actorId,
+      ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
+        runningContent !== undefined && !isSignalContent(runningContent) &&
+        session.options.purpose !== "workflow" && session.options.purpose !== "child"
+        ? { interactiveActor: { id: this.runningItem.author.id } } : {}),
       ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,

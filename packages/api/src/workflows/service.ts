@@ -110,6 +110,9 @@ export interface WorkflowOwner {
   /** Live team-assistant actions recheck the acting member. Team API keys
    * and workflow runs authorize through their server-derived principal. */
   requireTeamMembership?: boolean;
+  /** Tool-origin deletion provenance. HTTP deletion uses its authenticated
+   * request principal. Tool calls must never inherit a creator's admin role. */
+  deletionAuthority?: { type: "interactive"; userId: string } | { type: "automated" };
 }
 
 /** The owner types `workflow_definitions.owner_type` holds. Read off the
@@ -1146,7 +1149,14 @@ export async function deleteWorkflowDefinition(
     if (row.ownerType === "team") {
       // A machine principal must not learn another team's resource or request IDs.
       if (owner.principal?.type === "team" && owner.principal.id !== row.ownerId) return "not_found";
-      if (owner.principal?.type === "team" || !(await lockTeamDeletionAccess(tx, owner, row.ownerId))) {
+      const directAuthor = owner.deletionAuthority?.type === "interactive" && owner.deletionAuthority.userId === owner.userId;
+      if (owner.principal?.type === "team" && !directAuthor) {
+        throw new TeamAdminRequiredError(row.ownerId, "workflow", id);
+      }
+      // Recheck personal callers before returning a resource-specific refusal.
+      // Automated personal runs must not inherit their creator's admin rights.
+      const admin = await lockTeamDeletionAccess(tx, owner, row.ownerId);
+      if ((owner.deletionAuthority !== undefined && !directAuthor) || !admin) {
         throw new TeamAdminRequiredError(row.ownerId, "workflow", id);
       }
     }
