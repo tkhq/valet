@@ -1835,7 +1835,7 @@ export class EngineHost {
       if (actsAsMember && sessionOwner.type === "team") {
         // A turn from a channel sender with no Valet account never reads a
         // member's own credentials, whoever woke the runtime.
-        actsAsMember = !use.externalSender && (!use.actorId || use.actorId === userId) && db
+        actsAsMember = !use.externalSender && use.actorId === userId && db
           ? await isTeamMember(db, sessionOwner.id, userId) : false;
       }
       const owner: CredentialOwner = actsAsMember ? { type: "user", id: userId } : sessionOwner;
