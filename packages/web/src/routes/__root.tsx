@@ -1,6 +1,7 @@
 import { AUTH_CHANGE_KEY } from "~/lib/auth-navigation";
 import { WorkspaceAssistantProvider, WorkspaceAssistantDock } from "~/components/layout/workspace-assistant";
-import { useEffect, type ReactNode } from "react";
+import { ApiError } from "~/api/client";
+import { useEffect, useState, type ReactNode } from "react";
 import { useMe } from "~/api/settings";
 import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanstack/react-router";
@@ -162,13 +163,19 @@ export function DraftAccountBoundary({ children }: { children: ReactNode }) {
   const me = useMe({ staleTime: 0, refetchOnMount: "always", refetchOnWindowFocus: "always" });
   const owner = me.data ? JSON.stringify([me.data.orgId, me.data.id]) : "";
   const activeOwner = useComposerDraftStore((s) => s.owner);
+  const [verifiedOwner, setVerifiedOwner] = useState("");
+  const unauthorized = me.error instanceof ApiError && (me.error.status === 401 || me.error.status === 403);
   useEffect(() => {
-    if (!me.isFetching && !me.error) useComposerDraftStore.getState().activateOwner(owner);
-  }, [owner, me.isFetching, me.error]);
-  if (me.error) return <p role="alert">Could not load your account. Reload to try again.</p>;
-  if (!owner || activeOwner !== owner) return <p role="status">Loading your account…</p>;
+    if (unauthorized) setVerifiedOwner("");
+    else if (!me.isFetching && !me.error && owner) {
+      useComposerDraftStore.getState().activateOwner(owner);
+      setVerifiedOwner(owner);
+    }
+  }, [owner, me.isFetching, me.error, unauthorized]);
+  if (unauthorized || (me.error && verifiedOwner !== owner)) return <p role="alert">Could not load your account. Reload to try again.</p>;
+  if (!owner || activeOwner !== owner || verifiedOwner !== owner) return <p role="status">Loading your account…</p>;
   return <>
-    {me.isFetching && <p role="status">Verifying your account…</p>}
-    <div key={owner} hidden={me.isFetching} inert={me.isFetching} className={me.isFetching ? undefined : "contents"}>{children}</div>
+    {me.error && <p role="status">Connection interrupted. Reconnect to sync your work.</p>}
+    <div key={owner} className="contents">{children}</div>
   </>;
 }

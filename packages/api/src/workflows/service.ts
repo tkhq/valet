@@ -1384,7 +1384,7 @@ export async function startWorkflowRun(
   // Team and user runs use the definition owner, matching the scheduler,
   // event dispatcher, and webhook. An org-owned row stays caller-owned:
   // any org member can read one, and stamping the org would let them run
-  // with the org's stored credentials. Actor is the clicker on every path.
+  // with the org's stored credentials. Team keys act as the team, not their creator.
   const runAsCaller = row.ownerType === "org";
   await deps.workflowRunHost.start(runId, params, definition, {
     ownerType: runAsCaller ? "user" : row.ownerType,

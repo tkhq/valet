@@ -161,7 +161,7 @@ function serviceCtx(c: {
     // `engineStore` is what run-origin validation probes for the origin
     // thread (`activeWorkflowOrigin`).
     deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials, engineStore },
-    owner: { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
+    owner: { userId: c.var.principal?.type === "team" ? `team:${c.var.principal.id}` : c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal },
     env: buildValidateEnvironment(actionPluginByService),
   };
 }

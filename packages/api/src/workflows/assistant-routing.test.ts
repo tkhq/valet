@@ -361,6 +361,15 @@ describe("workflow workspace routing", () => {
     expect(await getWorkflowRunDetail(deps, approver, "private-approval")).toBeNull();
   });
 
+  it.each([true, false])("preserves delegated human workflow actors (membership=%s)", async requireTeamMembership => {
+    const { p, deps } = await setup();
+    const created = await createWorkflowDefinition(deps, owner, { name: "Key actor", teamId: "team-a", definition: graph });
+    const start = vi.spyOn(p.workflowRunHost, "start").mockResolvedValue(undefined);
+    await startWorkflowRun(deps, { ...owner, principal: { type: "team", id: "team-a" }, requireTeamMembership }, created.id);
+    expect(start).toHaveBeenCalledWith(expect.any(String), expect.any(Object), expect.any(Object),
+      { ownerType: "team", ownerId: "team-a", actorUserId: owner.userId });
+  });
+
   it("fills visible pages without exposing private ids in continuation cursors", async () => {
     const { p, deps } = await setup();
     await p.db.insert(teamMembers).values({ teamId: "team-a", userId: "test-member", role: "member" });

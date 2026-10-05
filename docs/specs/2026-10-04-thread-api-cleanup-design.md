@@ -61,7 +61,7 @@ Removed the obsolete boot report claiming organization-audience Slack rules admi
 
 ### Open shared-runtime privacy boundary
 
-Private transcript authorization does not isolate a team runtime's sandbox or workspace memory. The engine passes the session sandbox and owner into each thread's tool context, and memory tools use that owner as their default scope. Files or memory written from a private thread can therefore enter shared workspace state. Do not declare the release privacy-complete until the product boundary is decided and enforced: isolate private execution/storage, or explicitly define and communicate workspace files and memory as shared. No weaker boundary has been accepted as part of these fixes.
+Private transcript authorization does not isolate a team runtime's sandbox or workspace memory. The engine passes the session sandbox and owner into each thread's tool context, and memory tools use that owner as their default scope. Files or memory written from a private thread can therefore enter shared workspace state. The release default is to preserve private execution and storage boundaries. Shared files and memory must not silently receive private-thread data. Isolation remains a release blocker until implemented and verified; this no longer awaits a product decision.
 
 Borrow approvals are reusable only by current members of the owning team in the grant organization. Chat, workflow, and sandbox Git readers check membership when consuming a grant. Missing actors and removed members cannot reuse it.
 
@@ -76,3 +76,5 @@ Proposal retries must match the stored normalized configuration and creator. Reu
 Human-authored chat turns fail visibly when provider credentials are unavailable or a transient provider failure exhausts transport retries. They do not inherit background orchestrator retry delays. Workflow and child retries remain bounded. Steering and Stop do not emit provider-error banners. Empty interrupted assistant rows stay hidden after reload; partial answers remain visible.
 
 Named account approvers can answer only their exact gate on a private run. They cannot read or cancel that run or answer unrelated gates. Unattended team workflows can consume an approved account grant only for their stored team and while the lending member remains on that team.
+
+Team-key workflow starts use the team actor, never the key creator. Account checks preserve mounted composers after a verified identity on transient failures. Initial checks, account changes, and authentication failures still hide the previous account.

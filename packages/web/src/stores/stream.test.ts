@@ -1497,7 +1497,7 @@ describe("streaming tool calls", () => {
 describe("turn error visibility", () => {
   beforeEach(reset);
 
-  function errorEvent(off: number): WireEvent {
+  function errorEvent(off: number): Extract<WireEvent, { type: "error" }> {
     return {
       seq: off,
       ts: Date.now(),

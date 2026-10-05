@@ -138,6 +138,21 @@ describe("team API key reach", () => {
     expect(save.mock.calls[0]?.[2].author).toEqual({ id: `team:${f.teamId}`, name: "Team API key" });
   });
 
+  it("starts workflows as the team without inheriting the key creator", async () => {
+    const f = await bootFixture();
+    const headers = { "content-type": "application/json", "x-api-key": f.teamKey };
+    const created = await fetch(`${f.baseUrl}/api/workflows`, { method: "POST", headers,
+      body: JSON.stringify({ name: "Key workflow", definition: { version: "dag/v1", nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop" }], edges: [{ from: "start", to: "done" }] } }) });
+    expect(created.status).toBe(201);
+    const workflow = await created.json();
+    if (!workflow || typeof workflow !== "object" || !("id" in workflow) || typeof workflow.id !== "string") throw new Error("Missing workflow id");
+    const start = vi.spyOn(api!.providers.workflowRunHost, "start").mockResolvedValue(undefined);
+    const response = await fetch(`${f.baseUrl}/api/workflows/${workflow.id}/runs`, { method: "POST", headers, body: "{}" });
+    expect(response.status).toBe(201);
+    expect(start).toHaveBeenCalledWith(expect.any(String), expect.any(Object), expect.any(Object),
+      { ownerType: "team", ownerId: f.teamId, actorUserId: `team:${f.teamId}` });
+  });
+
   it("reads its team's session and 404s the admin's personal session", async () => {
     const f = await bootFixture();
     const headers = { "x-api-key": f.teamKey };
