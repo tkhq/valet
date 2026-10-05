@@ -289,14 +289,15 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string;
 /**
  * SQL: whether a team thread may appear in content every member sees at once,
  * such as a cached briefing. Not a person's own thread, and not a Slack
- * channel thread unless the channel is stored as public: nobody's access is
+ * channel thread unless its public classification is fresh: nobody's access is
  * checked when the content is read. A channel is classified the first time
  * any member's thread list shows it.
  */
 export function sharedWithWholeTeamSql(orgId: string, key: SQL): SQL {
   return sql`(${key} IS NULL OR (${key} NOT LIKE 'app-assistant:%' AND ${key} NOT LIKE 'workflow:%'
     AND ((${key} NOT LIKE 'slack:%' AND ${key} NOT LIKE 'slack-events:%') OR EXISTS (SELECT 1 FROM slack_channel_privacy p
-      WHERE p.org_id = ${orgId} AND p.channel_id = split_part(${key}, ':', 2) AND p.is_private = false))))`;
+      WHERE p.org_id = ${orgId} AND p.channel_id = split_part(${key}, ':', 2) AND p.is_private = false
+        AND p.checked_at > ${Date.now() - PUBLIC_TTL_MS}))))`;
 }
 
 /** Of the given threads, the ones (`<session>:<thread>`) the viewer may see. */

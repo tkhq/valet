@@ -349,6 +349,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     ALTER TABLE memory_files ADD PRIMARY KEY (owner_type, owner_id, namespace, path); END $$` },
   { describe: "assistants.behavior column", probe: { kind: "column", table: "assistants", column: "behavior" }, sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "behavior" text' },
   { describe: "Slack webhook inbox", probe: { kind: "table", table: "slack_webhook_inbox" }, sql: 'CREATE TABLE "slack_webhook_inbox" ("id" text PRIMARY KEY, "org_id" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "next_attempt_at" bigint NOT NULL);' },
+  { describe: "Slack inbox attempts", probe: { kind: "column", table: "slack_webhook_inbox", column: "attempts" }, sql: 'ALTER TABLE slack_webhook_inbox ADD COLUMN attempts integer NOT NULL DEFAULT 0' },
+  { describe: "Slack inbox terminal failures", probe: { kind: "column", table: "slack_webhook_inbox", column: "failed_at" }, sql: 'ALTER TABLE slack_webhook_inbox ADD COLUMN failed_at bigint' },
   { describe: "Slack inbox due index", probe: { kind: "index", index: "slack_webhook_inbox_due" }, sql: 'CREATE INDEX IF NOT EXISTS "slack_webhook_inbox_due" ON "slack_webhook_inbox" ("next_attempt_at")' },
   { describe: "credential shares", probe: { kind: "table", table: "credential_shares" }, sql: `CREATE TABLE IF NOT EXISTS "credential_shares" (
   "team_id" text NOT NULL, "service" text NOT NULL, "user_id" text NOT NULL, "created_at" bigint NOT NULL,

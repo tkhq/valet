@@ -2787,4 +2787,6 @@ export const slackWebhookInbox = pgTable("slack_webhook_inbox", {
   payload: text("payload").notNull(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  failedAt: bigint("failed_at", { mode: "number" }),
 }, t => [index("slack_webhook_inbox_due").on(t.nextAttemptAt)]);

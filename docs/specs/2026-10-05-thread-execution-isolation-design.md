@@ -67,4 +67,51 @@ Do not bulk-copy the legacy namespace into shared team memory.
 The sandbox reconciler retains working directories for identities marked `<owner>:retired:<assistant-id>`.
 It continues to report their age. Operators export retained data before explicitly deleting the sandbox.
 This retention does not make a retired sandbox available through terminal or file routes.
+The hibernation reaper also excludes legacy team roots. Isolated executions keep the normal retention policy.
 Artifacts without a verifiable source thread remain hidden. Restore their provenance only from verified publication receipts.
+
+## Shared briefing privacy
+
+Team briefings require a public Slack classification checked within five minutes.
+The same bound applies to collected evidence and cached responses, including event-only workflow runs and their effects.
+Expired classifications exclude evidence until a successful channel check refreshes them. An outage must not extend a shared briefing's public classification.
+
+## Slack delivery recovery
+
+The durable inbox retains an encrypted delivery after ten failed processing attempts.
+It records `failed_at` and a `slack_delivery_failed` problem. Automatic drains exclude these records.
+An operator inspects the delivery's receipt stages and repairs the failing consumer before replay.
+To replay, reset `attempts` to zero, `failed_at` to null, and `next_attempt_at` to zero for the verified organization and delivery ID.
+Never delete the accepted payload to clear the error. Durable engine dispatch IDs prevent a previously admitted message from starting another turn.
+
+## Blocking artifact cutover check
+
+Run this check against each target database before enabling the refactored deployment.
+Use an operator connection. Do not paste artifact content or publication tokens into shared review comments.
+
+1. Back up the database and retained working directories.
+2. Inventory affected artifacts with the query below.
+3. Inspect the recorded source session for a successful `artifact_publish` or `mem_share` tool call and its paired tool result.
+4. Match the exact artifact token, normalized publish key, and current version's content against that receipt.
+5. Verify that exactly one existing thread satisfies the evidence. Verify its organization and owner.
+6. Record the receipt entry IDs and version in the private deployment record.
+7. Lock the artifact row in a transaction. Repeat the version, source session, and null-thread checks before updating `source_thread_id`.
+8. Test access as the intended reader and as an unauthorized team member.
+9. Repeat the inventory. Stop cutover if any row lacks verified provenance or an owner-approved recovery disposition.
+
+```sql
+SELECT a.id, a.org_id, a.owner_id, a.source_session_id,
+       a.source_memory_path, a.version, a.updated_at
+FROM artifacts a
+WHERE a.owner_type = 'team' AND a.source_session_id <> ''
+  AND a.source_thread_id IS NULL AND a.revoked_at IS NULL
+ORDER BY a.org_id, a.owner_id, a.id;
+```
+
+A quoted URL in an ordinary message is not a publication receipt.
+The publishing actor and default thread are not proof of audience.
+If the latest version cannot be verified, keep the artifact quarantined.
+Ask its owner to recover and republish it from an authorized conversation, or explicitly accept quarantine in the deployment record.
+Never assign an arbitrary shared thread to clear this check.
+
+This procedure is a release gate, not an automatic backfill. A code review cannot certify the target database's recovery state.

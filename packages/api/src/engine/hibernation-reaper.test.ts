@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import type { AttachmentState } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import { HibernationReaper, type HibernationReaperDeps } from "./hibernation-reaper.js";
 
 const RETENTION_MS = 60 * 60_000;
@@ -98,6 +98,18 @@ describe("HibernationReaper", () => {
     const after = await row(id);
     expect(after?.sandboxReclaimedAt).toBe(NOW);
     expect(after?.status).toBe("hibernated");
+  });
+
+  it("retains legacy team root files while isolated executions expire normally", async () => {
+    const root = await seed({ id: "assistant:legacy" });
+    const execution = await seed({ id: "execution:isolated" });
+    await db.update(agentSessions).set({ ownerType: "team", ownerId: "team" });
+    await db.insert(assistants).values({ id: "legacy", sessionId: root, orgId: "org1", ownerType: "team", ownerId: "team",
+      createdAt: 1 });
+    const { deps, destroyedSandboxes } = fakeDeps();
+    await new HibernationReaper(deps).sweep(NOW);
+    expect(destroyedSandboxes).toEqual([`sbx-${execution}`]);
+    expect((await row(root))?.sandboxReclaimedAt).toBeNull();
   });
 
   it("a stamped row stops sweeping: the second pass destroys nothing", async () => {

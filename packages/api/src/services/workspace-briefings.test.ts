@@ -185,7 +185,7 @@ describe("workspace briefing evidence", () => {
     api = await bootTestApi(); const db = api.providers.db;
     await db.insert(slackChannelPrivacy).values([
       { orgId: "local-org", channelId: "CPRIV", isPrivate: true, checkedAt: 1 },
-      { orgId: "local-org", channelId: "CPUB", isPrivate: false, checkedAt: 1 },
+      { orgId: "local-org", channelId: "CPUB", isPrivate: false, checkedAt: Date.now() },
     ]);
     const run = async (id: string, key: string, payload: Record<string, unknown>, refs?: Record<string, string>) => {
       await db.insert(workflowDefinitions).values({ id: `wf-${id}`, orgId: "local-org", ownerType: "team", ownerId: "team", name: id, definition: {}, createdAt: 1, updatedAt: 1 });

@@ -70,7 +70,7 @@ it("lets a thread read only what its audience may see", async () => {
 it("shares a team thread with the whole team only when nothing narrows it", async () => {
   api = await bootTestApi();
   await api.providers.db.insert(slackChannelPrivacy).values([
-    { orgId: "local-org", channelId: "CSHAREPUB", isPrivate: false, checkedAt: 1 },
+    { orgId: "local-org", channelId: "CSHAREPUB", isPrivate: false, checkedAt: Date.now() },
     { orgId: "local-org", channelId: "CSHAREPRIV", isPrivate: true, checkedAt: 1 },
   ]);
   const shared = async (key: string | null) => {

@@ -907,6 +907,26 @@ describe("POST /api/channels/slack/webhook", () => {
 
 
 describe("Slack receipt diagnostics", () => {
+  it("retains a terminal failed delivery without retrying it again", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    const { db } = api.providers;
+    await db.insert(slackWebhookInbox).values({ id: "poison", orgId: "local-org", payload: "invalid-encrypted-record",
+      createdAt: 1, nextAttemptAt: 0, attempts: 9 });
+    await db.insert(slackWebhookInbox).values({ id: "poison-second", orgId: "local-org", payload: "invalid-encrypted-record",
+      createdAt: 1, nextAttemptAt: 0, attempts: 9 });
+    await drainSlackIngress(api.providers);
+    const [failed] = await db.select().from(slackWebhookInbox).where(eq(slackWebhookInbox.id, "poison"));
+    expect(failed.attempts).toBe(10);
+    expect(failed.failedAt).toBeTypeOf("number");
+    const diagnostics = await db.select().from(eventDropLog).where(eq(eventDropLog.reason, "slack_delivery_failed"));
+    expect(diagnostics).toHaveLength(2);
+    await db.update(slackWebhookInbox).set({ nextAttemptAt: 0 }).where(eq(slackWebhookInbox.id, "poison"));
+    await drainSlackIngress(api.providers);
+    const [retained] = await db.select().from(slackWebhookInbox).where(eq(slackWebhookInbox.id, "poison"));
+    expect(retained.attempts).toBe(10);
+    expect(retained.payload).toBe(failed.payload);
+  });
+
   const secretBody = "secret-form-answer-do-not-retain-in-receipt";
   async function receipts(eventId: string) {
     return api!.providers.db.select().from(eventReceipts).where(eq(eventReceipts.externalId, eventId));

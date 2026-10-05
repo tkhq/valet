@@ -154,7 +154,7 @@ describe("durable workspace briefing cache", () => {
     await db.insert(sessionThreads).values({ id: "slack-th", sessionId: "team-rt", createdAt: 1 });
     await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
       VALUES ('slack-th', 'team-rt', 'slack:CFLIP:1.1', 'idle', 'steer', 1, 1)`);
-    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CFLIP", isPrivate: false, checkedAt: 1 });
+    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CFLIP", isPrivate: false, checkedAt: Date.now() });
     const response: WorkspaceBriefingsResponse = { generatedAt: 1, coverage: "recent", briefings: [{ id: "b", title: "t", summary: "s", status: "updated", updatedAt: 1,
       latestThread: { sessionId: "team-rt", threadId: "slack-th" },
       sources: [{ id: "thread:team-rt:slack-th", kind: "thread", sessionId: "team-rt", threadId: "slack-th", title: "t", updatedAt: 1 }] }] };
@@ -185,7 +185,7 @@ describe("durable workspace briefing cache", () => {
       expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.runId === "r")).toBe(allowed);
     }
     await db.execute(sql`UPDATE engine_threads SET key='slack:CPUBLIC:1' WHERE session_id='rt' AND id='th'`);
-    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPUBLIC", isPrivate: false, checkedAt: 1 });
+    await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPUBLIC", isPrivate: false, checkedAt: Date.now() });
     await db.update(workflowRuns).set({ params: { origin: { assistantSessionId: "rt", threadId: "th" } } }).where(eq(workflowRuns.id,"r"));
     expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
     expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.runId === "r")).toBe(true);
@@ -199,6 +199,12 @@ describe("durable workspace briefing cache", () => {
     await db.update(workflowRuns).set({ params: { input: { data: { key: "slack.message", refs: { channel: "CPUBLIC" } } } } }).where(eq(workflowRuns.id,"r"));
     expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
     expect((await collectWorkspaceBriefingSources(db,"local-org",team)).some(item => item.source.id === "action:effect")).toBe(true);
+    // No viewer needs to open the channel for stale event/run evidence to expire.
+    await db.update(slackChannelPrivacy).set({ checkedAt: Date.now() - 5 * 60_000 }).where(eq(slackChannelPrivacy.channelId,"CPUBLIC"));
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(false);
+    expect(await collectWorkspaceBriefingSources(db,"local-org",team)).toEqual([]);
+    await db.update(slackChannelPrivacy).set({ checkedAt: Date.now() }).where(eq(slackChannelPrivacy.channelId,"CPUBLIC"));
+    expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(true);
     await db.update(slackChannelPrivacy).set({ isPrivate: true }).where(eq(slackChannelPrivacy.channelId,"CPUBLIC"));
     expect(await canReadCachedBriefingSources(db,"local-org",team,response)).toBe(false);
     expect(await collectWorkspaceBriefingSources(db,"local-org",team)).toEqual([]);

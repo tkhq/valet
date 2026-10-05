@@ -2542,6 +2542,6 @@ CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (
 );
 
 --> statement-breakpoint
-CREATE TABLE "slack_webhook_inbox" ("id" text PRIMARY KEY, "org_id" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "next_attempt_at" bigint NOT NULL);
+CREATE TABLE "slack_webhook_inbox" ("id" text PRIMARY KEY, "org_id" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "next_attempt_at" bigint NOT NULL, "attempts" integer NOT NULL DEFAULT 0, "failed_at" bigint);
 --> statement-breakpoint
 CREATE INDEX "slack_webhook_inbox_due" ON "slack_webhook_inbox" ("next_attempt_at");

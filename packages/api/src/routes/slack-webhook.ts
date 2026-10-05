@@ -62,8 +62,8 @@
  * workspace-to-org lookup here.
  */
 import { createHash } from "node:crypto";
-import { and, eq, inArray, lte, asc } from "drizzle-orm";
-import { slackWebhookInbox } from "../schema/index.js";
+import { and, eq, inArray, lte, asc, isNull, sql } from "drizzle-orm";
+import { slackWebhookInbox, eventDropLog } from "../schema/index.js";
 import { encryptSecret, decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import type { Providers } from "../providers/types.js";
 import { createEventReceipt, appendReceiptStage } from "../events/receipts.js";
@@ -474,10 +474,10 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
   const { db } = providers;
   const now = Date.now();
   const due = db.select({ id: slackWebhookInbox.id }).from(slackWebhookInbox)
-    .where(lte(slackWebhookInbox.nextAttemptAt, now)).orderBy(asc(slackWebhookInbox.nextAttemptAt)).limit(10);
+    .where(and(isNull(slackWebhookInbox.failedAt), lte(slackWebhookInbox.nextAttemptAt, now))).orderBy(asc(slackWebhookInbox.nextAttemptAt)).limit(10);
   // Repeat the due predicate on UPDATE to fence concurrent process claims.
-  const rows = await db.update(slackWebhookInbox).set({ nextAttemptAt: now + 60_000 })
-    .where(and(inArray(slackWebhookInbox.id, due), lte(slackWebhookInbox.nextAttemptAt, now))).returning();
+  const rows = await db.update(slackWebhookInbox).set({ nextAttemptAt: now + 60_000, attempts: sql`${slackWebhookInbox.attempts} + 1` })
+    .where(and(inArray(slackWebhookInbox.id, due), isNull(slackWebhookInbox.failedAt), lte(slackWebhookInbox.nextAttemptAt, now))).returning();
   for (const row of rows) {
     try {
       const payload: unknown = JSON.parse(decryptSecret(row.payload, deriveSecretKey(`slack-inbox:${providers.encryptionKey}`)));
@@ -520,7 +520,22 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
       }
       await db.delete(slackWebhookInbox).where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, row.nextAttemptAt)));
     } catch (err) {
-      // The lease becomes the retry delay. Keep the encrypted request for recovery.
+      // Keep the accepted encrypted request. Persistent failures need operator
+      // recovery instead of repeating side effects indefinitely.
+      if (row.attempts >= 10) {
+        await db.transaction(async tx => {
+          const failedAt = Date.now();
+          const [failed] = await tx.update(slackWebhookInbox).set({ failedAt })
+            .where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, row.nextAttemptAt))).returning({ id: slackWebhookInbox.id });
+          if (!failed) return;
+          // The terminal state and its per-delivery problem must commit together.
+          // A shared reason throttle would permanently hide other failed records.
+          const detail = `Slack delivery ${row.id} failed after ${row.attempts} attempts. Ask an operator to inspect its receipts and repair the failing consumer before replaying the retained inbox record.`;
+          await tx.insert(eventDropLog).values({ id: `slack-inbox:${row.id}`, orgId: row.orgId,
+            reason: "slack_delivery_failed", detail, createdAt: failedAt })
+            .onConflictDoUpdate({ target: eventDropLog.id, set: { detail, createdAt: failedAt } });
+        });
+      }
       console.error(`[slack-webhook] inbox ${row.id} processing failed`, err);
     }
   }
