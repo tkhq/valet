@@ -131,3 +131,7 @@ Shared sandbox repository bindings retain their restrictions: App-only bindings 
 ### Briefing source origins
 
 Team briefing generation and cache validation inspect persisted workflow and artifact origins, independently of optional links in the response. Missing, archived, private, or foreign workspace origins fail closed. Originless sources remain supported. Slack event-only runs are rechecked against current channel privacy on cache reads. Missing referenced outcome threads cannot become shared evidence.
+
+### Workflow chaining audience
+
+Workflow tool and session execution IDs are not conversation origins. Agent-started chained runs inherit the parent run's stored origin, scoped to its organization and execution owner, and validate it through the normal active-origin check. Missing parents and unavailable private origins fail closed. Originless scheduled runs can chain. Team Slack event runs remain blocked from agent-started chaining until the child can carry the channel audience independently; they must not silently become team-public.

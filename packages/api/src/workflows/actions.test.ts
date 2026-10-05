@@ -11,6 +11,7 @@ import type { PluginActionContext } from "@valet/engine";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
+  workflowActionOrigin,
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
@@ -448,6 +449,55 @@ describe("DB-backed actions", () => {
     );
     await setApprovedModels(db, "org1", null);
     expect(result).toMatchObject({ success: false, error: expect.stringContaining("not approved") });
+  });
+
+  it.each(["wf:invoke:workflow:parent:tool", "wf:parent:agent", "wf:parent:agent:1"])(
+    "chains originless workflows from %s without inventing a conversation", async (sessionId) => {
+      const workflowId = await seedWorkflow();
+      await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v",
+        definition: {}, params: {}, ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
+      const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke" }))).toMatchObject({ success: true });
+      expect(runHost.started.at(-1)?.[1].origin).toBeUndefined();
+    },
+  );
+
+  it("inherits a stored workflow audience and rejects unknown or foreign parents", async () => {
+    const workflowId = await seedWorkflow();
+    const origin = { assistantSessionId: "private-runtime", threadId: "private-thread" };
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: { origin }, ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
+    expect(await workflowActionOrigin(deps, { orgId: "org1", userId: "user1" }, "wf:parent:agent", "t")).toEqual(origin);
+    for (const owner of [{ orgId: "other", userId: "user1" }, { orgId: "org1", userId: "other" }]) {
+      await expect(workflowActionOrigin(deps, owner, "wf:parent:agent", "t")).rejects.toThrow("parent workflow is unavailable");
+    }
+    await expect(workflowActionOrigin(deps, { orgId: "org1", userId: "user1" }, "wf:missing:agent", "t")).rejects.toThrow("parent workflow is unavailable");
+  });
+
+  it.each([undefined, { assistantSessionId: "runtime", threadId: "public" }])("does not widen a team Slack event audience when chaining (%j)", async (origin) => {
+    const workflowId = await seedWorkflow();
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: { input: { data: { key: "slack.message" } }, ...(origin ? { origin } : {}) }, ownerType: "team", ownerId: "team", createdAt: 1, updatedAt: 1 });
+    await expect(workflowActionOrigin(deps, { orgId: "org1", userId: "team:team", principal: { type: "team", id: "team" } },
+      "wf:invoke:workflow:parent:tool", "invoke")).rejects.toThrow("channel audience can be preserved");
+  });
+
+  it("uses the execution owner for org-owned workflow parents", async () => {
+    const workflowId = await seedWorkflow();
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: {}, ownerType: "org", ownerId: "org1", createdAt: 1, updatedAt: 1 });
+    expect(await workflowActionOrigin(deps, { orgId: "org1", userId: "org:org1" },
+      "wf:parent:agent", "t", { type: "org", id: "org1" })).toBeUndefined();
+  });
+
+  it("does not drop a chained workflow's missing private origin", async () => {
+    const workflowId = await seedWorkflow();
+    await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
+      params: { origin: { assistantSessionId: "missing-private", threadId: "private" } },
+      ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
+    const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+    await expect(start.execute({ workflow_id: workflowId }, ctx({ sessionId: "wf:parent:agent", threadId: "t" }))).rejects.toThrow("origin is unavailable");
+    expect(runHost.started).toHaveLength(0);
   });
 
   it("stores team assistant workflows in the team scope and keeps personal creation personal", async () => {

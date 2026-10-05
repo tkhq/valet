@@ -5,7 +5,7 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
-import type { ActionPlugin, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import { normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
 import { writeBorrowGrant } from "../services/credential-borrow.js";
@@ -38,6 +38,7 @@ import {
 } from "../policies/service.js";
 import {
   actionInvocations,
+  agentSessions,
   assistants,
   briefingDismissals,
   contentSources,
@@ -1274,6 +1275,49 @@ export async function reapTeamWorkflows(tx: AppQueryable, teamId: string): Promi
   for (const def of defs) {
     await purgeWorkflowRows(tx, def.orgId, def.id);
   }
+}
+
+/**
+ * Workflow tool/session contexts are execution IDs, not conversation IDs.
+ * A chained run inherits the stored audience; a broken parent never widens it.
+ */
+export async function workflowActionOrigin(
+  deps: WorkflowServiceDeps, owner: WorkflowOwner, sessionId?: string, threadId?: string, executionOwner?: Principal,
+): Promise<WorkflowRunOrigin | undefined> {
+  if (!sessionId?.startsWith("wf:")) {
+    return sessionId && threadId ? { assistantSessionId: sessionId, threadId } : undefined;
+  }
+  // App sessions keep ordinary origin validation even if their ID uses this prefix.
+  const [app] = await deps.db.select({ id: agentSessions.id }).from(agentSessions)
+    .where(eq(agentSessions.id, sessionId)).limit(1);
+  if (app) return { assistantSessionId: sessionId, threadId: threadId ?? "" };
+  const match = /^wf:(?:invoke:workflow:)?([A-Za-z0-9_-]+):[A-Za-z0-9_-]+(?::[0-9]+)?$/.exec(sessionId);
+  const principal = executionOwner ?? owner.principal ?? { type: "user", id: owner.userId };
+  const [parent] = match ? await deps.db.select({ params: workflowRuns.params }).from(workflowRuns)
+    .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+    .where(and(eq(workflowRuns.id, match[1]), eq(workflowDefinitions.orgId, owner.orgId),
+      eq(workflowRuns.ownerType, principal.type), eq(workflowRuns.ownerId, principal.id))).limit(1) : [];
+  if (!parent) throw new ValidationError("The parent workflow is unavailable. Start from an active thread.");
+  const params = parent.params;
+  if (!params || typeof params !== "object") throw new ValidationError("The parent workflow context is invalid.");
+  const input = "input" in params ? params.input : undefined;
+  const data = input && typeof input === "object" && "data" in input ? input.data : undefined;
+  const eventKey = data && typeof data === "object" && "key" in data ? data.key : undefined;
+  // A Slack event can have a narrower audience than its conversation origin.
+  // Until chained runs carry that audience separately, do not publish its input
+  // in an originless child that every team member could read.
+  if (principal.type === "team" && typeof eventKey === "string" && eventKey.startsWith("slack.")) {
+    throw new ValidationError("Chaining a Slack-triggered workflow is unavailable until its channel audience can be preserved.");
+  }
+  if ("origin" in params && params.origin != null) {
+    const origin = params.origin;
+    if (typeof origin !== "object" || !("assistantSessionId" in origin) || !("threadId" in origin)
+      || typeof origin.assistantSessionId !== "string" || typeof origin.threadId !== "string") {
+      throw new ValidationError("The parent workflow origin is invalid.");
+    }
+    return { assistantSessionId: origin.assistantSessionId, threadId: origin.threadId };
+  }
+  return undefined;
 }
 
 /**

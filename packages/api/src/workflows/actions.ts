@@ -43,6 +43,7 @@ import {
   resolveWorkflowApproval,
   RUN_STATUS_VALUES,
   startWorkflowRun,
+  workflowActionOrigin,
   updateWorkflowDefinition,
   validateDefinitionInput,
   type WorkflowOwner,
@@ -385,13 +386,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
-      // The calling conversation, as-is. `startWorkflowRun` is the one
-      // validator: it drops a session that is no assistant's, an assistant
-      // that belongs to neither the caller nor the run, and a thread that
-      // is archived or gone.
-      const origin = ctx.sessionId && ctx.threadId
-        ? { assistantSessionId: ctx.sessionId, threadId: ctx.threadId }
-        : undefined;
+      const origin = await workflowActionOrigin(deps, owner, ctx.sessionId, ctx.threadId, ctx.owner);
       const started = await startWorkflowRun(deps, owner, workflow_id, input, origin);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
