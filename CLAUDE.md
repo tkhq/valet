@@ -101,7 +101,7 @@ This section governs new and edited prose. Do not rewrite existing documents who
 2. **Pluggable providers** — `SessionStore` and `SandboxProvider` swap behind engine contracts with shared conformance suites.
 3. **REST is authoritative for thread history** — `GET /api/sessions/:id/messages`. The WS `init` event is metadata-only; never add messages back to it.
 4. **Plugins self-describe** — one `ValetPlugin` manifest per `packages/plugin-*`, exported from `./plugin`; `make generate-registries` regenerates `packages/api/src/plugins/registry.gen.ts` from `plugin.yaml` (`v2: true`).
-5. **Orchestrators are full agent sessions** — one runtime per personal or team workspace, resolved by workspace ownership, spawning children through the same engine APIs.
+5. **Orchestrators are full agent sessions** — one assistant identity per personal or team workspace, resolved by workspace ownership. Team conversations use separate execution sessions and sandboxes. Children use the same engine APIs.
 6. **Auth is better-auth** — email/password + optional OIDC; `VALET_LOCAL_AUTH=1` is the dev stub (see `docs/specs/2026-07-14-auth-v2-design.md`).
 
 ## Rules learned the hard way

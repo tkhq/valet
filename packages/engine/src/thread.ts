@@ -667,6 +667,7 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
     if (opts.promoteItemId) {
       throw new ValidationError(
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
@@ -2620,6 +2621,7 @@ export class Thread {
   }
 
   private async kickLoop(): Promise<void> {
+    if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
       if (this.paused) return;

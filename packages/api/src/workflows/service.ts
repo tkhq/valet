@@ -1,3 +1,4 @@
+import { loadAssistantBySessionId } from "../assistants/service.js";
 import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
@@ -1350,14 +1351,14 @@ async function activeWorkflowOrigin(
     const session = await deps.engineStore.getSession(origin.assistantSessionId);
     if (!session) return invalidOrigin();
     if (session.orgId !== owner.orgId) return invalidOrigin();
+    // Execution sessions report into their own live conversation, not their authorization anchor.
+    if (await loadAssistantBySessionId(deps.db, origin.assistantSessionId)) break;
     if (!session.parentSessionId) break;
     if (!session.parentThreadId || !(await deps.engineStore.getThread(origin.assistantSessionId, origin.threadId))) return invalidOrigin();
     origin = { assistantSessionId: session.parentSessionId, threadId: session.parentThreadId };
   }
-  const [assistant] = await deps.db.select().from(assistants)
-    .where(and(eq(assistants.sessionId, origin.assistantSessionId), eq(assistants.orgId, owner.orgId)))
-    .limit(1);
-  if (!assistant || assistant.archivedAt !== null) return invalidOrigin();
+  const assistant = await loadAssistantBySessionId(deps.db, origin.assistantSessionId);
+  if (!assistant || assistant.orgId !== owner.orgId || assistant.archivedAt !== null) return invalidOrigin();
   const callerOwner = owner.principal?.type === "team"
     ? { ownerType: "team", ownerId: owner.principal.id }
     : { ownerType: "user", ownerId: owner.userId };

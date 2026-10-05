@@ -487,9 +487,11 @@ describe("api integration: memory owner scope", () => {
     });
     expect(put.status).toBe(200);
     const read = (owner: string) => fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, {
-      headers: { "x-valet-internal": internalToken(), "x-valet-owner": owner, "x-valet-actor": "local-user" },
+      headers: { "x-valet-internal": internalToken(), "x-valet-owner": owner, "x-valet-actor": "local-user",
+        "x-valet-session-id": "team-runtime", "x-valet-org-id": "local-org" },
     });
     expect((await read("team:team_1")).status).toBe(200);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md&${TEAM_QUERY}`)).status).toBe(404);
     expect((await read("user:local-user")).status).toBe(404);
     await target.providers.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, "team-runtime"));
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(404);
@@ -506,7 +508,10 @@ describe("api integration: memory owner scope", () => {
     const { token } = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:step", userId: "local-user", orgId: "local-org" });
     expect((await fetch(`${target.baseUrl}/api/memory`, { method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
       body: JSON.stringify({ path: "notes/workflow.md", content: "# Team workflow" }) })).status).toBe(200);
-    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md&${TEAM_QUERY}`)).status).toBe(200);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md&${TEAM_QUERY}`)).status).toBe(404);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(200);
+    const next = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:next", userId: "local-user", orgId: "local-org" });
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": next.token } })).status).toBe(200);
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`)).status).toBe(404);
   });
 

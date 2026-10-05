@@ -35,7 +35,6 @@ import { runEventChannel, slackEventsThreadKey } from "../services/thread-access
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
-  parseAssistantSessionId,
   parsePrincipal,
   type ActionPlugin,
   type CredentialStore,
@@ -67,8 +66,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   ArchivedAssistantError,
-  ensureAssistantRuntime,
-  loadAssistant,
+  ensureAssistantRuntime, ensureAssistantExecution,
   loadAssistantBySessionId,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
@@ -288,9 +286,10 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   // its own chokepoint — an assistant id fed to `workflowSessionFor` would
   // rebuild it without persona/memory (the Phase 4 cache-poisoning class),
   // and a `wf:` id has no assistant row.
-  const assistantId = parseAssistantSessionId(sessionId);
-  if (assistantId) {
-    return ensureAssistantSession(opts, sessionId, assistantId);
+  const assistant = await loadAssistantBySessionId(opts.db, sessionId);
+  if (assistant) {
+    return (await ensureAssistantRuntime({ db: opts.db, engineHost: opts.host }, assistant,
+      { actorUserId: actorUserIdFor({ type: assistant.ownerType, id: assistant.ownerId }), orgId: assistant.orgId })).session;
   }
   const parts = parseWorkflowSessionId(sessionId);
   const ctx = await resolveRunContext(opts, parts.runId);
@@ -303,33 +302,6 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
     workspace,
     title,
   });
-}
-
-/**
- * Wake the assistant for the settle-side of an `orchestrator` node
- * (`awaitResult`/`abort`/re-entry after restart). `orgId` isn't in the
- * session id, but the assistant row carries it, and `promptOrchestrator`'s
- * dispatch-side resolve created that row — so the whole context is
- * recoverable from the id alone.
- */
-async function ensureAssistantSession(
-  opts: WorkflowEngineDepsOpts,
-  sessionId: string,
-  assistantId: string,
-) {
-  const assistant = await loadAssistant(opts.db, assistantId);
-  if (!assistant) {
-    throw new Error(
-      `workflow engine-deps: no assistant recorded for ${sessionId} — ` +
-        `the dispatch that produced this receipt should have created one`,
-    );
-  }
-  const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
-  return opts.host.assistantSessionFor(
-    assistant.id,
-    { actorUserId: actorUserIdFor(principal), orgId: assistant.orgId },
-    { sessionId: assistant.sessionId },
-  );
 }
 
 export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowEngineDeps {
@@ -527,11 +499,11 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // Through the shared helper, so a runtime first woken by a workflow
       // gets the same API session record as one opened by a person. Without
       // it, the run's threads and artifact publishing report "not found".
-      const { session } = await ensureAssistantRuntime(
-        { db: opts.db, engineHost: opts.host },
-        assistant,
-        { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
-      );
+      const deps = { db: opts.db, engineHost: opts.host };
+      const meta = { actorUserId: ctx.actorUserId, orgId: ctx.orgId };
+      const { session } = origin
+        ? await ensureAssistantRuntime(deps, assistant, meta)
+        : await ensureAssistantExecution(deps, principal, meta, workflowRunThreadKey(runId, ctx.slackChannel));
       // One thread per run. A thread is the engine's unit of serial
       // execution and of abort: a shared thread makes one run's approval
       // gate hold every other run of the same workflow, and makes the

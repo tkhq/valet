@@ -7,7 +7,7 @@ import { and, eq, sql, type SQL } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, assistants, orgs, teams, users, type AssistantRow } from "../schema/index.js";
+import { agentSessions, assistantExecutions, assistants, orgs, teams, users, type AssistantRow } from "../schema/index.js";
 
 /** Raised when a request targets an assistant that is already archived. */
 export class ArchivedAssistantError extends Error {
@@ -50,7 +50,12 @@ export async function loadAssistantBySessionId(
     .from(assistants)
     .where(eq(assistants.sessionId, sessionId))
     .limit(1);
-  return rows[0];
+  if (rows[0]) return rows[0];
+  const [execution] = await db.select({ assistant: assistants }).from(assistantExecutions)
+    .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
+  // The logical assistant stays the same; callers restore the addressed execution.
+  return execution ? { ...execution.assistant, sessionId } : undefined;
 }
 
 /** Find the workspace identity without creating it. Retired rows remain
@@ -152,6 +157,32 @@ export async function ensureDefaultAssistantSession(
   return ensureAssistantSession(deps, assistant, meta);
 }
 
+/** Team conversations use independent execution state with the existing reader boundary. */
+export async function ensureAssistantExecution(
+  deps: { db: AppDb; engineHost: EngineHost },
+  principal: Principal,
+  meta: { actorUserId: string; orgId: string },
+  conversationKey: string,
+): Promise<{ assistant: AssistantRow; sessionId: string; session: Session }> {
+  if (principal.type !== "team") return ensureDefaultAssistantSession(deps, principal, meta);
+  const root = await ensureDefaultAssistantSession(deps, principal, meta);
+  const [existing] = await deps.db.select().from(assistantExecutions)
+    .where(and(eq(assistantExecutions.assistantId, root.assistant.id), eq(assistantExecutions.conversationKey, conversationKey))).limit(1);
+  let execution = existing;
+  if (!execution) {
+    const data = await root.session.toData();
+    const governing = await deps.engineHost.ensureFreshThread(root.session, conversationKey,
+      { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, meta.actorUserId);
+    const candidate = { sessionId: `execution:${randomUUID()}`, assistantId: root.assistant.id,
+      conversationKey, governingThreadId: governing.id, createdAt: Date.now() };
+    await deps.db.insert(assistantExecutions).values(candidate).onConflictDoNothing();
+    [execution] = await deps.db.select().from(assistantExecutions)
+      .where(and(eq(assistantExecutions.assistantId, root.assistant.id), eq(assistantExecutions.conversationKey, conversationKey))).limit(1);
+  }
+  if (!execution) throw new Error("The conversation could not be created. Try opening it again.");
+  return ensureAssistantSession(deps, { ...root.assistant, sessionId: execution.sessionId }, meta);
+}
+
 /** Materialize the workspace runtime and its API session record on first use.
  * Exported as `ensureAssistantRuntime` for callers that already hold the row,
  * such as a workflow Thread step. */
@@ -224,4 +255,12 @@ export async function retireAssistant(db: AppQueryable, assistantId: string): Pr
   if (!updated[0]) {
     throw new Error(`assistants: ${assistantId} disappeared during its own retire`);
   }
+}
+
+/** The logical workspace runtime and its execution sessions. Authorize the caller before use. */
+export async function workspaceSessionIds(db: AppDb, orgId: string, rootSessionId: string): Promise<string[]> {
+  const rows = await db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
+    .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(and(eq(assistants.sessionId, rootSessionId), eq(assistants.orgId, orgId)));
+  return [rootSessionId, ...rows.map(row => row.id)];
 }

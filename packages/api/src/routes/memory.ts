@@ -40,7 +40,7 @@ import { ReservedPathError } from "../lib/okf.js";
 import { getTeamInOrg, isTeamMember } from "../services/teams.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import { agentSessions, memoryFiles } from "../schema/index.js";
-import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
+import { canAccessSessionResources, canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   copyFileToTeam,
@@ -155,6 +155,32 @@ function authorizeOwner(db: AppDb, owner: Principal, caller: RequestPrincipal, a
  * `/api/sandbox` prefixes.
  */
 export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
+  const scope = await resolveOwnerScope(c, access);
+  if (scope.owner.type !== "team") return scope;
+  const internal = isValidInternalToken(c.req.header("x-valet-internal"));
+  // Explicit team writes retain their authorized shared destination.
+  if (internal && c.req.query("teamId")) return scope;
+  const sessionId = c.var.sandbox?.sessionId ?? (internal ? c.req.header("x-valet-session-id") : c.req.query("sessionId"));
+  if (!sessionId) return scope;
+  const orgId = c.var.sandbox?.orgId ?? (internal ? c.req.header("x-valet-org-id") : c.var.user.orgId);
+  const { db } = c.var.providers;
+  const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  if (session) {
+    if (session.ownerType !== scope.owner.type || session.ownerId !== scope.owner.id || session.status === "deleted"
+      || (orgId && session.orgId !== orgId)) throw new NotFoundError("owner");
+    if (!internal && !c.var.sandbox && !await canAccessSessionResources(c.var.providers, session, c.var.principal)) throw new NotFoundError("owner");
+  } else {
+    // Workflow nodes share only their run's memory, never the team's default corpus.
+    const owner = orgId ? await workflowSessionOwner(db, sessionId, orgId) : null;
+    if (!owner || owner.type !== scope.owner.type || owner.id !== scope.owner.id || (!internal && !c.var.sandbox)) {
+      throw new NotFoundError("owner");
+    }
+  }
+  const namespace = sessionId.startsWith("wf:") ? `wf:${sessionId.split(":")[1]}` : sessionId;
+  return { ...scope, namespace };
+}
+
+async function resolveOwnerScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
   const internalHeader = c.req.header("x-valet-internal");
   if (isValidInternalToken(internalHeader)) {
     const ownerHeader = c.req.header("x-valet-owner");
@@ -423,7 +449,7 @@ memoryRouter.get("/tree", async (c) => {
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
 
   const entries: MemoryTreeEntry[] = rows
     .map((r) => ({
@@ -661,7 +687,7 @@ memoryRouter.get("/graph", async (c) => {
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")))
     .orderBy(asc(memoryFiles.path))
     .limit(MAX_GRAPH_NODES);
 

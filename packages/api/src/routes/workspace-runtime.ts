@@ -1,10 +1,13 @@
+import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import type { Principal } from "@valet/engine";
-import { and, count, eq } from "drizzle-orm";
+import { and, count, desc, eq, inArray, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
-import { ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant } from "../assistants/service.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant, workspaceSessionIds } from "../assistants/service.js";
 import { canViewAssistantOwner } from "../assistants/access.js";
-import { childWatches } from "../schema/index.js";
+import { threadVisibility } from "../services/thread-access.js";
+import { viewerOf } from "./_thread-access.js";
+import { assistants, childWatches } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
 import { clearIntegrationLimit, loadIntegrationLimit } from "../assistants/integration-limit.js";
 import type { WorkspaceRuntimeInfoResponse, EnsureWorkspaceRuntimeResponse, WorkspaceIntegrationLimitResponse } from "../wire/types.js";
@@ -24,6 +27,10 @@ async function ensureWorkspaceRuntime(c: Context<AppEnv>, workspace = c.req.para
   const owner = await authorizedWorkspaceOwner(c, workspace);
   if (!owner) return c.json({ error: "Workspace not found. Select an accessible workspace." }, 404);
   const { sessionId } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
+  if (owner.type === "team") {
+    const execution = await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, "web:default");
+    await execution.session.ensureDefaultThread();
+  }
   const body: EnsureWorkspaceRuntimeResponse = { sessionId };
   return c.json(body);
 }
@@ -58,7 +65,7 @@ workspaceRuntimeRouter.delete("/:workspace/integration-limit", async (c) => {
 workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
-  const { sessionId, session } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
+  const { sessionId, session } = await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}`);
   // A new helper thread starts from the viewer's current model and reasoning
   // defaults, as every other new thread does, not the runtime's stored model.
   const data = await session.toData();
@@ -73,11 +80,16 @@ workspaceRuntimeRouter.get("/:workspace/runtime/info", async (c) => {
   const { db, engineHost } = c.var.providers;
   // Resolve the identity only: presence reads never start the runtime or a sandbox.
   const row = await resolveDefaultAssistant(db, c.var.user.orgId, owner);
+  const ids = await workspaceSessionIds(db, row.orgId, row.sessionId);
+  const visibleIds = [];
+  for (const id of ids) {
+    if (await threadVisibility(c.var.providers, { ownerType: owner.type, id }, viewerOf(c))(null)) visibleIds.push(id);
+  }
   const [children] = await db.select({ n: count() }).from(childWatches)
-    .where(and(eq(childWatches.parentSessionId, row.sessionId), eq(childWatches.settled, false)));
+    .where(and(inArray(childWatches.parentSessionId, visibleIds), eq(childWatches.settled, false)));
   const activeChildren = children?.n ?? 0;
-  const live = engineHost.liveSession(row.sessionId);
-  const presence = activeChildren > 0 ? "working" : live?.listThreads().some(thread => thread.runningItemId() !== undefined) ? "thinking" : "idle";
+  const thinking = visibleIds.some(id => engineHost.liveSession(id)?.listThreads().some(thread => thread.runningItemId() !== undefined));
+  const presence = activeChildren > 0 ? "working" : thinking ? "thinking" : "idle";
   const body: WorkspaceRuntimeInfoResponse = { sessionId: row.sessionId, presence, activeChildren };
   return c.json(body);
 });
@@ -86,3 +98,50 @@ workspaceRuntimeRouter.get("/:workspace/runtime/info", async (c) => {
 export const legacyOrchestratorRouter = new Hono<AppEnv>();
 legacyOrchestratorRouter.post("/orchestrator", c => ensureWorkspaceRuntime(c, "user"));
 legacyOrchestratorRouter.post("/teams/:workspace/orchestrator", c => ensureWorkspaceRuntime(c));
+
+/** Read retained history without restoring an archived assistant or opening its sandbox. */
+workspaceRuntimeRouter.get("/:workspace/history", async c => {
+  const owner = await authorizedWorkspaceOwner(c);
+  if (!owner) return c.json({ error: "Workspace not found." }, 404);
+  const { db } = c.var.providers;
+  const sessionId = c.req.query("sessionId");
+  const threadId = c.req.query("threadId");
+  const rawCursor = c.req.query("before");
+  const cursorKey = deriveSecretKey(JSON.stringify(["retained-history", c.var.providers.encryptionKey,
+    c.var.user.orgId, c.var.principal, owner, sessionId, threadId]));
+  let before: string | undefined;
+  try {
+    if (rawCursor !== undefined) {
+      if (rawCursor.length > 4096) throw new Error("Cursor exceeds limit");
+      before = decryptSecret(Buffer.from(rawCursor, "base64url").toString("utf8"), cursorKey);
+    }
+  } catch { return c.json({ error: "Invalid cursor. Reload the retained history." }, 400); }
+  const sealCursor = (value: string) => Buffer.from(encryptSecret(value, cursorKey)).toString("base64url");
+  const scope = and(eq(assistants.orgId, c.var.user.orgId), eq(assistants.ownerType, owner.type),
+    sql`(${assistants.ownerId} = ${owner.id} OR ${assistants.ownerId} = ${owner.id} || ':retired:' || ${assistants.id})`);
+  if (!sessionId && !threadId) {
+    const rows = await db.select({ sessionId: sql<string>`t.session_id`, threadId: sql<string>`t.id`,
+      key: sql<string>`t.key`, title: sql<string | null>`m.title` }).from(assistants)
+      .innerJoin(sql`engine_threads t`, sql`t.session_id = ${assistants.sessionId}`)
+      .leftJoin(sql`session_threads m`, sql`m.session_id = t.session_id AND m.id = t.id`)
+      .where(and(scope, before ? sql`t.id < ${before}` : undefined)).orderBy(desc(sql`t.id`)).limit(101);
+    const visible = [];
+    for (const row of rows.slice(0, 100)) {
+      if (await threadVisibility(c.var.providers, { id: row.sessionId, ownerType: owner.type }, viewerOf(c))(row.key)) visible.push(row);
+    }
+    return c.json({ threads: visible, nextCursor: rows.length > 100 ? sealCursor(rows[99].threadId) : null });
+  }
+  if (!sessionId || !threadId || (before !== undefined && (!/^[0-9]{1,19}$/.test(before) || BigInt(before) > 9223372036854775807n))) {
+    return c.json({ error: "Supply sessionId and threadId. Use the returned cursor for older entries." }, 400);
+  }
+  const [source] = await db.select({ key: sql<string>`t.key` }).from(assistants)
+    .innerJoin(sql`engine_threads t`, sql`t.session_id = ${assistants.sessionId}`)
+    .where(and(scope, eq(assistants.sessionId, sessionId), sql`t.id = ${threadId}`)).limit(1);
+  if (!source || !await threadVisibility(c.var.providers, { id: sessionId, ownerType: owner.type }, viewerOf(c))(source.key)) {
+    return c.json({ error: "Thread not found." }, 404);
+  }
+  const rows = await db.select({ entry: sql<Record<string, unknown>>`row_to_json(e)`, cursor: sql<string>`e.seq::text` })
+    .from(sql`engine_entries e`).where(sql`e.session_id = ${sessionId} AND e.thread_id = ${threadId}
+      ${before ? sql`AND e.seq < ${before}::bigint` : sql``}`).orderBy(desc(sql`e.seq`)).limit(101);
+  return c.json({ entries: rows.slice(0, 100).map(row => row.entry), nextCursor: rows.length > 100 ? sealCursor(rows[99].cursor) : null });
+});

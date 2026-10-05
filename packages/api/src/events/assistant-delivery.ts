@@ -11,7 +11,7 @@
  * The workspace owner determines the assistant.
  */
 import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent } from "@valet/engine";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
@@ -60,9 +60,9 @@ export async function deliverToAssistantThread(
   args: AssistantDeliveryArgs,
 ): Promise<void> {
   // Serialize by runtime session and thread so delivery paths share one queue.
-  const { session } = await ensureDefaultAssistantSession(deps, args.owner, {
+  const { session } = await ensureAssistantExecution(deps, args.owner, {
     actorUserId: args.actorUserId, orgId: args.orgId,
-  });
+  }, args.threadKey);
   const key = `${session.id}:${args.threadKey}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
   const run = prior.then(() => deliverToAssistantThreadInner(deps, args, session));

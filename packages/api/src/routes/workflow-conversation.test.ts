@@ -32,14 +32,14 @@ describe("workflow editor conversation", () => {
     expect(appConversation.status).toBe(200);
     expect(await appConversation.json()).toEqual(expect.objectContaining({ sessionId: opened[0]!.sessionId, threadId: expect.not.stringMatching(opened[0]!.threadId) }));
   });
-  it("keeps each viewer’s workflow thread in the team runtime and rejects unrelated workflows", async () => {
+  it("isolates each viewer’s workflow execution and rejects unrelated workflows", async () => {
     api = await bootTestApi();
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Editors", creatorUserId: "local-user" });
     await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
     const wf = await workflow(api.baseUrl, team.id);
     const member = await open(api.baseUrl, wf.id, "test-member");
     const creator = await open(api.baseUrl, wf.id);
-    expect(member.sessionId).toBe(creator.sessionId);
+    expect(member.sessionId).not.toBe(creator.sessionId);
     expect(member.threadId).not.toBe(creator.threadId);
     expect(await open(api.baseUrl, wf.id, "test-member")).toEqual(member);
     const personal = await workflow(api.baseUrl);

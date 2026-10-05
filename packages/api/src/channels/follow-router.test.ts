@@ -6,6 +6,7 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { findFollowedThread, upsertFollowedThread } from "../events/followed-threads.js";
 import { linkIdentity } from "./identity-links.js";
@@ -202,7 +203,7 @@ describe("handleFollowedMessage", () => {
     await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
       type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "later thought",
     }) });
-    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: "org-only", orgId: ORG });
+    const { session } = await ensureAssistantExecution(deps, { type: "team", id: "team-follow" }, { actorUserId: "org-only", orgId: ORG }, "slack:C1:1.2");
     await vi.waitFor(async () => {
       const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
       expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: "org-only" } });
@@ -272,7 +273,7 @@ describe("handleFollowedMessage", () => {
     await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
       type: "message", channel: "C1", thread_ts: "1.2", ts: "1.8", user: "U9", text: "and back on",
     }, "EvOn") });
-    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: "org-only", orgId: ORG });
+    const { session } = await ensureAssistantExecution(deps, { type: "team", id: "team-follow" }, { actorUserId: "org-only", orgId: ORG }, "slack:C1:1.2");
     await vi.waitFor(async () => {
       const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
       expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: "org-only" } });
@@ -292,7 +293,7 @@ describe("handleFollowedMessage", () => {
     await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
       type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "still here",
     }) });
-    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: USER, orgId: ORG });
+    const { session } = await ensureAssistantExecution(deps, { type: "team", id: "team-follow" }, { actorUserId: USER, orgId: ORG }, "slack:C1:1.2");
     await vi.waitFor(async () => {
       const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
       expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: USER } });
@@ -332,7 +333,7 @@ describe("handleFollowedMessage", () => {
     await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({
       type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "OTHER", text: "<@OTHERBOT> reply",
     }) });
-    const session = await defaultAssistantSessionFor(deps, { type: "team", id: "team-follow" }, { actorUserId: USER, orgId: ORG });
+    const { session } = await ensureAssistantExecution(deps, { type: "team", id: "team-follow" }, { actorUserId: USER, orgId: ORG }, "slack:C1:1.2");
     await vi.waitFor(async () => {
       const entries = await session.providers.store.getEntries(session.id, session.thread("slack:C1:1.2").id);
       expect(entries.find((e) => e.type === "message" && e.role === "user")).toMatchObject({ author: { id: "other-user" }, signal: { origin: { reply: "manual" } } });

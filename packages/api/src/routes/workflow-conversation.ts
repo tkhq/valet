@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
 import type { AppEnv } from "../env.js";
 import type { EnsureWorkflowConversationResponse } from "../wire/types.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
@@ -21,10 +21,11 @@ workflowConversationRouter.post("/:id/conversation", async (c) => {
   if (workflow.ownerType !== "user" && workflow.ownerType !== "team") {
     return c.json({ error: "Copy this workflow to a personal or team workspace to open its conversation." }, 409);
   }
-  const { session, sessionId } = await ensureDefaultAssistantSession(
+  const { session, sessionId } = await ensureAssistantExecution(
     { db, engineHost },
     { type: workflow.ownerType, id: workflow.ownerId },
     { actorUserId: user.id, orgId: user.orgId },
+    workflowConversationKey(workflow.id, user.id),
   );
   // A new editor thread starts from the viewer's current model and reasoning
   // defaults, as every other new thread does, not the runtime's stored model.

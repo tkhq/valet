@@ -58,7 +58,9 @@ export async function hasBorrowGrant(db: AppQueryable, scope: BorrowScope): Prom
 
 /** Only a live workspace runtime can request unattended account consent. */
 function unattendedRuntimeOwner(scope: { orgId: string; teamId: string; sessionId: string; threadId?: string; actorId?: string }) {
-  return sql`EXISTS (SELECT 1 FROM agent_sessions s JOIN assistants a ON a.session_id = s.id
+  return sql`EXISTS (SELECT 1 FROM agent_sessions s
+    LEFT JOIN assistant_executions e ON e.session_id = s.id
+    JOIN assistants a ON a.session_id = s.id OR a.id = e.assistant_id
     WHERE s.id = ${scope.sessionId} AND s.org_id = ${scope.orgId} AND s.owner_type = 'team'
       AND s.owner_id = ${scope.teamId} AND s.status <> 'deleted'
       AND a.org_id = ${scope.orgId} AND a.owner_type = 'team' AND a.owner_id = ${scope.teamId}

@@ -109,7 +109,7 @@ describe("thread addressing compatibility", () => {
     expect(created.status).toBe(201);
     const first = await created.json() as { id: string; sessionId: string };
     const second = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers, body: "{}" })).json() as { id: string; sessionId: string };
-    expect(second.sessionId).toBe(first.sessionId);
+    expect(second.sessionId).not.toBe(first.sessionId);
     expect(second.id).not.toBe(first.id);
     const personal = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: "{}" })).json() as { id: string };
     expect((await fetch(`${api.baseUrl}/api/threads/${personal.id}`, { headers })).status).toBe(404);
@@ -136,7 +136,7 @@ describe("thread addressing compatibility", () => {
     const helper = await (await fetch(`${api.baseUrl}/api/workspaces/${team.team.id}/conversation`, { method: "POST", headers: { cookie } })).json() as { sessionId: string; threadId: string };
     await api.providers.engineStore.saveDecisionGate(helper.sessionId, helper.threadId, { ...gate, id: "helper-gate", sessionId: helper.sessionId, threadId: helper.threadId, resumeKey: "helper" });
     const decisions = `${api.baseUrl}/api/sessions/${encodeURIComponent(helper.sessionId)}/decisions`;
-    expect(((await (await fetch(decisions, { headers })).json()) as { gates: Array<{ id: string }> }).gates.map((g) => g.id)).not.toContain("helper-gate");
+    expect((await fetch(decisions, { headers })).status).toBe(404);
     expect((await fetch(`${decisions}/helper-gate/resolve`, { method: "POST", headers, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
     expect((await api.providers.engineStore.getDecisionGate(first.sessionId, gate.id))?.status).toBe("resolved");
   });

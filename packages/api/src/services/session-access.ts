@@ -40,10 +40,13 @@
  * every row they touched. Agent-facing callers that hold only a user id
  * build the principal with `userPrincipal`.
  *
- * `POST /api/sessions/:id/sandbox-jwt` stays direct-owner-only
- * (`isSessionDirectOwner`) and uses neither check. It mints a credential
- * bound to one user, not a view of a shared resource.
+ * Sandbox credentials and file access also require `canAccessSessionResources`.
+ * That check verifies the execution audience and rejects mixed legacy runtimes.
  */
+import { and, eq, isNull } from "drizzle-orm";
+import type { Providers } from "../providers/types.js";
+import { assistants, assistantExecutions, childWatches } from "../schema/index.js";
+import { threadVisibility } from "./thread-access.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { canAdministerTeam, isTeamMember } from "./teams.js";
@@ -175,4 +178,37 @@ export async function isSessionDirectOwner(
   if (session.userId !== caller.id) return false;
   if (session.ownerType === "team" && session.ownerId) return isTeamMember(db, session.ownerId, caller.id);
   return true;
+}
+
+/** Session-wide tools require one verifiable audience. Legacy team runtimes mixed audiences. */
+export async function canAccessSessionResources(
+  deps: Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword">,
+  session: SessionOwnerLike & { id: string; orgId: string; status: string },
+  caller: RequestPrincipal,
+): Promise<boolean> {
+  if (session.status === "deleted" || !await canViewSession(deps.db, session, caller)) return false;
+  if (session.ownerType !== "team") return isSessionDirectOwner(deps.db, session, caller);
+  const [root] = await deps.db.select({ id: assistants.id }).from(assistants)
+    .where(eq(assistants.sessionId, session.id)).limit(1);
+  if (root) return false;
+  const stored = await deps.engineStore.getSession(session.id);
+  if (!stored) {
+    if (session.id.startsWith("execution:")) return false;
+    const [child] = await deps.db.select({ id: childWatches.childSessionId }).from(childWatches)
+      .where(eq(childWatches.childSessionId, session.id)).limit(1);
+    return !child && isSessionDirectOwner(deps.db, session, caller);
+  }
+  if (stored.orgId !== session.orgId || stored.owner.type !== "team" || stored.owner.id !== session.ownerId) return false;
+  const [execution] = await deps.db.select({ parentId: assistants.sessionId, threadId: assistantExecutions.governingThreadId })
+    .from(assistantExecutions).innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(and(eq(assistantExecutions.sessionId, session.id), eq(assistants.orgId, session.orgId),
+      eq(assistants.ownerType, "team"), eq(assistants.ownerId, session.ownerId), isNull(assistants.archivedAt))).limit(1);
+  if (execution) {
+    if (stored.parentSessionId !== execution.parentId || stored.parentThreadId !== execution.threadId) return false;
+  } else if (session.id.startsWith("execution:")) return false;
+  if (stored.parentSessionId || stored.parentThreadId) {
+    if (!stored.parentSessionId || !stored.parentThreadId) return false;
+    return threadVisibility(deps, session, { orgId: session.orgId, userId: caller.type === "user" ? caller.id : undefined })(null);
+  }
+  return isSessionDirectOwner(deps.db, session, caller);
 }

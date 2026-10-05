@@ -115,6 +115,8 @@ export interface RepoBinding {
 }
 
 export interface SessionDetail extends SessionSummary {
+  /** History remains readable; execution is disabled for this session. */
+  readOnlyReason?: string;
   /** Permanent owner runtime; cannot be moved or deleted. */
   isWorkspaceRuntime?: boolean;
   /** Originating work in the same workspace, including dismissed children. */

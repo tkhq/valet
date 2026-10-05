@@ -21,7 +21,7 @@ import { eq } from "drizzle-orm";
 import { assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
-import { resolveDefaultAssistant } from "../assistants/service.js";
+import { loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
 
 let api: TestApi | undefined;
 
@@ -375,7 +375,10 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
     const teamDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "team", id: team.id });
     const personalDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
-    expect(receipt.sessionId).toBe(teamDefault.sessionId);
+    expect(receipt.sessionId).not.toBe(teamDefault.sessionId);
+    expect((await loadAssistantBySessionId(db, receipt.sessionId))?.id).toBe(teamDefault.id);
+    engineHost.evictCache(receipt.sessionId);
+    await expect(deps.abort(receipt.sessionId, receipt.threadId, receipt.queueItemId)).resolves.toBeUndefined();
     expect(receipt.sessionId).not.toBe(personalDefault.sessionId);
   });
 

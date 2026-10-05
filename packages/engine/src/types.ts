@@ -2337,6 +2337,8 @@ export type ThreadAccessCheck = (req: {
 }) => Promise<boolean>;
 
 export interface CreateSessionOptions {
+  /** Retain history without admitting or resuming execution. */
+  readOnlyReason?: string;
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
   onTurnComplete?: (context: { sessionId: string; submissionId: string; threadId: string; actorId: string; owner: Principal; sandbox?: Sandbox }) => Promise<void>;

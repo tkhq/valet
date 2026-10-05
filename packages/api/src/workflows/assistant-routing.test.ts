@@ -1,3 +1,4 @@
+import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import { shareCredential } from "../services/credential-shares.js";
 import { shareGeneration } from "../services/credential-borrow.js";
 import { runOriginVisible } from "../services/thread-access.js";
@@ -32,6 +33,23 @@ async function setup() {
   return { api, p, deps: { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore } };
 }
 const owner = { userId: "local-user", orgId: "local-org" };
+
+it("retains a private execution as a workflow origin instead of its read-only anchor", async () => {
+  const { deps } = await setup();
+  if (!api) throw new Error("Test API is missing");
+  const p = api.providers;
+  const runtime = await ensureAssistantExecution(p, { type: "team", id: "team-a" },
+    { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:local-user");
+  const thread = await runtime.session.ensureDefaultThread();
+  const owner = { userId: "local-user", orgId: "local-org" };
+  const definition = await createWorkflowDefinition(deps, owner, { name: "Execution origin", teamId: "team-a", definition: graph });
+  const origin = { assistantSessionId: runtime.sessionId, threadId: thread.id };
+  const result = await startWorkflowRun(deps, owner, definition.id, undefined, origin);
+  expect(result).toHaveProperty("runId");
+  if (!result || !("runId" in result)) throw new Error("Workflow did not start");
+  const stored = await p.workflowStore.getRun(result.runId);
+  expect(stored?.params).toMatchObject({ origin });
+});
 
 describe("workflow workspace routing", () => {
   it("rejects cross-team, foreign-org, missing and malformed selections through HTTP, including updates", async () => {
@@ -476,11 +494,15 @@ describe("workflow workspace routing", () => {
     await updateWorkflowDefinition(deps, owner, created.id, { name: "Edited after run started", definition: graph });
     const hostSpy = vi.spyOn(p.engineHost, "assistantSessionFor");
     const engine = buildWorkflowEngineDeps({ db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials });
+    const executions = new Set<string>();
     for (const node of ["one", "two", "one:repair"]) {
       const receipt = await engine.promptOrchestrator("hello", { dispatchId: `workflow:${started.runId}:${node}`, queueMode: "followup", ownerHint: { ownerType: "team", ownerId: "team-a" } });
-      expect(receipt.sessionId).toBe("assistant:default-a");
+      expect((await loadAssistantBySessionId(p.db, receipt.sessionId))?.id).toBe("default-a");
+      expect(receipt.sessionId).not.toBe("assistant:default-a");
+      executions.add(receipt.sessionId);
     }
-    expect(hostSpy).toHaveBeenCalledWith("default-a", { actorUserId: "local-user", orgId: "local-org" }, { sessionId: "assistant:default-a" });
+    expect(executions.size).toBe(1);
+    expect(hostSpy).toHaveBeenCalledWith("default-a", { actorUserId: "local-user", orgId: "local-org" }, { sessionId: [...executions][0] });
     const run = await p.workflowStore.getRun(started.runId);
     expect(run?.definition).toEqual(graph);
     expect(run?.owner).toEqual({ ownerType: "team", ownerId: "team-a" });

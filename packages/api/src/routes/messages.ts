@@ -11,8 +11,9 @@
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { ensureAssistantExecution } from "../assistants/service.js";
 import { Hono, type Context } from "hono";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   dispatchCommand,
   NotFoundError,
@@ -23,7 +24,7 @@ import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@vale
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -340,14 +341,55 @@ async function loadEngineSession(
 
 messagesRouter.get("/:id/threads", (c) => listThreads(c, c.req.param("id")));
 
+/** Enumerate execution histories without waking their sandboxes. */
+async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSessions.$inferSelect) {
+  const { db, engineStore } = c.var.providers;
+  const executions = session.ownerType === "team"
+    ? await db.select({ session: agentSessions, governingThreadId: assistantExecutions.governingThreadId, governingKey: assistantExecutions.conversationKey }).from(assistantExecutions)
+      .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+      .innerJoin(agentSessions, eq(agentSessions.id, assistantExecutions.sessionId))
+      .where(and(eq(assistants.sessionId, session.id), eq(agentSessions.orgId, session.orgId),
+        eq(agentSessions.ownerType, session.ownerType), eq(agentSessions.ownerId, session.ownerId),
+        sql`${agentSessions.status} <> 'deleted'`))
+    : [];
+  const anchors = new Set(executions.map(e => e.governingThreadId));
+  const keys = new Map(executions.map(e => [e.session.id, e.governingKey]));
+  if (session.id.startsWith("execution:")) {
+    const [self] = await db.select({ key: assistantExecutions.conversationKey }).from(assistantExecutions)
+      .where(eq(assistantExecutions.sessionId, session.id)).limit(1);
+    if (self) keys.set(session.id, self.key);
+  }
+  const groups = [];
+  for (const row of [session, ...executions.map(e => e.session)]) {
+    if (!await spawnedFromVisibleThread(c, row)) continue;
+    const visible = threadsVisibleTo(c, row);
+    const stored = await engineStore.listThreads(row.id);
+    const threads = [];
+    for (const thread of stored) {
+      if (!await visible(thread.key)) continue;
+      // Root anchors carry authorization; keep old history when an anchor already held entries.
+      if (row.id === session.id && anchors.has(thread.id)) {
+        const entries = await db.select({ id: sql<string>`id` }).from(sql`engine_entries`)
+          .where(sql`session_id = ${row.id} AND thread_id = ${thread.id}`).limit(1);
+        if (!entries.length) continue;
+      }
+      threads.push({ ...thread, key: keys.get(row.id) ?? thread.key });
+    }
+    groups.push({ session: row, threads, defaults: await engineStore.getSession(row.id) });
+  }
+  return groups;
+}
+
 export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
   const { db } = c.var.providers;
 
-  await engineSession.ensureDefaultThread();
-  const threads = engineSession.listThreads();
+  if (!session.id.startsWith("execution:")) await engineSession.ensureDefaultThread();
+  const groups = await workspaceThreadGroups(c, session);
+  const threads = groups.flatMap(group => group.threads.map(t => ({ ...t,
+    model: t.model ?? group.defaults?.model, reasoning: t.reasoning ?? group.defaults?.reasoning })));
 
   // Titles + archive state live in the app-side `session_threads` mirror
   // (titles populated by auto-title). One lookup by id set — small, since a
@@ -382,9 +424,6 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const wantArchived = c.req.query("archived") === "1";
   // A team runtime's private threads show only to the people they belong to
   // (`services/thread-access.ts`).
-  const visible = threadsVisibleTo(c, session);
-  const shown = new Set<string>();
-  for (const t of threads) if (await visible(t.key)) shown.add(t.id);
   const query = c.req.query("q")?.trim().toLowerCase() ?? "";
   if (query.includes("\0")) return c.json({ error: "Search contains an unsupported NUL character. Remove it and try again." }, 400);
   if (query.length > 500) return c.json({ error: "Search is too long. Use at most 500 characters." }, 400);
@@ -393,33 +432,25 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const contentMatches = query
     ? await db.selectDistinct({ threadId: sql<string>`thread_id` })
         .from(sql`engine_entries`)
-        .where(sql`session_id = ${session.id} and entry_type = 'message'
+        .where(sql`session_id in (${sql.join(groups.map(g => sql`${g.session.id}`), sql`, `)}) and entry_type = 'message'
           and role in ('user', 'assistant')
           and strpos(lower(content), ${query}) > 0`)
     : [];
   const matchingIds = new Set(contentMatches.map((row) => row.threadId));
   const summaries = threads
-    .filter((t) => shown.has(t.id))
-    .filter((t) => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
-    .filter((t) => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
-    .map((t) =>
-      threadToSummary(
-        t.id,
-        t.toThreadData().createdAt,
-        session.id,
-        metaById.get(t.id)?.lastUserActivityAt ?? t.toThreadData().createdAt,
-        metaById.get(t.id)?.title,
-        t.modelId(),
-        t.key,
-        metaById.get(t.id)?.archivedAt,
-        t.reasoning() ?? null,
-      ),
-    );
-  const activity = await listThreadActivity(db, c.var.user.id, session.id, summaries.map((t) => t.id));
-  for (const summary of summaries) {
-    Object.assign(summary, activity.get(summary.id));
-    const channel = threadChannel(summary.key, summary.pullRequests);
-    if (channel) summary.channel = channel;
+    .filter(t => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
+    .filter(t => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
+    .map(t => threadToSummary(t.id, t.createdAt, t.sessionId,
+      metaById.get(t.id)?.lastUserActivityAt ?? t.createdAt, metaById.get(t.id)?.title,
+      t.model, t.key, metaById.get(t.id)?.archivedAt, t.reasoning ?? null));
+  for (const group of groups) {
+    const groupSummaries = summaries.filter(t => t.sessionId === group.session.id);
+    const activity = await listThreadActivity(db, c.var.user.id, group.session.id, groupSummaries.map(t => t.id));
+    for (const summary of groupSummaries) {
+      Object.assign(summary, activity.get(summary.id));
+      const channel = threadChannel(summary.key, summary.pullRequests);
+      if (channel) summary.channel = channel;
+    }
   }
   const body: ListThreadsResponse = { threads: summaries };
   return c.json(body);
@@ -454,13 +485,17 @@ export async function readThreads(c: Context<AppEnv>, sessionId: string) {
   }
   // Another pod may have made a thread this one has not loaded, so the
   // stored threads decide which ids exist.
-  const known = new Set((await c.var.providers.engineStore.listThreads(session.id)).map((t) => t.id));
+  const groups = await workspaceThreadGroups(c, session);
+  const known = new Set(groups.flatMap(g => g.threads.map(t => t.id)));
   if (body.threadIds !== undefined && !Array.isArray(body.threadIds)) {
     return c.json({ error: "threadIds must be an array of thread ids." }, 400);
   }
   const ids = body.threadIds === undefined ? [...known]
     : body.threadIds.filter((id): id is string => typeof id === "string" && known.has(id));
-  await markThreadsRead(c.var.providers.db, c.var.user.id, session.id, ids);
+  const selected = new Set(ids);
+  for (const group of groups) {
+    await markThreadsRead(c.var.providers.db, c.var.user.id, group.session.id, group.threads.filter(t => selected.has(t.id)).map(t => t.id));
+  }
   return c.body(null, 204);
 }
 
@@ -706,7 +741,17 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
 
   const sourceThreadId = body.sourceThreadId;
   // An empty id names no thread; `visibleThread` would read it as the default.
-  const source = sourceThreadId ? await visibleThread(c, session, engineSession, sourceThreadId) : null;
+  let source = sourceThreadId ? await visibleThread(c, session, engineSession, sourceThreadId) : null;
+  if (sourceThreadId && !source && engineSession.options.readOnlyReason) {
+    const [mapped] = await db.select({ sessionId: assistantExecutions.sessionId }).from(assistantExecutions)
+      .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+      .where(and(eq(assistants.sessionId, session.id), sql`exists (select 1 from engine_threads t
+        where t.session_id = ${assistantExecutions.sessionId} and t.id = ${sourceThreadId})`)).limit(1);
+    if (mapped) {
+      const loaded = await loadEngineSession(c, mapped.sessionId);
+      if (!("error" in loaded)) source = await visibleThread(c, loaded.session, loaded.engineSession, sourceThreadId);
+    }
+  }
   if (sourceThreadId !== undefined && !source) {
     return c.json({ error: "thread not found. Select a thread from this session." }, 404);
   }
@@ -730,17 +775,21 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
   // POST creates a new thread (calling thread() with an existing key
   // returns the cached one).
   const key = `web:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const thread = await engineSession.createThread(key, settings);
+  const target = engineSession.options.readOnlyReason && session.ownerType === "team"
+    ? (await ensureAssistantExecution(c.var.providers, { type: "team", id: session.ownerId },
+      { orgId: session.orgId, actorUserId: c.var.user.id }, key)).session
+    : engineSession;
+  const thread = await target.createThread(key, settings);
   if (title) {
     await db.insert(sessionThreads).values({
-      id: thread.id, sessionId: session.id,
+      id: thread.id, sessionId: target.id,
       createdAt: thread.toThreadData().createdAt, title,
     }).onConflictDoUpdate({ target: sessionThreads.id, set: { title } });
   }
   const summary: CreateThreadResponse = threadToSummary(
     thread.id,
     thread.toThreadData().createdAt,
-    session.id,
+    target.id,
     thread.toThreadData().createdAt,
     title,
     thread.modelId(),
@@ -1015,6 +1064,8 @@ messagesRouter.post("/:id/messages", (c) => sendPrompt(c, c.req.param("id")));
 export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId?: string) {
   const row = await loadOwnedSession(c, sessionId);
   if (!row) return c.json({ error: "session not found" }, 404);
+  const loadedPrompt = await loadEngineSession(c, sessionId);
+  if ("error" in loadedPrompt) return loadedPrompt.error;
 
   let body: SendPromptRequest;
   try {
@@ -1072,6 +1123,8 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     if ("error" in loaded) return loaded.error;
     if (!await visibleThread(c, row, loaded.engineSession, body.threadId)) return c.json({ error: "thread not found" }, 404);
   }
+
+  if (loadedPrompt.engineSession.options.readOnlyReason) return c.json({ error: loadedPrompt.engineSession.options.readOnlyReason }, 409);
 
   try {
     let replyTo: MessageReplyReference | undefined;

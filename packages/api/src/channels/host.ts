@@ -1760,7 +1760,7 @@ export class ChannelHost {
         if (!sessionRow) throw new Error("missing session row for channel gate callback");
         const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
         session = assistant
-          ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
+          ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId }, { sessionId: mapped.sessionId })
           : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
       }
     } catch (err) {

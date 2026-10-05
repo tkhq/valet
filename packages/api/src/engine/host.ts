@@ -1,3 +1,4 @@
+import { assistantExecutions } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
@@ -2589,10 +2590,14 @@ export class EngineHost {
     // principal. The runtime keeps its own working directory.
     const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
 
-    const workspace = join(homedir(), ".valet", "assistants", assistantId);
+    const [execution] = await db.select().from(assistantExecutions)
+      .where(and(eq(assistantExecutions.sessionId, sessionId), eq(assistantExecutions.assistantId, assistantId))).limit(1);
+    const workspace = execution
+      ? join(homedir(), ".valet", "assistants", assistantId, "executions", execution.sessionId)
+      : join(homedir(), ".valet", "assistants", assistantId);
     await mkdir(workspace, { recursive: true });
 
-    const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId };
+    const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId, ...(principal.type === "team" ? { namespace: sessionId } : {}) };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, scope);
@@ -2716,6 +2721,10 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+      ...(execution ? { parentSessionId: assistant.sessionId, parentThreadId: execution.governingThreadId } : {}),
+      ...(principal.type === "team" && !execution ? {
+        readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
+      } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       threadSystemContext: workflowEditorThreadContext,
       tools: [...buildMemoryTools(), ...extras.tools],

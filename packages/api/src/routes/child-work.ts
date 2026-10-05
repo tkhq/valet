@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, exists, inArray, isNull, lt, or } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { assistantOwner, canViewAssistantOwner } from "../assistants/access.js";
-import { loadAssistantBySessionId } from "../assistants/service.js";
+import { loadAssistantBySessionId, workspaceSessionIds } from "../assistants/service.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
@@ -28,10 +28,10 @@ async function canViewParent(db: AppDb, sessionId: string, orgId: string, princi
 /** The threads of a parent session whose children this request may see: the
  * children of a private thread stay with the people that thread belongs to
  * (`services/thread-access.ts`). */
-async function visibleParentThreads(c: Context<AppEnv>, parentSessionId: string, owner: { type: string }): Promise<string[]> {
-  const rows = await c.var.providers.db.selectDistinct({ threadId: childWatches.parentThreadId }).from(childWatches)
-    .where(and(eq(childWatches.parentSessionId, parentSessionId), eq(childWatches.orgId, c.var.user.orgId)));
-  const shown = await keepVisibleThreads(c, owner, rows.map((row) => ({ sessionId: parentSessionId, threadId: row.threadId })));
+async function visibleParentThreads(c: Context<AppEnv>, parentSessionIds: string[], owner: { type: string }): Promise<string[]> {
+  const rows = await c.var.providers.db.selectDistinct({ sessionId: childWatches.parentSessionId, threadId: childWatches.parentThreadId }).from(childWatches)
+    .where(and(inArray(childWatches.parentSessionId, parentSessionIds), eq(childWatches.orgId, c.var.user.orgId)));
+  const shown = await keepVisibleThreads(c, owner, rows);
   return shown.map((row) => row.threadId);
 }
 
@@ -50,8 +50,9 @@ childWorkRouter.get("/:sessionId/children", async (c) => {
     typeof cursor.childSessionId !== "string" || cursor.childSessionId.length === 0)) {
     return c.json({ error: "Invalid child-work cursor. Remove it to start at the first page." }, 400);
   }
-  const threads = await visibleParentThreads(c, parentSessionId, owner);
-  const scope = and(eq(childWatches.parentSessionId, parentSessionId), eq(childWatches.orgId, orgId), inArray(childWatches.parentThreadId, threads),
+  const parentSessionIds = await workspaceSessionIds(db, orgId, parentSessionId);
+  const threads = await visibleParentThreads(c, parentSessionIds, owner);
+  const scope = and(inArray(childWatches.parentSessionId, parentSessionIds), eq(childWatches.orgId, orgId), inArray(childWatches.parentThreadId, threads),
     eq(agentSessions.orgId, orgId), eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id), isNull(childWatches.dismissedAt));
   const after = cursor ? or(
     cursor.settled === 0 ? eq(childWatches.settled, true) : undefined,
@@ -87,8 +88,9 @@ childWorkRouter.post("/:sessionId/children/:childSessionId/dismiss", async (c) =
   const orgId = c.var.user.orgId;
   const owner = await canViewParent(db, parentSessionId, orgId, c.var.principal);
   if (!owner) return c.json({ error: "child not found" }, 404);
-  const threads = await visibleParentThreads(c, parentSessionId, owner);
-  const scope = and(eq(childWatches.parentSessionId, parentSessionId), eq(childWatches.childSessionId, childSessionId), eq(childWatches.orgId, orgId),
+  const parentSessionIds = await workspaceSessionIds(db, orgId, parentSessionId);
+  const threads = await visibleParentThreads(c, parentSessionIds, owner);
+  const scope = and(inArray(childWatches.parentSessionId, parentSessionIds), eq(childWatches.childSessionId, childSessionId), eq(childWatches.orgId, orgId),
     inArray(childWatches.parentThreadId, threads),
     exists(db.select({ id: agentSessions.id }).from(agentSessions).where(and(eq(agentSessions.id, childSessionId),
       eq(agentSessions.orgId, orgId), eq(agentSessions.ownerType, owner.type), eq(agentSessions.ownerId, owner.id)))));

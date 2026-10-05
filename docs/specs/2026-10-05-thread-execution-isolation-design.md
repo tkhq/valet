@@ -22,6 +22,8 @@ Credential ownership remains the workspace owner; execution isolation does not g
 
 Thread history and decisions continue to use the existing thread APIs.
 Workspace lists include execution threads and exclude empty governing threads.
+The chat page selects the listed execution session. Private helper and editor labels follow their governing audience.
+Legacy conversation views replace the composer with an instruction to start a new thread.
 Session-wide filesystem and terminal requests require access to the execution's governing audience.
 A team API key cannot access a private execution. An unknown or missing governing thread denies access.
 Default memory reads, writes, snapshots, searches, exports, and imports use the execution namespace.
@@ -52,6 +54,7 @@ That limitation is explicit and does not prevent this isolation change from ship
 
 `GET /api/workspaces/:workspace/history` lists retained root and retired conversation IDs without waking a sandbox.
 The response includes `nextCursor`; send it as `before` to read the next page.
+Cursors are encrypted and scoped to the viewer and workspace. They do not expose hidden thread IDs.
 Add `sessionId` and `threadId` to export one authorized transcript page. Entries are newest first.
 This route applies current workspace membership and each conversation's reader boundary, including private helper ownership.
 It never grants team administrators access to another member's private helper.

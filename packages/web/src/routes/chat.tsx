@@ -27,17 +27,19 @@ function ChatPage() {
   const teams = useTeams();
   const team = teams.data?.teams.find(t => t.id === scope.teamId);
   const navigate = useNavigate({ from: Route.fullPath });
-  const sessionId = conversation.data?.sessionId;
-  useInvalidateMessagesOnQueueState(sessionId, thread);
+  const runtimeId = conversation.data?.sessionId;
   // The notice follows the open thread: a helper thread is private, a Slack thread follows its channel.
-  const threads = useThreads(sessionId ?? "");
+  const threads = useThreads(runtimeId ?? "");
   const list = threads.data?.threads ?? [];
-  const activeKey = list.find((t) => t.id === (thread ?? defaultThreadId(list)))?.key;
+  const active = list.find(t => t.id === (thread ?? defaultThreadId(list)));
+  const sessionId = active?.sessionId ?? runtimeId;
+  const activeKey = active?.key;
+  useInvalidateMessagesOnQueueState(sessionId, thread);
   if (conversation.error) return <div role="alert" className="p-8 text-sm text-danger-500">
     Couldn’t open this workspace’s threads. {errorText(conversation.error)}
     <button className="ml-2 underline" onClick={() => void conversation.refetch()}>Retry</button>
   </div>;
-  if (!sessionId) return <div className="flex-1 grid place-items-center"><Spinner /> Opening threads…</div>;
+  if (!sessionId || threads.isLoading) return <div className="flex-1 grid place-items-center"><Spinner /> Opening threads…</div>;
   return <>
     <div className="flex-1 min-h-0 flex flex-col">
       <SessionView key={sessionId} sessionId={sessionId} activeThreadId={thread} scopeNotice={team ? teamThreadNotice(team.name, activeKey) : undefined}

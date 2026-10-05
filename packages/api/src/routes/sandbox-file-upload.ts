@@ -42,6 +42,7 @@ import { resolveUploadDest } from "../services/path-validation.js";
 import { extractPdf, pdfStubMarkdown } from "../services/pdf-extract.js";
 import { extractZip } from "../services/archive-extract.js";
 import { getAttachmentRefStore, type AttachmentInfo } from "../services/attachment-refs.js";
+import { canAccessSessionResources } from "../services/session-access.js";
 import { loadOwnedSession } from "./messages.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type {
@@ -152,7 +153,7 @@ export function sandboxReadyError(err: unknown, state: AttachmentState, aborted:
 
 fileUploadRouter.post("/:id/files", async (c) => {
   const row = await loadOwnedSession(c);
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !await canAccessSessionResources(c.var.providers, row, c.var.principal)) return c.json({ error: "session not found" }, 404);
 
   const { engineHost, db } = c.var.providers;
 
@@ -490,7 +491,7 @@ fileUploadRouter.post("/:id/files", async (c) => {
  */
 fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
   const row = await loadOwnedSession(c);
-  if (!row) return c.json({ error: "session not found" }, 404);
+  if (!row || !await canAccessSessionResources(c.var.providers, row, c.var.principal)) return c.json({ error: "session not found" }, 404);
   const { engineHost, db } = c.var.providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
   await engineSession.ensureDefaultThread();

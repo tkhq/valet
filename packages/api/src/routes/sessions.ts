@@ -14,7 +14,7 @@ import {
   type RunStateRow,
   type SessionRunFields,
 } from "../sessions/run-state.js";
-import { canAdministerSession, canViewSession, isSessionDirectOwner } from "../services/session-access.js";
+import { canAdministerSession, canViewSession, canAccessSessionResources } from "../services/session-access.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
@@ -47,7 +47,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
-  assistants,
+  assistants, assistantExecutions,
   childWatches,
   messages as messagesTable,
   sessionRepos,
@@ -189,12 +189,14 @@ export async function listStandaloneSessions(db: AppDb, userId: string, owner?: 
         inArray(agentSessions.status, ["active", "hibernated"]),
         notExists(db.select({ id: childWatches.childSessionId }).from(childWatches)
           .where(eq(childWatches.childSessionId, agentSessions.id))),
+        notExists(db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
+          .where(eq(assistantExecutions.sessionId, agentSessions.id))),
         notExists(db.select({ id: assistants.sessionId }).from(assistants)
           .where(eq(assistants.sessionId, agentSessions.id))),
       ))
       .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${agentSessions.updatedAt})`));
   // Retain the prefix fallback for assistant rows whose metadata is gone.
-  return rows.filter((r) => parseAssistantSessionId(r.id) === null);
+  return rows.filter((r) => parseAssistantSessionId(r.id) === null && !r.id.startsWith("execution:"));
 }
 
 sessionsRouter.get("/", async (c) => {
@@ -902,8 +904,12 @@ sessionsRouter.get("/:id", async (c) => {
   // One session, so one submission read — the same derivation the list uses.
   const unsettled = await engineStore.listUnsettledSubmissions(id);
 
+  const runtime = await loadAssistantBySessionId(db, id);
+  const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
+    ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
   const detail: GetSessionResponse = {
-    isWorkspaceRuntime: (await loadAssistantBySessionId(db, id)) !== undefined,
+    readOnlyReason,
+    isWorkspaceRuntime: runtime !== undefined,
     ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
     parentWork: await visibleWorkOrigin(db, row),
     messageCount: Number(n ?? 0),
@@ -1209,8 +1215,12 @@ sessionsRouter.patch("/:id", async (c) => {
     .from(messagesTable)
     .where(eq(messagesTable.sessionId, id));
   const unsettled = await engineStore.listUnsettledSubmissions(id);
+  const runtime = await loadAssistantBySessionId(db, id);
+  const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
+    ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
   const detail: GetSessionResponse = {
-    isWorkspaceRuntime: (await loadAssistantBySessionId(db, id)) !== undefined,
+    readOnlyReason,
+    isWorkspaceRuntime: runtime !== undefined,
     ...rowToSummary(effectiveRow, deriveRunFields(runStateRow(effectiveRow), unsettled)),
     parentWork: await visibleWorkOrigin(db, effectiveRow),
     messageCount: Number(n ?? 0),
@@ -1236,7 +1246,7 @@ sessionsRouter.post("/:id/sandbox-jwt", async (c) => {
 
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await isSessionDirectOwner(db, row, caller))) return c.json({ error: "session not found" }, 404);
+  if (!row || row.orgId !== c.var.user.orgId || !(await canAccessSessionResources(c.var.providers, row, caller))) return c.json({ error: "session not found" }, 404);
   if (caller.type === "team") {
     return c.json(
       { error: "A team API key cannot mint a sandbox credential. Use a personal API key or the web app." },
@@ -1337,7 +1347,7 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "active")))
     .limit(1);
   const row = rows[0];
-  if (!row || !(await isSessionDirectOwner(db, row, caller))) return c.json({ error: "session not found" }, 404);
+  if (!row || row.orgId !== c.var.user.orgId || !(await canAccessSessionResources(c.var.providers, row, caller))) return c.json({ error: "session not found" }, 404);
   if (caller.type === "team") {
     return c.json(
       { error: "A team API key cannot replace a sandbox. Use a personal API key or the web app." },

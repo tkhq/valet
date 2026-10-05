@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import { eq, sql } from "drizzle-orm";
 import { agentSessions, channelMessages, childWatches, eventSubscriptions, sessionThreads, threadPullRequests } from "../schema/index.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -129,7 +129,9 @@ async function teamRuntime(a: TestApi) {
 
 it("applies a private Slack thread's access to every route that addresses the thread", async () => {
   api = await bootTestApi();
-  const { session, sessionId } = await teamRuntime(api);
+  const root = await teamRuntime(api);
+  const { session, sessionId } = await ensureAssistantExecution(api.providers, { type: "team", id: root.assistant.ownerId },
+    { orgId: "local-org", actorUserId: "local-user" }, "slack:CROUTES:1700.1");
   const thread = await session.createThread("slack:CROUTES:1700.1");
   await recordChannelMessage(api.providers.db, {
     orgId: "local-org", sessionId, threadId: thread.id, channelKey: "slack:CROUTES", conversationKey: "slack:CROUTES:1700.1",

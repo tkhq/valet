@@ -22,7 +22,8 @@ import {
 import { SessionView } from "./session-view";
 
 let fullProfile = false;
-beforeEach(() => { fullProfile = false; });
+let readOnlyReason: string | undefined;
+beforeEach(() => { fullProfile = false; readOnlyReason = undefined; });
 
 vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined }));
 
@@ -34,7 +35,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSession: () => ({
       isLoading: false,
       error: null,
-      data: { owner: { type: "user", id: "u1" }, id: "sess-1", title: "fix-auth", workspace: "/workspace", profile: fullProfile ? "full" : "headless" },
+      data: { readOnlyReason, owner: { type: "user", id: "u1" }, id: "sess-1", title: "fix-auth", workspace: "/workspace", profile: fullProfile ? "full" : "headless" },
     }),
     useThreads: () => ({ data: { threads: [{ id: "t1", createdAt: 0 }] } }),
     useMessages: () => ({ data: undefined }),
@@ -90,6 +91,12 @@ function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void)
 }
 
 describe("SessionView header chrome", () => {
+  it("shows a recovery instruction instead of a composer for legacy history", async () => {
+    readOnlyReason = "This legacy conversation is read-only. Start a new thread to continue.";
+    renderInRouter("sess-1", false);
+    expect(await screen.findByText(readOnlyReason)).toBeTruthy();
+    expect(screen.queryByTestId("composer")).toBeNull();
+  });
   it("watches from chat, suspends in the full pane, restores, and returns focus on close", async () => {
     fullProfile = true;
     renderInRouter("sess-1", false);

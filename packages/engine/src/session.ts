@@ -589,6 +589,7 @@ export class Session {
    * re-running is safe.
    */
   async reconcile(): Promise<void> {
+    if (this.options.readOnlyReason) return;
     const items = await this.providers.store.listUnsettledSubmissions(this.id);
     for (const item of items) {
       // startup: this instance is the definitive new owner (restoreSession's
@@ -630,6 +631,7 @@ export class Session {
    * observes the stuck-head condition for the attention signal.
    */
   private async reconcileItem(item: QueueItem, opts?: { startup?: boolean }): Promise<void> {
+    if (this.options.readOnlyReason) return;
     if (item.status === "settled") return;
     const thread = this.threads.get(item.threadId);
     if (!thread) return; // thread not hydrated — nothing to drive it with
@@ -868,6 +870,7 @@ export class Session {
   // ── public API ──────────────────────────────────────────────────
 
   async prompt(content: PromptContent, opts: PromptOptions = {}): Promise<PromptReceipt> {
+    if (this.options.readOnlyReason) throw new ValidationError(this.options.readOnlyReason);
     const thread = this.resolveTargetThread(opts.threadId);
     const text = commandText(content);
     if (text?.startsWith("/")) {
@@ -1465,6 +1468,7 @@ export class Session {
   }
 
   async resume(opts: { threadId?: string } = {}): Promise<void> {
+    if (this.options.readOnlyReason) throw new ValidationError(this.options.readOnlyReason);
     if (opts.threadId) {
       await this.threads.get(opts.threadId)?.resume();
       return;

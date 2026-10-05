@@ -144,7 +144,9 @@ export function governingThreadKeySql(sessionId: SQL, threadId: SQL, from: "thre
       SELECT es.parent_session_id, es.parent_thread_id, up.depth + 1 FROM up
       JOIN engine_sessions es ON es.id = up.sid
       WHERE es.parent_session_id IS NOT NULL AND es.parent_thread_id IS NOT NULL AND up.depth < 8
-    ) SELECT CASE WHEN up.depth > 0 AND et.id IS NULL THEN ${UNKNOWN_THREAD_KEY} ELSE et.key END
+    ) SELECT CASE WHEN (up.depth > 0 AND et.id IS NULL) OR (up.sid LIKE 'execution:%' AND NOT EXISTS (
+      SELECT 1 FROM engine_sessions es WHERE es.id = up.sid AND es.parent_session_id IS NOT NULL AND es.parent_thread_id IS NOT NULL
+    )) THEN ${UNKNOWN_THREAD_KEY} ELSE et.key END
     FROM up LEFT JOIN engine_threads et ON et.session_id = up.sid AND et.id = up.tid
     ORDER BY up.depth DESC LIMIT 1)`;
 }
@@ -164,7 +166,10 @@ async function spawningThread(db: Providers["db"], sessionId: string): Promise<{
     rows: Array<{ parent_session_id: string | null; parent_thread_id: string | null }>;
   };
   const row = result.rows[0];
-  return row?.parent_session_id && row.parent_thread_id ? { sessionId: row.parent_session_id, threadId: row.parent_thread_id } : null;
+  if (row?.parent_session_id && row.parent_thread_id) return { sessionId: row.parent_session_id, threadId: row.parent_thread_id };
+  // An isolated execution with missing ancestry has no verifiable audience.
+  if (sessionId.startsWith("execution:") || row?.parent_session_id || row?.parent_thread_id) return { sessionId, threadId: "" };
+  return null;
 }
 
 /** Conversations whose readers need not be on the team. */

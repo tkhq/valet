@@ -20,6 +20,7 @@ import type {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eq } from "drizzle-orm";
 import { agentSessions, artifacts, teamMembers } from "../schema/index.js";
+import { writeFile } from "../services/memory.js";
 import { createTeam } from "../services/teams.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -49,7 +50,7 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   const sandbox: Partial<Sandbox> & { id: string } = { id: "sb-1" };
   return {
     userId: "u1",
-    orgId: "o1",
+    orgId: "local-org",
     sessionId: "s1",
     threadId: "t1",
     credentials: stubCredentials,
@@ -349,6 +350,7 @@ describe("mem_* tools: real HTTP round trip", () => {
       owner: { type: "team", id: "eng" },
     });
 
+    await seedPublishingContext(api, ctx);
     const writeResult = await memWriteTool.execute({ path: "notes/team.md", content: "# Team note\n" }, ctx);
     // The result names the scope the server wrote. A team-owned session has
     // always written its team here; it just used to report a bare path, so
@@ -565,6 +567,7 @@ describe("mem_copy_from_team", () => {
     expect((await memReadTool.execute({ path: args.to }, ctx)).text).toContain("Exact knowledge.");
     expect((await memCopyFromTeamTool.execute(args, ctx)).text).toContain("Ask the user whether to replace, rename, or cancel");
     const fresh = { ...args, to: "knowledge/denied.md" };
+    await seedPublishingContext(api, { ...ctx, owner: { type: "team", id: team.id } });
     expect((await memCopyFromTeamTool.execute(fresh, { ...ctx, owner: { type: "team", id: team.id } })).text).toContain("personal");
     expect((await memCopyFromTeamTool.execute(fresh, { ...ctx, owner: { type: "user", id: "test-member" } })).text).toContain("personal");
     await api.providers.db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
@@ -583,23 +586,24 @@ for (const tool of [memCopyToTeamTool, memCopyFromTeamTool]) {
       const teamCtx = { ...ctx, owner: { type: "team" as const, id: team.id } };
       const sourceCtx = tool === memCopyToTeamTool ? ctx : teamCtx;
       const destinationCtx = tool === memCopyToTeamTool ? teamCtx : ctx;
-      await memWriteTool.execute({ path: "notes/source.md", content: "# Source content" }, sourceCtx);
-      await memWriteTool.execute({ path: "notes/source.md", content: "# Existing destination" }, destinationCtx);
+      await writeFile(api.providers.db, { owner: sourceCtx.owner ?? { type: "user", id: ctx.userId }, actorUserId: ctx.userId }, { path: "notes/source.md", content: "# Source content" });
+      await writeFile(api.providers.db, { owner: destinationCtx.owner ?? { type: "user", id: ctx.userId }, actorUserId: ctx.userId }, { path: "notes/source.md", content: "# Existing destination" });
+      const destinationPath = tool === memCopyToTeamTool ? `team:${team.id}/notes/source.md` : "notes/source.md";
       const args = { from: "notes/source.md", to: "notes/source.md", teamId: team.id };
       const conflict = await tool.execute(args, ctx);
       const details = JSON.parse(conflict.text.replace("[memory_error] ", ""));
       expect(details).toMatchObject({ code: "MEMORY_DESTINATION_EXISTS", destinationVersion: expect.any(String) });
       expect(details.error).toContain("Ask the user whether to replace, rename, or cancel");
-      expect((await memReadTool.execute({ path: args.to }, destinationCtx)).text).toContain("Existing destination");
+      expect((await memReadTool.execute({ path: destinationPath }, ctx)).text).toContain("Existing destination");
       // Exercise runtime defense as well as the schema: an unvalidated call
       // without a user confirmation must not reach the HTTP mutation.
       const unconfirmed = JSON.parse(JSON.stringify({ ...args, replacement: { expectedVersion: details.destinationVersion } }));
       expect((await tool.execute(unconfirmed, ctx)).text).toContain("requires explicit user confirmation");
-      expect((await memReadTool.execute({ path: args.to }, destinationCtx)).text).toContain("Existing destination");
+      expect((await memReadTool.execute({ path: destinationPath }, ctx)).text).toContain("Existing destination");
       const confirmed = { ...args, replacement: { expectedVersion: details.destinationVersion, userConfirmed: true as const } };
       const replacement = await tool.execute(confirmed, ctx);
       expect(tool === memCopyToTeamTool ? decode(replacement.text) : JSON.parse(replacement.text)).toMatchObject({ file: { version: 2 } });
-      expect((await memReadTool.execute({ path: args.to }, destinationCtx)).text).toContain("Source content");
+      expect((await memReadTool.execute({ path: destinationPath }, ctx)).text).toContain("Source content");
       const stale = JSON.parse((await tool.execute(confirmed, ctx)).text.replace("[memory_error] ", ""));
       expect(stale).toMatchObject({ code: "MEMORY_DESTINATION_CHANGED", destinationVersion: expect.any(String) });
       expect(stale.destinationVersion).not.toBe(details.destinationVersion);
