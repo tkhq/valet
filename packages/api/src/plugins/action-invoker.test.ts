@@ -698,6 +698,7 @@ describe("buildActionInvoker", () => {
 
   it("team-owned run: asks the member whose shared account a step would use, then uses it once they allow it", async () => {
     const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Borrow team", createdAt: 1 });
     await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
     await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
     const store = new FakeCredentialStore();
@@ -712,6 +713,9 @@ describe("buildActionInvoker", () => {
 
     await writeBorrowGrant(db, "org1", { sessionId: "wf:run1", service: "demo", memberId: "bea" });
     expect((await invoke({ ...req, invocationId: "workflow:run1:step:again" }, ctx)).ok).toBe(true);
+    expect(fixture.calls()).toBe(1);
+    const outsider = await invoke({ ...req, invocationId: "workflow:run1:outsider" }, { ...ctx, userId: "outsider" });
+    expect(outsider.ok).toBe(false);
     expect(fixture.calls()).toBe(1);
   });
 
