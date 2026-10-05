@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionInvocations, runtimeGrants, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
 import * as borrow from "../services/credential-borrow.js";
 import * as policy from "../policies/service.js";
 import { resolveWorkflowApproval } from "./service.js";
@@ -17,8 +18,9 @@ async function setup(sharedAccount = true) {
   const definition = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, { id: "step", type: "tool", service: "demo", action: "ping", params: {} }], edges: [{ from: "trigger", to: "step" }] };
   await p.db.insert(workflowDefinitions).values({ id: "wf-atomic", orgId: "local-org", ownerType: "team", ownerId: "atomic-team", name: "Atomic", definition, createdAt: 1, updatedAt: 1 });
   await p.workflowStore.createRun("run-atomic", { workflowId: "wf-atomic", definitionVersionId: "v1" }, definition, "v1", { ownerType: "team", ownerId: "atomic-team", actorUserId: "local-user" });
+  await shareCredential(p.db, { teamId: "atomic-team", service: "demo", userId: "local-user", createdAt: 1 });
   if (sharedAccount) await p.workflowStore.putIntent({ runId: "run-atomic", nodeId: "step", iteration: 0, status: "intent", attempt: 1, createdAt: 1,
-    effects: { gate: true, provenance: "shared_account", approver: { userId: "local-user", name: "Local User" } } });
+    effects: { gate: true, provenance: "shared_account", approver: { userId: "local-user", name: "Local User", shareGeneration: await borrow.shareGeneration(p.db, "atomic-team", "demo", "local-user") } } });
   await p.workflowStore.parkRun("run-atomic", 1, [{ kind: "signal", nodeId: "step", signalType: "approval:step" }]);
   await policy.persistInvocationAudit(p.db, { invocationId: "pol:wf:workflow:run-atomic:step", orgId: "local-org", workflowExecutionId: "run-atomic", service: "demo", actionId: "demo.ping", resolvedMode: "require_approval", status: "pending" });
   const wake = vi.spyOn(p.workflowRunHost, "wake").mockResolvedValue(undefined);

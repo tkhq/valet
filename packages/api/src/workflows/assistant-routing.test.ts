@@ -1,3 +1,5 @@
+import { shareCredential } from "../services/credential-shares.js";
+import { shareGeneration } from "../services/credential-borrow.js";
 import { runOriginVisible } from "../services/thread-access.js";
 import type { PluginActionContext } from "@valet/engine";
 import { eq } from "drizzle-orm";
@@ -336,9 +338,10 @@ describe("workflow workspace routing", () => {
     await p.workflowStore.createRun("private-approval", { workflowId: created.id, definitionVersionId: "v1",
       origin: { assistantSessionId: "assistant:default-a", threadId: thread.id } }, definition, "v1",
       { ownerType: "team", ownerId: "team-a", actorUserId: owner.userId });
+    await shareCredential(p.db, { teamId: "team-a", service: "demo", userId: "test-member", createdAt: 1 });
     await p.workflowStore.putIntent({ runId: "private-approval", nodeId: "borrow", iteration: 0,
       status: "intent", attempt: 1, createdAt: 1,
-      effects: { gate: true, provenance: "shared_account", approver: { userId: "test-member" } } });
+      effects: { gate: true, provenance: "shared_account", approver: { userId: "test-member", shareGeneration: await shareGeneration(p.db, "team-a", "demo", "test-member") } } });
     await p.workflowStore.parkRun("private-approval", 1, [
       { kind: "signal", nodeId: "borrow", signalType: "approval:borrow" },
       { kind: "signal", nodeId: "other", signalType: "approval:other" },
