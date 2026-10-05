@@ -175,6 +175,9 @@ sidecars remain PDF-only.
 
 ## Tests
 
+The importable definitions in `docs/testing/workflows/` provide manual Drive DOCX and team Slack checks.
+`document-slack-smoke.test.ts` runs both definitions through the real workflow host with mocked provider HTTP.
+
 - `packages/api/src/services/channel-file-ingest.test.ts`: a real one-page
   PDF fixture extracts to a sidecar; a non-PDF gets no sidecar; a
   malformed PDF is still written; a `..` name stays inside the uploads

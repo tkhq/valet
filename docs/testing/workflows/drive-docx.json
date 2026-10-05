@@ -1,0 +1,16 @@
+{
+  "version": "dag/v1",
+  "nodes": [
+    { "id": "trigger", "type": "trigger" },
+    {
+      "id": "read_document", "type": "tool",
+      "service": "google_workspace", "action": "drive.download_file",
+      "params": { "fileId": "REPLACE_WITH_TEST_DOCX_FILE_ID" }
+    },
+    { "id": "done", "type": "stop" }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "read_document" },
+    { "from": "read_document", "to": "done" }
+  ]
+}
