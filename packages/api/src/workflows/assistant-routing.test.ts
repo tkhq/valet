@@ -294,7 +294,7 @@ describe("workflow workspace routing", () => {
     expect(p.workflowRunHost.start).not.toHaveBeenCalled();
   });
 
-  it("reports an in-flight run from a retired assistant on the workspace runtime", async () => {
+  it("refuses an in-flight run from a retired origin instead of redirecting its audience", async () => {
     const { p, deps } = await setup();
     const created = await createWorkflowDefinition(deps, owner, { name: "Retired origin", definition: graph });
     // What the singleton cutover leaves for a dev-v2 user's second assistant.
@@ -310,11 +310,12 @@ describe("workflow workspace routing", () => {
       db: p.db, host: p.engineHost, store: p.workflowStore, engineStore: p.engineStore,
       actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials,
     });
-    const receipt = await engine.promptOrchestrator("next step", {
+    const submit = vi.spyOn(p.engineHost, "assistantSessionFor");
+    await expect(engine.promptOrchestrator("next step", {
       dispatchId: `workflow:${runId}:node`, queueMode: "followup",
       ownerHint: { ownerType: "user", ownerId: "local-user" },
-    });
-    expect(receipt.sessionId).toBe("assistant:personal");
+    })).rejects.toThrow("origin assistant is unavailable");
+    expect(submit).not.toHaveBeenCalled();
   });
 
   it("rejects retry when its origin thread is gone", async () => {
