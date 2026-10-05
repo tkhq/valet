@@ -14,7 +14,7 @@ import { pgDbFromPglite } from "@valet/store-postgres";
 import { InMemoryCredentialStore, type DecisionResolution, type PolicyInvocationRecord, type PolicyResolveInput } from "@valet/engine";
 import { shareCredential, revokeShare } from "../services/credential-shares.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
+import { assistants, agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
 import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
@@ -539,6 +539,22 @@ describe("another member's shared account", () => {
     expect(fresh.approver?.shareGeneration).not.toBe(decision.approver?.shareGeneration);
     await resolver.onResolution!(input, fresh, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 3 });
     expect((await resolver.resolve(input)).approver).toBeUndefined();
+  });
+
+  it("lets a live unattended workspace runtime ask its lender and reuse only that thread's consent", async () => {
+    const resolver = await sharedByMember();
+    await db.insert(assistants).values({ id: "borrow-runtime", orgId: ORG, ownerType: "team", ownerId: TEAM, sessionId: SESSION, createdAt: 1 });
+    const machine = { ...input, userId: `team:${TEAM}` };
+    const decision = await resolver.resolve(machine);
+    expect(decision).toMatchObject({ mode: "require_approval", approver: { userId: MEMBER } });
+    await expect(resolver.onResolution!(machine, decision, { actionId: "approve", resolvedBy: ADMIN, resolvedAt: 1 })).rejects.toThrow(/Only Member/);
+    await resolver.onResolution!(machine, decision, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 1 });
+    expect(await resolver.resolve(machine)).toMatchObject({ mode: "allow" });
+    expect((await resolver.resolve({ ...machine, threadId: "another-thread" })).approver).toMatchObject({ userId: MEMBER });
+    expect((await resolver.resolve({ ...machine, externalSender: true })).approver).toMatchObject({ userId: MEMBER });
+    await db.update(assistants).set({ archivedAt: 2 }).where(eq(assistants.id, "borrow-runtime"));
+    expect(await resolver.resolve(machine)).toMatchObject({ mode: "deny" });
+    await db.delete(assistants).where(eq(assistants.id, "borrow-runtime"));
   });
 
   it("never asks the member acting on their own account", async () => {

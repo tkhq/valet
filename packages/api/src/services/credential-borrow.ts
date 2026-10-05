@@ -11,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { credentialShares, runtimeGrants } from "../schema/index.js";
+import { agentSessions, credentialShares, runtimeGrants } from "../schema/index.js";
 
 /** Where a borrow approval applies: a session's thread, or a workflow run
  * (a `wf:<runId>:<node>` session). */
@@ -56,6 +56,25 @@ export async function hasBorrowGrant(db: AppQueryable, scope: BorrowScope): Prom
   return rows.length > 0;
 }
 
+/** Only a live workspace runtime can request unattended account consent. */
+function unattendedRuntimeOwner(scope: { orgId: string; teamId: string; sessionId: string; threadId?: string; actorId?: string }) {
+  return sql`EXISTS (SELECT 1 FROM agent_sessions s JOIN assistants a ON a.session_id = s.id
+    WHERE s.id = ${scope.sessionId} AND s.org_id = ${scope.orgId} AND s.owner_type = 'team'
+      AND s.owner_id = ${scope.teamId} AND s.status <> 'deleted'
+      AND a.org_id = ${scope.orgId} AND a.owner_type = 'team' AND a.owner_id = ${scope.teamId}
+      AND a.archived_at IS NULL)`;
+}
+
+export async function isUnattendedTeamRuntime(
+  db: AppQueryable,
+  scope: { orgId: string; teamId: string; sessionId: string; threadId?: string; actorId?: string },
+): Promise<boolean> {
+  if (!scope.threadId || scope.actorId !== `team:${scope.teamId}`) return false;
+  const rows = await db.select({ id: agentSessions.id }).from(agentSessions)
+    .where(and(eq(agentSessions.id, scope.sessionId), unattendedRuntimeOwner(scope))).limit(1);
+  return rows.length > 0;
+}
+
 /** Grants require a current teammate, or an unattended run owned by the team. */
 export async function canBorrowCredential(
   db: AppQueryable,
@@ -65,7 +84,8 @@ export async function canBorrowCredential(
   const key = await borrowKey(db, scope);
   if (!key) return false;
   const runId = workflowRunOf(scope.sessionId);
-  const unattended = !!runId && scope.actorId === `team:${scope.teamId}`;
+  const unattended = scope.actorId === `team:${scope.teamId}`;
+  if (unattended && !runId && !scope.threadId) return false;
   const rows = await db.select({ id: runtimeGrants.id }).from(runtimeGrants).where(and(
     eq(runtimeGrants.orgId, scope.orgId),
     runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
@@ -73,9 +93,9 @@ export async function canBorrowCredential(
     isNull(runtimeGrants.revokedAt),
     sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
       WHERE m.team_id = ${scope.teamId} AND m.user_id = ${unattended ? scope.memberId : scope.actorId} AND t.org_id = ${scope.orgId})`,
-    unattended ? sql`EXISTS (SELECT 1 FROM workflow_runs r
+    unattended ? (runId ? sql`EXISTS (SELECT 1 FROM workflow_runs r
       WHERE r.id = ${runId} AND r.owner_type = 'team' AND r.owner_id = ${scope.teamId}
-        AND (r.actor_user_id IS NULL OR r.actor_user_id = ${scope.actorId}))` : undefined,
+        AND (r.actor_user_id IS NULL OR r.actor_user_id = ${scope.actorId}))` : unattendedRuntimeOwner(scope)) : undefined,
   )).limit(1);
   return rows.length > 0;
 }

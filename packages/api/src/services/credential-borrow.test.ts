@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { getWorkflowRunDetail, resolveWorkflowApproval } from "../workflows/service.js";
 import { shareCredential, revokeShare } from "./credential-shares.js";
 import { shareGeneration, canBorrowCredential, hasBorrowGrant, writeBorrowGrant } from "./credential-borrow.js";
@@ -97,4 +97,26 @@ it.each(["session", "wf:run:step"])("requires fresh approval after revocation an
   await expect(writeBorrowGrant(db, "local-org", { ...scope, shareGeneration: oldGeneration })).rejects.toThrow(/share changed/);
   await writeBorrowGrant(db, "local-org", { ...scope, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
   expect(await hasBorrowGrant(db, scope)).toBe(true);
+});
+
+
+it("binds unattended runtime grants to the live team, lender and thread", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  const scope = { teamId: "runtime-team", orgId: "local-org", actorId: "team:runtime-team", sessionId: "runtime-borrow", threadId: "scheduled", service: "linear", memberId: "test-member" };
+  await db.insert(teams).values({ id: scope.teamId, orgId: scope.orgId, name: "Runtime", createdAt: 1 });
+  await db.insert(teamMembers).values({ teamId: scope.teamId, userId: scope.memberId, role: "member" });
+  await db.insert(agentSessions).values({ id: scope.sessionId, orgId: scope.orgId, ownerType: "team", ownerId: scope.teamId, userId: scope.actorId, workspace: "test", createdAt: 1, updatedAt: 1 });
+  await shareCredential(db, { teamId: scope.teamId, userId: scope.memberId, service: scope.service, createdAt: 1 });
+  await writeBorrowGrant(db, scope.orgId, { ...scope, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+  await db.insert(assistants).values({ id: "runtime-assistant", orgId: scope.orgId, ownerType: "team", ownerId: scope.teamId, sessionId: scope.sessionId, createdAt: 1 });
+  expect(await canBorrowCredential(db, scope)).toBe(true);
+  expect(await canBorrowCredential(db, { ...scope, threadId: "other" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, orgId: "other" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, actorId: "team:other" })).toBe(false);
+  await db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, scope.sessionId));
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+  await db.update(agentSessions).set({ status: "active" }).where(eq(agentSessions.id, scope.sessionId));
+  await db.delete(teamMembers).where(eq(teamMembers.teamId, scope.teamId));
+  expect(await canBorrowCredential(db, scope)).toBe(false);
 });
