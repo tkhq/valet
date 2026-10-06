@@ -362,7 +362,7 @@ export async function runOriginVisible(
   run: { ownerType: string; origin?: WorkflowRunOrigin | null; actorUserId?: string | null },
 ): Promise<boolean> {
   if (run.ownerType !== "team" || !run.origin) return true;
-  const [session] = await deps.db.select({ ownerType: agentSessions.ownerType }).from(agentSessions)
+  const [session] = await deps.db.select({ id: agentSessions.id, ownerType: agentSessions.ownerType }).from(agentSessions)
     .where(eq(agentSessions.id, run.origin.assistantSessionId)).limit(1);
   const thread = session && await deps.engineStore.getThread(run.origin.assistantSessionId, run.origin.threadId);
   if (!thread) return viewer.userId !== undefined && viewer.userId === run.actorUserId;

@@ -1,11 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
+import { runOriginVisible, visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -28,6 +28,20 @@ async function connectSlack(a: TestApi, members: Record<string, string[]>) {
 
 const team = { type: "team" as const, id: "team-1" };
 const ref = (key: string) => ({ id: key, key });
+
+it("keeps a workflow started in a private execution visible only to its originating member", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Private workflow", creatorUserId: "local-user" });
+  const execution = await ensureAssistantExecution(p, { type: "team", id: team.id },
+    { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:local-user");
+  const thread = await execution.session.ensureDefaultThread();
+  const run = { ownerType: "team", actorUserId: "local-user",
+    origin: { assistantSessionId: execution.sessionId, threadId: thread.id } };
+  expect(await runOriginVisible(p, { orgId: "local-org", userId: "local-user" }, run)).toBe(true);
+  expect(await runOriginVisible(p, { orgId: "local-org", userId: "test-member" }, run)).toBe(false);
+  expect(await runOriginVisible(p, { orgId: "local-org", userId: undefined }, run)).toBe(false);
+});
 
 it("lets a thread read only what its audience may see", async () => {
   api = await bootTestApi();
