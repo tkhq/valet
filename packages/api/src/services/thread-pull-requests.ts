@@ -86,7 +86,7 @@ export function wireThreadPullRequests(eventStream: EventStream, db: AppDb): () 
   return eventStream.subscribe({ eventTypes: ["tool_end"] }, (delivered) => {
     const { event, sessionId } = delivered;
     if (event.type !== "tool_end" || !event.outcome) return;
-    const { kind, url } = event.outcome;
+    const { kind, url, startedAt } = event.outcome;
     if (kind === "pull_request_created" && url) {
       void recordDelegatedPullRequest(db, { sessionId, threadId: event.threadId, url })
         .catch(err => console.error("[thread-activity] could not record a pull request", err));
@@ -97,7 +97,7 @@ export function wireThreadPullRequests(eventStream: EventStream, db: AppDb): () 
     if (kind === "pull_request_comment" || kind === "review_submitted") {
       void (async () => {
         const [session] = await db.select({ orgId: agentSessions.orgId }).from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
-        if (session) await recordTerminalPullRequestWrite(db, { orgId: session.orgId, sessionId, threadId: event.threadId, kind, ...(url ? { url } : {}) });
+        if (session) await recordTerminalPullRequestWrite(db, { orgId: session.orgId, sessionId, threadId: event.threadId, kind, ...(url ? { url } : {}), ...(startedAt !== undefined ? { startedAt } : {}) });
       })().catch(err => console.error("[thread-activity] could not record a terminal pull request write", err));
     }
   });

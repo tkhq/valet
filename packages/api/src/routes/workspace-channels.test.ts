@@ -246,15 +246,21 @@ it("finds the thread that opened a pull request, and records the comment Valet p
     url: "https://github.com/ACME/App/pull/12#issuecomment-901" });
   expect(await wasSentByValet(api.providers.db, "local-org", { channelKey: "github:acme/app#12", providerMessageId: "901" })).toBe(true);
   const key = "github:acme/app#12";
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, Date.now())).toBe(false);
-  const submitted = Date.now();
-  await recordTerminalPullRequestWrite(api.providers.db, { orgId: "local-org", sessionId, threadId: thread.id, kind: "review_submitted" });
-  // Valet's own review was submitted just before its record.
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, submitted)).toBe(true);
-  // A person's review submitted after the record is not Valet's.
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, Date.now() + 10_000)).toBe(false);
+  const startedAt = Date.now() - 2_000;
+  const completedAt = startedAt + 1_000;
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, startedAt, completedAt)).toBe(false);
+  await recordTerminalPullRequestWrite(api.providers.db, {
+    orgId: "local-org", sessionId, threadId: thread.id, kind: "review_submitted", startedAt,
+  }, completedAt);
+  // The command interval is inclusive at both boundaries.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, startedAt, completedAt)).toBe(true);
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, completedAt + 5_000, completedAt + 10_000)).toBe(true);
+  // A human review before the command, even one close to it, is never Valet's.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, startedAt - 1, completedAt + 10_000)).toBe(false);
+  // A person's review beyond completion clock skew is not Valet's.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, completedAt + 5_001, completedAt + 10_000)).toBe(false);
   // Without a submission time, a record in the last window counts.
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, undefined)).toBe(true);
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, undefined, completedAt)).toBe(true);
   const detail = await (await fetch(`${api.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("github:acme/app#12")}`)).json() as ChannelDetailResponse;
   expect(detail.channel).toMatchObject({ provider: "github", name: "app #12", state: "open", url });
   expect(detail.messages).toEqual(expect.arrayContaining([

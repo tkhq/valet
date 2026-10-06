@@ -118,6 +118,7 @@ async function pollJobToCompletion(
   cancelJob: (execId: string) => Promise<void>,
   execId: string,
   timeoutMs: number,
+  startedAt: number,
 ): Promise<ToolResult> {
   const deadline = Date.now() + timeoutMs;
   let offset = 0;
@@ -146,7 +147,7 @@ async function pollJobToCompletion(
       const exitNote = poll.exitCode !== undefined && poll.exitCode !== 0 ? `\n[exit ${poll.exitCode}]` : "";
       const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
       const outcome = terminalOutcome(command, output, poll.exitCode);
-      return { text: `${output}${truncNote}${exitNote}`, ...(outcome ? { outcome } : {}) };
+      return { text: `${output}${truncNote}${exitNote}`, ...(outcome ? { outcome: { ...outcome, startedAt } } : {}) };
     }
     if (poll.status === "failed") {
       const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
@@ -302,6 +303,7 @@ export const bashTool = defineTool({
   }),
   execute: async (args, ctx) => {
     const timeoutMs = (args.timeout ?? BASH_DEFAULT_TIMEOUT_S) * 1000;
+    const startedAt = Date.now();
 
     // Mode selection (spec decision 10). NOTE: `ctx.sandbox` is normally a
     // PolicySandbox, whose execJob/pollJob/cancelJob are ALWAYS defined
@@ -333,7 +335,7 @@ export const bashTool = defineTool({
         // Underlying sandbox doesn't support job mode — fall through to sync exec.
       }
       if (handle) {
-        return pollJobToCompletion(ctx, args.command, pollJob, cancelJob, handle.execId, timeoutMs);
+        return pollJobToCompletion(ctx, args.command, pollJob, cancelJob, handle.execId, timeoutMs, startedAt);
       }
     }
 
@@ -341,7 +343,7 @@ export const bashTool = defineTool({
     const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
     const outcome = terminalOutcome(args.command, result.stdout, result.exitCode);
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}`, ...(outcome ? { outcome } : {}) };
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}`, ...(outcome ? { outcome: { ...outcome, startedAt } } : {}) };
   },
 });
 

@@ -326,29 +326,35 @@ export async function isOwnPullRequestWrite(
     || (eventKey.startsWith("github.pull_request_review") && await recentTerminalReview(db, orgId, comment.channelKey, comment.postedAt));
 }
 
-/** How long a review Valet posted from the terminal (no id to match) keeps
- * review events on its pull request off the thread that posted it. */
-/** How long after GitHub accepts a terminal review Valet records it: the
- * command returns, then the tool result is stored. */
+/** How long an un-timestamped review event may use a terminal marker. */
 export const TERMINAL_REVIEW_WINDOW_MS = 60_000;
-/** Clock difference allowed between GitHub's timestamp and this server's. */
+/** Clock difference allowed after this server records command completion. */
 const TERMINAL_REVIEW_SKEW_MS = 5_000;
+const TERMINAL_REVIEW_PREFIX = "terminal-review:";
 
 /**
  * Whether a review is one Valet posted from the terminal. `gh pr review`
- * prints no review id, so Valet records the time its command finished. A
- * review counts as Valet's only when GitHub says it was submitted just before
- * that record, so a person's review after it still reaches the thread.
- * Without a submission time, any record in the last window counts.
+ * prints no review id, so the marker stores the command start time. A GitHub
+ * submission matches only from that start through marker persistence. A
+ * marker can therefore never claim an earlier human review. Dispatcher
+ * retries use the same immutable GitHub submission time.
+ *
+ * Without a submission time, a marker in the last window counts.
  */
 export async function recentTerminalReview(db: AppDb, orgId: string, channelKey: string, submittedAt: number | undefined, now = Date.now()): Promise<boolean> {
-  const from = submittedAt === undefined ? now - TERMINAL_REVIEW_WINDOW_MS : submittedAt - TERMINAL_REVIEW_SKEW_MS;
-  const to = submittedAt === undefined ? now : submittedAt + TERMINAL_REVIEW_WINDOW_MS;
-  const result = await db.execute(sql`SELECT 1 FROM channel_messages
+  const earliestCompletion = submittedAt === undefined ? now - TERMINAL_REVIEW_WINDOW_MS : submittedAt - TERMINAL_REVIEW_SKEW_MS;
+  const result = await db.execute(sql`SELECT provider_message_id, created_at FROM channel_messages
     WHERE org_id = ${orgId} AND channel_key = ${channelKey} AND direction = 'out'
-      AND provider_message_id LIKE 'terminal-review:%' AND created_at BETWEEN ${from} AND ${to}
-    LIMIT 1`) as { rows: unknown[] };
-  return result.rows.length > 0;
+      AND provider_message_id LIKE 'terminal-review:%' AND created_at >= ${earliestCompletion}
+      AND created_at <= ${now}
+    ORDER BY created_at DESC`) as { rows: Array<{ provider_message_id: string; created_at: number }> };
+  if (submittedAt === undefined) return result.rows.length > 0;
+  return result.rows.some(row => {
+    const startedAt = Number(row.provider_message_id.slice(TERMINAL_REVIEW_PREFIX.length));
+    return Number.isFinite(startedAt)
+      && submittedAt >= startedAt
+      && submittedAt <= Number(row.created_at) + TERMINAL_REVIEW_SKEW_MS;
+  });
 }
 
 /**
@@ -357,10 +363,11 @@ export async function recentTerminalReview(db: AppDb, orgId: string, channelKey:
  * id) as a timed mark on each pull request the thread opened.
  */
 export async function recordTerminalPullRequestWrite(
-  db: AppDb, input: { orgId: string; sessionId: string; threadId: string; kind: "pull_request_comment" | "review_submitted"; url?: string },
+  db: AppDb, input: { orgId: string; sessionId: string; threadId: string; kind: "pull_request_comment" | "review_submitted"; url?: string; startedAt?: number },
   now = Date.now(),
 ): Promise<void> {
   const base = { orgId: input.orgId, sessionId: input.sessionId, threadId: input.threadId, direction: "out" as const, createdAt: now };
+  const startedAt = input.startedAt !== undefined && Number.isFinite(input.startedAt) ? input.startedAt : now;
   if (input.kind === "pull_request_comment") {
     const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)#issuecomment-(\d+)$/.exec(input.url ?? "");
     if (!match) return;
@@ -375,7 +382,7 @@ export async function recordTerminalPullRequestWrite(
     if (!match) continue;
     const channelKey = githubPullRequestKey(match[1]!, match[2]!, Number(match[3]));
     await recordChannelMessage(db, {
-      ...base, channelKey, conversationKey: channelKey, providerMessageId: `terminal-review:${now}`, url,
+      ...base, channelKey, conversationKey: channelKey, providerMessageId: `${TERMINAL_REVIEW_PREFIX}${startedAt}`, url,
       text: "Posted a review from the terminal.",
     });
   }

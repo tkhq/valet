@@ -27,7 +27,7 @@ import {
   assistants,
   threadPullRequests,
 } from "../schema/index.js";
-import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
+import { OWN_WRITE_SETTLE_MS, recordChannelMessage, recordTerminalPullRequestWrite } from "../services/channel-messages.js";
 import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 
 const ORG = "org-1";
@@ -303,6 +303,50 @@ describe("EventDispatcher", () => {
     await dispatcher.pollOnce();
     expect(deliver).not.toHaveBeenCalled();
     expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped" });
+  });
+
+  it("uses terminal command direction across review settle and retry timing", async () => {
+    const db = tdb.appDb;
+    const url = "https://github.com/acme/app/pull/12";
+    await db.insert(assistants).values({ id: "asst-1", orgId: ORG, ownerType: "user", ownerId: "user-1", sessionId: "sess-1", createdAt: 1 });
+    await db.insert(agentSessions).values({ id: "sess-1", orgId: ORG, userId: "user-1", ownerType: "user", ownerId: "user-1", workspace: "/workspace", createdAt: 1, updatedAt: 1 });
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('thr-1', 'sess-1', 'web:pr-thread', 'idle', 'steer', 1, 1)`);
+    await db.insert(threadPullRequests).values({
+      sessionId: "sess-1", threadId: "thr-1", url, repo: "acme/app", number: 12, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1,
+    });
+
+    const t0 = Date.now() - 35_000;
+    await recordTerminalPullRequestWrite(db, {
+      orgId: ORG, sessionId: "sess-1", threadId: "thr-1", kind: "review_submitted", startedAt: t0,
+    }, t0 + 2_000);
+    const humanReviewAt = t0 - 30_000;
+    const humanReview = await seedDelivery({
+      target: { kind: "orchestrator" }, attempts: 3,
+      eventKey: "github.pull_request_review.submitted", eventKeys: ["github.pull_request_review.*"],
+      payload: { pull_request: { html_url: url }, review: { id: 701, body: "Human review", submitted_at: new Date(humanReviewAt).toISOString(), user: { login: "reviewer", type: "User" } } },
+    });
+    const humanInline = await seedDelivery({
+      target: { kind: "orchestrator" }, attempts: 2,
+      eventKey: "github.pull_request_review_comment.created", eventKeys: ["github.pull_request_review_comment.*"],
+      payload: { pull_request: { html_url: url }, comment: { id: 702, pull_request_review_id: 701, body: "Inline note", created_at: new Date(humanReviewAt).toISOString(), user: { login: "reviewer", type: "User" } } },
+    });
+    const ownReview = await seedDelivery({
+      target: { kind: "orchestrator" }, attempts: 1,
+      eventKey: "github.pull_request_review.submitted", eventKeys: ["github.pull_request_review.*"],
+      payload: { pull_request: { html_url: url }, review: { id: 703, body: "Valet review", submitted_at: new Date(t0 + 1_000).toISOString(), user: { login: "me", type: "User" } } },
+    });
+
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({
+      db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver,
+    });
+    await dispatcher.pollOnce();
+
+    expect(await getDelivery(humanReview.deliveryId)).toMatchObject({ status: "delivered", attempts: 4 });
+    expect(await getDelivery(humanInline.deliveryId)).toMatchObject({ status: "delivered", attempts: 3 });
+    expect(await getDelivery(ownReview.deliveryId)).toMatchObject({ status: "skipped", attempts: 2 });
+    expect(deliver).toHaveBeenCalledTimes(2);
   });
 
   it("keeps a Slack event with no thread to reply into on its channel's events thread", async () => {
