@@ -49,8 +49,8 @@ Decisions (locked in during brainstorming):
 
 - **Consumers:** all four — workflow triggers, orchestrator prompts,
   running-run signals, API/UI feed.
-- **Linear setup:** Linear OAuth app; webhook created automatically via
-  Linear's API on connect.
+- **Linear setup:** organization app configured with `client_credentials`;
+  Linear owns the app webhook (see Organization Linear application setup below).
 - **Filter model:** namespaced event key + structured declarative filters on
   catalog-declared fields.
 - **Source contract:** plugin-level (`TriggerDef` evolution) — GitHub and
@@ -482,12 +482,14 @@ does not expect an instruction to hold for the whole conversation.
 
 Personal Linear OAuth enables MCP tools, including `linear.save_issue`. It does
 not install a webhook. Events such as `linear.issue.update` require the separate
-organization connection. Organization settings expose the existing Linear OAuth
-setup, which registers that webhook. The callback returns to this settings page.
+organization connection. An admin configures the app in Organization settings >
+Linear using the `client_credentials` setup below; there is no browser approval
+callback or `webhookCreate` call.
 
 Trigger catalogs show incoming event labels and organization readiness. Readiness
-requires an installation, an organization credential with a signing secret, and a
-registered webhook ID. It does not prove that Linear delivered a particular event.
+requires an installation and an organization credential with a signing secret;
+the credential's workspace ID must match when present. No webhook ID is required.
+Readiness does not prove that Linear delivered a particular event.
 Creation and activation report missing setup instead of accepting an event source
 that cannot receive events. Template installation uses the same check. Repository
 imports keep workflow definitions but leave missing-ingress triggers unarmed with

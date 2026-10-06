@@ -276,14 +276,16 @@ session resolver). Without it, private-channel reads and `slack.dm_owner`
 fail with "Owner has not linked their Slack identity" even when the owner
 is linked — the failure mode of run `wfrun_mt1kva4i5wqesi`.
 
-Team- and org-owned runs get no enrichment. Private-channel actions require an
-authorized personal scope. A member's identity link does not grant access to a
-shared team run. The denial directs the caller to a public channel or a personal
-run owned by a linked channel member. It does not ask the team to link an identity.
+Team- and org-owned runs get no personal identity enrichment. They can access
+private channels when the connected bot's membership is verified. The access
+check uses `conversations.info.is_member`; if absent, it searches the bot's
+paginated `users.conversations` list. A member's personal identity link grants
+no additional access to the shared run. Unverified membership is denied with an
+instruction to invite Valet to the channel.
 `slack.list_channels` returns its scope, visibility, and an access note.
-An empty list does not prove that the bot needs another invitation.
-`scope="all"` lists public channels only; personal private discovery uses `scope="joined"`.
-Shared owners exclude private channels even if a credential contains personal identity metadata.
+`scope="all"` lists public channels only; `scope="joined"` includes private
+channels joined by the bot for shared owners. Personal private discovery still
+requires the linked owner's membership.
 
 The org bot credential supports public-channel reads and `slack.dm_user` sends
 without a personal identity link. Shared runs cannot read DM or group DM history,
@@ -308,7 +310,7 @@ or a valid implicit DM recipient.
 | --- | --- |
 | `identity-links.ts` Telegram routes | Migrate to the generic provider-parameterized routes; delete the hardcoded handlers. |
 | `github-connect.ts`, `github-app.ts` | Stay. Locked constraint from the integration-oauth design: the GitHub App flow (installations, repo bindings, token tiers) is not a credential connect. |
-| `linear-connect.ts` | Stays, as a documented exception. It is org-admin-gated and its callback performs app-table side effects (`linear_installations` upsert, workspace webhook creation) that a plugin manifest cannot reach. Making it plugin-forward needs an org-scoped connect variant with a host-side post-connect capability — a separate design if ever wanted. |
+| `linear-connect.ts` | Stays, as a documented exception. It is org-admin-gated, verifies app credentials with `client_credentials`, and stores the app, organization credential, and `linear_installations` mapping. Linear owns the app webhook; there is no browser approval callback or `webhookCreate` call. See [Organization Linear application setup](2026-07-20-event-system-design.md#organization-linear-application-setup-2026-09-29). |
 | `slack-app.ts` | Stays. Org manifest handout, not OAuth. |
 | `slack-webhook.ts` | Stays. Dedicated for documented reasons (challenge echo, dedupe, workspace gate). |
 

@@ -33,10 +33,6 @@ export function WorkflowApprovalItem({
               <ShieldAlert className="h-3 w-3" aria-hidden />
               {policy ? "Tool permission" : "Workflow approval"}
             </span>
-            {/* The run's OWN snapshot names this assistant, so re-pinning
-                the workflow while the run waits does not move the badge
-                beside a permission decision. Absent means the snapshot pins
-                none, and the owner's default assistant runs it. */}
             <OwnerBadge
               ownerType={item.owner.type}
               ownerId={item.owner.id}

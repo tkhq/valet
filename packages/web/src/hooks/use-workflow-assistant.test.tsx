@@ -19,7 +19,7 @@ beforeEach(() => {
 describe("workflow editor conversation", () => {
   it("opens through the server without browser storage or an automatic prompt", async () => {
     const storage = vi.spyOn(Storage.prototype, "setItem");
-    const { result } = renderHook(() => useWorkflowAssistant("a", "A", routing), { wrapper });
+    const { result } = renderHook(() => useWorkflowAssistant("a", routing), { wrapper });
     expect(result.current.opening).toBe(true);
     await waitFor(() => expect(result.current.threadId).toBe("thread:a"));
     expect(result.current.sessionId).toBe("session");
@@ -28,17 +28,17 @@ describe("workflow editor conversation", () => {
     storage.mockRestore();
   });
   it("revalidates on remount and returns the server's stable identifiers", async () => {
-    const first = renderHook(() => useWorkflowAssistant("a", "A", routing), { wrapper });
+    const first = renderHook(() => useWorkflowAssistant("a", routing), { wrapper });
     await waitFor(() => expect(first.result.current.threadId).toBe("thread:a"));
     first.unmount();
-    const second = renderHook(() => useWorkflowAssistant("a", "A", routing), { wrapper });
+    const second = renderHook(() => useWorkflowAssistant("a", routing), { wrapper });
     await waitFor(() => expect(second.result.current.threadId).toBe("thread:a"));
     expect(ensure).toHaveBeenCalledTimes(2);
   });
   it("isolates navigation from a late response for another workflow", async () => {
     let finish: (value: { sessionId: string; threadId: string }) => void = () => {};
     ensure.mockImplementation(id => id === "a" ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ sessionId: "b", threadId: "thread:b" }));
-    const { result, rerender } = renderHook(({ id }) => useWorkflowAssistant(id, id, routing), { wrapper, initialProps: { id: "a" } });
+    const { result, rerender } = renderHook(({ id }) => useWorkflowAssistant(id, routing), { wrapper, initialProps: { id: "a" } });
     rerender({ id: "b" });
     expect(result.current.threadId).toBeUndefined();
     await waitFor(() => expect(result.current.threadId).toBe("thread:b"));
@@ -48,7 +48,7 @@ describe("workflow editor conversation", () => {
   });
   it("shows a corrective error and retries the failed server request", async () => {
     ensure.mockRejectedValueOnce(new Error("offline"));
-    const { result } = renderHook(() => useWorkflowAssistant("a", "A", routing), { wrapper });
+    const { result } = renderHook(() => useWorkflowAssistant("a", routing), { wrapper });
     await waitFor(() => expect(result.current.error).toContain("Retry"));
     expect(result.current.opening).toBe(false);
     act(() => result.current.retry());
@@ -56,11 +56,11 @@ describe("workflow editor conversation", () => {
     expect(result.current.error).toBeUndefined();
   });
   it("hides previously cached identifiers when access is revoked", async () => {
-    const first = renderHook(() => useWorkflowAssistant("a", "A", routing), { wrapper });
+    const first = renderHook(() => useWorkflowAssistant("a", routing), { wrapper });
     await waitFor(() => expect(first.result.current.threadId).toBe("thread:a"));
     first.unmount();
     ensure.mockRejectedValue(new Error("404"));
-    const second = renderHook(() => useWorkflowAssistant("a", "A", routing), { wrapper });
+    const second = renderHook(() => useWorkflowAssistant("a", routing), { wrapper });
     await waitFor(() => expect(second.result.current.error).toContain("Retry"));
     expect(second.result.current.threadId).toBeUndefined();
     expect(second.result.current.sessionId).toBeUndefined();

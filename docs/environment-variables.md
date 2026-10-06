@@ -304,23 +304,17 @@ semantics.
 
 ## Linear
 
-Personal Linear connections enable MCP tools. The organization's native Linear
-connection starts workflows from Linear events. It needs no environment
-variables: an organization admin creates a Linear app and saves it in
-Settings > Organization > Linear.
+Personal Linear connections enable MCP tools. An organization admin configures
+native event delivery in Settings > Organization > Linear. See
+[Organization Linear application setup](specs/2026-07-20-event-system-design.md#organization-linear-application-setup-2026-09-29)
+for app creation, credential verification, and token renewal.
 
 | Variable | Description |
 |----------|-------------|
-| `VALET_PUBLIC_URL` | Public HTTPS API base URL. Linear delivers app webhooks only to a public HTTPS URL |
+| `VALET_PUBLIC_URL` | Public HTTPS API base URL. Local webhook delivery needs a public HTTPS tunnel |
 
-1. As an organization admin, open Settings > Organization > Linear.
-2. Open the prefilled Linear app creation form, and create the app.
-3. Paste the app's client ID, client secret, and webhook signing secret. Then choose Connect Linear.
-
-Valet checks the client ID and secret with a `client_credentials` token before it
-saves them. It renews that 30-day token before it expires. `LINEAR_CLIENT_ID` and
-`LINEAR_CLIENT_SECRET` are no longer read. Local development needs a public HTTPS
-tunnel for webhook delivery.
+`LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are no longer read; app credentials
+are stored through Organization settings.
 
 ## Channels
 

@@ -180,7 +180,7 @@ function WorkflowEditorPane({
   const revokePermissions = useRevokeWorkflowPermissions(workflowId);
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
-  const assistant = useWorkflowAssistant(workflowId, initialName, { ownerType, ownerId });
+  const assistant = useWorkflowAssistant(workflowId, { ownerType, ownerId });
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
   useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);

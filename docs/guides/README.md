@@ -9,9 +9,8 @@ are about to do.
 | [Building a feature](./building-a-feature.md) | Your change cuts through the stack, and you want the build order |
 | [Data fetching](./data-fetching.md) | You are reading or writing server state in `packages/web` |
 | [Styling](./styling.md) | You are building or restyling UI |
-| [Reusing components](./components.md) | You are about to build a UI element, or you found two versions of one |
 | [Web performance](./web-performance.md) | A page feels slow, or you are about to reach for `memo` |
 
-The last four cover `packages/web` only. [CLAUDE.md](../../CLAUDE.md) remains
+The last three cover `packages/web` only. [CLAUDE.md](../../CLAUDE.md) remains
 the source for repo-wide rules: the locked architecture decisions, the dev loop,
 the writing standard, and the traps we have already hit.

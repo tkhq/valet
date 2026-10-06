@@ -196,7 +196,7 @@ docs/plans/         # implementation plans
 docs/guides/        # contributor guides — read these before a first change
 ```
 
-- [docs/guides/](docs/guides/README.md) carries the conventions this file only summarizes: which package a new file belongs to, the build order for a change that cuts through the stack, and — for `packages/web` — data fetching, styling, component reuse, and performance. Before building a UI element, reuse or extend a primitive in `src/components/primitives/` ([components guide](docs/guides/components.md)), and delete the code a change replaces.
+- [docs/guides/](docs/guides/README.md) carries the conventions this file only summarizes: which package a new file belongs to, the build order for a change that cuts through the stack, and — for `packages/web` — data fetching, styling, component reuse, and performance. Before building a UI element, reuse or extend a primitive in `src/components/primitives/` ([styling guide](docs/guides/styling.md#reusing-feature-components)), and delete the code a change replaces.
 - Web tool renderers (`packages/web/src/components/session/tool-renderers/`) are a registry — new renderer file + list it before the fallback in `index.ts`.
 - Optimistic UI messages must carry the active `threadId` (null + fallback matching leaked bubbles across threads).
 - Superpowers design specs → `docs/specs/YYYY-MM-DD-<topic>-design.md`; plans → `docs/plans/YYYY-MM-DD-<topic>.md`.

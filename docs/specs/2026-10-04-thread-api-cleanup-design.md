@@ -39,6 +39,8 @@ Slack acknowledges verification only after encrypted durable inbox admission. St
 
 ## Current UI and approval contracts
 
+Workflow editor conversations use the workflow ID and owner scope. The server supplies the session and thread; the browser revalidates access before displaying them.
+
 Thread search matches literal title/message text within the current workspace and existing audience filters. It excludes tool output/reasoning, limits queries to 500 characters, and debounces requests by 250ms. Selection follows thread identity as results arrive.
 
 Chat gates use the composer column and shared primitives. Pending actions disable duplicate submissions, errors retain input, and reasons remain wrapped. Ordinary workflow approval submits directly; workflow-wide permission keeps confirmation. Scope, named-lender, iteration, and authorization checks remain enforced. Question fields submit with Command/Control+Enter, excluding empty, pending, repeated, and composing input; plain Enter adds a newline.

@@ -7,13 +7,11 @@ export interface WorkflowAssistant {
   opening: boolean;
   error?: string;
   retry: () => void;
-  stage: "session" | "thread";
 }
 
 /** The server resolves the workflow owner and its durable editor thread. */
 export function useWorkflowAssistant(
   workflowId: string,
-  _workflowName: string,
   routing: { ownerType: string; ownerId: string },
 ): WorkflowAssistant {
   const conversation = useWorkflowConversation(workflowId, routing.ownerType, routing.ownerId);
@@ -28,6 +26,5 @@ export function useWorkflowAssistant(
       ? "Cannot open this workflow conversation. Use Retry to try again."
       : undefined,
     retry,
-    stage: "thread",
   };
 }
