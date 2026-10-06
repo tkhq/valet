@@ -460,7 +460,7 @@ const listChannels = action(Type.Object({
   }))({
   id: 'slack.list_channels',
   name: 'List Channels',
-  description: 'List Slack channels available to this run. "joined" lists bot member channels; "all" lists public channels only. Team and organization runs exclude private channels, even when the bot is invited. Personal runs require a linked Slack identity and channel membership for private access. Read access_note before suggesting another invitation. Use prefix to filter channel names.',
+  description: 'List Slack channels available to this run. "joined" lists bot member channels; "all" lists public channels only. Team and organization runs can access private channels where the connected bot is a member. Personal runs require a linked Slack identity and channel membership for private access. Read access_note before suggesting another invitation. Use prefix to filter channel names.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -515,14 +515,14 @@ const listChannels = action(Type.Object({
         const deniedIds = new Set(accessChecks.filter((c) => !c.allowed).map((c) => c.id));
         channels = channels.filter((ch) => !deniedIds.has(ch.id));
       }
-    } else {
-      // Shared runs cannot borrow a member's private access.
+    } else if (!sharedOwner) {
+      // Personal runs need a linked member identity.
       channels = channels.filter((ch) => ch.is_private !== true);
     }
 
-    const visibility = wantAll || sharedOwner || !ownerSlackId ? 'public_only' : 'public_and_authorized_private';
+    const visibility = wantAll || (!sharedOwner && !ownerSlackId) ? 'public_only' : 'public_and_authorized_private';
     const accessNote = sharedOwner
-      ? 'Team and organization runs exclude private channels. Inviting the bot does not change this restriction. Use a public channel or a personal run owned by a linked channel member.'
+      ? wantAll ? 'scope="all" lists public channels only. Use scope="joined" for private channels where the bot is a member.' : 'Private channels are included where the connected bot is a member. Team and organization runs use bot membership, not a person’s private access. Direct messages remain restricted.'
       : !ownerSlackId
         ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Settings → Connected accounts. Then use scope="joined".'
         : wantAll

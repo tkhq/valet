@@ -437,7 +437,7 @@ describe('slack actions', () => {
     });
   });
 
-  it.each(['team', 'org'] as const)('list_channels explains shared %s restrictions even with personal metadata', async (type) => {
+  it.each(['team', 'org'] as const)('list_channels includes bot-joined private channels for %s without personal metadata', async (type) => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, {
       ok: true, channels: [
         { id: 'C1', name: 'general', is_private: false },
@@ -446,15 +446,14 @@ describe('slack actions', () => {
     }));
     const result = await action('slack.list_channels').execute({}, pluginCtx({
       owner: { type, id: 'shared1' },
-      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U1' } }),
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token' }),
     }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ success: true, data: {
-      channels: [{ id: 'C1' }], total: 1, visibility: 'public_only',
-      access_note: expect.stringContaining('Inviting the bot does not change this restriction'),
+      channels: [{ id: 'C1' }, { id: 'C2' }], total: 2, visibility: 'public_and_authorized_private',
+      access_note: expect.stringContaining('bot is a member'),
     } });
-    expect(JSON.stringify(result)).not.toContain('secret');
-    expect(JSON.stringify(result)).not.toContain('C2');
+    expect(JSON.stringify(result)).toContain('secret');
   });
 
   it('list_channels explains that all means public and joined is needed for authorized private channels', async () => {

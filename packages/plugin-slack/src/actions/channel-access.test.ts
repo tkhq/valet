@@ -71,15 +71,31 @@ describe('checkPrivateChannelAccess', () => {
     expect(slackGetMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['team', 'org'] as const)('denies private channels for %s owners even with member metadata', async (ownerType) => {
-    slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'C123', is_private: true } }));
-    const result = await checkPrivateChannelAccess('xoxb-token', 'C123', 'UMEMBER', { ownerType });
-    expect(result).toEqual({
-      allowed: false,
-      isPrivate: true,
-      error: 'This run cannot access private Slack conversations. Use a public channel or a personal run owned by a linked conversation member.',
-    });
+  it.each(['team', 'org'] as const)('allows invited private channels for %s owners without borrowing member identity', async (ownerType) => {
+    slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'C123', is_private: true, is_member: true } }));
+    const result = await checkPrivateChannelAccess('xoxb-token', 'C123', undefined, { ownerType });
+    expect(result).toEqual({ allowed: true, isPrivate: true });
     expect(slackGetMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false])('denies shared private access without verified bot membership (%s)', async (is_member) => {
+    slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'C123', is_private: true, is_member } }));
+    const result = await checkPrivateChannelAccess('xoxb-token', 'C123', 'UMEMBER', { ownerType: 'team' });
+    expect(result).toMatchObject({ allowed: false, isPrivate: true });
+    expect(result.error).toContain('Invite Valet');
+  });
+
+  it('verifies missing is_member using the bot joined list, including pagination', async () => {
+    slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'C123', is_private: true } }))
+      .mockResolvedValueOnce(mockSlackResponse({ channels: [], response_metadata: { next_cursor: 'page2' } }))
+      .mockResolvedValueOnce(mockSlackResponse({ channels: [{ id: 'C123' }] }));
+    expect(await checkPrivateChannelAccess('xoxb-token', 'C123', undefined, { ownerType: 'team' })).toMatchObject({ allowed: true, isPrivate: true });
+    expect(slackGetMock).toHaveBeenLastCalledWith('users.conversations', 'xoxb-token', { types: 'private_channel', limit: 200, cursor: 'page2' });
+  });
+  it('fails closed when bot membership cannot be verified', async () => {
+    slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'C123', is_private: true } }))
+      .mockResolvedValueOnce(mockSlackError('missing_scope'));
+    expect(await checkPrivateChannelAccess('xoxb-token', 'C123', undefined, { ownerType: 'team' })).toMatchObject({ allowed: false, error: expect.stringContaining('groups:read') });
   });
 
   it.each((['team', 'org'] as const).flatMap((ownerType) =>

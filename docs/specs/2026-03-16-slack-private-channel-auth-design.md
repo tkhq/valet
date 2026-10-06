@@ -37,11 +37,12 @@ direct message, and for a denied check. See the channel name section of
 
 Logic:
 1. Call `conversations.info` to get channel metadata
-2. If `is_im` or `is_mpim` (DMs/group DMs) → always allowed, not subject to this check
+2. Shared owners cannot read DMs or group DMs. Personal callers can require linked-owner membership for these conversations.
 3. If `is_private === false` → allowed (public channels always pass)
-4. If private and no `ownerSlackUserId` → denied ("Owner has not linked their Slack identity")
-5. If private, paginate `conversations.members` to check if `ownerSlackUserId` is in the list
-6. Found → allowed. Not found → denied ("You don't have access to this private channel")
+4. For team and organization runs, private channels require verified bot membership. Use `conversations.info.is_member` or the paginated bot `users.conversations` list. Never supply a personal user ID.
+5. For personal runs, if private and no `ownerSlackUserId` → denied ("Owner has not linked their Slack identity")
+6. For personal runs, if private, paginate `conversations.members` to check if `ownerSlackUserId` is in the list
+7. Found → allowed. Not found → denied ("You don't have access to this private channel")
 
 ### Action-level enforcement
 
@@ -89,9 +90,9 @@ The user's Slack ID is already available at this point (`slackUserId` from the e
 - No caching for now — API calls are cheap and correctness matters more than latency
 - Inbound webhook path already makes multiple Slack API calls; one more is negligible
 
-### Future: org orchestrators
+### Shared orchestrators and workflows
 
-Org orchestrators (not yet implemented) will need an exemption from this check since they act as shared automation agents not tied to a single user. Leave a code comment noting this.
+Team and organization runs use bot membership for private channels. Bot invitation grants this channel capability. DMs remain restricted. Personal runs still require linked-owner membership. The default joined channel list includes bot-joined private channels. The all-channel scope lists only public channels. Missing bot scopes return an error with reinstall instructions. Inbound Slack messages still require a linked Valet account.
 
 ## Scope
 
