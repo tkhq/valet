@@ -252,6 +252,7 @@ export function graphSignature(definition: WorkflowDefinition): string {
     nodes: definition.nodes,
     edges: definition.edges,
     policy: definition.policy ?? null,
+    presence: definition.presence ?? null,
   });
 }
 

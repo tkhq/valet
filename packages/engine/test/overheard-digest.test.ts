@@ -253,6 +253,43 @@ describe("overheard digest: queue coalescing", () => {
     faux.unregister();
   });
 
+  it("keeps custom-presence submissions outside default overheard digests", async () => {
+    const faux = registerFauxProvider({ provider: "digest-presence" });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      const plain = await thread.submitPrompt(overheardSignal({ body: "plain" }), {});
+      const custom = await thread.submitPrompt(overheardSignal({ body: "custom" }), { metadata: { presence: { displayName: "Automation" } } });
+      const customAgain = await thread.submitPrompt(overheardSignal({ body: "custom again" }), { metadata: { presence: { displayName: "Automation" } } });
+      const digest = await thread.submitPrompt(overheardSignal({ body: "plain again" }), {});
+      expect((await store.getQueueItem(session.id, plain.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+      for (const receipt of [custom, customAgain]) {
+        expect(await store.getQueueItem(session.id, receipt.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+      }
+      const content = (await store.getQueueItem(session.id, digest.queueItemId))?.content;
+      if (!content || typeof content !== "object" || !("kind" in content)) throw new Error("Expected a digest signal");
+      expect(content.body.split("\n").sort()).toEqual([OVERHEARD_DIGEST_HEADER, "plain", "plain again"].sort());
+    } finally {
+      faux.unregister();
+    }
+  });
+
+  it("queues custom presence separately when collect mode is requested", async () => {
+    const faux = registerFauxProvider({ provider: "collect-presence" });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      const receipt = await thread.submitPrompt("custom", { queueMode: "collect", metadata: { presence: { displayName: "Automation" } } });
+      expect(await store.getQueueItem(session.id, receipt.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+    } finally {
+      faux.unregister();
+    }
+  });
+
   it("preserves the digest actor and never merges different actors", async () => {
     const faux = registerFauxProvider({ provider: "digest-actor" });
     const { engine, store } = makeEngine();

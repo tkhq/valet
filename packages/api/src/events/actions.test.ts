@@ -35,6 +35,14 @@ describe("eventsActionPlugin", () => {
     ]);
   });
 
+  it("persists proposal presence and rejects invalid avatar URLs", async () => {
+    const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const input = { proposal_key: "presence", name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper", avatarUrl: "https://example.com/a.webp" } };
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { config: { target: { presence: input.presence } } } } });
+    expect(await tool.execute({ ...input, proposal_key: "bad-presence", presence: { avatarUrl: "http://example.com/a" } }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("HTTPS") });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+  });
+
   it("stores one disabled proposal per owner and preserves enabled configuration on retry", async () => {
     const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
     const input = { proposal_key: "pulls", name: "Pulls", event_keys: ["github.pull_request.opened"] };

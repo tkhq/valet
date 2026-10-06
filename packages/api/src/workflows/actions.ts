@@ -629,6 +629,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     Type.Object({
       workflow_id: Type.String(),
       name: Type.Optional(Type.String()),
+      presence: Type.Optional(Type.Union([Type.Object({
+        displayName: Type.Optional(Type.String()),
+        avatarUrl: Type.Optional(Type.String()),
+      }), Type.Null()])),
       upsert_nodes: Type.Optional(Type.Array(Type.Unknown())),
       remove_node_ids: Type.Optional(Type.Array(Type.String())),
       add_edges: Type.Optional(
@@ -656,13 +660,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Patch workflow",
     description:
       "Edit a workflow WITHOUT re-sending the whole definition: rename, upsert single nodes " +
-      "(replace-by-id or append), remove nodes (their edges go too), add/remove edges. " +
+      "(replace-by-id or append), remove nodes (their edges go too), add/remove edges, or set presence. " +
+      "Presence replaces the channel identity; null clears it. " +
       "Prefer this over save_workflow for small edits — the patched result runs the full " +
       "linter, so a bad patch returns lint errors instead of saving. The linter reads the " +
       "WHOLE merged definition, so an error in a node you did not touch also blocks the " +
       "patch; the reply names those errors as pre-existing.",
     riskLevel: "medium",
-    execute: async ({ workflow_id, name, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
+    execute: async ({ workflow_id, name, presence, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
@@ -680,6 +685,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       }
 
       const patched = applyWorkflowPatch(stored as WorkflowDefinition, {
+        presence,
         upsertNodes: upsert_nodes,
         removeNodeIds: remove_node_ids,
         addEdges: add_edges as WorkflowEdge[] | undefined,

@@ -8,6 +8,7 @@
  * Scoped deliberately to workflow targets: orchestrator/signal
  * subscriptions have their own management surface (`/api/event-subscriptions`).
  */
+import type { Presence } from "@valet/shared";
 import { linearEventArmBlock } from "../services/linear-ingress.js";
 import { proposalId } from "../events/proposals.js";
 import { randomUUID } from "node:crypto";
@@ -82,10 +83,10 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
 export async function createWorkflowTrigger(
   deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
-  input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
+  input: { workflowId: string; name: string; presence?: Presence; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const db = deps.db;
-  const target = { kind: "workflow" as const, workflowId: input.workflowId };
+  const target = { kind: "workflow" as const, workflowId: input.workflowId, ...(input.presence !== undefined ? { presence: input.presence } : {}) };
   const write = await validateSubscriptionWrite(
     db,
     deps.plugins,

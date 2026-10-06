@@ -23,6 +23,7 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
     "@valet/engine": "workspace:*",
+    "@valet/shared": "workspace:*",
     "typebox": "^1.1.24"
   },
   "devDependencies": {

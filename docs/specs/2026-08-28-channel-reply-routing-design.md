@@ -191,11 +191,20 @@ and `signal` records engine-routed admissions.
   the same line renders. If a gap remains on the events path, close it here.
 - **Outbound identity (TKAI-387).** Host deliveries and Slack actions resolve
   the current workspace name. Team and organization runs use their owner's
-  name. Personal runs use the bot identity.
+  name. Personal runs use the bot identity. Workflows may set
+  `definition.presence: { displayName?, avatarUrl? }`; event subscriptions may
+  set `target.presence` for either an assistant or workflow target. Fields
+  inherit in order: workspace, workflow, subscription, explicit action arguments.
+  The editor exposes these as Presence settings. Clearing a field restores its
+  inherited default. Settings change appearance, never the runtime owner.
+  Runs retain the definition and subscription presence captured at admission;
+  assistant turns carry presence in durable submission metadata. Followed Slack
+  replies read the bound subscription's current settings. No schema migration
+  or rewrite of existing definitions, chats, files, or memories is required.
   `reply_to_origin`, `send_message`, `dm_owner`, and `dm_user` accept optional
   `sender_name` and `sender_avatar_url` parameters. Each parameter overrides
   its default for that message. Workflow tool steps persist these parameters.
-  An upstream `set` node can hold a shared identity for downstream Slack steps.
+  Existing per-step overrides continue to work.
   Agent steps pass the same parameters through their tool calls.
   These settings do not change credentials, permissions, or the bot's DM identity.
   `profile_pictures.publish_avatar` converts a current-chat image attachment
@@ -204,9 +213,9 @@ and `signal` records engine-routed admissions.
   The existing profile-picture normalizer bounds the size, removes metadata,
   and writes a WebP copy. Only this copy is public under `/avatars/workflows/`.
   The publication tool uses the normal high-risk action approval path.
-  Workflow authors store its URL in `sender_avatar_url`; later runs do not
+  Workflow authors store its URL in `presence.avatarUrl`; later runs do not
   depend on the source chat. Retries reuse the same source-scoped content key.
-  Automatic replies and approval cards keep their existing workspace identity.
+  Automatic replies and approval cards use the asking submission's presence.
   Slack maps the display name and avatar URL to `username` and `icon_url` on
   `chat.postMessage`, using `chat:write.customize`. Names have an 80-character
   limit. Avatar URLs must use HTTPS and be accessible to Slack.

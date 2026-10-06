@@ -80,6 +80,10 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),
     ], { description: "Personal target only: choose whether matching team subscriptions suppress delivery." })),
     pause_on_overlap: Type.Optional(Type.Boolean({ description: "Personal target only: pause following when a team subscription covers the thread." })),
+    presence: Type.Optional(Type.Object({
+      displayName: Type.Optional(Type.String()),
+      avatarUrl: Type.Optional(Type.String()),
+    })),
     user_prompt_template: Type.Optional(Type.String()),
     system_prompt: Type.Optional(Type.String()),
     audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
@@ -115,6 +119,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         ...(follow !== undefined ? { follow } : {}),
         ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
         ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
+        ...(input.presence !== undefined ? { presence: input.presence } : {}),
         ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
         ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
       };

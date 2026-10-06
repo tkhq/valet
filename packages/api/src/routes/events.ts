@@ -734,6 +734,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // Validated jsonb narrows to the wire union, as before; old rows may also carry `assistantId`.
   const { assistantId: _retired, ...storedTarget } = row.target as EventSubscriptionTargetWire & { assistantId?: unknown };
   let patchedTarget: EventSubscriptionTargetWire = storedTarget;
+  if (body.presence === null) {
+    const { presence: _cleared, ...rest } = patchedTarget;
+    patchedTarget = rest;
+  } else if (body.presence !== undefined) {
+    patchedTarget = { ...patchedTarget, presence: body.presence };
+  }
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
     if (row.ownerType !== "user" || patchedTarget.kind !== "orchestrator") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
     patchedTarget = { ...patchedTarget,

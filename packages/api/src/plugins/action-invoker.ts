@@ -1,3 +1,4 @@
+import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * Headless ActionInvoker (plugin-system-v2 plan Task 6) — the real
  * implementation behind the workflow `tool` node's `engine.invokeAction`
@@ -83,6 +84,7 @@ const ACTION_TIMEOUT_MS = 120_000;
  * resolves this from the run and passes it in.
  */
 export interface ActionInvocationContext {
+  presence?: Presence;
   userId: string;
   orgId: string;
   owner: Principal;
@@ -950,6 +952,7 @@ function buildActionContext(
   db: AppDb,
 ): PluginActionContext {
   const sessionId = `wf:invoke:${req.invocationId}`;
+  const presence = mergePresence(readPresence(ctx.presence));
   return {
     userId: ctx.userId,
     orgId: ctx.orgId,
@@ -965,7 +968,7 @@ function buildActionContext(
     summary: undefined,
     credentials,
     // Workflow actions use the same owner identity as session-backed actions.
-    resolveOutboundSender: () => workspaceSenderIdentity(db, ctx.orgId, ctx.owner),
+    resolveOutboundSender: async () => mergePresence(await workspaceSenderIdentity(db, ctx.orgId, ctx.owner), presence),
     sandbox: throwingSandbox(sessionId),
     // Unlike the capabilities stubbed out below, document extraction is
     // genuinely available here: it is a pure call over bytes against the

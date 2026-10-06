@@ -29,6 +29,12 @@ function definition(overrides: Partial<WorkflowDefinition>): WorkflowDefinition 
 }
 
 describe('validateWorkflowDefinition', () => {
+  it('validates optional channel presence', () => {
+    expect(validateWorkflowDefinition(definition({ presence: { displayName: 'Helper', avatarUrl: 'https://example.com/a.webp' } }))).toEqual({ ok: true });
+    const invalid = validateWorkflowDefinition(definition({ presence: { avatarUrl: 'http://example.com/a.webp' } }));
+    expect(invalid).toMatchObject({ ok: false, errors: [expect.stringContaining('HTTPS')] });
+  });
+
   it('accepts a valid fixture', () => {
     const result = validateWorkflowDefinition(definition({}));
     expect(result).toEqual({ ok: true });

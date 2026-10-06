@@ -1,3 +1,5 @@
+import { type Presence, validatePresence } from "@valet/shared";
+import { PresenceSettings } from "~/components/presence-settings";
 import { AutomationReview } from "./automation-review";
 import { parseSlackThreadLink } from "./slack-thread-preset";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
@@ -133,6 +135,7 @@ export function AutomationWizard({
   const [outcome, setOutcome] = useState<Outcome>("reply");
   const [threadLink, setThreadLink] = useState("");
   const threadPreset = parseSlackThreadLink(threadLink);
+  const [presence, setPresence] = useState<Presence>({});
   const [name, setName] = useState("");
   const { keys, setKeys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(services);
   const [cron, setCron] = useState("");
@@ -270,6 +273,9 @@ export function AutomationWizard({
 
   function submit(allowCollision = false) {
     if (!canCreate) return;
+    const presenceError = isSchedule ? null : validatePresence(presence);
+    if (presenceError) { setError(presenceError); return; }
+    const presenceFields = Object.keys(presence).length > 0 ? { presence } : {};
     setError(null);
 
     // Shared by both subscription branches: a 409 collision renders the
@@ -319,7 +325,7 @@ export function AutomationWizard({
           // The reply step collects the same optional templates the Then step
           // collects for the other assistant outcomes. Empty fields are left
           // off, so the rule posts the target it always did.
-          target: { ...mentionTarget, follow, ...promptFieldsToTarget(promptTemplates), ...(mentionTarget.orchestrator === "user" ? deliveryPreferences : {}) },
+          target: { ...mentionTarget, ...presenceFields, follow, ...promptFieldsToTarget(promptTemplates), ...(mentionTarget.orchestrator === "user" ? deliveryPreferences : {}) },
           // Only a team assistant has an audience; the server refuses one
           // on any other target.
           ...(mentionTarget.orchestrator === "team" ? { audience } : {}),
@@ -354,7 +360,7 @@ export function AutomationWizard({
           name: name.trim(),
           eventKeys: [...keys],
           filters,
-          target: eventTarget,
+          target: { ...eventTarget, ...presenceFields },
           // The raw picker can select `slack.app_mention` too; the flag only
           // means anything there, and the server ignores it elsewhere.
           ...(anyChannel && keys.has(SLACK_APP_MENTION) ? { anyChannel: true } : {}),
@@ -484,6 +490,8 @@ export function AutomationWizard({
           {isLastStep && !isSchedule && target.kind === "orchestrator" && target.orchestrator === "user" && (
             <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />
           )}
+
+          {isLastStep && !isSchedule && <PresenceSettings value={presence} onChange={setPresence} subscription />}
 
           {isLastStep && (
             <ReviewStep
