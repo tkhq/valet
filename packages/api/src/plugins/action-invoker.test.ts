@@ -547,8 +547,10 @@ describe("buildActionInvoker", () => {
     }
   });
 
-  it("team workflow sends an explicit DM without borrowing the invoking member's identity", async () => {
+  it.each(["u1", "team:t1"])("team workflow DM uses the team display name when actor is %s", async (userId) => {
     const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Organization", createdAt: 1 });
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Hestia", createdAt: 1 });
     await linkIdentity(db, { provider: "slack", externalId: "UMEMBER", userId: "u1" });
     const store = new FakeCredentialStore();
     store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
@@ -564,14 +566,14 @@ describe("buildActionInvoker", () => {
     try {
       const result = await invoke(
         { service: "slack", action: "dm_user", params: { user: "URECIPIENT", text: "Hello" }, invocationId: "team-explicit-dm" },
-        { userId: "u1", orgId: "org1", owner: { type: "team", id: "t1" } },
+        { userId, orgId: "org1", owner: { type: "team", id: "t1" } },
       );
       expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "DRECIPIENT" } });
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(fetchMock.mock.calls[0][0]).toContain("conversations.open");
       expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ users: "URECIPIENT" });
       expect(fetchMock.mock.calls[1][0]).toContain("chat.postMessage");
-      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channel: "DRECIPIENT", text: "Hello" });
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channel: "DRECIPIENT", text: "Hello", username: "Hestia" });
       for (const [, init] of fetchMock.mock.calls) {
         expect(init.headers).toMatchObject({ Authorization: "Bearer org-bot" });
       }

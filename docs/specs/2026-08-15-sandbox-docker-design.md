@@ -352,6 +352,7 @@ Mitigations shipped:
   that executable layers work. Docker Desktop LinuxKit 6.10.14 can reject
   execution with `EINVAL` after a successful mount. The probe selects vfs
   if execution fails. It unmounts the probe before removing its files.
+  `scripts/e2e/docker-storage.test.ts` checks driver selection with stubbed mount and privilege boundaries, including successful mounts with failed execution.
 - The manifest sets `hostUsers: false` on docker pods. Kubernetes >= 1.31
   validation requires it for `procMount: Unmasked` and REJECTS the pod
   without it once the ProcMountType gate is on (default from 1.33). On

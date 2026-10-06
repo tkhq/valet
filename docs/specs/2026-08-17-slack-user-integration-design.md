@@ -291,6 +291,12 @@ The org bot credential supports public-channel reads and `slack.dm_user` sends
 without a personal identity link. Shared runs cannot read DM or group DM history,
 even when the bot can access those conversations. `slack.dm_user`
 uses its explicit recipient. It does not infer the workflow creator as recipient.
+Outbound display names follow the run owner. Team runs use the team name;
+organization runs use the organization name. Personal runs use the connected
+bot's default identity. The invoking member does not select the display name.
+These names decorate posts from the organization bot; they do not create
+separate Slack accounts or DM conversations. If Slack rejects the decoration,
+the action retries with the bot's default identity.
 `slack.dm_owner` requires a personal owner. For team and organization runs, its
 error directs the caller to `slack.dm_user` with the intended Slack user ID.
 Shared runs also cannot use `slack.fetch_file`. A private file URL alone does not

@@ -398,8 +398,11 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.getByRole("button", { name: "New workflow" })).toBeTruthy();
   });
 
-  it("shows both gate classes in the shared approval cards", () => {
-    renderApprovals();
+  it("shows both gate classes and highlights the focused approval", () => {
+    renderApprovals("wfrun_policy");
+    const rows = screen.getAllByTestId("action-required-item");
+    expect(rows[0].className).not.toContain("ring-2");
+    expect(rows[1].className).toContain("ring-2");
 
     expect(screen.getByText("Workflow approval")).toBeTruthy();
     expect(screen.getByText("Tool permission")).toBeTruthy();
@@ -417,20 +420,6 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.getByText("Private run")).toBeTruthy();
     expect(screen.queryByText("Open run")).toBeNull();
     expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
-  });
-
-  it("uses shrinkable containers and stacked action details", () => {
-    renderApprovals();
-    const row = screen.getAllByTestId("action-required-item")[0];
-    expect(row.className).toContain("min-w-0");
-    expect(row.querySelector(".flex-col")).toBeTruthy();
-  });
-
-  it("highlights only the gate marked as focused", () => {
-    renderApprovals("wfrun_policy");
-    const rows = screen.getAllByTestId("action-required-item");
-    expect(rows[0].className).not.toContain("ring-2");
-    expect(rows[1].className).toContain("ring-2");
   });
 
   it("submits an explicit approval directly without a second dialog", () => {

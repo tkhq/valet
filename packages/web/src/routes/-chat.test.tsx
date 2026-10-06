@@ -5,7 +5,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import "./chat";
 const capture = vi.hoisted(() => ({ page: undefined as (() => ReactElement) | undefined }));
 const createThread = vi.fn();
-const navigate = vi.fn();
+const navigate = vi.fn<(options: { search: (previous: { thread?: string; workspace?: string }) => { thread?: string; workspace?: string } }) => void>();
 let data: { sessionId: string } | undefined;
 let error: Error | null = null;
 vi.mock("@tanstack/react-router", () => ({
@@ -38,6 +38,8 @@ it("offers a new thread instead of mounting a read-only root when no conversatio
   fireEvent.click(screen.getByRole("button", { name: "New thread" }));
   await waitFor(() => expect(navigate).toHaveBeenCalled());
   expect(createThread).toHaveBeenCalledTimes(1);
+  const [navigation] = navigate.mock.calls[0];
+  expect(navigation.search({ thread: "thread-a", workspace: "team-a" })).toEqual({ thread: "created", workspace: "team-a" });
 });
 it("tells a helper thread's person that only they can see it", () => {
   threadKey = "app-assistant:me"; show();
