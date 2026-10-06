@@ -898,7 +898,7 @@ export const api = {
     ),
 
   // decision gates
-  listNotificationDecisions: () => request<ListNotificationDecisionsResponse>("GET", "/notifications/decisions"),
+  listNotificationDecisions: (cursor?: string) => request<ListNotificationDecisionsResponse>("GET", `/notifications/decisions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
   listDecisions: (sessionId: string) =>
     request<ListDecisionsResponse>(
       "GET",

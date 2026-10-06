@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
@@ -220,4 +220,36 @@ it.each([
   expect((await request(`${resolvePath}/borrow-child/resolve`, "POST", { actionId: "approve" })).status).toBe(200);
   expect((await p.engineStore.getDecisionGate(childId, "borrow-child"))?.status).toBe("resolved");
   for (const path of decisionPaths) expect((await request(path)).status).toBe(404);
+});
+
+it.each(["long question", "Unicode order"])("bounds inbox pages and roundtrips %s gate IDs without skips", async (variant) => {
+  api = await bootTestApi();
+  await pendingGate(api, "paged", "user", "local-user", "local-user");
+  const p = api.providers;
+  const template = await p.engineStore.getDecisionGate("paged", "gate-paged");
+  if (!template) throw new Error("Missing gate fixture");
+  await p.db.execute(sql`DELETE FROM engine_decision_gates WHERE session_id = 'paged'`);
+  const unicode = variant === "Unicode order";
+  const ids = Array.from({ length: unicode ? 101 : 102 }, (_, i) => unicode && i >= 99
+    ? i === 99 ? "\uE000" : "\u{1F600}" : `gate-${String(i).padStart(3, "0")}${i === 99 ? "A".repeat(600) + "\nquestion" : ""}`);
+  for (const [i, id] of ids.entries()) await p.engineStore.saveDecisionGate("paged", template.threadId, {
+    ...template, id, resumeKey: `rk-${i}`,
+    ...(i < (unicode ? 99 : 100) ? { context: { approver: { userId: "another-user" } } } : {}),
+  });
+  const list = vi.spyOn(p.engineStore, "listDecisionGates");
+  const get = vi.spyOn(p.engineStore, "getDecisionGate");
+  const first = await (await fetch(`${api.baseUrl}/api/notifications/decisions`)).json() as ListNotificationDecisionsResponse;
+  expect(first.items.map(item => item.gate.id)).toEqual(unicode ? ["\uE000"] : []);
+  expect(first.nextCursor).toBeTruthy();
+  expect(Buffer.from(first.nextCursor!, "base64url").toString()).not.toContain("gate-099");
+  expect(list).not.toHaveBeenCalled();
+  expect(get).toHaveBeenCalledTimes(100);
+  const second = await (await fetch(`${api.baseUrl}/api/notifications/decisions?cursor=${encodeURIComponent(first.nextCursor!)}`)).json() as ListNotificationDecisionsResponse;
+  expect(second.items.map(item => item.gate.id)).toEqual(unicode ? ["\u{1F600}"] : ["gate-100", "gate-101"]);
+  expect(second.nextCursor).toBeNull();
+  expect((await fetch(`${api.baseUrl}/api/notifications/decisions?cursor=invalid`)).status).toBe(400);
+  expect((await fetch(`${api.baseUrl}/api/notifications/decisions?cursor=${encodeURIComponent(first.nextCursor!)}`, {
+    headers: { "x-valet-test-user-id": "test-member" },
+  })).status).toBe(400);
+  list.mockRestore(); get.mockRestore();
 });

@@ -368,8 +368,8 @@ export function useDecisions(
   });
 }
 
-export function useNotificationDecisions() {
-  return useQuery({ queryKey: ["notification-decisions"], queryFn: api.listNotificationDecisions, refetchInterval: 5000 });
+export function useNotificationDecisions(cursor?: string, enabled = true) {
+  return useQuery({ queryKey: ["notification-decisions", cursor], queryFn: () => api.listNotificationDecisions(cursor), enabled, refetchInterval: 5000 });
 }
 
 export function useResolveDecision(sessionId: string) {

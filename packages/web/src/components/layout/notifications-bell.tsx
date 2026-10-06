@@ -29,10 +29,15 @@ export function NotificationsBell() {
   const [open, setOpen] = useState(false);
   const notifications = useNotifications();
   const workflows = useWorkflowActionRequired();
-  const decisions = useNotificationDecisions();
+  const [decisionCursor, setDecisionCursor] = useState<string>();
+  const summary = useNotificationDecisions();
+  const page = useNotificationDecisions(decisionCursor, open && !!decisionCursor);
+  const decisions = decisionCursor ? page : summary;
+  const moreDecisions = decisions.data?.nextCursor;
+  const partialCount = !!summary.data?.nextCursor;
   const markRead = useMarkNotificationRead();
   const markAllRead = useMarkAllNotificationsRead();
-  const pendingCount = (workflows.data?.count ?? 0) + (decisions.data?.items.length ?? 0);
+  const pendingCount = (workflows.data?.count ?? 0) + (summary.data?.items.length ?? 0);
   // Approval state comes from gates. Historical notification copies do not create another inbox item.
   const updates = groupUpdates((notifications.data?.notifications ?? []).filter(n => n.kind !== "approval"));
   const unread = updates.length;
@@ -40,6 +45,7 @@ export function NotificationsBell() {
   const failed = workflows.isError || decisions.isError;
   function changeOpen(value: boolean) {
     setOpen(value);
+    if (!value) setDecisionCursor(undefined);
     if (value) { void notifications.refetch(); void workflows.refetch(); void decisions.refetch(); }
   }
   async function openUpdate({ latest, ids }: { latest: NotificationSummary; ids: string[] }) {
@@ -49,23 +55,25 @@ export function NotificationsBell() {
   return (
     <Popover open={open} onOpenChange={changeOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="sm" className="relative px-2" aria-label={pendingCount ? `Notifications: ${pendingCount} pending approvals` : "Notifications"}>
+        <Button variant="ghost" size="sm" className="relative px-2" aria-label={pendingCount || partialCount ? `Notifications: ${pendingCount}${partialCount ? "+" : ""} pending approvals` : "Notifications"}>
           <Bell className={`h-4 w-4 ${pendingCount ? "text-warning-fg" : ""}`} aria-hidden />
-          {pendingCount > 0 ? <Badge variant="warning" className="absolute -right-1 -top-1 px-1 py-0 text-[10px]">{pendingCount}</Badge>
+          {pendingCount > 0 || partialCount ? <Badge variant="warning" className="absolute -right-1 -top-1 px-1 py-0 text-[10px]">{pendingCount}{partialCount ? "+" : ""}</Badge>
             : unread > 0 && <StatusDot tone="accent" size="sm" className="absolute right-1 top-1" />}
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" aria-label="Notifications" className="w-[520px] max-h-[min(720px,calc(100dvh-6rem))] bg-paper p-0">
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-paper px-4 py-3">
           <h2 className="font-semibold">Notifications</h2>
-          <Button variant="ghost" size="sm" aria-label="Close notifications" onClick={() => setOpen(false)}><X className="h-4 w-4" /></Button>
+          <Button variant="ghost" size="sm" aria-label="Close notifications" onClick={() => changeOpen(false)}><X className="h-4 w-4" /></Button>
         </div>
         <section aria-label="Needs action" className="space-y-3 p-4">
-          <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Needs action</h3><Badge variant={pendingCount ? "warning" : "neutral"}>{pendingCount}</Badge></div>
+          <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Needs action</h3><Badge variant={pendingCount ? "warning" : "neutral"}>{pendingCount}{partialCount ? "+" : ""}</Badge></div>
           {loading && <p className="text-sm text-muted">Loading approvals…</p>}
           {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button className="underline" onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}
-          {!loading && !failed && pendingCount === 0 && <p className="text-sm text-muted">You're all caught up. No decisions are waiting.</p>}
+          {!loading && !failed && pendingCount === 0 && !moreDecisions && !decisionCursor && <p className="text-sm text-muted">You're all caught up. No decisions are waiting.</p>}
           <ul className="space-y-3">{workflows.data?.items.map(item => <WorkflowApprovalItem key={item.id} item={item} />)}</ul>
+          {decisionCursor && <button className="text-sm underline" onClick={() => setDecisionCursor(undefined)}>First approvals</button>}
+          {moreDecisions && <button className="text-sm underline" onClick={() => setDecisionCursor(moreDecisions)}>Next approvals</button>}
           {decisions.data?.items.map(item => <div key={item.gate.id} className="rounded-lg border border-line pb-3">
             <div className="px-3 pt-3 text-sm font-medium">{item.title}</div>
             <DecisionGateCard sessionId={item.sessionId} gate={item.gate} />

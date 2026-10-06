@@ -338,6 +338,7 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "pending approval pagination", probe: { kind: "index", index: "engine_decision_gates_pending" }, sql: "CREATE INDEX \"engine_decision_gates_pending\" ON \"engine_decision_gates\" (\"created_at\", \"id\" COLLATE \"C\") WHERE \"status\" = 'pending';" },
   { describe: "assistant execution identities", probe: { kind: "table", table: "assistant_executions" }, sql: `CREATE TABLE "assistant_executions" (
   "session_id" text PRIMARY KEY, "assistant_id" text NOT NULL,
   "conversation_key" text NOT NULL, "governing_thread_id" text NOT NULL, "created_at" bigint NOT NULL

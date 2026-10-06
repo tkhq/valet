@@ -16,6 +16,7 @@
  * Preferences mirror `isWebEnabled`'s default in `orchestrator/attention.ts`:
  * a kind with no row reports `web: true` and `teamDm: false`.
  */
+import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { Hono } from "hono";
 import { and, desc, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
@@ -47,61 +48,80 @@ notificationsRouter.get("/decisions", async (c) => {
     ? sql`(${ownerType} = 'team' AND ${ownerId} = ${caller.id})`
     : sql`((${ownerType} = 'team' AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = ${ownerId} AND tm.user_id = ${caller.id}))
         OR (${ownerType} <> 'team' AND ${userId} = ${caller.id}))`;
-  const sessions = await db.select().from(agentSessions).where(and(
-    eq(agentSessions.orgId, c.var.user.orgId),
-    ne(agentSessions.status, "deleted"),
-    reachable(sql`${agentSessions.ownerType}`, sql`${agentSessions.ownerId}`, sql`${agentSessions.userId}`),
-    sql`EXISTS (SELECT 1 FROM engine_decision_gates g WHERE g.session_id = ${agentSessions.id} AND g.status = 'pending')`,
-  ));
+  const encodedCursor = c.req.query("cursor");
+  const cursorKey = deriveSecretKey(JSON.stringify(["approval-inbox", c.var.providers.encryptionKey, c.var.user.orgId, caller.type, caller.id]));
+  let cursor: { createdAt: number; id: string } | undefined;
+  try {
+    if (encodedCursor && encodedCursor.length <= 65_536) {
+      const decoded: unknown = JSON.parse(decryptSecret(Buffer.from(encodedCursor, "base64url").toString("utf8"), cursorKey));
+      if (Array.isArray(decoded) && decoded.length === 2 && typeof decoded[0] === "number" && Number.isSafeInteger(decoded[0])
+        && decoded[0] >= 0 && typeof decoded[1] === "string" && decoded[1].length > 0) {
+        cursor = { createdAt: decoded[0], id: decoded[1] };
+      }
+    }
+  } catch { /* Invalid or foreign cursors fail below. */ }
+  if (encodedCursor && !cursor) {
+    return c.json({ error: "Invalid approval cursor. Reload notifications and try again." }, 400);
+  }
+  const after = cursor ? sql`(g.created_at, g.id COLLATE "C") > (${cursor.createdAt}, ${cursor.id} COLLATE "C")` : sql`TRUE`;
+  const pending = and(sql`g.status = 'pending'`, after);
+  const gateFields = { id: sql<string>`g.id`, createdAt: sql<number>`g.created_at`.mapWith(Number) };
+  const limit = 100;
+  // Page gates, not sessions: a single parked session can contain many gates.
+  const [appRows, workflowRows] = await Promise.all([
+    db.select({ ...gateFields, session: agentSessions }).from(sql`engine_decision_gates g`)
+      .innerJoin(agentSessions, sql`${agentSessions.id} = g.session_id`)
+      .where(and(pending, eq(agentSessions.orgId, c.var.user.orgId), ne(agentSessions.status, "deleted"),
+        reachable(sql`${agentSessions.ownerType}`, sql`${agentSessions.ownerId}`, sql`${agentSessions.userId}`)))
+      .orderBy(sql`g.created_at`, sql`g.id COLLATE "C"`).limit(limit + 1),
+    db.select({ ...gateFields,
+      sessionId: sql<string>`g.session_id`, ownerType: workflowRuns.ownerType, ownerId: workflowRuns.ownerId,
+      title: workflowDefinitions.name, origin: sql<WorkflowRunOrigin | null>`${workflowRuns.params}->'origin'`,
+      actorUserId: workflowRuns.actorUserId, input: sql<unknown>`${workflowRuns.params}->'input'`,
+    }).from(sql`engine_decision_gates g`)
+      .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(g.session_id, ':', 2)`)
+      .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
+      .where(and(pending, eq(workflowDefinitions.orgId, c.var.user.orgId), sql`g.session_id LIKE 'wf:%'`,
+        sql`NOT EXISTS (SELECT 1 FROM agent_sessions a WHERE a.id = g.session_id)`,
+        reachable(sql`${workflowRuns.ownerType}`, sql`${workflowRuns.ownerId}`, sql`${workflowRuns.ownerId}`)))
+      .orderBy(sql`g.created_at`, sql`g.id COLLATE "C"`).limit(limit + 1),
+  ]);
+  const candidates = [
+    ...appRows.map(row => ({ ...row, kind: "app" as const })),
+    ...workflowRows.map(row => ({ ...row, kind: "workflow" as const })),
+  ].sort((a, b) => a.createdAt - b.createdAt || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)));
+  const page = candidates.slice(0, limit);
   const items: ListNotificationDecisionsResponse["items"] = [];
-  // A gate on a thread the viewer may not see, such as another member's
-  // helper thread or a private Slack channel's, stays out of their inbox.
-  for (const session of sessions) {
-    if (!await canResolveSessionGate(db, session, c.var.principal)) continue;
-    const visible = threadsVisibleTo(c, session);
-    const keys = new Map<string, Promise<boolean>>();
-    const gates = await engineStore.listDecisionGates(session.id, undefined, "pending");
-    for (const gate of gates) {
-      // A gate asking to lend a member's account is that member's to answer,
-      // and only theirs, whatever thread asked for it.
+  const authority = new Map<string, Promise<boolean>>();
+  const visibility = new Map<string, Promise<boolean>>();
+  // Limit concurrent authorization/store work; never hydrate or wake an agent.
+  for (let offset = 0; offset < page.length; offset += 10) {
+    const batch = await Promise.all(page.slice(offset, offset + 10).map(async row => {
+      const session = row.kind === "app" ? row.session : {
+        ownerType: row.ownerType, ownerId: row.ownerId, userId: row.ownerType === "user" ? row.ownerId : "",
+      };
+      const sessionId = row.kind === "app" ? row.session.id : row.sessionId;
+      if (!authority.has(sessionId)) authority.set(sessionId, canResolveSessionGate(db, session, caller));
+      if (!await authority.get(sessionId)) return null;
+      const gate = await engineStore.getDecisionGate(sessionId, row.id);
+      if (!gate || gate.status !== "pending") return null;
       const approver = gateApprover(gate);
-      if (approver && (caller.type !== "user" || approver.userId !== caller.id)) continue;
-      if (!approver) {
-        if (!keys.has(gate.threadId)) keys.set(gate.threadId, engineStore.getThread(session.id, gate.threadId).then((t) => t ? visible(t.key) : false));
-        if (!await keys.get(gate.threadId)) continue;
-      }
-      const thread = await engineStore.getThread(session.id, gate.threadId);
-      const canOpenThread = !!thread && await visible(thread.key);
-      items.push({ canOpenThread, sessionId: session.id, title: session.title || "Thread approval", gate: engineGateToWire(gate) });
-    }
+      if (approver && (caller.type !== "user" || approver.userId !== caller.id)) return null;
+      const key = JSON.stringify([sessionId, gate.threadId]);
+      if (!visibility.has(key)) visibility.set(key, row.kind === "app"
+        ? engineStore.getThread(sessionId, gate.threadId).then(thread => thread ? threadsVisibleTo(c, session)(thread.key) : false)
+        : runVisible(c, { ownerType: row.ownerType, origin: row.origin, actorUserId: row.actorUserId, params: { input: row.input } }));
+      const canOpenThread = await visibility.get(key) ?? false;
+      if (!approver && !canOpenThread) return null;
+      return { canOpenThread, sessionId, title: row.kind === "app" ? row.session.title || "Thread approval" : row.title,
+        gate: engineGateToWire(gate) };
+    }));
+    items.push(...batch.filter(item => item !== null));
   }
-  // Workflow agent sessions have no app session row. Their run owns the gates.
-  const workflowSessions = await db.selectDistinct({
-    session_id: sql<string>`g.session_id`,
-    owner_type: workflowRuns.ownerType, owner_id: workflowRuns.ownerId, title: workflowDefinitions.name,
-    origin: sql<WorkflowRunOrigin | null>`${workflowRuns.params}->'origin'`, actor_user_id: workflowRuns.actorUserId,
-    input: sql<unknown>`${workflowRuns.params}->'input'`,
-  }).from(sql`engine_decision_gates g`)
-    .innerJoin(workflowRuns, sql`${workflowRuns.id} = split_part(g.session_id, ':', 2)`)
-    .innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
-    .where(and(eq(workflowDefinitions.orgId, c.var.user.orgId), sql`g.status = 'pending' and g.session_id LIKE 'wf:%'`,
-      reachable(sql`${workflowRuns.ownerType}`, sql`${workflowRuns.ownerId}`, sql`${workflowRuns.ownerId}`)));
-  for (const session of workflowSessions) {
-    if (!await canResolveSessionGate(db, {
-      ownerType: session.owner_type, ownerId: session.owner_id,
-      userId: session.owner_type === "user" ? session.owner_id : "",
-    }, c.var.principal)) continue;
-    const canOpenThread = await runVisible(c, { ownerType: session.owner_type, origin: session.origin, actorUserId: session.actor_user_id, params: { input: session.input } });
-    const gates = await engineStore.listDecisionGates(session.session_id, undefined, "pending");
-    for (const gate of gates) {
-      const approver = gateApprover(gate);
-      if (approver ? caller.type !== "user" || approver.userId !== caller.id : !canOpenThread) continue;
-      if (!items.some(item => item.gate.id === gate.id)) {
-        items.push({ canOpenThread, sessionId: session.session_id, title: session.title, gate: engineGateToWire(gate) });
-      }
-    }
-  }
-  return c.json({ items } satisfies ListNotificationDecisionsResponse);
+  const last = page.at(-1);
+  // Advance past hidden candidates too, without exposing their identifiers.
+  const nextCursor = candidates.length > limit && last ? Buffer.from(encryptSecret(JSON.stringify([last.createdAt, last.id]), cursorKey)).toString("base64url") : null;
+  return c.json({ items, nextCursor } satisfies ListNotificationDecisionsResponse);
 });
 
 const NOTIFICATION_KINDS: NotificationKind[] = ["notification", "question", "escalation", "approval", "review"];

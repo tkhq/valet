@@ -1837,6 +1837,7 @@ export interface ListNotificationsResponse {
 }
 
 export interface ListNotificationDecisionsResponse {
+  nextCursor?: string | null;
   items: Array<{ sessionId: string; title: string; gate: DecisionGate; canOpenThread?: boolean }>;
 }
 

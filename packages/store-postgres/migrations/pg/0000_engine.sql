@@ -31,6 +31,8 @@ CREATE TABLE "engine_decision_gates" (
 --> statement-breakpoint
 CREATE INDEX "engine_decision_gates_thread" ON "engine_decision_gates" ("session_id","thread_id","status");
 --> statement-breakpoint
+CREATE INDEX "engine_decision_gates_pending" ON "engine_decision_gates" ("created_at", "id" COLLATE "C") WHERE "status" = 'pending';
+--> statement-breakpoint
 CREATE INDEX "engine_decision_gates_resume" ON "engine_decision_gates" ("session_id","thread_id","queue_item_id","resume_key");
 --> statement-breakpoint
 CREATE TABLE "engine_entries" (
