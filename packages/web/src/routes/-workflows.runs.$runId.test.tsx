@@ -231,7 +231,7 @@ describe("RunDetailBody", () => {
     }
   });
 
-  it("links checkpoints to their thread, legacy runtime, and child run", async () => {
+  it("offers inline submission logs, preserves child links, and declines unscoped legacy logs", async () => {
     const data = baseRun({ status: "settled", outcome: "failed" });
     data.checkpoints = [
       {
@@ -242,7 +242,7 @@ describe("RunDetailBody", () => {
         sessionId: "s_abc",
         createdAt: Date.now(),
       },
-      { nodeId: "thread-step", iteration: 0, status: "completed", sessionId: "s_abc", threadId: "thread_abc", createdAt: Date.now() },
+      { nodeId: "thread-step", iteration: 0, status: "completed", sessionId: "s_abc", threadId: "thread_abc", queueItemId: "q-step", createdAt: Date.now() },
       { nodeId: "sub", iteration: 0, status: "completed", childRunId: "wfrun_sub_1", createdAt: Date.now() },
       { nodeId: "set1", iteration: 0, status: "completed", createdAt: Date.now() },
     ];
@@ -256,13 +256,14 @@ describe("RunDetailBody", () => {
         retryPending={false}
       />,
     );
-    expect((await screen.findByText("View runtime logs")).getAttribute("href")).toBe("/sessions/s_abc");
-    expect(screen.getByText("View agent logs").getAttribute("href")).toBe("/threads/thread_abc");
+    expect(await screen.findByText("Scoped agent logs were not recorded for this step.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "View agent logs" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("link", { name: "View agent logs" })).toBeNull();
     expect(screen.getByText("Open child run").getAttribute("href")).toBe(
       "/workflows/runs/wfrun_sub_1",
     );
     // A checkpoint carrying neither id gets no link row.
-    expect(screen.getAllByText("View runtime logs")).toHaveLength(1);
+    expect(screen.getAllByText("Scoped agent logs were not recorded for this step.")).toHaveLength(1);
   });
 
   it("renders checkpoints with status and a result preview", () => {
