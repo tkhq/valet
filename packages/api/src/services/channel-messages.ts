@@ -328,16 +328,17 @@ export async function isOwnPullRequestWrite(
 
 /** How long an un-timestamped review event may use a terminal marker. */
 export const TERMINAL_REVIEW_WINDOW_MS = 60_000;
-/** Clock difference allowed after this server records command completion. */
-const TERMINAL_REVIEW_SKEW_MS = 5_000;
+/** Clock precision and difference allowed around the terminal command interval. */
+export const TERMINAL_REVIEW_SKEW_MS = 5_000;
 const TERMINAL_REVIEW_PREFIX = "terminal-review:";
 
 /**
  * Whether a review is one Valet posted from the terminal. `gh pr review`
  * prints no review id, so the marker stores the command start time. A GitHub
- * submission matches only from that start through marker persistence. A
- * marker can therefore never claim an earlier human review. Dispatcher
- * retries use the same immutable GitHub submission time.
+ * submission matches from five seconds before that start through five
+ * seconds after marker persistence. The lower tolerance covers GitHub's
+ * second-precision timestamps. It cannot claim a human review 30 seconds
+ * before the command. Dispatcher retries use the same immutable timestamp.
  *
  * Without a submission time, a marker in the last window counts.
  */
@@ -352,7 +353,7 @@ export async function recentTerminalReview(db: AppDb, orgId: string, channelKey:
   return result.rows.some(row => {
     const startedAt = Number(row.provider_message_id.slice(TERMINAL_REVIEW_PREFIX.length));
     return Number.isFinite(startedAt)
-      && submittedAt >= startedAt
+      && submittedAt >= startedAt - TERMINAL_REVIEW_SKEW_MS
       && submittedAt <= Number(row.created_at) + TERMINAL_REVIEW_SKEW_MS;
   });
 }

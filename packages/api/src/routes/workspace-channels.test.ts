@@ -7,7 +7,7 @@ import { linkIdentity } from "../channels/identity-links.js";
 import { recordDelegatedPullRequest } from "../services/thread-pull-requests.js";
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
-import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadForPullRequest, wasSentByValet } from "../services/channel-messages.js";
+import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, TERMINAL_REVIEW_SKEW_MS, threadForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -252,13 +252,16 @@ it("finds the thread that opened a pull request, and records the comment Valet p
   await recordTerminalPullRequestWrite(api.providers.db, {
     orgId: "local-org", sessionId, threadId: thread.id, kind: "review_submitted", startedAt,
   }, completedAt);
-  // The command interval is inclusive at both boundaries.
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, startedAt, completedAt)).toBe(true);
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, completedAt + 5_000, completedAt + 10_000)).toBe(true);
-  // A human review before the command, even one close to it, is never Valet's.
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, startedAt - 1, completedAt + 10_000)).toBe(false);
+  // The tolerance is inclusive at both boundaries.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, startedAt - TERMINAL_REVIEW_SKEW_MS, completedAt)).toBe(true);
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, completedAt + TERMINAL_REVIEW_SKEW_MS, completedAt + 10_000)).toBe(true);
+  // GitHub truncates review timestamps to seconds, before the ms-precision command start.
+  const secondTruncated = Math.floor(startedAt / 1_000) * 1_000;
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, secondTruncated, completedAt)).toBe(true);
+  // A human review outside the lower tolerance is never Valet's.
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, startedAt - TERMINAL_REVIEW_SKEW_MS - 1, completedAt + 10_000)).toBe(false);
   // A person's review beyond completion clock skew is not Valet's.
-  expect(await recentTerminalReview(api.providers.db, "local-org", key, completedAt + 5_001, completedAt + 10_000)).toBe(false);
+  expect(await recentTerminalReview(api.providers.db, "local-org", key, completedAt + TERMINAL_REVIEW_SKEW_MS + 1, completedAt + 10_000)).toBe(false);
   // Without a submission time, a record in the last window counts.
   expect(await recentTerminalReview(api.providers.db, "local-org", key, undefined, completedAt)).toBe(true);
   const detail = await (await fetch(`${api.baseUrl}/api/workspaces/user/channel?key=${encodeURIComponent("github:acme/app#12")}`)).json() as ChannelDetailResponse;

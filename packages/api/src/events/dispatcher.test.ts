@@ -316,7 +316,7 @@ describe("EventDispatcher", () => {
       sessionId: "sess-1", threadId: "thr-1", url, repo: "acme/app", number: 12, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1,
     });
 
-    const t0 = Date.now() - 35_000;
+    const t0 = Math.floor((Date.now() - 35_000) / 1_000) * 1_000 + 300;
     await recordTerminalPullRequestWrite(db, {
       orgId: ORG, sessionId: "sess-1", threadId: "thr-1", kind: "review_submitted", startedAt: t0,
     }, t0 + 2_000);
@@ -334,7 +334,8 @@ describe("EventDispatcher", () => {
     const ownReview = await seedDelivery({
       target: { kind: "orchestrator" }, attempts: 1,
       eventKey: "github.pull_request_review.submitted", eventKeys: ["github.pull_request_review.*"],
-      payload: { pull_request: { html_url: url }, review: { id: 703, body: "Valet review", submitted_at: new Date(t0 + 1_000).toISOString(), user: { login: "me", type: "User" } } },
+      // GitHub truncates the real T0+400ms submission to the start of its second.
+      payload: { pull_request: { html_url: url }, review: { id: 703, body: "Valet review", submitted_at: new Date(Math.floor((t0 + 400) / 1_000) * 1_000).toISOString(), user: { login: "me", type: "User" } } },
     });
 
     const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});

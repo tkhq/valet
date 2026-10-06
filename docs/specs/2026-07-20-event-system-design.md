@@ -534,8 +534,10 @@ terminal-review marker. The marker persistence time is the command interval's
 upper bound, with at most five seconds of provider clock skew after that bound.
 
 A GitHub review or inline review comment MUST match the marker only when its
-provider timestamp is at or after the command start. A marker MUST NOT match an
-event with an earlier provider timestamp. The dispatcher MUST use the immutable
+provider timestamp is no more than five seconds before the command start. This
+lower tolerance covers GitHub timestamps that have second precision. The upper
+bound is five seconds after marker persistence. A marker MUST NOT match a human
+event from 30 seconds before the command. The dispatcher MUST use the immutable
 provider timestamp on every settle or retry attempt. Poll time, attempt count,
 and backoff delay MUST NOT change the attribution result.
 
