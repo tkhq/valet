@@ -248,3 +248,7 @@ sheets.protect_range({
 - **Border styles**: SOLID, SOLID_MEDIUM, SOLID_THICK, DASHED, DOTTED, DOUBLE, NONE.
 - **Colors**: RGB floats from 0 to 1. Black = `{red:0, green:0, blue:0}`, White = `{red:1, green:1, blue:1}`.
 - **Hex colors in borders**: `set_cell_borders` accepts hex strings like `"#FF0000"` for color.
+
+## Disabled API errors
+
+If a tool reports `SERVICE_DISABLED`, give the user its Google Cloud project and enable-API link. Ask the project administrator to enable Sheets, then retry. Do not treat this as a spreadsheet sharing failure or repeat the same failed request. An authorized Drive CSV export may work for read-only tasks. It cannot replace Sheets writes.
