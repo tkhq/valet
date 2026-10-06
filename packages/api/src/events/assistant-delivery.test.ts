@@ -1,14 +1,14 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EngineHost } from "../engine/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
-import { assistants, sessionThreads, teams, users } from "../schema/index.js";
+import { assistantExecutions, assistants, sessionThreads, teams, users } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
@@ -126,6 +126,62 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect((await restored.threadByKey("slack:C1:next"))?.modelId()).toBe("s");
     expect((await restored.threadByKey("slack:C1:next"))?.toThreadData().reasoning).toBe("off");
     expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
+  });
+
+  it.each(["queued", "settled"])("keeps a %s pre-upgrade event admission when channel routing changes", async (state) => {
+    const owner = { type: "team", id: "cutover-team" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Cutover team", createdAt: 1 });
+    const deps = { db: testDb.appDb, engineHost };
+    const root = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
+    await testDb.appDb.execute(sql`INSERT INTO legacy_assistant_runtimes (session_id, org_id) VALUES (${root.id}, ${ORG})`);
+    engineHost.evictCache(root.id);
+    const original = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
+    const externalAction = vi.fn(async () => ({ text: "sent once" }));
+    original.options.tools = [...(original.options.tools ?? []), {
+      name: "external_write", description: "Send an external update", parameters: Type.Object({}), execute: externalAction,
+    }];
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("external_write", {}, { id: "external-once" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("sent"),
+    ]);
+    const thread = original.thread("events");
+    if (state === "queued") await thread.pause();
+    const signal = { kind: "signal" as const, signalType: "slack.reaction_added", body: "Review this reaction", attributes: { eventId: "old-event", service: "slack" } };
+    const receipt = await thread.submitPrompt(signal, { dispatchId: "event:cutover-delivery" });
+    if (state === "settled") await thread.awaitResult(receipt.queueItemId);
+    const remaining = faux.getPendingResponseCount();
+    engineHost.evictCache(original.id);
+    for (let retry = 0; retry < 2; retry++) {
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner, actorUserId: USER, threadKey: "slack-events:C1", signal,
+        dispatchId: "event:cutover-delivery", mismatchReason: "event_target_mismatch",
+      });
+      engineHost.evictCache(original.id);
+    }
+    const rows = await testDb.appDb.execute(sql`SELECT id, session_id, thread_id FROM engine_queue_items WHERE dispatch_id = 'event:cutover-delivery'`) as { rows: Array<{ id: string; session_id: string; thread_id: string }> };
+    expect(rows.rows).toEqual([{ id: receipt.queueItemId, session_id: original.id, thread_id: thread.id }]);
+    expect(await testDb.appDb.select().from(assistantExecutions)).toHaveLength(0);
+    expect(faux.getPendingResponseCount()).toBe(remaining);
+    expect(externalAction).toHaveBeenCalledTimes(state === "settled" ? 1 : 0);
+  });
+
+  it("recovers the admitted event before a new PR target and verifies its original content", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const thread = session.thread("events");
+    await thread.pause();
+    const signal = channelSignal("review the change");
+    const seeded = { ...signal, body: `Conversation so far in this thread:\nEarlier history\n\n---\n\n${signal.body}` };
+    const admitted = await thread.submitPrompt(seeded, { dispatchId: "event:pr-cutover" });
+    const args = { orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "web:pr-origin",
+      target: { sessionId: "new-pr-runtime", threadId: "new-pr-thread" }, signal,
+      dispatchId: "event:pr-cutover", mismatchReason: "test" };
+    await expect(deliverToAssistantThread(deps, args)).resolves.toBeUndefined();
+    await expect(deliverToAssistantThread(deps, { ...args, signal: channelSignal("changed work") })).rejects.toThrow("different content");
+    expect((await session.providers.store.listUnsettledSubmissions(session.id)).map(item => item.id)).toEqual([admitted.queueItemId]);
+    await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER } })).rejects.toThrow("original event owner differs");
+    // An identical ID in another organization must not resolve this receipt.
+    await expect(deliverToAssistantThread(deps, { ...args, orgId: "other-org" })).rejects.toThrow("original conversation is unavailable");
   });
 
   it("restores the exact private PR thread and refuses deliveries archived while queued", async () => {

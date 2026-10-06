@@ -10,6 +10,7 @@
  *
  * The workspace owner determines the assistant.
  */
+import { isDeepStrictEqual } from "node:util";
 import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent } from "@valet/engine";
 import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -63,6 +64,9 @@ export async function deliverToAssistantThread(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
 ): Promise<void> {
+  // A delivery can outlive a routing upgrade. The admitted dispatch belongs
+  // to its original runtime, even if today's route selects another one.
+  if (args.dispatchId.startsWith("event:") && await recoverAdmittedEvent(deps, args)) return;
   // Serialize by runtime session and thread so delivery paths share one queue.
   let session: Session;
   if (args.target) {
@@ -93,6 +97,46 @@ export async function deliverToAssistantThread(
     });
   deliveryChains.set(key, tail);
   return run;
+}
+
+/** Recover an existing admission without resubmitting or replaying its tools. */
+async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: AssistantDeliveryArgs): Promise<boolean> {
+  const result = await deps.db.execute(sql`
+    SELECT q.id, q.session_id, q.thread_id, q.content, q.status, s.owner_type, s.owner_id
+    FROM engine_queue_items q JOIN agent_sessions s ON s.id = q.session_id
+    WHERE q.dispatch_id = ${args.dispatchId} AND s.org_id = ${args.orgId}
+    LIMIT 2`) as { rows: Array<{ id: string; session_id: string; thread_id: string; content: unknown; status: string; owner_type: string; owner_id: string }> };
+  if (result.rows.length === 0) return false;
+  if (result.rows.length !== 1) throw new Error("This event has multiple admitted submissions. Inspect the original submissions before retrying delivery.");
+  const prior = result.rows[0]!;
+  if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
+    throw new Error("The original event owner differs from this delivery. Inspect its subscription before retrying delivery.");
+  }
+  const content: unknown = typeof prior.content === "string" ? JSON.parse(prior.content) : prior.content;
+  if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") {
+    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
+  }
+  // First channel admissions include fetched history. Compare the original
+  // signal beneath that known wrapper without fetching mutable history again.
+  const body = content.body === args.signal.body ? content.body
+    : content.body.startsWith("Conversation so far in this thread:\n") && content.body.endsWith(`\n\n---\n\n${args.signal.body}`)
+      ? args.signal.body : content.body;
+  const expected: unknown = JSON.parse(JSON.stringify({ ...args.signal, tagName: args.signal.tagName ?? "signal" }));
+  const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
+  if (!isDeepStrictEqual({ ...content, body, tagName }, expected)) {
+    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
+  }
+  if (prior.status !== "settled") {
+    const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, prior.session_id), eq(agentSessions.orgId, args.orgId))).limit(1);
+    if (!row || row.status === "deleted") throw new Error("The original event session was deleted. Inspect its submission before retrying delivery.");
+    // Session recovery already owns queued, interrupted, and approval-blocked
+    // work. Restoring it never requires another prompt admission here.
+    await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
+  }
+  if (args.inbound) await recordChannelMessage(deps.db, {
+    ...args.inbound, orgId: args.orgId, sessionId: prior.session_id, threadId: prior.thread_id, direction: "in",
+  });
+  return true;
 }
 
 async function deliverToAssistantThreadInner(

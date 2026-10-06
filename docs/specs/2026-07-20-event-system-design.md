@@ -166,6 +166,8 @@ Public route `POST /webhooks/events/:service`, mounted pre-auth (like
    `installation.id` → `github_installations`. Then run the plugin's
    `verify()` with that org's secret over the raw bytes.
 3. `toEvent()` → insert into `events`. Duplicate `dedupe_key` → 200 no-op.
+
+
 4. In the same transaction, match active subscriptions (indexed `org_id` +
    event-key match, filters evaluated in memory) and insert `event_deliveries`
    rows. Nudge the in-process dispatcher (`dispatcher.nudge()`); return 200.
@@ -181,6 +183,8 @@ Public route `POST /webhooks/events/:service`, mounted pre-auth (like
 Matching inside the ingest transaction means an accepted event either has its
 delivery rows or doesn't exist — no persisted-but-never-matched window. Actual
 delivery stays async.
+
+Event delivery retries check for an admitted `event:{deliveryId}` submission before selecting a runtime. The lookup preserves the original organization and owner. An existing admission retains its runtime, thread, queue item, and completed tool results across routing changes. Content must match the original signal, including the engine's default signal tag and optional channel-history wrapper. Unsettled work uses normal session recovery. Settled work is acknowledged without another prompt. Diagnostic receipt retention never controls admission deduplication.
 
 **GitHub routing:** the existing `/webhooks/github-app` route keeps handling
 `installation*` events (installations sync); all other event types it receives
