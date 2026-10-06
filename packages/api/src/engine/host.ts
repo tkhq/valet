@@ -3280,7 +3280,8 @@ export class EngineHost {
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
-    return rows[0]?.defaultModel ?? undefined;
+    const pref = rows[0]?.defaultModel;
+    return pref && !isDisabledModel(pref) ? pref : undefined;
   }
 
   /**

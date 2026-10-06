@@ -685,7 +685,7 @@ describe("EngineHost model resolution wiring", () => {
     ).rejects.toThrow(/provider Custom is disabled/);
   });
 
-  it("reopens an Astra-pinned session without losing threads and permits an allowed model change", async () => {
+  it.each([null, "openrouter/openai/gpt-6-astra"])("reopens an Astra-pinned session with saved user default %s and permits an allowed model change", async (defaultModel) => {
     api = await bootTestApi();
     const { engineHost, engineStore } = api.providers;
     const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
@@ -694,6 +694,7 @@ describe("EngineHost model resolution wiring", () => {
     const saved = await engineStore.getSession(session.id);
     if (!saved) throw new Error("Session was not persisted");
     await engineStore.saveSession({ ...saved, model: "openrouter/openai/gpt-6-astra" });
+    await api.providers.db.update(users).set({ defaultModel }).where(eq(users.id, "local-user"));
     engineHost.evictAll();
 
     const restored = await engineHost.sessionFor(session.id, meta);

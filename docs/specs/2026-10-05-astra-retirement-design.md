@@ -21,6 +21,7 @@ Existing sessions, transcripts, workflows, and usage records remain retained.
 Historical pricing uses bundled metadata separately from execution eligibility.
 Restoring a session with an Astra default resolves the current owner/tier default,
 so history and the model selector remain accessible. Allowed pins stay unchanged.
+Retired stored user defaults fall through to the next allowed default.
 Thread-specific Astra pins still reject inference until changed.
 
 ## Validation
