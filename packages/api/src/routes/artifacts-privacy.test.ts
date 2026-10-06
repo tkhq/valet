@@ -88,6 +88,11 @@ describe("team artifact privacy", () => {
       orgId: "local-org", key: row.sourceMemoryPath, content: "Replace provenance", format: "html",
       sourceSessionId: "new-team-source", sourceThreadId: "new-thread",
     })).rejects.toThrow();
+    const republish = await request("/share?ownerType=team&ownerId=private-team", "test-member", "POST", {
+      key: row.sourceMemoryPath, content: "Replace provenance", format: "html",
+    });
+    expect(republish.status).toBe(404);
+    expect(await republish.json()).toMatchObject({ error: expect.stringContaining("Try a new path") });
     expect(await getArtifactById(db, row.id)).toMatchObject({ version: 1, revokedAt: null, sourceThreadId: null });
   });
 

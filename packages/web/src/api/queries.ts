@@ -9,6 +9,7 @@ import {
   useQuery,
   useQueryClient,
   type UseQueryOptions,
+  type Query,
 } from "@tanstack/react-query";
 import type {
   CreateSessionRequest,
@@ -62,6 +63,17 @@ export const qk = {
   identityLinks: () => ["identityLinks"] as const,
   linkMembers: (provider: string, query: string) => ["linkMembers", provider, query] as const,
 };
+
+/** Execution updates also refresh workspace aggregates containing that execution. */
+export function threadListFilters(sessionId: string) {
+  return { predicate: ({ queryKey, state }: Query) => {
+    if (queryKey[0] !== "sessions" || queryKey[2] !== "threads") return false;
+    if (queryKey[1] === sessionId) return true;
+    const data = state.data;
+    return Boolean(data && typeof data === "object" && "threads" in data && Array.isArray(data.threads)
+      && data.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
+  } };
+}
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
@@ -179,7 +191,7 @@ export function useCreateThread(sessionId: string) {
   return useMutation<CreateThreadResponse, Error, CreateThreadRequest | void>({
     mutationFn: (body) => api.createThread(sessionId, body ?? {}),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
     },
   });
 }
@@ -283,11 +295,11 @@ export function useSetThreadModel(sessionId: string) {
     mutationFn: ({ threadId, model }) => api.patchThread(threadId, { model }),
     onSuccess: async (saved) => {
       // A GET started before the save must not overwrite its confirmed pin.
-      await qc.cancelQueries({ queryKey: qk.threads(sessionId) });
+      await qc.cancelQueries(threadListFilters(sessionId));
       // PATCH confirms the pin. Update only that field so newer activity
       // and title updates survive a slower model save.
       qc.setQueriesData<ListThreadsResponse>(
-        { queryKey: qk.threads(sessionId) },
+        threadListFilters(sessionId),
         (current) => current && ({
           ...current,
           threads: current.threads.map((thread) =>
@@ -306,7 +318,7 @@ export function useSetThreadReasoning(sessionId: string) {
   return useMutation<PatchThreadResponse, Error, { threadId: string; reasoning: string | null }>({
     mutationFn: ({ threadId, reasoning }) => api.patchThread(threadId, { reasoning }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
     },
   });
 }
@@ -319,10 +331,11 @@ export function useMarkThreadsRead(sessionId: string) {
     mutationFn: ({ threadIds }) => api.markThreadsRead(sessionId, threadIds),
     onMutate: ({ threadIds }) => {
       const at = Date.now();
-      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+      const ids = threadIds ?? qc.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads.map(thread => thread.id);
+      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
         ...current,
         threads: current.threads.map((thread) =>
-          !threadIds || threadIds.includes(thread.id) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread),
+          (ids ? ids.includes(thread.id) : thread.sessionId === sessionId) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread),
       }));
     },
     onSettled: () => {
@@ -337,7 +350,7 @@ export function useSetThreadArchived(sessionId: string) {
     mutationFn: ({ threadId, archived }) =>
       api.patchThread(threadId, { archived }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
     },
   });
@@ -350,7 +363,7 @@ export function useRenameThread(sessionId: string) {
     mutationFn: ({ threadId, title }) =>
       api.patchThread(threadId, { title }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
     },
   });
@@ -447,7 +460,7 @@ export function useSendPrompt(sessionId: string) {
     // Socket events update other viewers; a later thread-list fetch reconciles
     // this cache with the persisted value.
     onSuccess: (data, { text }) => {
-      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
         ...current,
         threads: current.threads.map((thread) =>
           thread.id === data.threadId

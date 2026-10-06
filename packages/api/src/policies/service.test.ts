@@ -13,6 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { pgDbFromPglite } from "@valet/store-postgres";
 import { InMemoryCredentialStore, type DecisionResolution, type PolicyInvocationRecord, type PolicyResolveInput } from "@valet/engine";
 import { shareCredential, revokeShare } from "../services/credential-shares.js";
+import { upsertOverride } from "./admin.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
 import { assistants, agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
 import {
@@ -454,6 +455,20 @@ describe("buildPolicyResolver", () => {
 // ── loadPolicyRows shape ───────────────────────────────────────────
 
 describe("loadPolicyRows", () => {
+  it("ignores legacy allows in chat and workflows until explicit reapproval, preserving deny rules", async () => {
+    await db.insert(actionPolicyOverrides).values([
+      { id: "old-allow", orgId: ORG, userId: MEMBER, service: "gmail", mode: "allow", legacyUnscoped: true, createdAt: 1, updatedAt: 1 },
+      { id: "old-deny", orgId: ORG, userId: MEMBER, actionId: "github.create_issue", mode: "deny", legacyUnscoped: true, createdAt: 1, updatedAt: 1 },
+    ]);
+    const input = { service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: {},
+      userId: MEMBER, orgId: ORG, sessionId: SESSION, pluginDefault: undefined, now: 2 } as const;
+    for (const appliesIn of ["session", "workflow"] as const) {
+      expect((await resolveActionPolicy(db, { ...input, appliesIn, workflowExecutionId: RUN })).mode).toBe("require_approval");
+    }
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION })).overrides.map(row => row.id)).toEqual(["old-deny"]);
+    expect(await upsertOverride(db, ORG, MEMBER, { service: "gmail", mode: "allow", now: 3 }, new Map())).toMatchObject({ ok: true });
+    expect((await resolveActionPolicy(db, { ...input, appliesIn: "session" })).mode).toBe("allow");
+  });
   it("loads org policies + session grants + user overrides for the scope", async () => {
     await db.insert(actionPolicies).values({
       id: "p1", orgId: ORG, principalType: "org", principalId: ORG,

@@ -21,11 +21,16 @@ function harness() {
 beforeEach(() => {
   vi.clearAllMocks(); scope = { key: "user", teamId: undefined }; search = {};
   personal.mockResolvedValue({ sessionId: "personal-session" });
-  team.mockResolvedValue({ sessionId: "team-session" });
+  team.mockResolvedValue({ sessionId: "private-helper", workspaceSessionId: "team-session" });
   legacy.mockResolvedValue({ sessionId: "legacy-session" });
 });
 describe("workspace conversation", () => {
-
+  it("fails clearly when the team backend only returns a private helper target", async () => {
+    scope = { key: "team-a", teamId: "team-a" }; team.mockResolvedValue({ sessionId: "private-helper" });
+    const { result } = renderHook(() => useWorkspaceConversation(), { wrapper: harness() });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  });
   it("switches by owner and never shows the previous workspace while ensuring", async () => {
     const { result, rerender } = renderHook(() => useWorkspaceConversation(), { wrapper: harness() });
     await waitFor(() => expect(result.current.data?.sessionId).toBe("personal-session"));

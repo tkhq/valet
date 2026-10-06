@@ -32,7 +32,9 @@ async function ensureWorkspaceRuntime(c: Context<AppEnv>, workspace = c.req.para
       c.var.principal.type === "user" ? `app-assistant:${c.var.principal.id}` : "web:default")
     : await ensureDefaultAssistantSession(c.var.providers, owner, meta);
   await runtime.session.ensureDefaultThread();
-  const body: EnsureWorkspaceRuntimeResponse = { sessionId: runtime.sessionId };
+  const root = owner.type === "team" ? await findDefaultAssistant(c.var.providers.db, meta.orgId, owner) : undefined;
+  const body: EnsureWorkspaceRuntimeResponse = { sessionId: runtime.sessionId,
+    ...(root ? { workspaceSessionId: root.sessionId } : {}) };
   return c.json(body);
 }
 

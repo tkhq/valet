@@ -882,6 +882,7 @@ CREATE TABLE "action_policy_overrides" (
 	"action_id" text,
 	"risk_level" text,
 	"mode" text NOT NULL,
+	"legacy_unscoped" boolean NOT NULL DEFAULT false,
 	"param_matchers" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,

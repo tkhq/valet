@@ -829,7 +829,7 @@ export interface WorkspaceRuntimeInfoResponse {
   presence: OrchestratorPresence;
   activeChildren: number;
 }
-export interface EnsureWorkspaceRuntimeResponse { sessionId: string; }
+export interface EnsureWorkspaceRuntimeResponse { sessionId: string; workspaceSessionId?: string; }
 
 /** The services a workspace's carried-over integration limit allows, or null for no limit. */
 export interface WorkspaceIntegrationLimitResponse { services: string[] | null; }
@@ -4972,6 +4972,8 @@ export interface ActionPolicyOverrideWire {
   actionId: string | null;
   riskLevel: RiskLevelWire | null;
   mode: ApprovalModeWire;
+  /** Legacy personal allow rules require an explicit save before taking effect. */
+  legacyUnscoped?: boolean;
   paramMatchers: ParamMatcherWire[];
   createdAt: number;
   updatedAt: number;

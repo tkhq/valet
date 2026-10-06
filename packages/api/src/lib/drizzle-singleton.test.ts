@@ -16,6 +16,23 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("ALTER TABLE assistants ADD COLUMN IF NOT EXISTS is_default boolean NOT NULL DEFAULT false");
   }
 
+  it("retains old override rows but quarantines their unscoped allow authority once", async () => {
+    await db.query("ALTER TABLE action_policy_overrides DROP COLUMN legacy_unscoped");
+    await db.query(`INSERT INTO action_policy_overrides(id, org_id, user_id, action_id, mode, created_at, updated_at)
+      VALUES ('old-allow', 'legacy-org', 'legacy-user', 'gmail.send_email', 'allow', 1, 1),
+             ('old-deny', 'legacy-org', 'legacy-user', 'github.create_issue', 'deny', 1, 1)`);
+    await applyAppMigrations(db);
+    await db.query(`INSERT INTO action_policy_overrides(id, org_id, user_id, action_id, mode, created_at, updated_at)
+      VALUES ('new-allow', 'legacy-org', 'legacy-user', 'slack.send_message', 'allow', 2, 2)`);
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT id, mode, legacy_unscoped FROM action_policy_overrides ORDER BY id")).rows).toEqual([
+      { id: "new-allow", mode: "allow", legacy_unscoped: false },
+      { id: "old-allow", mode: "allow", legacy_unscoped: true },
+      { id: "old-deny", mode: "deny", legacy_unscoped: true },
+    ]);
+    await db.query("DELETE FROM action_policy_overrides");
+  });
+
   it("moves each share stored as a team credential row into its own share row", async () => {
     await db.query("DROP TABLE credential_shares");
     await db.query(`INSERT INTO credentials(owner_type, owner_id, service, type, metadata, created_at, updated_at)

@@ -38,7 +38,7 @@ import {
   type WorkflowFile,
 } from "@valet/workflow";
 import type { CredentialStore, ValetPlugin } from "@valet/engine";
-import type { AppDb } from "../../lib/drizzle.js";
+import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import { canonicalJson } from "../../lib/canonical-json.js";
 import {
   eventSubscriptions,
@@ -433,36 +433,23 @@ class WorkflowPass implements CollectorPass {
 
       let deleted = 0;
       const disarmed: string[] = [];
-      const unsettled = await workflowsWithUnsettledRuns(
-        db,
-        stale.map((row) => row.id),
-      );
       for (const row of stale) {
-        if (unsettled.has(row.id)) {
-          // The run keeps its own snapshot of the definition, so it finishes
-          // either way. Deleting the row would orphan it from every list view,
-          // so disarm instead: nothing new starts, and the next sync after the
-          // run settles deletes the row.
-          await disarmWorkflowTriggers(db, source.orgId, row.id);
-          disarmed.push(row.name);
-          continue;
-        }
-        // Scoped by source and origin a second time, so this delete stays off a
-        // local workflow and off another source's rows even if the ids were
-        // wrong.
-        const confirmed = await db
-          .select({ id: workflowDefinitions.id })
-          .from(workflowDefinitions)
-          .where(
-            and(
-              eq(workflowDefinitions.id, row.id),
-              eq(workflowDefinitions.sourceId, source.id),
-              eq(workflowDefinitions.origin, "repo"),
-            ),
-          );
-        if (confirmed.length === 0) continue;
-        await purgeWorkflowRows(db, source.orgId, row.id);
-        deleted += 1;
+        const result = await db.transaction(async tx => {
+          // Run insertion holds this row until its snapshot is committed.
+          const [confirmed] = await tx.select({ id: workflowDefinitions.id }).from(workflowDefinitions).where(and(
+            eq(workflowDefinitions.id, row.id), eq(workflowDefinitions.orgId, source.orgId),
+            eq(workflowDefinitions.sourceId, source.id), eq(workflowDefinitions.origin, "repo"),
+          )).for("update");
+          if (!confirmed) return "missing";
+          if ((await workflowsWithUnsettledRuns(tx, [row.id])).size > 0) {
+            await disarmWorkflowTriggers(tx, source.orgId, row.id);
+            return "disarmed";
+          }
+          await purgeWorkflowRows(tx, source.orgId, row.id);
+          return "deleted";
+        });
+        if (result === "disarmed") disarmed.push(row.name);
+        if (result === "deleted") deleted += 1;
       }
       this.disarmed = disarmed;
       for (const name of disarmed) {
@@ -859,7 +846,7 @@ async function teamTriggerGate(
 
 /** Which of `ids` hold a run that has not settled. One query, and none at all
  * when nothing is stale. */
-async function workflowsWithUnsettledRuns(db: AppDb, ids: string[]): Promise<Set<string>> {
+async function workflowsWithUnsettledRuns(db: AppQueryable, ids: string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
   const rows = await db
     .select({ workflowId: workflowRuns.workflowId })

@@ -141,7 +141,19 @@ it("deletes a team execution individually and tears down every runtime when dele
   const second = await ensureAssistantExecution(p, owner, meta, "web:default");
   await second.session.sandbox.writeFile("/workspace/secret.txt", "teardown marker");
   expect((await fetch(`${api.baseUrl}/api/sessions/${first.sessionId}`, { method: "DELETE" })).status).toBe(200);
-  await expect(ensureAssistantExecution(p, owner, meta, "app-assistant:local-user")).rejects.toThrow();
+  const [replacement, concurrent] = await Promise.all([
+    ensureAssistantExecution(p, owner, meta, "app-assistant:local-user"),
+    ensureAssistantExecution(p, owner, meta, "app-assistant:local-user"),
+  ]);
+  expect(replacement.sessionId).not.toBe(first.sessionId);
+  expect(replacement.sessionId).toBe(concurrent.sessionId);
+  expect(replacement.session.options.workspace).not.toBe(first.session.options.workspace);
+  expect(await p.engineStore.getSession(first.sessionId)).toBeNull();
+  const [deleted] = await p.db.select().from(agentSessions).where(eq(agentSessions.id, first.sessionId));
+  expect(deleted.status).toBe("deleted");
+  for (const suffix of ["runtime", "conversation"]) {
+    expect((await fetch(`${api.baseUrl}/api/workspaces/${team.id}/${suffix}`, { method: "POST" })).status).toBe(200);
+  }
   expect((await fetch(`${api.baseUrl}/api/teams/${team.id}`, { method: "DELETE" })).status).toBe(200);
   const rows = await p.db.select().from(agentSessions).where(eq(agentSessions.ownerId, team.id));
   expect(rows.every(row => row.status === "deleted")).toBe(true);

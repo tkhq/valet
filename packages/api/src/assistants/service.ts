@@ -179,7 +179,15 @@ export async function ensureAssistantExecution(
     const [row] = await tx.select().from(assistantExecutions)
       .where(and(eq(assistantExecutions.assistantId, root.assistant.id), eq(assistantExecutions.conversationKey, conversationKey))).limit(1);
     const [app] = row ? await tx.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, row.sessionId)).limit(1) : [];
-    if (app?.status === "deleted") throw new ArchivedAssistantError();
+    if (app?.status === "deleted") {
+      // Explicitly deleting a helper must not reserve its owner's entry point
+      // forever. Allocate fresh state; never restore the deleted execution.
+      if (conversationKey !== `app-assistant:${meta.actorUserId}`) throw new ArchivedAssistantError();
+      const [replacement] = await tx.update(assistantExecutions)
+        .set({ sessionId: candidate.sessionId, createdAt: candidate.createdAt })
+        .where(eq(assistantExecutions.sessionId, row.sessionId)).returning();
+      return replacement;
+    }
     return row;
   });
   if (!execution) throw new Error("The conversation could not be created. Try opening it again.");

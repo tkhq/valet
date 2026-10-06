@@ -21,6 +21,7 @@ describe("useSendPrompt", () => {
         { id: "newer", sessionId, createdAt: 2_000, lastUserActivityAt: 2_000, key: "web:newer" },
       ],
     });
+    client.setQueryData<ListThreadsResponse>(qk.threads("root"), client.getQueryData<ListThreadsResponse>(qk.threads(sessionId)));
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
@@ -31,6 +32,7 @@ describe("useSendPrompt", () => {
     const threads = client.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads;
     expect(threads?.find((thread) => thread.id === "older")?.lastUserActivityAt).toBe(3_000);
     expect(threads?.find((thread) => thread.id === "newer")?.lastUserActivityAt).toBe(2_000);
+    expect(client.getQueryData<ListThreadsResponse>(qk.threads("root"))?.threads[0]?.lastUserActivityAt).toBe(3_000);
   });
 });
 
@@ -48,6 +50,7 @@ describe("useSetThreadModel", () => {
         { id: "other", sessionId, createdAt: 2, lastUserActivityAt: 2, model: "m" },
       ],
     });
+    client.setQueryData<ListThreadsResponse>(qk.threads("root"), client.getQueryData<ListThreadsResponse>(qk.threads(sessionId)));
     let finishOldRead: ((value: ListThreadsResponse) => void) | undefined;
     const oldRead = client.fetchQuery({
       queryKey: qk.threads(sessionId),
@@ -70,6 +73,7 @@ describe("useSetThreadModel", () => {
     finishOldRead?.({ threads: [{ id: "chosen", sessionId, createdAt: 1, lastUserActivityAt: 1, model: "s" }] });
     await oldRead;
     expect(client.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads[0]?.model).toBe("l");
+    expect(client.getQueryData<ListThreadsResponse>(qk.threads("root"))?.threads[0]?.model).toBe("l");
     expect(invalidate).not.toHaveBeenCalled();
   });
 

@@ -4,6 +4,8 @@ Workspace ownership controls credentials, policy and billing. Conversation audie
 Keep one workspace assistant in the UI. Persist each team conversation's execution session and governing thread under a unique mapping.
 Concurrent creation shares the team-deletion lock. Restart restores the stored execution identity; missing or cyclic ancestry fails closed.
 Helpers, editors, web threads, events and workflow reports resolve their execution before uploads or prompt admission. Children inherit their parent audience.
+Runtime ensure returns a writable helper target and the team workspace root separately. The web rail lists/creates through the root; shared conversations keep their own execution IDs. Empty roots never synthesize read-only default chats.
+Deleting a person's helper allows a fresh helper identity on next open, without restoring its deleted execution or files. Deleted shared execution keys stay retired.
 Private Slack audiences require current membership. Team API keys cannot access private executions. Configuration changes evict all mapped execution catalogs.
 
 Default writes, exports and imports use the execution namespace. Reads, searches and snapshots also expose explicit shared team memory under `team:<id>/`.
@@ -18,6 +20,8 @@ Workflow nodes and reports resolve live legacy origins into isolated executions 
 Legacy team memory moves to `legacy`; personal memory keeps its namespace. Back up the database and working directories before cutover.
 Recover ambiguous notes only after their owner confirms the audience. Never bulk-copy legacy memory into shared memory.
 This is a one-way schema cutover: stop old writers before repair. Rollback requires restoring the pre-upgrade database and files, not reusing migrated data.
+Legacy personal overrides cannot distinguish workflow pre-approvals from global settings. Mark existing overrides `legacy_unscoped`; ignore their allow authority in both chat and workflows until the person explicitly re-saves the setting. Deny/approval rules remain enforced, rows are retained, and new workflow grants remain scoped to their definition.
+Upgrade the server before shipping the new CLI. Retired assistant profile/read endpoints are intentionally removed; integrations must use workspace runtime/thread routes before cutover. Legacy POST ensure aliases remain for older clients against the new server.
 
 `GET /api/workspaces/:workspace/history` lists retained root/retired conversation IDs without waking sandboxes.
 Its encrypted viewer/workspace-scoped `nextCursor` is accepted as `before`; `sessionId` and `threadId` select authorized transcript pages, newest first.
@@ -26,6 +30,7 @@ Sandbox reconciliation retains retired identities' working directories and repor
 The hibernation reaper excludes legacy team roots. On hibernation-capable backends, executions leave cache after the existing idle window when submissions, gates and exec jobs finish; mappings, history and files remain.
 Runtime presence checks only running sessions and active child watches. Thread lists filter archived-only executions before loading histories; archived history remains available on request.
 Originless workflow runs receive separate report executions. Report archival evicts only after submissions and decisions finish; origin executions remain available.
+Execution directories and histories are retained deliberately; archival is not deletion. Idle compute follows backend hibernation, and explicit execution/team deletion owns sandbox and token teardown. Do not merge working directories or purge retained data to reduce conversation counts; production-copy rehearsals must verify retained-file capacity and recovery.
 
 ## Artifact cutover gate
 
@@ -55,6 +60,8 @@ Shared briefing evidence and cached responses require public Slack classificatio
 Outages exclude expired evidence. Refreshes renew leases through collection/generation/validation; replaced workers cannot publish or renew.
 
 ## Validation
+
+Owned workflow starts and definition deletion share a row lock; team starts also hold the team ownership lock. Repository cleanup rechecks unsettled runs under that row lock. A deleted definition cannot start from a stale snapshot.
 
 Test Alice/Bob isolation across tools, memory, uploads, terminal, children and restart; preserve team credentials and current lender grants.
 Test missing origins, allocation/deletion races, repeated repairs and retained history without importing ambiguous state.

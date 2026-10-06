@@ -92,8 +92,13 @@ export function PolicyOverridesEditor({ overrides, title, description, canEdit, 
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2 break-words">
                 <span className="text-sm font-medium text-[--fg]">{targetLabel(o)}</span>
-                <Badge variant={MODE_BADGE[o.mode]}>{MODE_LABELS[o.mode]}</Badge>
+                <Badge variant={o.legacyUnscoped && o.mode === "allow" ? "accent" : MODE_BADGE[o.mode]}>
+                  {o.legacyUnscoped && o.mode === "allow" ? "Reapproval required" : MODE_LABELS[o.mode]}
+                </Badge>
               </div>
+              {o.legacyUnscoped && o.mode === "allow" && <p className="mt-1 text-xs text-muted">
+                This legacy permission is inactive. Save the same target again to enable it under current policy.
+              </p>}
             </div>
             <Button
               type="button"

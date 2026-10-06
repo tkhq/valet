@@ -10,7 +10,13 @@ export function useOwnerConversation(workspace: string | undefined) {
     enabled: workspace !== undefined,
     queryFn: async () => {
       if (workspace === undefined) throw new Error("Choose a workspace to open its threads.");
-      return api.ensureWorkspaceRuntime(workspace);
+      const runtime = await api.ensureWorkspaceRuntime(workspace);
+      if (workspace !== "user" && !runtime.workspaceSessionId) {
+        throw new Error("The team chat API needs an update. Retry after the deployment finishes.");
+      }
+      // The CLI target is a private helper. The chat rail addresses the workspace
+      // root to list sibling conversations and create explicitly shared threads.
+      return { sessionId: runtime.workspaceSessionId ?? runtime.sessionId };
     },
     staleTime: Infinity,
     retry: false,

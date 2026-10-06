@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistantExecutions, teams, teamMembers } from "../schema/index.js";
+import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 describe("workspace runtime authorization", () => {
@@ -41,6 +42,33 @@ describe("workspace runtime authorization", () => {
     expect(session.options.readOnlyReason).toBeUndefined();
     const [mapping] = await api.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, sessionId));
     expect(mapping.conversationKey).toBe("app-assistant:local-user");
+  });
+  it("returns the workspace root separately so the web creates and lists shared conversations", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "web-team", orgId: "local-org", name: "Web", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values([
+      { teamId: "web-team", userId: "local-user", role: "admin" },
+      { teamId: "web-team", userId: "test-member", role: "member" },
+    ]);
+    const request = (path: string, user = "local-user", method = "GET") => fetch(`${api?.baseUrl}/api${path}`, {
+      method, headers: { "x-valet-test-user-id": user },
+    });
+    const mine = await (await request("/workspaces/web-team/runtime", "local-user", "POST")).json() as EnsureWorkspaceRuntimeResponse;
+    const theirs = await (await request("/workspaces/web-team/runtime", "test-member", "POST")).json() as EnsureWorkspaceRuntimeResponse;
+    expect(mine.sessionId).not.toBe(theirs.sessionId);
+    expect(mine.workspaceSessionId).toBe(theirs.workspaceSessionId);
+    expect(mine.workspaceSessionId).toMatch(/^assistant:/);
+    const path = `/sessions/${mine.workspaceSessionId}/threads`;
+    const before = await (await request(path)).json() as ListThreadsResponse;
+    expect(before.threads.every((thread: { sessionId: string }) => thread.sessionId !== mine.workspaceSessionId)).toBe(true);
+    const shared = await (await request(path, "local-user", "POST")).json() as CreateThreadResponse;
+    for (const user of ["local-user", "test-member"]) {
+      expect(await (await request(path, user)).json()).toMatchObject({ threads: expect.arrayContaining([
+        expect.objectContaining({ id: shared.id, sessionId: shared.sessionId, key: shared.key }),
+      ]) });
+      expect((await request(`/threads/${shared.id}/messages`, user)).status).toBe(200);
+    }
+    expect((await request(`/sessions/${mine.sessionId}/threads`, "test-member")).status).toBe(404);
   });
   it("authorizes every operation by the requested team's organization and membership", async () => {
     api = await bootTestApi();

@@ -390,7 +390,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const { session, engineSession } = result;
   const { db } = c.var.providers;
 
-  if (!session.id.startsWith("execution:")) await engineSession.ensureDefaultThread();
+  if (!session.id.startsWith("execution:") && !engineSession.options.readOnlyReason) await engineSession.ensureDefaultThread();
   const wantArchived = c.req.query("archived") === "1";
   const groups = await workspaceThreadGroups(c, session, wantArchived);
   const threads = groups.flatMap(group => group.threads.map(t => ({ ...t,

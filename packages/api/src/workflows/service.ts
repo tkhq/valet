@@ -1150,7 +1150,13 @@ export async function deleteWorkflowDefinition(
     }
     // Deleting the file is the delete, exactly as editing the file is the
     // edit. A delete here would come back on the next sync anyway.
-    await refuseRepoOwned(tx, row);
+    // Run insertion holds this same row lock before writing its snapshot.
+    const [locked] = await tx.select().from(workflowDefinitions).where(and(
+      eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId),
+      eq(workflowDefinitions.ownerType, row.ownerType), eq(workflowDefinitions.ownerId, row.ownerId),
+    )).for("update");
+    if (!locked) return "not_found";
+    await refuseRepoOwned(tx, locked);
 
     const active = await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
       eq(workflowRuns.workflowId, id), hasUnsettledWorkflowRun(),
@@ -2220,4 +2226,3 @@ async function projectWorkflowRun(
     pendingGates,
   };
 }
-

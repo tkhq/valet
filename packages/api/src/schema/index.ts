@@ -1529,6 +1529,7 @@ export const actionPolicyOverrides = pgTable(
     actionId: text("action_id"),
     riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
     mode: text("mode", { enum: ["allow", "require_approval", "deny"] }).notNull(),
+    legacyUnscoped: boolean("legacy_unscoped").notNull().default(false),
     paramMatchers: jsonb("param_matchers").notNull().default([]).$type<ParamMatcher[]>(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),

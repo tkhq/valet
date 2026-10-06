@@ -606,6 +606,7 @@ artifactsRouter.post("/share", async (c) => {
     return c.json(resp);
   } catch (err) {
     const mapped = handleServiceError(err);
+    if (mapped?.status === 404) return c.json({ error: "Cannot publish at this path. Try a new path. Ask an administrator to verify legacy artifact provenance before reusing an old path.", code: "not_found" }, 404);
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }

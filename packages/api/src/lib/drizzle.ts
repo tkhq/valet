@@ -338,6 +338,9 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "quarantine unscoped legacy workflow approvals", probe: { kind: "column", table: "action_policy_overrides", column: "legacy_unscoped" }, sql: `DO $$ BEGIN
+    ALTER TABLE action_policy_overrides ADD COLUMN legacy_unscoped boolean NOT NULL DEFAULT true;
+    ALTER TABLE action_policy_overrides ALTER COLUMN legacy_unscoped SET DEFAULT false; END $$` },
   { describe: "pending approval pagination", probe: { kind: "index", index: "engine_decision_gates_pending" }, sql: "CREATE INDEX \"engine_decision_gates_pending\" ON \"engine_decision_gates\" (\"created_at\", \"id\" COLLATE \"C\") WHERE \"status\" = 'pending';" },
   { describe: "assistant execution identities", probe: { kind: "table", table: "assistant_executions" }, sql: `CREATE TABLE "assistant_executions" (
   "session_id" text PRIMARY KEY, "assistant_id" text NOT NULL,
