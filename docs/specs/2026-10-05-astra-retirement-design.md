@@ -19,8 +19,9 @@ Send individual inference requests through the proxy instead.
 
 Existing sessions, transcripts, workflows, and usage records remain retained.
 Historical pricing uses bundled metadata separately from execution eligibility.
-Existing explicit Astra pins must be changed before their work can continue.
-This change does not silently replace those pins with another model.
+Restoring a session with an Astra default resolves the current owner/tier default,
+so history and the model selector remain accessible. Allowed pins stay unchanged.
+Thread-specific Astra pins still reject inference until changed.
 
 ## Validation
 

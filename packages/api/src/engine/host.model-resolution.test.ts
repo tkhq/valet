@@ -685,6 +685,26 @@ describe("EngineHost model resolution wiring", () => {
     ).rejects.toThrow(/provider Custom is disabled/);
   });
 
+  it("reopens an Astra-pinned session without losing threads and permits an allowed model change", async () => {
+    api = await bootTestApi();
+    const { engineHost, engineStore } = api.providers;
+    const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+    const session = await engineHost.sessionFor("restore-astra", meta);
+    const thread = await session.createThread("web:retained");
+    const saved = await engineStore.getSession(session.id);
+    if (!saved) throw new Error("Session was not persisted");
+    await engineStore.saveSession({ ...saved, model: "openrouter/openai/gpt-6-astra" });
+    engineHost.evictAll();
+
+    const restored = await engineHost.sessionFor(session.id, meta);
+    expect(restored.options.modelSpec).toBe("s");
+    expect(restored.threadById(thread.id)?.key).toBe("web:retained");
+    await restored.setModel("anthropic/claude-sonnet-4-5");
+    await expect(restored.setModel("gpt-6-astra")).rejects.toThrow("Astra is disabled");
+    engineHost.evictAll();
+    expect((await engineHost.sessionFor(session.id, meta)).options.modelSpec).toBe("anthropic/claude-sonnet-4-5");
+  });
+
   it("restore-no-clobber: a persisted namespaced custom model restores verbatim", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineCredentials } = api.providers;

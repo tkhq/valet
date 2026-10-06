@@ -3346,7 +3346,9 @@ export class EngineHost {
       childDefault?: string;
     },
   ): Promise<BuildModel> {
-    if (existing?.model) return this.resolveModelObject(orgId, existing.model);
+    // Retired pins must not brick history or the model selector on restore.
+    // Explicit selections remain rejected by the resolver and request boundary.
+    if (existing?.model && !isDisabledModel(existing.model)) return this.resolveModelObject(orgId, existing.model);
     const id =
       prefs.overrideId ??
       prefs.childDefault ??
