@@ -8,7 +8,7 @@ Private Slack audiences require current membership. Team API keys cannot access 
 
 Default writes, exports and imports use the execution namespace. Reads, searches and snapshots also expose explicit shared team memory under `team:<id>/`.
 Shared projections are read-only. Publication requires a separately authorized copy. Legacy quarantine never enters this union.
-Filesystem, terminal, artifacts and memory routes apply governing-thread authorization; team administration alone cannot read another member's private helper.
+Filesystem, terminal, artifacts, memory and child-work routes apply governing-thread authorization; team administration alone cannot read another member's private helper.
 
 ## Upgrade and recovery
 

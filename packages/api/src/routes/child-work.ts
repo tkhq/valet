@@ -9,7 +9,7 @@ import type { RequestPrincipal } from "../lib/request-principal.js";
 import { agentSessions, childWatches } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import type { ChildWorkResponse } from "../wire/types.js";
-import { keepVisibleThreads } from "./_thread-access.js";
+import { keepVisibleThreads, spawnedFromVisibleThread } from "./_thread-access.js";
 
 export const childWorkRouter = new Hono<AppEnv>();
 const ORDER = "running-created-id-v1";
@@ -40,7 +40,7 @@ childWorkRouter.get("/:sessionId/children", async (c) => {
   const parentSessionId = c.req.param("sessionId");
   const orgId = c.var.user.orgId;
   const owner = await canViewParent(db, parentSessionId, orgId, c.var.principal);
-  if (!owner) return c.json({ error: "session not found" }, 404);
+  if (!owner || !await spawnedFromVisibleThread(c, { id: parentSessionId, ownerType: owner.type })) return c.json({ error: "session not found" }, 404);
   const limit = readLimit(c.req.query("limit"), 25, 100);
   if (limit === undefined) return c.json({ error: "Send a positive whole number for limit." }, 400);
   const raw = c.req.query("cursor");
@@ -87,7 +87,7 @@ childWorkRouter.post("/:sessionId/children/:childSessionId/dismiss", async (c) =
   const childSessionId = c.req.param("childSessionId");
   const orgId = c.var.user.orgId;
   const owner = await canViewParent(db, parentSessionId, orgId, c.var.principal);
-  if (!owner) return c.json({ error: "child not found" }, 404);
+  if (!owner || !await spawnedFromVisibleThread(c, { id: parentSessionId, ownerType: owner.type })) return c.json({ error: "child not found" }, 404);
   const parentSessionIds = await workspaceSessionIds(db, orgId, parentSessionId);
   const threads = await visibleParentThreads(c, parentSessionIds, owner);
   const scope = and(inArray(childWatches.parentSessionId, parentSessionIds), eq(childWatches.childSessionId, childSessionId), eq(childWatches.orgId, orgId),

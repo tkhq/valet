@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { resolveDefaultAssistant } from "../assistants/service.js";
+import { ensureAssistantExecution, resolveDefaultAssistant } from "../assistants/service.js";
 import { agentSessions, assistants, childWatches, teams, teamMembers } from "../schema/index.js";
 import type { ChildWorkResponse, CreateTeamResponse, CreateTeamApiKeyResponse, GetSessionResponse } from "../wire/types.js";
 let api: TestApi | undefined;
@@ -68,6 +68,23 @@ describe("parent-scoped child work", () => {
     expect((await list(api, foreign.sessionId)).status).toBe(404);
     expect((await list(api, "missing")).status).toBe(404);
     for (const path of ["/api/orchestrator/children", "/api/teams/team/children"]) expect((await fetch(`${api.baseUrl}${path}`)).status).toBe(404);
+  });
+  it("hides private execution existence from other team members", async () => {
+    api = await bootTestApi();
+    const owner = { type: "team", id: "private-team" } as const;
+    await api.providers.db.insert(teams).values({ id: owner.id, orgId: "local-org", name: "Team", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values(["local-user", "test-member"].map(userId => ({ teamId: owner.id, userId, role: "member" as const })));
+    const meta = { orgId: "local-org", actorUserId: "local-user" };
+    const privateExecution = await ensureAssistantExecution(api.providers, owner, meta, "app-assistant:local-user");
+    const sharedExecution = await ensureAssistantExecution(api.providers, owner, meta, "web:default");
+    const otherMember = { "x-valet-test-user-id": "test-member" };
+    expect((await list(api, privateExecution.sessionId)).status).toBe(200);
+    expect((await list(api, sharedExecution.sessionId, "", otherMember)).status).toBe(200);
+    const missing = await list(api, "missing", "", otherMember);
+    const hidden = await list(api, privateExecution.sessionId, "", otherMember);
+    expect(hidden.status).toBe(404);
+    expect(await hidden.json()).toEqual(await missing.json());
+    expect((await list(api, privateExecution.sessionId, "?limit=invalid", otherMember)).status).toBe(404);
   });
   it("scopes dismiss to parent, refuses running children, preserves history and first dismissal timestamp", async () => {
     api = await bootTestApi();
