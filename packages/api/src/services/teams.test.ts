@@ -135,7 +135,6 @@ describe("teams service", () => {
       .from(assistants)
       .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
     expect(owned).toHaveLength(1);
-    expect(owned[0]).toBeDefined();
     expect(owned[0]?.archivedAt).toBeNull();
     expect(owned[0]?.orgId).toBe(orgId);
     // Session address follows the assistant id (`assistant:{id}`), so the

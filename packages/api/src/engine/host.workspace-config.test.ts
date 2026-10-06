@@ -105,7 +105,23 @@ describe("workspace runtime configuration", () => {
   });
 
   it("exposes all owner-accessible actions and skills without a profile filter", async () => {
-    api = await bootTestApi({ plugins: [fixturePlugin] });
+    // The workflow editor panel depends on the pinned
+    // workflows.get_workflow/patch_workflow pair (plugins/pinned-actions.ts);
+    const workflowsPlugin: ValetPlugin = {
+      name: "workflows-fixture",
+      version: "0.0.1",
+      actions: [
+        {
+          service: "workflows",
+          actions: [
+            makeAction("workflows.get_workflow"),
+            makeAction("workflows.patch_workflow"),
+            makeAction("workflows.save_workflow"),
+          ],
+        } satisfies ActionPlugin,
+      ],
+    };
+    api = await bootTestApi({ plugins: [fixturePlugin, workflowsPlugin] });
     const { db, engineHost } = api.providers;
 
     await createSkill(db, { userId: USER, orgId: ORG }, {
@@ -130,48 +146,16 @@ describe("workspace runtime configuration", () => {
     expect(listed).toContain("github.delete_repo");
     expect(listed).toContain("slack.post_message");
     expect(listed).not.toContain("excluded_by_assistant");
+    expect(listed).toContain("workflows.save_workflow");
+    const toolNames = (session.options.tools ?? []).map((t) => t.name);
+    expect(toolNames).toContain("workflows__get_workflow");
+    expect(toolNames).toContain("workflows__patch_workflow");
 
     const provider = session.options.skillsProvider;
     expect(provider).toBeDefined();
     const provided = await provider!();
     const providedNames = provided.map((s) => s.name).sort();
     expect(providedNames).toEqual(["deploy", "gh-triage", "slack-notes"]);
-  });
-
-  it("keeps workflow pins and ordinary owner-accessible actions", async () => {
-    // The workflow editor panel depends on the pinned
-    // workflows.get_workflow/patch_workflow pair (plugins/pinned-actions.ts);
-    const workflowsPlugin: ValetPlugin = {
-      name: "workflows-fixture",
-      version: "0.0.1",
-      actions: [
-        {
-          service: "workflows",
-          actions: [
-            makeAction("workflows.get_workflow"),
-            makeAction("workflows.patch_workflow"),
-            makeAction("workflows.save_workflow"),
-          ],
-        } satisfies ActionPlugin,
-      ],
-    };
-    api = await bootTestApi({ plugins: [fixturePlugin, workflowsPlugin] });
-    const { db, engineHost } = api.providers;
-
-    const row = await seedWorkspaceAssistant(db, ORG, { type: "user", id: USER });
-    const { session } = await ensureDefaultAssistantSession({ db, engineHost }, { type: row.ownerType, id: row.ownerId }, {
-      actorUserId: USER,
-      orgId: ORG,
-    });
-
-    // The pins survive as direct tools (`service__action`)...
-    const toolNames = (session.options.tools ?? []).map((t) => t.name);
-    expect(toolNames).toContain("workflows__get_workflow");
-    expect(toolNames).toContain("workflows__patch_workflow");
-    const listed = await listToolIds(session.options.tools);
-    expect(listed).toContain("workflows.save_workflow");
-    expect(listed).toContain("slack.post_message");
-    expect(listed).toContain("github.create_issue");
   });
 
   it("keeps a carried-over integration allow-list until an admin clears it", async () => {

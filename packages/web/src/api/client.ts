@@ -86,13 +86,10 @@ import type {
   SecurityFileIssueResponse,
   SecurityFindingSeverity,
   SecurityFindingStatus,
-  SecurityPlanCellInput,
   SecurityPreviewRequest,
   SecurityPreviewResponse,
   SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
-  SecuritySetConfigResponse,
-  SecuritySetPlanResponse,
   GetWorkflowResponse,
   EnsureWorkflowConversationResponse,
   GetWorkflowRunResponse,
@@ -109,7 +106,6 @@ import type {
   ListGrantsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
-  ListAllWorkflowRunsResponse,
   ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
@@ -147,8 +143,6 @@ import type {
   ListThreadsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowTriggersResponse,
-  WorkflowRunOutcome,
-  WorkflowRunStatus,
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
@@ -234,11 +228,9 @@ import type {
   WorkflowScheduleResponse,
   WithdrawDecisionRequest,
   ListCommandsResponse,
-  ProxyUsageSummary,
   ProxyRequestListResponse,
   ProxySettingsResponse,
   UsageBreakdownResponse,
-  UsageSessionsResponse,
   UsageDrillResponse,
   UsageScopeName,
   UsageToolEfficiencyResponse,
@@ -309,7 +301,6 @@ class ApiError extends Error {
     this.name = "ApiError";
   }
 }
-
 
 export interface MemoryCopyRequest {
   from: string;
@@ -519,15 +510,6 @@ export interface SecurityFindingsQuery {
   limit?: number;
 }
 
-/** Filters the cross-workflow run list accepts. Array fields match any-of. */
-export interface WorkflowRunFilter extends WorkflowRunPage {
-  workflowIds?: string[];
-  status?: WorkflowRunStatus[];
-  outcome?: WorkflowRunOutcome[];
-  parentRunId?: string;
-  since?: number;
-}
-
 export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearchParams {
   if (period.kind === "lookback") return new URLSearchParams({ window: period.window });
   if (period.kind === "month") return new URLSearchParams({ month: period.month });
@@ -613,27 +595,6 @@ export const api = {
     request<ListSecurityCoverageResponse>(
       "GET",
       `/sessions/${encodeURIComponent(id)}/security/coverage`,
-    ),
-  /** POST /sessions/:id/security/plan/cells — replace the plan from structured
-   * steps during planning (dynamic-config M-F2; session admin). The server
-   * assigns dense ordinals in array order. Returns the new cell count. */
-  setSecurityPlanCells: (id: string, cells: SecurityPlanCellInput[]) =>
-    request<SecuritySetPlanResponse>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/security/plan/cells`,
-      { cells },
-    ),
-  /** POST /sessions/:id/security/config — edit the engagement's focus, known
-   * invariants, and loaded threat categories during planning (dynamic-config
-   * M-F3, M-P2a; session admin). Returns the saved values. */
-  setSecurityConfig: (
-    id: string,
-    body: { focus?: string | null; invariants?: string[]; categories?: string[] },
-  ) =>
-    request<SecuritySetConfigResponse>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/security/config`,
-      body,
     ),
   /** POST /sessions/:id/security/findings/:findingId/status — human
    * verify/refute (forward-only; session admin). */
@@ -750,10 +711,6 @@ export const api = {
   },
   dismissChild: (sessionId: string, childSessionId: string) =>
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(sessionId)}/children/${encodeURIComponent(childSessionId)}/dismiss`),
-
-  // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
-  // also how the client learns each assistant's session id, so it replaces
-  // the client-side id derivation the rail used to do.
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
@@ -984,26 +941,6 @@ export const api = {
       `/workflows/${encodeURIComponent(id)}/runs${tail}`,
     );
   },
-  // Cross-workflow run list. `parentRunId` is how a batch parent's child
-  // runs come back in one request.
-  listRuns: (opts?: WorkflowRunFilter): Promise<ListAllWorkflowRunsResponse> => {
-    // An any-of filter with no values matches nothing. A query string cannot
-    // carry an empty repeated field, so an unguarded request would drop the
-    // filter and list every readable run — the opposite of what was asked.
-    for (const values of [opts?.workflowIds, opts?.status, opts?.outcome]) {
-      if (values?.length === 0) return Promise.resolve({ runs: [] });
-    }
-    const qs = new URLSearchParams();
-    for (const workflowId of opts?.workflowIds ?? []) qs.append("workflowId", workflowId);
-    for (const status of opts?.status ?? []) qs.append("status", status);
-    for (const outcome of opts?.outcome ?? []) qs.append("outcome", outcome);
-    if (opts?.parentRunId) qs.set("parentRunId", opts.parentRunId);
-    if (opts?.since !== undefined) qs.set("since", String(opts.since));
-    if (opts?.limit) qs.set("limit", String(opts.limit));
-    if (opts?.cursor) qs.set("cursor", opts.cursor);
-    const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
-  },
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(
       "GET",
@@ -1112,17 +1049,6 @@ export const api = {
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
   listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
-  listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
-    const qs = new URLSearchParams();
-    if (page?.limit) qs.set("limit", String(page.limit));
-    if (page?.cursor) qs.set("cursor", page.cursor);
-    const owned = ownerParams(owner);
-    const joined = [qs.toString(), owned].filter(Boolean).join("&");
-    return request<ListAllWorkflowRunsResponse>(
-      "GET",
-      `/workflows/runs${joined ? `?${joined}` : ""}`,
-    );
-  },
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
   updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>
@@ -1193,11 +1119,6 @@ export const api = {
     qs.set("granularity", granularity);
     qs.set("validate", "1");
     return request<void>("GET", `/usage/export.csv?${qs}`);
-  },
-  usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
-    const qs = new URLSearchParams({ window });
-    if (useCase) qs.set("useCase", useCase);
-    return request<UsageSessionsResponse>("GET", `/usage/sessions?${qs}`);
   },
   getJournalSummary: () =>
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
@@ -1522,8 +1443,6 @@ export const api = {
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),
 
   // ── LLM proxy usage (recording-gateway dashboard) ──────────────────────
-  proxyUsageSummary: (window: string = "7d") =>
-    request<ProxyUsageSummary>("GET", `/proxy/usage/summary?window=${encodeURIComponent(window)}`),
   proxyRequests: (opts: {
     model?: string;
     harness?: string;

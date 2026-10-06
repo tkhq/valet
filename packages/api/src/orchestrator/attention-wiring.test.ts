@@ -265,6 +265,8 @@ describe("wireAttentionRouter", () => {
     const seen: AttentionEvent[] = [];
     unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ deliver: async (_userId, event) => { seen.push(event); } }] });
     const runId = `run-${randomUUID()}`;
+    await db.insert(workflowDefinitions).values({ id: "wf-x", orgId: "local-org", ownerType: "user", ownerId: "local-user",
+      name: "Slack event workflow", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: Date.now(), updatedAt: Date.now() });
     await workflowStore.createRun(runId, {
       workflowId: "wf-x", definitionVersionId: "v1",
       input: { type: "event", timestamp: "2026-10-04T00:00:00.000Z", data: { key: "slack.message", refs: { channel: "CPRIV" }, payload: { channel: "CPRIV" } }, metadata: {} },

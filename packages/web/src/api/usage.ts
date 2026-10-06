@@ -18,8 +18,6 @@ import { api } from "~/api/client";
 export const qkUsage = {
   breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
     ["usage", "breakdown", period, scope, teamId] as const,
-  sessions: (window: string, useCase?: "orchestrator" | "session") =>
-    ["usage", "sessions", window, useCase] as const,
   items: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
     ["usage", "items", period, scope, useCase, teamId] as const,
   toolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>

@@ -44,18 +44,6 @@ function grantKey(scope: BorrowScope, generation: string): string {
   return workflowRunOf(scope.sessionId) ? base : `${base}:${scope.threadId ?? ""}`;
 }
 
-export async function hasBorrowGrant(db: AppQueryable, scope: BorrowScope): Promise<boolean> {
-  const key = await borrowKey(db, scope);
-  if (!key) return false;
-  const runId = workflowRunOf(scope.sessionId);
-  const rows = await db.select({ id: runtimeGrants.id }).from(runtimeGrants).where(and(
-    runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
-    eq(runtimeGrants.policyKey, key),
-    isNull(runtimeGrants.revokedAt),
-  )).limit(1);
-  return rows.length > 0;
-}
-
 /** Only a live workspace runtime can request unattended account consent. */
 function unattendedRuntimeOwner(scope: { orgId: string; teamId: string; sessionId: string; threadId?: string; actorId?: string }) {
   return sql`EXISTS (SELECT 1 FROM agent_sessions s

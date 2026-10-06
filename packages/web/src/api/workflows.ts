@@ -38,7 +38,7 @@ import type {
   WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "@valet/api/wire";
-import { api, ApiError, type OwnerFilter, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
+import { api, ApiError, type OwnerFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
   /** The owner is a trailing element, so `["workflows"]` stays the prefix
@@ -52,8 +52,6 @@ export const qkWorkflows = {
   // invalidates all of them.
   runs: (id: string, page?: WorkflowRunPage) =>
     ["workflows", id, "runs", ...(page ? [page] : [])] as const,
-  runList: (filter?: WorkflowRunFilter) =>
-    ["workflows", "run-list", ...(filter ? [filter] : [])] as const,
   run: (runId: string) => ["workflows", "runs", runId] as const,
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,

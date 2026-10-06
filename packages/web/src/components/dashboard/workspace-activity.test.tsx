@@ -7,14 +7,13 @@ import { api, type OwnerFilter } from "~/api/client";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 let owner: OwnerFilter = { ownerType: "user", ownerId: "u" };
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
-vi.mock("~/api/client", () => ({ api: { listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listRuns: vi.fn(), listWorkflowActionRequired: vi.fn(), dismissWorkflowRun: vi.fn(async () => ({ ok: true })) } }));
+vi.mock("~/api/client", () => ({ api: { listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listWorkflowActionRequired: vi.fn(), dismissWorkflowRun: vi.fn(async () => ({ ok: true })) } }));
 beforeEach(() => {
   vi.clearAllMocks(); owner = { ownerType: "user", ownerId: "u" };
   vi.mocked(api.listArtifacts).mockResolvedValue({ artifacts: [], nextCursor: null });
   vi.mocked(api.listWorkspaceOutcomes).mockResolvedValue({ items: [], nextCursor: null });
   vi.mocked(api.listWorkspaceActiveWork).mockResolvedValue({ items: [], nextCursor: null });
   vi.mocked(api.listWorkflows).mockResolvedValue({ workflows: [{ id: "wf", name: "Review", definition: {}, ownerType: "user", ownerId: "u", createdAt: 1, updatedAt: 1 }] });
-  vi.mocked(api.listRuns).mockResolvedValue({ runs: [] });
   vi.mocked(api.listWorkflowActionRequired).mockResolvedValue({ items: [], count: 0 });
 });
 function setup() {

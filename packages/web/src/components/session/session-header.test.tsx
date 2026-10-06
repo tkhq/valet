@@ -826,14 +826,6 @@ describe("SessionHeader — team assistant", () => {
     expect(screen.getByText("Platform")).toBeTruthy();
   });
 
-  it("titles a named team assistant with its own name", () => {
-    // A team owns several, so the team's name no longer identifies which
-    // conversation you are reading.
-    withTeam("member", "Triage");
-    renderTeamHeader();
-    expect(screen.getByText("New thread")).toBeTruthy();
-  });
-
   it("marks it as shared with a badge naming the owning team", () => {
     withTeam("member");
     renderTeamHeader();

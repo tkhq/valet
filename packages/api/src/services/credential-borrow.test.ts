@@ -4,7 +4,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistants, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { getWorkflowRunDetail, resolveWorkflowApproval } from "../workflows/service.js";
 import { shareCredential, revokeShare } from "./credential-shares.js";
-import { shareGeneration, canBorrowCredential, hasBorrowGrant, writeBorrowGrant } from "./credential-borrow.js";
+import { shareGeneration, canBorrowCredential, writeBorrowGrant } from "./credential-borrow.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -39,9 +39,9 @@ it("lets only the member whose account a workflow step would use answer it, for 
 
   const approve = (userId: string) => resolveWorkflowApproval(deps, as(userId), { runId: "run-borrow", nodeId: "step", approved: true, scope: "run", via: "web" });
   expect(await approve("local-user")).toBe("not_approver");
-  expect(await hasBorrowGrant(p.db, { teamId: "mine", sessionId: "wf:run-borrow", service: "demo", memberId: "test-member" })).toBe(false);
+  expect(await canBorrowCredential(p.db, { teamId: "mine", sessionId: "wf:run-borrow", service: "demo", memberId: "test-member", orgId: "local-org", actorId: "local-user" })).toBe(false);
   expect(await approve("test-member")).toBe("ok");
-  expect(await hasBorrowGrant(p.db, { teamId: "mine", sessionId: "wf:run-borrow", service: "demo", memberId: "test-member" })).toBe(true);
+  expect(await canBorrowCredential(p.db, { teamId: "mine", sessionId: "wf:run-borrow", service: "demo", memberId: "test-member", orgId: "local-org", actorId: "local-user" })).toBe(true);
 });
 
 it("does not reuse a borrow grant across organizations or conversations", async () => {
@@ -82,21 +82,23 @@ it("lets an unattended workflow borrow only for its stored team and current lend
 
 it.each(["session", "wf:run:step"])("requires fresh approval after revocation and re-sharing for %s", async (sessionId) => {
   api = await bootTestApi(); const db = api.providers.db;
-  const scope = { teamId: "revoked", sessionId, threadId: "thread", service: "linear", memberId: "test-member" };
+  const scope = { teamId: "revoked", sessionId, threadId: "thread", service: "linear", memberId: "test-member", orgId: "local-org", actorId: "local-user" };
+  await db.insert(teams).values({ id: scope.teamId, orgId: scope.orgId, name: "Borrow", createdAt: 1 });
+  await db.insert(teamMembers).values({ teamId: scope.teamId, userId: scope.actorId, role: "member" });
   const share = { teamId: scope.teamId, service: scope.service, userId: scope.memberId, createdAt: 1 };
   await shareCredential(db, share);
   await writeBorrowGrant(db, "local-org", { ...scope, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
-  expect(await hasBorrowGrant(db, scope)).toBe(true);
+  expect(await canBorrowCredential(db, scope)).toBe(true);
   await shareCredential(db, share);
-  expect(await hasBorrowGrant(db, scope)).toBe(true);
+  expect(await canBorrowCredential(db, scope)).toBe(true);
   const oldGeneration = (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))!;
   await revokeShare(db, share);
-  expect(await hasBorrowGrant(db, scope)).toBe(false);
+  expect(await canBorrowCredential(db, scope)).toBe(false);
   await shareCredential(db, share);
-  expect(await hasBorrowGrant(db, scope)).toBe(false);
+  expect(await canBorrowCredential(db, scope)).toBe(false);
   await expect(writeBorrowGrant(db, "local-org", { ...scope, shareGeneration: oldGeneration })).rejects.toThrow(/share changed/);
   await writeBorrowGrant(db, "local-org", { ...scope, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
-  expect(await hasBorrowGrant(db, scope)).toBe(true);
+  expect(await canBorrowCredential(db, scope)).toBe(true);
 });
 
 

@@ -14,7 +14,6 @@ import type {
 import { api } from "~/api/client";
 
 export const qkProxy = {
-  summary: (window: string) => ["proxy", "usage", "summary", window] as const,
   requests: (filters: ProxyRequestFilters) => ["proxy", "requests", filters] as const,
   settings: () => ["proxy", "settings"] as const,
 };

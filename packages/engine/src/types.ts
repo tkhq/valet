@@ -844,12 +844,8 @@ export interface CredentialProvider {
    * actions can call `.get()` to use their own default scope (set up by
    * the plugin catalog when it builds PluginActionContext); first-class
    * tools should always pass it explicitly.
-   *
-   * `purpose: "discover"` marks a read that only lists a service's tools.
-   * The host may then use an account it would ask approval for before an
-   * action runs (`CredentialUse.discover`).
    */
-  get(service?: string, purpose?: "discover"): Promise<Credential | null>;
+  get(service?: string): Promise<Credential | null>;
   request(service: string, reason: string): Promise<Credential>;
 }
 
@@ -864,8 +860,6 @@ export interface CredentialOwner {
 export interface CredentialUse {
   actorId?: string;
   threadId?: string;
-  /** The read only lists a service's tools (`CredentialProvider.get`). */
-  discover?: boolean;
   /** The turn came from a channel sender with no Valet account: no
    * teammate's approval to lend an account covers it. */
   externalSender?: boolean;

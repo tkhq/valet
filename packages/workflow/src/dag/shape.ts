@@ -15,7 +15,6 @@ export interface WorkflowDefinition {
   version: 'dag/v1';
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
-  /** Explicit orchestrator routing. Omitted definitions use the owner's default assistant. */
   policy?: WorkflowPolicy;
   ui?: WorkflowEditorState;
 }

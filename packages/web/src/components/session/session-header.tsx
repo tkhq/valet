@@ -95,8 +95,6 @@ export function SessionHeader({
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
-  /** Wire timestamp the current turn began; undefined while idle. */
-  turnStartedAt?: number;
   conn: ConnectionStatus;
   sandbox?: { state: string; epoch: number };
   threadId?: string;

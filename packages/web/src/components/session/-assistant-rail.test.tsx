@@ -1,8 +1,6 @@
 // @vitest-environment jsdom
 import { render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { ReactNode } from "react";
-vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: ReactNode }) => <a>{children}</a> }));
 import { AssistantRail } from "./assistant-rail";
 let data: { sessionId: string } | undefined;
 let error: Error | null = null;

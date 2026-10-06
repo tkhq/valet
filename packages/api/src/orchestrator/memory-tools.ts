@@ -586,9 +586,6 @@ export const memShareTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);
     const headers = memoryHeaders(cfg, owner, ctx, true);
-    // Audit column: which session ran the share.
-    headers["x-valet-session-id"] = ctx.sessionId;
-    headers["x-valet-thread-id"] = ctx.threadId;
     return memoryRequest(
       url,
       {
@@ -746,9 +743,6 @@ export const artifactPublishTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);
     const headers = memoryHeaders(cfg, owner, ctx, true);
-    // Audit column — and the target for reader comments sent to the agent.
-    headers["x-valet-session-id"] = ctx.sessionId;
-    headers["x-valet-thread-id"] = ctx.threadId;
     return memoryRequest(
       url,
       {

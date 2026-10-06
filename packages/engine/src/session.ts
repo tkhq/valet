@@ -1744,13 +1744,13 @@ export class Session {
     // or raw store read — is one `credentials.get` span, nesting under the
     // running tool/turn span via the active context. Values never land on
     // the span; only the service name and hit/miss.
-    const read = (service: string, purpose?: "discover"): Promise<StoredCredential | null> =>
+    const read = (service: string): Promise<StoredCredential | null> =>
       withSpan(
         "credentials.get",
         { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
         async (span) => {
           const stored = resolver
-            ? await resolver(owner, service, purpose === "discover" ? { ...use, discover: true } : use)
+            ? await resolver(owner, service, use)
             : credStore
               ? await credStore.get(owner, service)
               : null;
@@ -1760,10 +1760,10 @@ export class Session {
         },
       );
     return {
-      async get(service?: string, purpose?: "discover") {
+      async get(service?: string) {
         if (!resolver && !credStore) return null;
         if (!service) return null; // session-level provider has no default service
-        const stored = await read(service, purpose);
+        const stored = await read(service);
         if (!stored) return null;
         return {
           accessToken: credentialSecret(stored) ?? "",

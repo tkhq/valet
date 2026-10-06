@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
 import { agentSessions, assistants, childWatches, teams, teamMembers } from "../schema/index.js";
-import type { ChildWorkResponse, CreateTeamResponse, CreateTeamApiKeyResponse } from "../wire/types.js";
+import type { ChildWorkResponse, CreateTeamResponse, CreateTeamApiKeyResponse, GetSessionResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 const local = { type: "user", id: "local-user" } as const;
@@ -24,7 +24,10 @@ describe("parent-scoped child work", () => {
     await api.providers.db.update(assistants).set({ sessionId: "runtime-without-assistant-prefix" }).where(eq(assistants.id, parent.id));
     parent.sessionId = "runtime-without-assistant-prefix";
     await seedChildren(api, parent.sessionId, local, 34, 29);
-    const first = await (await list(api, parent.sessionId)).json() as ChildWorkResponse;
+    await seedChildren(api, "another-parent");
+    const response = await list(api, parent.sessionId);
+    expect(response.status).toBe(200);
+    const first = await response.json() as ChildWorkResponse;
     expect(first.children).toHaveLength(25);
     expect(first.runningCount).toBe(29);
     expect(first.children.every(child => child.status === "running")).toBe(true);
@@ -34,7 +37,10 @@ describe("parent-scoped child work", () => {
     expect(second.runningCount).toBe(29);
     const ids = [...first.children, ...second.children].map(child => child.sessionId);
     expect(new Set(ids).size).toBe(34);
-    expect(ids[0]).toBe(`${parent.sessionId}-child-028`);
+    expect(ids).not.toContain("another-parent-child-000");
+    expect(first.children[0]).toMatchObject({ sessionId: `${parent.sessionId}-child-028`, title: "Work 28", parentThreadId: "thread", status: "running" });
+    expect(second.children.slice(4).every(child => child.status === "settled")).toBe(true);
+    expect(second.children[4]).toMatchObject({ sessionId: `${parent.sessionId}-child-033`, title: "Work 33", parentThreadId: "thread", status: "settled" });
     expect(second.children.slice(0, 4).every(child => child.status === "running")).toBe(true);
     const other = await resolveDefaultAssistant(api.providers.db, "local-org", { type: "team", id: "other" });
     await api.providers.db.insert(teams).values({ id: "other", orgId: "local-org", name: "Other", createdAt: 1 });
@@ -68,16 +74,37 @@ describe("parent-scoped child work", () => {
     const parent = await resolveDefaultAssistant(api.providers.db, "local-org", local);
     await seedChildren(api, parent.sessionId, local, 2, 1);
     const running = `${parent.sessionId}-child-000`, settled = `${parent.sessionId}-child-001`;
+    expect((await dismiss(api, parent.sessionId, "missing-child")).status).toBe(404);
     expect((await dismiss(api, parent.sessionId, running)).status).toBe(409);
+    const [runningWatch] = await api.providers.db.select().from(childWatches).where(eq(childWatches.childSessionId, running));
+    expect(runningWatch?.dismissedAt).toBeNull();
     await api.providers.db.insert(agentSessions).values({ id: "wrong-parent", orgId: "local-org", userId: "local-user", ownerType: "user", ownerId: "local-user", workspace: "/tmp/other", createdAt: 1, updatedAt: 1 });
     expect((await dismiss(api, "wrong-parent", settled)).status).toBe(404);
-    expect((await dismiss(api, parent.sessionId, settled)).status).toBe(200);
-    const [first] = await api.providers.db.select().from(childWatches).where(eq(childWatches.childSessionId, settled));
-    expect((await dismiss(api, parent.sessionId, settled)).status).toBe(200);
-    const [second] = await api.providers.db.select().from(childWatches).where(eq(childWatches.childSessionId, settled));
-    expect(second?.dismissedAt).toBe(first?.dismissedAt);
-    expect(await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, settled))).toHaveLength(1);
-    expect(((await (await list(api, parent.sessionId)).json()) as ChildWorkResponse).children).toHaveLength(1);
+    expect(((await (await list(api, parent.sessionId)).json()) as ChildWorkResponse).children.map(child => child.sessionId)).toContain(settled);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      expect((await dismiss(api, parent.sessionId, settled)).status).toBe(200);
+      const [first] = await api.providers.db.select().from(childWatches).where(eq(childWatches.childSessionId, settled));
+      expect(first?.dismissedAt).toBe(now);
+      clock.mockReturnValue(now + 1_000);
+      expect((await dismiss(api, parent.sessionId, settled)).status).toBe(200);
+      const [second] = await api.providers.db.select().from(childWatches).where(eq(childWatches.childSessionId, settled));
+      expect(second?.dismissedAt).toBe(first?.dismissedAt);
+    } finally {
+      clock.mockRestore();
+    }
+    const sessions = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, settled));
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.status).toBe("active");
+    expect(((await (await list(api, parent.sessionId)).json()) as ChildWorkResponse).children.map(child => child.sessionId)).toEqual([running]);
+    const detail = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(settled)}`);
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as GetSessionResponse).parentWork).toEqual({ sessionId: parent.sessionId, threadId: "thread" });
+    await api.providers.db.update(agentSessions).set({ ownerId: "test-member", userId: "test-member" }).where(eq(agentSessions.id, settled));
+    const moved = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(settled)}`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(moved.status).toBe(200);
+    expect(((await moved.json()) as GetSessionResponse)).not.toHaveProperty("parentWork");
   });
   it("hides and refuses dismissal of work moved to another workspace", async () => {
     api = await bootTestApi();

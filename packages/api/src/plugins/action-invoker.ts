@@ -357,7 +357,7 @@ async function computeResult(
     let resolved: PluginAction[];
     try {
       resolved = await entry.actionPlugin.resolveActions({
-        credentials: { get: (service) => credentials.get(service, "discover"), request: (service, reason) => credentials.request(service, reason) },
+        credentials,
       });
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

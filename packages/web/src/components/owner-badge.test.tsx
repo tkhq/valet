@@ -22,7 +22,6 @@ vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
 }));
 
-
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
@@ -112,14 +111,6 @@ describe("OwnerBadge", () => {
     expect(JSON.parse(link?.getAttribute("data-search") ?? "null")).toEqual({
       workspace: "team_1",
     });
-  });
-
-  it("still names the owner when the team has no assistant to link to", () => {
-    teamsData = { teams: [team()] };
-    const { container } = show("team", "team_1");
-
-    expect(screen.getByText("Design")).toBeTruthy();
-    expect(container.querySelector("a")?.getAttribute("to")).toBe("/chat");
   });
 
   it("names the destination on hover", () => {

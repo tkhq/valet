@@ -129,6 +129,9 @@ it("lists threads that wait on a reply until someone replies or archives them", 
   await agentMessage(api, { id: editor.threadId, sessionId: editor.sessionId }, now - 4_000);
   const titled = await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user");
   expect(titled.find(t => t.threadId === editor.threadId)?.title).toBe("Label new bug reports");
+  // Another viewer never sees this viewer's editor conversation.
+  expect((await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "someone-else"))
+    .some(t => t.threadId === editor.threadId)).toBe(false);
   expect((await fetch(`${api.baseUrl}/api/workflows/${workflow.id}`, { method: "DELETE" })).ok).toBe(true);
   // The app-assistant helper thread is hidden, as in the sidebar.
   const helper = await (await fetch(`${api.baseUrl}/api/workspaces/user/conversation`, { method: "POST" })).json() as { sessionId: string; threadId: string };
@@ -136,9 +139,6 @@ it("lists threads that wait on a reply until someone replies or archives them", 
   await agentMessage(api, { id: helper.threadId, sessionId: helper.sessionId }, now - 3_000);
   expect((await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user"))
     .some(t => t.threadId === helper.threadId)).toBe(false);
-  // Another viewer never sees this viewer's editor conversation.
-  expect((await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "someone-else"))
-    .some(t => t.threadId === editor.threadId)).toBe(false);
   const afterDelete = await listWaitingThreads(api.providers.db, "local-org", { type: "user", id: "local-user" }, "local-user");
   expect(afterDelete.map(t => t.threadId)).toEqual([waiting.id]);
 

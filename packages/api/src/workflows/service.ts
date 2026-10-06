@@ -646,7 +646,7 @@ export async function createWorkflowDefinition(
         requireMembership: owner.requireTeamMembership === true,
       },
       async (tx) => {
-        await validateWorkflowAssistant(tx, owner.orgId, { type: "team", id: teamId }, input.definition);
+        rejectAssistantRouting(input.definition);
         await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
         return true;
       },
@@ -655,7 +655,7 @@ export async function createWorkflowDefinition(
     ownerType = "team";
     ownerId = teamId;
   } else {
-    await validateWorkflowAssistant(deps.db, owner.orgId, { type: "user", id: owner.userId }, input.definition);
+    rejectAssistantRouting(input.definition);
     await deps.db.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
   }
 
@@ -668,20 +668,6 @@ function rejectAssistantRouting(definition: unknown): void {
   if (definition && typeof definition === "object" && "assistantId" in definition) {
     throw new ValidationError("Assistant selection is not supported. Remove assistantId from the workflow definition.");
   }
-}
-
-async function validateWorkflowAssistant(
-  _db: AppQueryable, _orgId: string, _owner: { type: WorkflowOwnerType; id: string }, definition: unknown,
-) {
-  rejectAssistantRouting(definition);
-}
-
-/** A copied definition is portable because it contains no assistant identity. */
-async function copiedDefinitionForOwner(
-  _db: AppDb, _orgId: string, definition: unknown, _owner: { type: "user" | "team"; id: string },
-): Promise<unknown> {
-  rejectAssistantRouting(definition);
-  return definition;
 }
 
 /** Immutable per-save snapshot backing the UI's version history. */
@@ -775,7 +761,7 @@ export async function updateWorkflowDefinition(
 
   const now = Date.now();
   if (input.definition !== undefined) {
-    await validateWorkflowAssistant(deps.db, owner.orgId, { type: row.ownerType, id: row.ownerId }, input.definition);
+    rejectAssistantRouting(input.definition);
   }
   const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
   // A grant approves the steps as they were. When someone who could not have
@@ -1091,7 +1077,8 @@ export async function copyWorkflowDefinition(
         eq(workflowDefinitions.ownerId, destination.teamId), eq(workflowDefinitions.name, name),
       )).limit(1);
       if (existing) throw new ValidationError("A workflow with that name already exists in the team. Choose another name.");
-      const definition = await copiedDefinitionForOwner(tx, owner.orgId, row.definition, { type: "team", id: destination.teamId });
+      rejectAssistantRouting(row.definition);
+      const definition = row.definition;
       return createWorkflowDefinition({ ...deps, db: tx }, owner, { name, definition, teamId: destination.teamId });
     });
   }
@@ -1099,7 +1086,8 @@ export async function copyWorkflowDefinition(
   const now = Date.now();
   const copyId = newWorkflowId("wf");
   const name = `${row.name} (copy)`;
-  const definition = await copiedDefinitionForOwner(deps.db, owner.orgId, row.definition, { type: "user", id: owner.userId });
+  rejectAssistantRouting(row.definition);
+  const definition = row.definition;
   // Personal, whatever the original's owner was. A team-owned mirror copied
   // into the team would be a second team workflow every member sees; the
   // person who wants to change the graph gets it in their own workspace,

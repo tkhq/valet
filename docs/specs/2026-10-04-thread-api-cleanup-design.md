@@ -59,7 +59,7 @@ Named approvers on private child sessions receive exact pending-gate decision ac
 
 ## Validation
 
-Exercise both route families against retained history, thread-local decisions, private/team access, malformed origins, named gate-only approvals, credential revocation races, account switching, and recovery. Retain unique API/client regression coverage and the final end-to-end scorecard. Removing obsolete aliases requires client-floor evidence; deployment requires the separate database-copy migration and artifact-cutover checks.
+Exercise both route families against retained history, thread-local decisions, private/team access, malformed origins, named gate-only approvals, credential revocation races, account switching, and recovery. Keep child-list and dismissal coverage in `routes/child-work.test.ts`, including parent visibility, retained history, and stable dismissal timestamps. Borrow-grant tests call the production authorization predicate. Retain unique API/client regression coverage and the final end-to-end scorecard. Removing obsolete aliases requires client-floor evidence; deployment requires the separate database-copy migration and artifact-cutover checks.
 
 Team CLI runtime resolution returns a writable execution: human requests use their private helper; team keys use the shared default.
 PR replies retain their exact source session/thread, recheck archive state, and suppress recorded own writes even when source routing is unavailable.

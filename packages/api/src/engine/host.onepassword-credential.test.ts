@@ -99,7 +99,7 @@ describe("EngineHost session 1Password credential resolution", () => {
       userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: teamId,
     });
     const discover = (actorId: string, externalSender = false) =>
-      session.credentialProvider({ actorId, externalSender, threadId: "thread" }).get(service, "discover");
+      session.credentialProvider({ actorId, externalSender, threadId: "thread" }).get(service);
     expect((await discover(userId))?.accessToken).toBe("shared-key");
     expect(await discover("borrower")).toBeNull();
     await writeBorrowGrant(appDb, orgId, { teamId, shareGeneration: (await shareGeneration(appDb, teamId, service, userId))!, sessionId: session.id, threadId: "thread", service: service, memberId: userId });

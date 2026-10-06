@@ -294,7 +294,6 @@ export function SessionView({
     <SessionHeader
       session={session.data}
       agentStatus={threadStatus.status}
-      turnStartedAt={threadStatus.turnStartedAt}
       conn={stream.conn}
       sandbox={stream.sandbox}
       threadId={effectiveThreadId}

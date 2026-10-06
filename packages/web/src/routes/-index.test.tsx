@@ -18,20 +18,6 @@ vi.mock("~/api/workspace-runtime", () => ({
 
 }));
 
-// importOriginal keeps the module's other exports real (see vitest.config.ts).
-vi.mock("~/api/queries", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/queries")>();
-  return {
-    ...actual,
-    useNotifications: () => ({
-      data: { notifications: [] },
-      isLoading: false,
-      error: null,
-      refetch: vi.fn(),
-    }),
-  };
-});
-
 vi.mock("~/components/dashboard/workspace-catch-up", () => ({
   WorkspaceCatchUp: () => <div data-testid="catch-up" />,
 }));
@@ -132,16 +118,4 @@ describe("Home (workspace branch)", () => {
     const dash = screen.getByTestId("team-dashboard");
     expect(dash.getAttribute("data-team")).toBe("team_1");
   });
-});
-
-vi.mock("~/api/child-work", async (importOriginal) => {
- const actual = await importOriginal<typeof import("~/api/child-work")>();
- return { ...actual,
-  useChildWork: () => ({
-    data: { pages: [{ children: [], runningCount: 0, nextCursor: null }] },
-    isLoading: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
- };
 });

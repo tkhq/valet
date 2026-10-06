@@ -202,7 +202,6 @@ function clip(text: string): string {
 export interface RunThreadArchiveDeps {
   db: AppDb;
   store: Pick<WorkflowStore, "getCheckpoints">;
-  channels?: AttentionChannelDeliverer[];
   /** The engine's own session store, for the thread's key and creation time,
    * and for the state of the submission the node dispatched onto it. */
   engineStore: Pick<SessionStore, "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates">;
