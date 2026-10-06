@@ -3,9 +3,8 @@ import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
-// utils and is only re-exported from the package root. It carries the
-// provider-maintained retryable/permanent taxonomy (incl. the quota
-// blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
+// utils and is only re-exported from the package root. Provider fallback
+// adds billing/quota and network failures to this transient taxonomy.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
@@ -563,6 +562,7 @@ export class Thread {
   private agentModelSwitch?: string;
   /** Snapshot at turn resolution: a user can change the next turn's pin while this one runs. */
   private assignedModelSpec?: string;
+  private fallbackModelSpec?: string;
   /** Last conversational request model; a switch must recheck the live context. */
   private lastRequestModel: PiModel;
   /** Set only after a role model resolves and is applied. Never persisted. */
@@ -1486,12 +1486,24 @@ export class Thread {
       // before the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(this.runningItem ?? undefined);
       const runningItem = this.runningItem;
+      if (runningItem && this.fence) {
+        const store = this.session.providers.store;
+        const current = await store.getQueueItem(this.session.id, runningItem.id);
+        const fence = this.fence;
+        if (current?.status === "blocked_on_decision_gate") {
+          await this.fencedWrite(() =>
+            store.setSubmissionBlocked(this.session.id, this.id, runningItem.id, false, fence),
+          );
+        }
+      }
       if (
         runningItem &&
-        await this.publishActiveModelState(runningItem.id, this.agent.state.model)
+        await this.publishActiveModelState(runningItem.id, this.agent.state.model) &&
+        await this.canRunCurrentSubmission()
       ) {
         await this.agent.continue();
         await this.agent.waitForIdle();
+        await this.retryTransientTurnError();
       }
     } catch (err) {
       continueError = err;
@@ -1501,6 +1513,7 @@ export class Thread {
       );
     } finally {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
@@ -2185,7 +2198,7 @@ export class Thread {
     // everywhere else (see `turnModelSpec`). Leaving it out let a real
     // retarget report "model unchanged" and emit no event.
     const before = isAgentSwitch
-      ? (this.agentModelSwitch ??
+      ? (this.fallbackModelSpec ?? this.agentModelSwitch ??
         this.runningItem?.model ??
         this.modelOverride ??
         sessionDefault)
@@ -2196,6 +2209,7 @@ export class Thread {
       } else {
         const priorLiveModel = this.agent.state.model;
         const priorAgentModelSwitch = this.agentModelSwitch;
+        const priorFallbackModelSpec = this.fallbackModelSpec;
         const priorTurnApiKey = this.turnApiKey;
         // Validate before assigning so an unknown id is rejected and the
         // turn keeps its previous model. The resolution is handed straight
@@ -2210,12 +2224,14 @@ export class Thread {
           // prompt rules mean by "switch_model ... in this turn, then continue".
           await this.applyModelToRunningTurn(modelId, resolved);
           this.agentModelSwitch = modelId;
+          this.fallbackModelSpec = undefined;
           if (
             this.runningItem &&
             !(await this.publishActiveModelState(this.runningItem.id, this.agent.state.model))
           ) {
             this.agent.state.model = priorLiveModel;
             this.agentModelSwitch = priorAgentModelSwitch;
+            this.fallbackModelSpec = priorFallbackModelSpec;
             this.turnApiKey = priorTurnApiKey;
           }
         } catch (err) {
@@ -2224,6 +2240,7 @@ export class Thread {
           // and any continuation stays on the previously disclosed model.
           this.agent.state.model = priorLiveModel;
           this.agentModelSwitch = priorAgentModelSwitch;
+          this.fallbackModelSpec = priorFallbackModelSpec;
           this.turnApiKey = priorTurnApiKey;
           throw err;
         }
@@ -2239,7 +2256,7 @@ export class Thread {
       await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
     }
     const after = isAgentSwitch
-      ? (this.agentModelSwitch ??
+      ? (this.fallbackModelSpec ?? this.agentModelSwitch ??
         this.runningItem?.model ??
         this.modelOverride ??
         sessionDefault)
@@ -3456,6 +3473,7 @@ export class Thread {
           await this.canRunCurrentSubmission()) {
         await this.agent.continue();
         await this.agent.waitForIdle();
+        await this.retryTransientTurnError();
       }
     } catch (err) {
       turnFailed = true;
@@ -3463,6 +3481,7 @@ export class Thread {
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
     } finally {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
     }
 
@@ -3836,12 +3855,14 @@ export class Thread {
       modelStatePublished = await this.publishActiveModelState(item.id, this.agent.state.model);
     } catch (err) {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
       await this.appendUserEntry(item);
       throw err;
     }
     if (!modelStatePublished) {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
       return;
     }
@@ -3931,6 +3952,7 @@ export class Thread {
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       // Per-turn key is turn-scoped only — clear it so the next turn re-resolves
       // (rotation applies next turn; a resolver-less session never set it).
       this.turnApiKey = undefined;
@@ -4157,6 +4179,7 @@ export class Thread {
       } finally {
         this.overflowRetryInProgress = false;
       }
+      await this.retryTransientTurnError();
       return;
     }
 
@@ -4169,55 +4192,77 @@ export class Thread {
       && purpose !== "workflow" && purpose !== "child";
   }
 
-  /**
-   * Turn-level retry for transient provider errors (TKAI-319). Engages only
-   * when the turn settled with a classified-transient error AND the session
-   * is unattended (or `turnRetry` is configured explicitly) — an interactive
-   * user sees the error and decides. Each retry drops the failed assistant
-   * message and calls `agent.continue()`, pi-agent-core's native re-run for
-   * a transcript ending on a user/tool-result message — re-prompting would
-   * append a SECOND copy of the user content and the model could act on it
-   * twice. The transport layer already retried underneath; this catches the
-   * failures that exhausted it (long rate-limit windows, capacity events).
-   */
+  /** Continue the current transcript after a bounded provider recovery attempt. */
   private async retryTransientTurnError(): Promise<void> {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
     const unattended = !this.isUserPrompt() && (purpose === "orchestrator" || purpose === "workflow" || purpose === "child");
     const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
-    if (maxAttempts <= 0) return;
-    // An explicitly configured empty backoff list means "no wait", not
-    // "crash on index" — but an absent/empty list falls back to defaults.
     const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+    const resolveFallback = this.session.options.resolveFallbackModel;
+    const attemptedProviderIds = new Set([this.agent.state.model.provider]);
+    let sameProviderAttempts = 0;
+    let fallbackExhausted = false;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (;;) {
       const last = this.agent.state.messages[this.agent.state.messages.length - 1];
-      if (
-        !last ||
-        last.role !== "assistant" ||
-        last.stopReason !== "error" ||
-        !isRetryableAssistantError(last)
-      ) {
-        return;
+      if (!last || last.role !== "assistant" || last.stopReason !== "error") return;
+      const error = last.errorMessage ?? "";
+      // Provider capacity cannot override authentication, input, policy, or
+      // application budget failures, even when their text also mentions 429.
+      if (/authentication|unauthorized|forbidden|invalid[_ -]?(?:api[_ -]?key|request|input|argument)|permission[_ -]denied|\b(?:40[013]|422)\b|content[_ -]?(?:policy|filter)|policy[_ -]?(?:violation|denied)|\bbudget\b|context[_ -]?(?:length|window)|aborted|cancelled/i.test(error)) return;
+      const quota = /\bquota\b|insufficient_quota|payment_required|\b402\b|billing[_ -](?:error|limit|hard_limit)|credit balance.*(?:low|insufficient|exhausted)|(?:insufficient|exhausted)[_ -]credits|(?:monthly|spend(?:ing)?)[_ -]limit|quota[_ -](?:exceeded|exhausted)/i.test(error);
+      const transient = !quota && (isRetryableAssistantError(last) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
+      if (!quota && !transient) return;
+      if (!(await this.canRunCurrentSubmission())) return;
+      attemptedProviderIds.add(this.agent.state.model.provider);
+
+      let fallback: ResolvedModel | null = null;
+      if (resolveFallback && !fallbackExhausted && attemptedProviderIds.size < 3) {
+        fallback = await resolveFallback({
+          requestedSpec: this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined),
+          failedModel: {
+            model: this.agent.state.model,
+            apiKey: this.turnApiKey,
+            canonicalId: this.fallbackModelSpec ?? this.agentModelSwitch ?? this.roleModelSpec ?? this.assignedModelSpec,
+          },
+          attemptedProviderIds: [...attemptedProviderIds],
+        });
+        if (!(await this.canRunCurrentSubmission())) return;
+        // A broken host resolver must not cycle between providers or reuse a
+        // failed provider under another model name.
+        if (fallback && attemptedProviderIds.has(fallback.model.provider)) fallback = null;
+        if (!fallback) fallbackExhausted = true;
       }
-      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
-      this.emitError(
-        "turn_transient_retry",
-        formatTransientRetryMessage({
+      if (fallback) {
+        assertModelEnabled(fallback.canonicalId ?? fallback.model.id);
+        const previousProvider = this.agent.state.model.provider;
+        attemptedProviderIds.add(fallback.model.provider);
+        this.turnApiKey = fallback.apiKey;
+        this.agent.state.model = fallback.model;
+        this.fallbackModelSpec = fallback.canonicalId ?? fallback.model.id;
+        if (this.runningItem && !(await this.publishActiveModelState(this.runningItem.id, fallback.model))) return;
+        this.emitError(
+          "turn_provider_fallback",
+          `${previousProvider} is unavailable. Continuing this turn with ${fallback.model.provider}.`,
+        );
+      } else {
+        if (!transient || sameProviderAttempts >= maxAttempts) return;
+        sameProviderAttempts++;
+        const waitMs = backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0;
+        this.emitError("turn_transient_retry", formatTransientRetryMessage({
           provider: this.agent.state.model.provider,
           errorMessage: last.errorMessage,
           waitMs,
-          attempt,
+          attempt: sameProviderAttempts,
           maxAttempts,
-        }),
-      );
-      if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
-      // Drop the failed assistant message; the transcript now ends on the
-      // user/tool-result message, which is exactly Agent.continue()'s
-      // contract for re-running the turn without duplicating the prompt.
+        }));
+        if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
+      }
+      if (!(await this.canRunCurrentSubmission())) return;
+      // Keep completed tools and the original user message. Only remove the
+      // failed assistant response before continuing the same queue item.
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
-      // The retry rewinds the transcript, so the next response's cache reads
-      // are expected to differ — do not count that as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
       await this.agent.continue();
       await this.agent.waitForIdle();
@@ -4871,10 +4916,12 @@ export class Thread {
     const assignedSelection = this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined);
     return appendRuntimeModelContext(prompt, {
       assignedSelection,
-      activeSelection: this.agentModelSwitch ?? this.roleModelSpec ?? assignedSelection,
+      activeSelection: this.fallbackModelSpec ?? this.agentModelSwitch ?? this.roleModelSpec ?? assignedSelection,
       provider: model.provider,
       modelId: model.id,
-      temporaryOverride: this.agentModelSwitch !== undefined
+      temporaryOverride: this.fallbackModelSpec !== undefined
+        ? "provider fallback"
+        : this.agentModelSwitch !== undefined
         ? "switch_model"
         : this.roleModelSpec !== undefined
           ? "role model"
@@ -4886,7 +4933,7 @@ export class Thread {
     // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
     // is constructed with the exact same options as before the seam existed, so
     // pi-ai's env-var fallback stamps StreamOptions.apiKey (byte-identical pin).
-    const hasResolver = this.session.options.resolveModel !== undefined;
+    const hasResolver = this.session.options.resolveModel !== undefined || this.session.options.resolveFallbackModel !== undefined;
     const agent = new Agent({
       initialState: {
         model: this.session.options.model,

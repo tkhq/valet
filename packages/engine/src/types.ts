@@ -2413,6 +2413,18 @@ export interface CreateSessionOptions {
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   /**
+   * Select a configured, credentialed model on another approved provider.
+   * The engine calls this after a transient provider or billing/quota failure,
+   * including interactive turns. Return null when no candidate is available.
+   * Each recovery loop tries at most three distinct providers. The selection
+   * and key apply only to this turn; the user's model selection is unchanged.
+   */
+  resolveFallbackModel?: (request: {
+    requestedSpec: string;
+    failedModel: ResolvedModel;
+    attemptedProviderIds: readonly string[];
+  }) => Promise<ResolvedModel | null>;
+  /**
    * Optional host-provided spec factory. Absent === no prep — existing paths
    * unchanged. When present, it is called once per (sandbox, epoch) after a
    * freshly cold-booted sandbox reports ready and BEFORE any `ensureReady`

@@ -205,6 +205,17 @@ provider, and a remap of that tier reaches every session that bottoms out
 at this fallback. `firstActivePreference` (the active-provider walk) stays
 — `teamDefaultModel` still uses it for the team tier above.
 
+At runtime, transient provider failures and exhausted provider credits can
+continue the same turn on another provider in the selected tier's ordered
+list. A concrete model uses the first matching tier (xs through xl); no
+matching tier means no cross-provider fallback. Only approved, enabled,
+credentialed models with compatible input capabilities qualify. Recovery
+tries at most three providers per recovery loop, preserves completed tool results, and does
+not change the saved model selection. Authentication, invalid input,
+policy, context-length, and application-budget errors do not trigger it.
+A tier with no usable cross-provider alternative cannot fail over. Slack
+receives a terminal notice in the original thread when recovery fails.
+
 Sessions built for an assistant pass `assistants.model` as
 `assistantDefault`. The value may be a tier token; `resolveModelSpec`
 already handles the token and persists it as the canonical id.

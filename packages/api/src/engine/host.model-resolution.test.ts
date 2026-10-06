@@ -418,6 +418,29 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
+  it("wires runtime fallback to the assistant organization's configured tier", async () => {
+    api = await bootTestApi();
+    vi.stubEnv("OPENAI_API_KEY", "fallback-key");
+    try {
+      await setOrgTierMap(api.providers.db, "local-org", {
+        ...DEFAULT_TIER_MAP, s: [`anthropic/${ANTHROPIC_MODEL}`, `openai/${OPENAI_MODEL}`],
+      });
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.resolveFallbackModel).toBeTypeOf("function");
+      const resolved = await session.options.resolveFallbackModel?.({
+        requestedSpec: "s",
+        failedModel: { model: session.options.model },
+        attemptedProviderIds: ["anthropic"],
+      });
+      expect(resolved).toMatchObject({ canonicalId: `openai/${OPENAI_MODEL}`, apiKey: "fallback-key" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("remapping the org's \"s\" tier changes what a fallback session resolves to", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;

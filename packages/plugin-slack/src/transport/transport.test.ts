@@ -134,6 +134,14 @@ describe("send threads on the conversation key's thread root", () => {
     expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000100");
   });
 
+  it("keeps a delayed reply on its original root after another inbound turn", async () => {
+    const transport = makeTransport();
+    const original = primeTurn(transport, "1700000000.000100");
+    primeTurn(transport, "1700000000.000200");
+    await transport.send(original, { markdown: "Recovered answer" });
+    expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000100");
+  });
+
   it("threads a primed (inbound) conversation, unchanged", async () => {
     const transport = makeTransport();
     const key = primeTurn(transport, "1700000000.000200");

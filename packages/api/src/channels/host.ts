@@ -689,6 +689,7 @@ export class ChannelHost {
       {
         eventTypes: [
           "message_end",
+          "submission_settled",
           "tool_end",
           "decision_gate",
           "decision_gate_resolved",
@@ -741,6 +742,8 @@ export class ChannelHost {
           queueItemId: event.queueItemId,
           reason: e.reason,
         });
+      } else if (e.type === "submission_settled" && e.outcome.outcome === "failed") {
+        await this.deliverSubmissionFailure(event.sessionId, e.threadId, e.queueItemId);
       } else if (e.type === "tool_end" && event.queueItemId !== undefined) {
         await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
           queueItemId: event.queueItemId,
@@ -757,6 +760,26 @@ export class ChannelHost {
     } catch (err) {
       console.error("[channels] outbound delivery failed", err);
     }
+  }
+
+  /** Provider attempts can recover. Only a settled failure needs a channel notice. */
+  private async deliverSubmissionFailure(sessionId: string, threadId: string, queueItemId: string): Promise<void> {
+    const dedupeKey = `${sessionId}:failure:${queueItemId}`;
+    if (this.delivered.has(dedupeKey)) return;
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    const origin = turnOrigin(entries, queueItemId);
+    if (!origin || origin.reply === "manual") return;
+    if (originReplyState(entries, queueItemId) === "succeeded") return;
+    const target = this.channelThreadFor(origin.threadKey);
+    if (!target) return;
+    const transport = this.transports.get(target.channelType);
+    if (!transport) return;
+    const sender = await this.workspaceSenderForSession(sessionId);
+    await transport.send(target.conversationKey, {
+      markdown: "This turn failed. Open the session in Valet for details.",
+      ...(sender !== undefined ? { sender } : {}),
+    });
+    this.markDelivered(dedupeKey);
   }
 
   /** Post only the first assistant text for an addressed channel turn. */
@@ -796,6 +819,7 @@ export class ChannelHost {
         entry.type === "message" &&
         entry.role === "assistant" &&
         entry.queueItemId === queueItemId &&
+        entry.stopReason !== "error" && entry.stopReason !== "abort" &&
         Boolean(entry.content),
     );
     if (!first || first.type !== "message" || !first.content) return;

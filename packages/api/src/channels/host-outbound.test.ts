@@ -342,6 +342,78 @@ describe("ChannelHost outbound delivery", () => {
     return { session, threadId };
   }
 
+  it("delivers the recovered answer once and skips text from failed provider attempts", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    const queueItemId = "recovered-provider";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "keyed.message", tagName: "signal", origin: { channelType: "keyed", threadKey: "keyed:C1:original-root", reply: "auto" } } }),
+      { type: "message", id: "failed-attempt", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", queueItemId, content: "Partial failed answer", stopReason: "error" },
+    ]);
+    const emit = async (event: BusEvent["event"]) => eventStream.append({ sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event }, randomUUID());
+    await emit({ type: "message_end", threadId, messageId: "failed-attempt", reason: "error" });
+    await emit({ type: "error", threadId, code: "turn_provider_fallback", error: "Recovering", recoverable: true });
+    await emit({ type: "turn_end", threadId, reason: "error" });
+    await engineStore.appendEntries(session.id, threadId, [
+      { type: "message", id: "recovered-attempt", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", queueItemId, content: "Recovered answer", stopReason: "end_turn" },
+    ]);
+    await emit({ type: "message_end", threadId, messageId: "recovered-attempt", reason: "end_turn" });
+    await emit({ type: "submission_settled", sessionId: session.id, threadId, queueItemId, outcome: { outcome: "completed" } });
+    await emit({ type: "message_end", threadId, messageId: "recovered-attempt", reason: "end_turn" });
+    await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(1));
+    expect(keyedTransport.sent[0]).toEqual({ conversationKey: "keyed:R1:C1:original-root", message: expect.objectContaining({ markdown: "Recovered answer" }) });
+  });
+
+  it("reports exhausted recovery once in the persisted Slack origin thread", async () => {
+    await host.stop();
+    class Slack extends FakeTransport {
+      override readonly channelType = "slack";
+      conversationKeyFromThreadKey(key: string) { return `slack:T1:${key.slice(6)}`; }
+    }
+    const slack = new Slack();
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "fake" });
+    host = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "slack-test", version: "0", transports: [{ channelType: "slack", create: () => slack }] }], resolveOrgId: async () => ORG_ID });
+    await host.start();
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    const queueItemId = "exhausted-provider";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "slack.message", tagName: "signal", origin: { channelType: "slack", threadKey: "slack:C1:original-root", reply: "auto" } } }),
+      userEntry({ sessionId: session.id, threadId, queueItemId: "newer-item", signal: { signalType: "slack.message", tagName: "signal", origin: { channelType: "slack", threadKey: "slack:C1:newer-root", reply: "auto" } } }),
+    ]);
+    const emit = async (outcome: "completed" | "failed") => eventStream.append({ sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "submission_settled", sessionId: session.id, threadId, queueItemId, outcome: { outcome } } }, randomUUID());
+    await emit("failed");
+    await emit("failed");
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(1));
+    expect(slack.sent[0]).toEqual({
+      conversationKey: "slack:T1:C1:original-root",
+      message: expect.objectContaining({ markdown: expect.stringContaining("This turn failed") }),
+    });
+  });
+
+  it("keeps failure notices off manual, web, and explicitly answered submissions", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    for (const queueItemId of ["manual", "web", "explicit", "visible-failure"]) {
+      await engineStore.appendEntries(session.id, threadId, [
+        userEntry({ sessionId: session.id, threadId, queueItemId,
+          ...(queueItemId === "web" ? {} : { signal: { signalType: "keyed.message", tagName: "signal", origin: { channelType: "keyed", threadKey: "keyed:C1:original-root", reply: queueItemId === "manual" ? "manual" as const : "auto" as const } } }),
+        }),
+        ...(queueItemId === "explicit" ? [{
+          type: "message" as const, id: "explicit-reply", sessionId: session.id, threadId, parentId: null,
+          createdAt: Date.now(), role: "assistant" as const, content: "", queueItemId,
+          parts: [{ type: "tool_call" as const, callId: "explicit-call", toolName: "call_tool", status: "completed" as const,
+            args: { tool_id: "keyed.reply_to_origin", params: { text: "Already answered" } }, result: { details: { ok: true } } }],
+        }] : []),
+      ]);
+      await eventStream.append({ sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "submission_settled", sessionId: session.id, threadId, queueItemId, outcome: { outcome: "failed" } } }, randomUUID());
+    }
+    await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(1));
+    expect(keyedTransport.sent[0]?.message.markdown).toContain("This turn failed");
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
   async function replyFeedbackEntries(sessionId: string, threadId: string) {
     return (await engineStore.getEntries(sessionId, threadId)).filter(
       (entry) => entry.type === "message" && entry.role === "user" && entry.signal?.signalType === "channel.reply_dropped",

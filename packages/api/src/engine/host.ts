@@ -98,6 +98,7 @@ import {
 } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
+import { resolveModelFallback } from "../services/model-fallback.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
@@ -1065,6 +1066,7 @@ export class EngineHost {
       ownerTeamId: meta.ownerTeamId,
     });
     const resolveModel = this.makeResolveModel(meta.orgId);
+    const resolveFallbackModel = this.makeResolveFallbackModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
@@ -1223,6 +1225,7 @@ export class EngineHost {
             model,
             modelSpec,
             resolveModel,
+            resolveFallbackModel,
             ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
             systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
@@ -1253,6 +1256,7 @@ export class EngineHost {
           model,
           modelSpec,
           resolveModel,
+          resolveFallbackModel,
           ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
           systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
@@ -2747,6 +2751,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
+      resolveFallbackModel: this.makeResolveFallbackModel(meta.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       ...(execution ? { parentSessionId: assistant.sessionId, parentThreadId: execution.governingThreadId } : {}),
       ...(principal.type === "team" && !execution ? {
@@ -3235,6 +3240,11 @@ export class EngineHost {
    * capturing `orgId`; keys are read fresh on each call (never cached) so a
    * rotated org credential applies on the next turn.
    */
+  private makeResolveFallbackModel(orgId: string) {
+    return (request: Parameters<typeof resolveModelFallback>[3]) =>
+      resolveModelFallback(this.opts.db, this.opts.engineCredentials, orgId, request);
+  }
+
   private makeResolveModel(orgId: string): (spec: string) => Promise<ResolvedModel | null> {
     return (spec: string) => resolveModelSpec(this.opts.db, this.opts.engineCredentials, orgId, spec);
   }
@@ -3808,6 +3818,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
@@ -3984,6 +3995,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: extras.tools.length ? extras.tools : undefined,
