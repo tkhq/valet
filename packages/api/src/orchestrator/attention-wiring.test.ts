@@ -10,7 +10,9 @@ import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { notifications } from "../schema/index.js";
+import { notifications, userNotificationPreferences, workflowDefinitions } from "../schema/index.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
+import { addMember, createTeam } from "../services/teams.js";
 import { wireAttentionRouter } from "./attention-wiring.js";
 import type { AttentionEvent } from "./attention.js";
 
@@ -229,6 +231,32 @@ describe("wireAttentionRouter", () => {
     await waitFor(async () => delivered.length > 0);
     expect(delivered[0]?.gate).toEqual({ id: gateId, actions: [{ id: "approve", label: "Approve" }] });
     expect(delivered[0]?.sessionId).toBe(sessionId);
+  });
+
+  it("workflow approval notifications inherit a private execution's audience", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream, workflowStore } = api.providers;
+    const team = await createTeam(db, { orgId: "local-org", name: "Private approvals", creatorUserId: "local-user" });
+    await addMember(db, { teamId: team.id, userId: "test-member", role: "member" });
+    await db.insert(userNotificationPreferences).values({ userId: "local-user", kind: "approval", teamDm: true });
+    const owner = { type: "team", id: team.id } as const;
+    const execution = await ensureAssistantExecution(api.providers, owner,
+      { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:local-user");
+    const thread = await execution.session.ensureDefaultThread();
+    const seen: AttentionEvent[] = [];
+    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ deliver: async (_userId, event) => { seen.push(event); } }] });
+    const runId = `run-${randomUUID()}`;
+    await db.insert(workflowDefinitions).values({ id: "wf-private", orgId: "local-org", ownerType: "team", ownerId: team.id,
+      name: "Private workflow", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: Date.now(), updatedAt: Date.now() });
+    await workflowStore.createRun(runId, { workflowId: "wf-private", definitionVersionId: "v1",
+      origin: { assistantSessionId: execution.sessionId, threadId: thread.id } },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id });
+    const sessionId = `wf:${runId}:approve`;
+    await engineStore.saveSession(baseSession({ id: sessionId, owner }));
+    await eventStream.append(gateEvent(sessionId, `gate-${randomUUID()}`, "Private cleanup approval"), `test-private-${randomUUID()}`);
+    await waitFor(async () => seen.length > 0);
+    expect(seen[0]?.audienceKey).toBe("app-assistant:local-user");
+    expect((await db.select().from(notifications)).map((row) => row.userId)).toEqual(["local-user"]);
   });
 
   it("decision_gate on a workflow run a Slack channel's event started names that channel's audience", async () => {

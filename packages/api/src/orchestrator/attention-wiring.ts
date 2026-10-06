@@ -34,7 +34,7 @@ import { parseAssistantSessionId } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { digestGate } from "../channels/gate-digest.js";
 import { gateApprover } from "../services/session-access.js";
-import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
+import { governingThreadKey, runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, workflowRuns } from "../schema/index.js";
 import {
@@ -150,9 +150,7 @@ async function workflowGateAudience(deps: AttentionWiringDeps, sessionId: string
     .where(eq(workflowRuns.id, sessionId.split(":")[1] ?? "")).limit(1);
   const params = run?.params as { origin?: { assistantSessionId: string; threadId: string }; input?: unknown } | undefined;
   if (params?.origin) {
-    const thread = await deps.engineStore.getThread(params.origin.assistantSessionId, params.origin.threadId);
-    // A gone origin thread names nobody, so the gate reaches nobody else.
-    return thread ? thread.key ?? undefined : "app-assistant:";
+    return await governingThreadKey(deps.db, params.origin.assistantSessionId, params.origin.threadId, "parent link") ?? "app-assistant:";
   }
   const channel = params ? runEventChannel(params) : undefined;
   return channel ? slackEventsThreadKey(channel) : undefined;

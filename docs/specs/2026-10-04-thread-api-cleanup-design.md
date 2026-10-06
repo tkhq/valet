@@ -55,7 +55,7 @@ Thread list reads never start GitHub requests. A non-overlapping minute sweep cl
 
 Overheard digests group only matching origin thread, author ID, and external-sender authority (absent equals false). Crash repair settles saved constituents without mixing groups. Existing mixed digests are not rewritten.
 
-Named approvers on private child sessions receive exact pending-gate decision access, subject to organization/team membership. Other gates, history, prompts, and metadata remain private; access ends after resolution. A thread URL never grants access to a gate in another thread.
+Named approvers on private child sessions receive exact pending-gate decision access, subject to organization/team membership. Other gates, history, prompts, and metadata remain private; access ends after resolution. A thread URL never grants access to a gate in another thread. Workflow approval notifications follow origin ancestry; an unresolved audience reaches nobody else.
 
 ## Validation
 
