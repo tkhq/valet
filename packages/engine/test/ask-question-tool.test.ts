@@ -73,3 +73,11 @@ describe("ask_question tool", () => {
     expect(result.text).toContain("Do not ask again in this turn");
   });
 });
+
+it("returns question-answer images as model-visible tool attachments after JSON replay", async () => {
+  const resolution: DecisionResolution = { resolvedBy: "u1", resolvedAt: 1,
+    attachments: [{ url: "data:image/png;base64,cGhvdG8=", mimeType: "image/png", name: "avatar.png" }] };
+  const result = await askQuestionTool.execute({ question: "Which avatar?" }, makeCtx(async () => JSON.parse(JSON.stringify(resolution))));
+  expect(result.text).toContain("See the attached images");
+  expect(result.attachments).toEqual([{ type: "image", data: new Uint8Array([112, 104, 111, 116, 111]), mimeType: "image/png", name: "avatar.png" }]);
+});

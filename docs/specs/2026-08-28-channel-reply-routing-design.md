@@ -439,3 +439,10 @@ Row expansion stops at the caller's text budget before formatting. Section split
 keep complete native spans together. Truncated output includes a visible notice.
 This is a deliberate compatibility fallback, not a claim that Markdown blocks
 support native spans.
+
+
+### Images in question answers
+
+The web question card accepts image uploads, clipboard images, and dropped images. An answer can contain images without text. Failed submissions retain the draft and its images. Changing questions clears that draft.
+
+Question resolutions retain inline images for restart replay. The question tool returns them as model-visible image attachments. The avatar publishing tool can select a question-answer photo from the same thread. Approval and credential gates do not accept images. Existing image count and size limits apply; remote URLs are rejected.

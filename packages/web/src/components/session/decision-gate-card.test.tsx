@@ -9,7 +9,7 @@
  * gate's actions render regardless. `useMe` comes from `~/api/settings`.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { DecisionGate, MeResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -229,5 +229,36 @@ describe("DecisionGateCard — response feedback", () => {
     renderCard();
     await userEvent.click(screen.getByRole("button", { name: "Deny" }));
     expect(resolveMutateAsync).toHaveBeenCalledWith({ gateId: "gate_1", body: { actionId: "deny" } });
+  });
+});
+
+
+describe("question image answers", () => {
+  it("keeps an image after a failed submit and sends an image-only answer on retry", async () => {
+    const user = userEvent.setup();
+    renderCard(gate({ type: "question", actions: [] }));
+    await user.upload(screen.getByLabelText("Attach images to answer"), new File(["photo"], "avatar.png", { type: "image/png" }));
+    await screen.findByAltText("avatar.png");
+    resolveMutateAsync.mockRejectedValueOnce(new Error("Connection lost"));
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+    await screen.findByRole("alert");
+    expect(screen.getByAltText("avatar.png")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+    expect(resolveMutateAsync).toHaveBeenLastCalledWith({ gateId: "gate_1", body: { value: "", attachments: [{ kind: "image", name: "avatar.png", mimeType: "image/png", url: "data:image/png;base64,cGhvdG8=" }] } });
+    await waitFor(() => expect(screen.queryByAltText("avatar.png")).toBeNull());
+  });
+
+  it("pastes an image, supports removal, and clears attachments when the question changes", async () => {
+    const view = renderCard(gate({ type: "question", actions: [] }));
+    const file = new File(["photo"], "pasted.png", { type: "image/png" });
+    const paste = () => fireEvent.paste(screen.getByRole("textbox"), { clipboardData: { items: [{ kind: "file", getAsFile: () => file }] } });
+    paste();
+    await screen.findByAltText("pasted.png");
+    fireEvent.click(screen.getByRole("button", { name: "Remove pasted.png" }));
+    expect(screen.queryByAltText("pasted.png")).toBeNull();
+    paste();
+    await screen.findByAltText("pasted.png");
+    view.rerender(<TooltipProvider><DecisionGateCard sessionId="sess_1" gate={gate({ id: "next", type: "question", actions: [] })} /></TooltipProvider>);
+    expect(screen.queryByAltText("pasted.png")).toBeNull();
   });
 });

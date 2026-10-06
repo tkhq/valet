@@ -30,9 +30,11 @@ export function profilePictureActions(store: SessionStore, blobs: BlobStore, pub
       const session = await store.getSession(ctx.sessionId);
       if (!session || session.orgId !== ctx.orgId) return { success: false, error: "Open the chat containing the photo and try again." };
       const entries = await store.getEntries(ctx.sessionId, ctx.threadId, { limit: 50 });
-      const message = entries.reverse().find((entry) => entry.type === "message" && entry.role === "user"
-        && (args.message_id ? entry.id === args.message_id : entry.attachments?.some((attachment) => attachment.type === "image")));
-      const image = message?.type === "message" ? message.attachments?.filter((attachment) => attachment.type === "image")[args.image_index ?? 0] : undefined;
+      const source = entries.reverse().find((entry) => (!args.message_id || entry.id === args.message_id)
+        && (entry.type === "message" && entry.role === "user" && entry.attachments?.some((attachment) => attachment.type === "image")
+          || entry.type === "decision_gate" && entry.gate.type === "question" && entry.resolution?.attachments?.length));
+      const image = source?.type === "message" ? source.attachments?.filter((attachment) => attachment.type === "image")[args.image_index ?? 0]
+        : source?.type === "decision_gate" ? source.resolution?.attachments?.map((attachment) => ({ ...attachment, type: "image" as const, data: undefined }))[args.image_index ?? 0] : undefined;
       if (!image || image.type !== "image") return { success: false, error: "Upload the selected photo to this chat, then try again with its image number." };
       let input = image.data;
       if (!input && image.url?.startsWith("data:")) {
@@ -46,7 +48,7 @@ export function profilePictureActions(store: SessionStore, blobs: BlobStore, pub
       const normalized = await normalizeProfilePicture(input, image.mimeType);
       if ("error" in normalized) return { success: false, error: normalized.error };
       // Content and source scope make retries stable without overwriting an older avatar.
-      const hash = createHash("sha256").update(JSON.stringify([ctx.orgId, ctx.sessionId, ctx.threadId, message?.id])).update(normalized.data).digest("hex");
+      const hash = createHash("sha256").update(JSON.stringify([ctx.orgId, ctx.sessionId, ctx.threadId, source?.id])).update(normalized.data).digest("hex");
       await blobs.put(`profile-pictures/workflows/${hash}.webp`, normalized.data, { contentType: "image/webp" });
       return { success: true, data: { avatar_url: `${origin}/avatars/workflows/${hash}.webp` } };
     },

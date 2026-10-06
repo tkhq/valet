@@ -1341,6 +1341,7 @@ export interface DecisionGate {
 }
 
 export interface DecisionResolution {
+  attachments?: Array<{ url: string; mimeType: string; name?: string }>;
   actionId?: string;
   value?: string;
   resolvedBy: string;
@@ -1357,6 +1358,7 @@ export interface ListDecisionsResponse {
  * gates the client sends `value` (free-form text).
  */
 export interface ResolveDecisionRequest {
+  attachments?: PromptImageAttachment[];
   actionId?: string;
   value?: string;
 }

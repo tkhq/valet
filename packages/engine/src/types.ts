@@ -988,6 +988,8 @@ export interface DecisionGateRequest {
 }
 
 export interface DecisionResolution {
+  /** Inline images supplied with a question answer; persisted for restart replay. */
+  attachments?: Array<{ url: string; mimeType: string; name?: string }>;
   actionId?: string;
   value?: string;
   resolvedBy: string;

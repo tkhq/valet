@@ -1381,7 +1381,21 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.actionId === undefined && body.value === undefined) {
+  // Accept only bounded inline images, never URLs that would require a server fetch.
+  if (body.attachments !== undefined) {
+    let totalBytes = 0;
+    const valid = Array.isArray(body.attachments) && body.attachments.length <= 20 && body.attachments.every((image) => {
+      if (!image || typeof image.url !== "string" || typeof image.mimeType !== "string"
+        || (image.name !== undefined && typeof image.name !== "string") || image.url.length > 7 * 1024 * 1024) return false;
+      const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+=*)$/.exec(image.url);
+      if (!match || match[1] !== image.mimeType) return false;
+      const bytes = Buffer.byteLength(match[2]!, "base64");
+      totalBytes += bytes;
+      return bytes > 0 && bytes <= 5 * 1024 * 1024 && totalBytes <= 15 * 1024 * 1024;
+    });
+    if (!valid) return c.json({ error: "Attach up to 20 PNG, JPEG, GIF, or WebP images, at most 5 MB each and 15 MB total." }, 400);
+  }
+  if (body.actionId === undefined && body.value === undefined && !body.attachments?.length) {
     return c.json({ error: "actionId or value is required" }, 400);
   }
   // A typed answer is text. Refuse anything else before it resolves the gate:
@@ -1419,6 +1433,9 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   const pending = await visibleGates(c, session, engineSession);
   const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
+  if (body.attachments?.length && gate.type !== "question") {
+    return c.json({ error: "Images can only answer questions. Use the approval buttons for this request." }, 400);
+  }
   if (!answersGate(gate, c.var.principal)) {
     return c.json({ error: `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.` }, 403);
   }
@@ -1439,6 +1456,7 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   await engineSession.resolveDecision(gateId, {
     actionId: body.actionId,
     value: body.value,
+    ...(body.attachments?.length ? { attachments: body.attachments } : {}),
     resolvedBy: c.var.user.id,
     resolvedAt: Date.now(),
     source: { channelType: "web" },

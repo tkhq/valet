@@ -56,3 +56,15 @@ describe("chat image to workflow avatar", () => {
     expect((await action.execute({ message_id: "invalid" }, ctx)).success).toBe(false);
   });
 });
+
+it("publishes the photo supplied as a question answer", async () => {
+  const { action, ctx, engineStore } = await setup();
+  const bytes = await sharp({ create: { width: 32, height: 32, channels: 3, background: "blue" } }).png().toBuffer();
+  await engineStore.appendEntries(ctx.sessionId, ctx.threadId, [{ id: "photo-answer", sessionId: ctx.sessionId, threadId: ctx.threadId, parentId: null, type: "decision_gate", createdAt: 3,
+    gate: { id: "question", sessionId: ctx.sessionId, threadId: ctx.threadId, type: "question", queueItemId: "q", resumeKey: "photo", ordinal: 0, title: "Which photo?", actions: [], status: "resolved", createdAt: 2, updatedAt: 3 },
+    resolution: { resolvedBy: "local-user", resolvedAt: 3, attachments: [{ url: `data:image/png;base64,${bytes.toString("base64")}`, mimeType: "image/png" }] },
+  }]);
+  const selected = await action.execute({ message_id: "photo-answer" }, ctx);
+  expect(selected.success).toBe(true);
+  expect(await action.execute({}, ctx)).toEqual(selected);
+});

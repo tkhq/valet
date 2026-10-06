@@ -10,8 +10,8 @@
  * pending in the store and the agent stays blocked until the user comes
  * back and answers — matching the engine's per-thread suspend model.
  */
-import { useState } from "react";
-import { Hand, HelpCircle, KeyRound, X } from "lucide-react";
+import { useRef, useState } from "react";
+import { Hand, HelpCircle, KeyRound, Paperclip, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
 import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
 import { useResolveDecision, useWithdrawDecision } from "~/api/queries";
@@ -19,6 +19,9 @@ import { useMe } from "~/api/settings";
 import { formatChord } from "~/lib/chat-keybindings";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
+
+import { acceptImages, readImage, filesFromClipboard, toPromptAttachments, IMAGE_ACCEPT_ATTRIBUTE, type ComposerImage } from "./composer-images";
+import { ComposerImageStrip } from "./composer-image-strip";
 
 // The gate action id the policy resolver offers on a `require_approval`
 // decision that grants an org-wide `allow` policy going forward — the API
@@ -30,7 +33,11 @@ const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
 const gateColumnClass = "mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
-export function DecisionGateCard({
+export function DecisionGateCard(props: { sessionId: string; gate: DecisionGate }) {
+  return <DecisionGateResponse key={`${props.sessionId}:${props.gate.id}`} {...props} />;
+}
+
+function DecisionGateResponse({
   sessionId,
   gate,
 }: {
@@ -42,15 +49,37 @@ export function DecisionGateCard({
   const meQ = useMe();
   const isAdmin = meQ.data?.orgRole === "admin";
   const [value, setValue] = useState("");
+  const [images, setImages] = useState<ComposerImage[]>([]);
+  const [reading, setReading] = useState(false);
+  const readingRef = useRef(false);
+  const picker = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const busy = resolve.isPending || withdraw.isPending;
+  const busy = resolve.isPending || withdraw.isPending || reading;
+
+  async function addImages(files: File[]) {
+    if (busy || readingRef.current) return;
+    readingRef.current = true;
+    setReading(true);
+    const { accepted, rejected } = acceptImages(images, files);
+    const added: ComposerImage[] = [];
+    for (const file of accepted) {
+      try { added.push(await readImage(file)); }
+      catch (err) { rejected.push(errorText(err)); }
+    }
+    setImages((current) => [...current, ...added]);
+    setError(rejected.length ? rejected.join(" ") : null);
+    readingRef.current = false;
+    setReading(false);
+  }
+
+  const imageBody = images.length ? { attachments: toPromptAttachments(images) } : {};
 
   async function pickAction(actionId: string) {
     if (busy) return;
     setError(null);
     try {
-      await resolve.mutateAsync({ gateId: gate.id, body: { actionId } });
+      await resolve.mutateAsync({ gateId: gate.id, body: { actionId, ...imageBody } });
     } catch (err) {
       setError(errorText(err));
     }
@@ -58,11 +87,12 @@ export function DecisionGateCard({
 
   async function submitValue() {
     const v = value.trim();
-    if (!v || busy) return;
+    if ((!v && !images.length) || busy) return;
     setError(null);
     try {
-      await resolve.mutateAsync({ gateId: gate.id, body: { value: v } });
+      await resolve.mutateAsync({ gateId: gate.id, body: { value: v, ...imageBody } });
       setValue("");
+      setImages([]);
     } catch (err) {
       setError(errorText(err));
     }
@@ -133,7 +163,7 @@ export function DecisionGateCard({
           </div>
         )}
 
-        {busy && <p role="status" className="px-5 pb-2 text-xs text-muted">{withdraw.isPending ? "Dismissing request…" : "Sending response…"}</p>}
+        {busy && <p role="status" className="px-5 pb-2 text-xs text-muted">{reading ? "Reading images…" : withdraw.isPending ? "Dismissing request…" : "Sending response…"}</p>}
 
         {gate.type === "question" ? (
           <>
@@ -144,10 +174,18 @@ export function DecisionGateCard({
               ))}
             </div>
           )}
-          <div className="px-5 pb-3 flex items-end gap-2">
+          <div className="px-5 pb-3"
+            onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.stopPropagation(); } }}
+            onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); event.stopPropagation(); void addImages(Array.from(event.dataTransfer.files)); } }}>
+            <ComposerImageStrip images={images} onRemove={(id) => { if (!busy) setImages((current) => current.filter((image) => image.id !== id)); }} />
+            <input ref={picker} type="file" accept={IMAGE_ACCEPT_ATTRIBUTE} multiple className="sr-only" aria-label="Attach images to answer" disabled={busy}
+              onChange={(event) => { void addImages(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+            <div className="flex items-end gap-2">
+            <Button variant="ghost" size="icon" aria-label="Attach images" disabled={busy} onClick={() => picker.current?.click()}><Paperclip className="h-4 w-4" /></Button>
             <Textarea
               value={value}
               onChange={(e) => setValue(e.target.value)}
+              onPaste={(event) => { const files = filesFromClipboard(event.clipboardData.items); if (files.length) { event.preventDefault(); event.stopPropagation(); void addImages(files); } }}
               onKeyDown={(event) => {
                 if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.repeat || event.nativeEvent.isComposing) return;
                 event.preventDefault();
@@ -166,10 +204,11 @@ export function DecisionGateCard({
               onClick={submitValue}
               title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
               aria-keyshortcuts="Meta+Enter Control+Enter"
-              disabled={busy || value.trim().length === 0}
+              disabled={busy || (value.trim().length === 0 && images.length === 0)}
             >
               {busy ? <Spinner size={14} /> : "Submit"}
             </Button>
+            </div>
           </div>
           </>
         ) : (

@@ -787,8 +787,16 @@ export const askQuestionTool = defineTool({
     const picked = resolution.actionId?.startsWith("option-") ? options[Number(resolution.actionId.slice("option-".length))] : undefined;
     // The host checks the type, but a resolution is stored data: narrow it here too.
     const typed = typeof resolution.value === "string" ? resolution.value.trim() : "";
-    const answer = typed || picked;
-    return { text: answer ? `answer to "${args.question}": ${answer}` : `the question "${args.question}" was closed without an answer.` };
+    const attachments: NonNullable<ToolResult["attachments"]> = [];
+    for (const image of resolution.attachments ?? []) {
+      const match = image.url.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+=*)$/);
+      if (match && match[1] === image.mimeType) {
+        attachments.push({ type: "image", data: new Uint8Array(Buffer.from(match[2]!, "base64")), mimeType: image.mimeType, name: image.name });
+      }
+    }
+    const answer = typed || picked || (attachments.length ? "See the attached images." : undefined);
+    return { text: answer ? `answer to "${args.question}": ${answer}` : `the question "${args.question}" was closed without an answer.`,
+      ...(attachments.length ? { attachments } : {}) };
   },
 });
 
