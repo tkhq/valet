@@ -585,7 +585,8 @@ describe("buildActionInvoker", () => {
       { channel: "CPUBLIC", isPrivate: false, isIm: false, isMpim: false, allowed: true },
       { channel: "DDIRECT", isPrivate: true, isIm: true, isMpim: false, allowed: false },
       { channel: "GMPIM", isPrivate: true, isIm: false, isMpim: true, allowed: false },
-      { channel: "CPRIVATE", isPrivate: true, isIm: false, isMpim: false, allowed: false },
+      { channel: "CPRIVATE", isPrivate: true, isIm: false, isMpim: false, allowed: true },
+      { channel: "CUNJOINED", isPrivate: true, isIm: false, isMpim: false, allowed: false },
     ].map((conversation) => ({ ...conversation, ownerType, action }))
   )))("$ownerType workflow $action enforces access for $channel without a personal identity", async ({ channel, isPrivate, isIm, isMpim, allowed, ownerType, action }) => {
     const db = await makeDb();
@@ -596,7 +597,7 @@ describe("buildActionInvoker", () => {
       credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
     };
     const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]) });
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: channel, is_private: isPrivate, is_im: isIm, is_mpim: isMpim } })));
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: channel, is_private: isPrivate, is_im: isIm, is_mpim: isMpim, is_member: channel === "CPRIVATE" } })));
     if (allowed) fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, messages: [{ text: "Visible message", ts: "1.2" }], has_more: false })));
     vi.stubGlobal("fetch", fetchMock);
     try {
@@ -609,7 +610,9 @@ describe("buildActionInvoker", () => {
         expect(fetchMock.mock.calls[1][0]).toContain(action === "read_thread" ? "conversations.replies" : "conversations.history");
         expect(fetchMock).toHaveBeenCalledTimes(2);
       } else {
-        expect(result).toEqual({ ok: false, error: "This run cannot access private Slack conversations. Use a public channel or a personal run owned by a linked conversation member." });
+        expect(result).toEqual({ ok: false, error: isIm || isMpim
+          ? "Shared runs cannot read direct messages. Use a personal run owned by a linked conversation member."
+          : "Valet is not a verified member of this private channel. Invite Valet to the channel, then retry." });
         expect(fetchMock).toHaveBeenCalledTimes(1);
       }
     } finally {

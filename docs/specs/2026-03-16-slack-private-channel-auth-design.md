@@ -92,7 +92,7 @@ The user's Slack ID is already available at this point (`slackUserId` from the e
 
 ### Shared orchestrators and workflows
 
-Team and organization runs use bot membership for private channels. Bot invitation grants this channel capability. DMs remain restricted. Personal runs still require linked-owner membership. The default joined channel list includes bot-joined private channels. The all-channel scope lists only public channels. Missing bot scopes return an error with reinstall instructions. Inbound Slack messages still require a linked Valet account.
+Team and organization runs use bot membership for private channels. Bot invitation grants this channel capability. DMs remain restricted. Personal runs still require linked-owner membership. The default joined channel list includes bot-joined private channels. The all-channel scope lists only public channels. Missing bot scopes return an error with reinstall instructions. Inbound Slack messages still require a linked Valet account. Workflow invoker tests cover bot-joined and unjoined private channels, public channels, and denied DMs.
 
 ## Scope
 
