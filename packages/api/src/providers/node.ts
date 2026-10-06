@@ -40,6 +40,7 @@ import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
+import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
@@ -382,6 +383,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
+  const avatarActions: ValetPlugin = {
+    name: "profile-picture-actions",
+    version: "0.1.0",
+    actions: [profilePictureActions(engineStore, blobs, () => publicUrlFromEnv(process.env) ?? process.env.BETTER_AUTH_URL)],
+  };
   const eventsActions: ValetPlugin = {
     name: "events-actions",
     version: "0.1.0",
@@ -417,7 +423,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, eventsActions],
+        [workflowsActions, skillsActions, eventsActions, avatarActions],
       ]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),

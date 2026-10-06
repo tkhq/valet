@@ -198,6 +198,14 @@ and `signal` records engine-routed admissions.
   An upstream `set` node can hold a shared identity for downstream Slack steps.
   Agent steps pass the same parameters through their tool calls.
   These settings do not change credentials, permissions, or the bot's DM identity.
+  `profile_pictures.publish_avatar` converts a current-chat image attachment
+  into a durable avatar URL. It reads at most 50 entries from the invoking
+  thread and rejects other organizations or externally linked images.
+  The existing profile-picture normalizer bounds the size, removes metadata,
+  and writes a WebP copy. Only this copy is public under `/avatars/workflows/`.
+  The publication tool uses the normal high-risk action approval path.
+  Workflow authors store its URL in `sender_avatar_url`; later runs do not
+  depend on the source chat. Retries reuse the same source-scoped content key.
   Automatic replies and approval cards keep their existing workspace identity.
   Slack maps the display name and avatar URL to `username` and `icon_url` on
   `chat.postMessage`, using `chat:write.customize`. Names have an 80-character

@@ -697,23 +697,24 @@ export class PgSessionStore implements SessionStore {
         // them in insertion order (TKAI-303). Without it Postgres may return a tie
         // in any order, which surfaced as chat bubbles rendering out of sequence.
         const scoped = opts?.queueItemId !== undefined;
+        const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
+        const newestFirst = scoped || limit !== undefined;
         const conditions = ["session_id = $1", "thread_id = $2"];
         const params: unknown[] = [sessionId, threadId];
         if (scoped) {
           params.push(opts.queueItemId);
           conditions.push(`queue_item_id = $${params.length}`);
-          if (opts.includeCompacted === false) conditions.push("entry_type != 'compaction'");
         }
-        let query = `SELECT * FROM engine_entries WHERE ${conditions.join(" AND ")} ORDER BY created_at ${scoped ? "DESC" : "ASC"}, seq ${scoped ? "DESC" : "ASC"}`;
-        if (scoped && opts.limit && opts.limit > 0) {
-          params.push(opts.limit);
+        if (opts?.includeCompacted === false) conditions.push("entry_type != 'compaction'");
+        // Select the tail in SQL so attachment payloads outside the window never load.
+        let query = `SELECT * FROM engine_entries WHERE ${conditions.join(" AND ")} ORDER BY created_at ${newestFirst ? "DESC" : "ASC"}, seq ${newestFirst ? "DESC" : "ASC"}`;
+        if (limit !== undefined) {
+          params.push(limit);
           query += ` LIMIT $${params.length}`;
         }
         const result = await this.db.query(query, params);
-        let rows = result.rows.map(rawToEntryRow);
-        if (scoped) rows.reverse();
-        if (opts?.includeCompacted === false) rows = rows.filter((r) => r.entryType !== "compaction");
-        if (opts?.limit && opts.limit > 0) rows = rows.slice(-opts.limit);
+        const rows = result.rows.map(rawToEntryRow);
+        if (newestFirst) rows.reverse();
         span.setAttribute("valet.entries.loaded", rows.length);
         if (span.isRecording()) {
           span.setAttribute("valet.entries.parts_bytes", rows.reduce(
