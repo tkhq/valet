@@ -1,14 +1,6 @@
 # Workspace upgrade checks
 
-Run the disposable schema rehearsal from a known deployment commit:
-
-```sh
-pnpm --filter @valet/api exec tsx scripts/rehearse-workspace-upgrade.ts <baseline-commit-sha>
-```
-
-The command reads the baseline's engine and application SQL from Git. It seeds an in-memory PGlite database with synthetic sessions, transcripts, workflow definitions, versions, settled runs and memory. It checks record preservation, expected memory quarantine, a second migration pass, and restoration of the pre-upgrade snapshot. It never reads `DATABASE_URL`, opens an existing database, starts the API or executes workflows.
-
-A pass validates the seeded cases against repository schema. It does **not** certify the target database, large-data performance, stored files, production configuration, or rolling back by running an old binary against the migrated database. Restore is tested by loading a pre-upgrade snapshot.
+The maintained `drizzle-singleton.test.ts` suite checks retained workflows, transcripts, legacy memory quarantine, and repeated repairs.
 
 ## Target-data rehearsal for each deployment
 

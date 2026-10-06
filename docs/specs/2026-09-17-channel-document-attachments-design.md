@@ -175,7 +175,7 @@ sidecars remain PDF-only.
 
 ## Tests
 
-The importable definitions in `docs/testing/workflows/` provide manual Drive DOCX and team Slack checks.
+The workflow integration test covers Drive DOCX extraction and team Slack actions with mocked provider HTTP.
 `document-slack-smoke.test.ts` runs both definitions through the real workflow host with mocked provider HTTP.
 
 - `packages/api/src/services/channel-file-ingest.test.ts`: a real one-page

@@ -223,6 +223,13 @@ describe("workspace singleton repair on an already migrated database", () => {
         }
       }
       const before = await snapshot();
+      const backup = await pglite.dumpDataDir();
+      const restored = new PGlite({ loadDataDir: backup });
+      try {
+        for (const table of allTables) {
+          expect((await restored.query(`SELECT * FROM ${table} WHERE id LIKE 'preserve-%' ORDER BY id`)).rows, `${table} backup`).toEqual(before[table]);
+        }
+      } finally { await restored.close(); }
       await applyAppMigrations(db);
       const after = await snapshot();
       for (const table of [...preservedTables, "workflow_checkpoints"]) {

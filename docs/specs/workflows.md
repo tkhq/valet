@@ -511,3 +511,8 @@ The `parallel` step type exists in the compiler and engine, but executes sub-ste
 - No workflow definition editor in the client.
 
 Run details show recorded agent summaries above collapsed raw output. Step logs load inline on request, restricted to the checkpoint receipt's latest queue item and its authorized thread; repairs replace that receipt, so the view labels them as latest-attempt logs. Older checkpoints without a receipt cannot display unrelated assistant history as a substitute. Log reads filter before taking a bounded tail (200 initially, at most 2,000), and poll only while the displayed attempt is active.
+
+Structured-output nodes include their schema in the initial prompt. Failed submissions fail even with schema-valid output.
+Invalid successful output gets one format-repair turn using prior tool results, without repeating side effects.
+Repair exhaustion fails the node. Checkpoint effects retain `repairAttempted` and `firstError`; the runtime never fabricates empty results.
+A valid empty array cannot prove inspection succeeded. Inventory workflows must require inspection status and evidence, then branch incomplete inspection to failure.

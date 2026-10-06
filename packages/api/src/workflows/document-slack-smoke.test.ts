@@ -1,6 +1,5 @@
 /** Run the user-facing smoke definitions through real routes, run host and plugins.
  * Only provider HTTP is mocked; no LLM or real Slack messages are involved. */
-import { readFile } from "node:fs/promises";
 import { afterEach, expect, it, vi } from "vitest";
 import { googleWorkspacePlugin } from "@valet/plugin-google-workspace/actions";
 import { slackPlugin } from "@valet/plugin-slack/actions";
@@ -54,9 +53,22 @@ it("runs the Drive DOCX and team Slack smoke workflows with workspace credential
     throw new Error(`Unexpected external request: ${url.origin}${url.pathname}`);
   });
 
-  for (const name of ["drive-docx", "team-slack"]) {
-    const source = await readFile(new URL(`../../../../docs/testing/workflows/${name}.json`, import.meta.url), "utf8");
-    const definition: unknown = JSON.parse(source.replace("REPLACE_WITH_TEST_DOCX_FILE_ID", "TESTDOCX").replace("REPLACE_WITH_PUBLIC_TEST_CHANNEL_ID", "CTEST").replace("REPLACE_WITH_YOUR_SLACK_USER_ID", "UTEST"));
+  const definitions = {
+    "drive-docx": {
+      version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" },
+        { id: "read_document", type: "tool", service: "google_workspace", action: "drive.download_file", params: { fileId: "TESTDOCX" } },
+        { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "read_document" }, { from: "read_document", to: "done" }],
+    },
+    "team-slack": {
+      version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" },
+        { id: "read_channel", type: "tool", service: "slack", action: "read_history", params: { channel: "CTEST", limit: 1 } },
+        { id: "send_dm", type: "tool", service: "slack", action: "dm_user", params: { user: "UTEST", text: "Valet team workflow test: explicit-recipient DM works." } },
+        { id: "done", type: "stop" }],
+      edges: [{ from: "trigger", to: "read_channel" }, { from: "read_channel", to: "send_dm" }, { from: "send_dm", to: "done" }],
+    },
+  };
+  for (const [name, definition] of Object.entries(definitions)) {
     const create = await fetch(`${api.baseUrl}/api/workflows`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, teamId: team.id, definition }) });
     expect(create.status, await create.clone().text()).toBe(201);
     const workflow = await create.json() as CreateWorkflowResponse;

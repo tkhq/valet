@@ -528,3 +528,12 @@ An active submission keeps its actual model after the save; the configured pin c
 The thread PATCH response updates only the model field in cached thread lists. It preserves newer titles and activity fields.
 The model-switch event refreshes only the exact session and thread-list queries. It does not refetch transcripts or decisions.
 No permissions, provider validation, or running-submission model behavior changes.
+
+## Catalog and cost policy
+
+The bundled catalog fills missing GPT-6.1 Sol and Claude Sonnet 5.5 metadata; SDK entries and runtime overlays take precedence.
+Provider availability and organization approval still apply. Serialization tests use fake HTTP transports, without paid requests.
+Source metadata: https://developers.openai.com/api/docs/models/gpt-6.1-sol and https://platform.claude.com/docs/en/models/sonnet-5-5/overview.
+Astra IDs, aliases, routing suffixes and custom-provider selections are disabled in catalogs, tier resolution, inference and recording proxies.
+Historical usage pricing remains available. Session restoration skips retired defaults; explicit thread pins require an allowed replacement.
+Proxy inference requires a model; batches remain unavailable because uploaded request files cannot be checked before submission.

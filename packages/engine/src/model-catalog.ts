@@ -3,7 +3,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
 // Metadata for releases newer than the pinned SDK. Built-in entries win by ID.
-// Sources and compatibility scope: docs/specs/2026-10-05-model-catalog-refresh-design.md.
+// Sources and compatibility scope: docs/specs/2026-08-24-thread-model-pinning-and-compaction-design.md.
 const supplementalModels: Model<Api>[] = [
   {
     id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai", api: "openai-responses",
