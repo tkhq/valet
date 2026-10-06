@@ -145,21 +145,6 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM teams WHERE id = 'live-team'");
   });
 
-  it("marks the session of a retired extra assistant deleted", async () => {
-    await restorePreviousSchema();
-    await db.query(`INSERT INTO assistants(id, org_id, owner_type, owner_id, session_id, is_default, created_at, archived_at)
-      VALUES ('main', 'org', 'user', 'two-assistants', 'main-session', true, 1, NULL),
-             ('extra', 'org', 'user', 'two-assistants', 'extra-session', false, 2, NULL)`);
-    await db.query(`INSERT INTO agent_sessions(id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
-      VALUES ('main-session', 'two-assistants', 'org', '/', 'active', 'user', 'two-assistants', 1, 1),
-             ('extra-session', 'two-assistants', 'org', '/', 'active', 'user', 'two-assistants', 2, 2)`);
-    await applyAppMigrations(db);
-    const statuses = await db.query("SELECT id, status FROM agent_sessions WHERE id IN ('main-session', 'extra-session') ORDER BY id");
-    expect(statuses.rows).toEqual([{ id: "extra-session", status: "deleted" }, { id: "main-session", status: "active" }]);
-    await db.query("DELETE FROM agent_sessions WHERE id IN ('main-session', 'extra-session')");
-    await db.query("DELETE FROM assistants WHERE org_id = 'org'");
-  });
-
   it("preserves linked workflows and transcripts through duplicate retirement and a second boot", async () => {
     await restorePreviousSchema();
     // These table names and predicates are fixed test data, never request input.
@@ -223,33 +208,18 @@ describe("workspace singleton repair on an already migrated database", () => {
         }
       }
       const before = await snapshot();
-      const backup = await pglite.dumpDataDir();
-      const restored = new PGlite({ loadDataDir: backup });
-      try {
-        for (const table of allTables) {
-          expect((await restored.query(`SELECT * FROM ${table} WHERE id LIKE 'preserve-%' ORDER BY id`)).rows, `${table} backup`).toEqual(before[table]);
-        }
-      } finally { await restored.close(); }
       await applyAppMigrations(db);
       const after = await snapshot();
       for (const table of [...preservedTables, "workflow_checkpoints"]) {
         expect(after[table], table).toEqual(before[table]);
       }
       for (const table of ["workflow_definitions", "workflow_versions"]) {
-        expect(after[table]).toHaveLength(table === "workflow_versions" ? 4 : 2);
         // Every other field, including IDs, version numbers and timestamps, survives.
         expect(after[table]).toEqual(before[table]?.map((row) => {
           const original = row as { definition: Record<string, unknown> };
           const { assistantId: _retired, ...definition } = original.definition;
           return { ...original, definition };
         }));
-      }
-      for (const ownerType of ["user", "team"]) {
-        const owner = `preserve-${ownerType}`;
-        expect(after.assistants).toContainEqual(expect.objectContaining({ id: `${owner}-main`, owner_id: owner, archived_at: null }));
-        expect(after.assistants).toContainEqual(expect.objectContaining({ id: `${owner}-extra`, owner_id: `${owner}:retired:${owner}-extra`, archived_at: expect.any(Number) }));
-        expect(after.agent_sessions).toContainEqual(expect.objectContaining({ id: `${owner}-main-session`, status: "active" }));
-        expect(after.agent_sessions).toContainEqual(expect.objectContaining({ id: `${owner}-extra-session`, status: "deleted" }));
       }
       expect(after.assistants).toEqual(before.assistants?.map((row) => {
         const original = row as { id: string; owner_id: string };

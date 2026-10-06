@@ -11,9 +11,10 @@ vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
 vi.mock("~/api/settings", () => ({ useMe: () => ({ error: null }) }));
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
 vi.mock("~/api/client", () => ({ api: { getWorkspaceBriefings: vi.fn(), dismissWorkspaceBriefing: vi.fn() } }));
-vi.mock("./workspace-activity", () => ({ WorkspaceActivity: () => <div>Detailed activity</div>, safeResultUrl: (value?: string) => {
-  try { const url = new URL(value ?? ""); return ["https:", "http:"].includes(url.protocol) ? url.href : undefined; } catch { return undefined; }
-} }));
+vi.mock("./workspace-activity", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./workspace-activity")>(),
+  WorkspaceActivity: () => <div>Detailed activity</div>,
+}));
 const briefing: WorkspaceBriefing = {
   id: "goal-routing", title: "Make event routing reliable",
   summary: "The routing change and replay checks are ready. The PR and report cover the implementation; rollout awaits your review.",
@@ -68,6 +69,7 @@ it("briefs one goal across conversations and runs with one concise summary", asy
   expect(within(article).getByRole("link", { name: "Replay report" }).getAttribute("href")).toBe("/a/replay-report");
   expect(within(article).getByRole("list", { name: "Sources" }).querySelector("a")?.textContent).toBe("TKAI-42 routing PR");
   expect(screen.getByText("Detailed activity")).toBeTruthy();
+  expect(screen.queryByText("Activity details")).toBeNull();
   expect(within(article).getByText("Review the rollout thread before release.")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Replay verification" }).closest("details")?.open).toBe(false);
   fireEvent.click(screen.getByText("Details · 4 sources"));
@@ -130,12 +132,7 @@ it("shows a retry state when generation is unavailable without inventing context
   expect(screen.getByText("One outcome from recent conversations and workflow runs.")).toBeTruthy();
   expect(screen.queryByRole("article")).toBeNull();
 });
-it("shows activity alongside the briefing", async () => {
-  setup();
-  await screen.findByText(briefing.summary);
-  expect(screen.getByText("Detailed activity")).toBeTruthy();
-  expect(screen.queryByText("Activity details")).toBeNull();
-});
+
 it("shows an honest briefing when no source links are available", async () => {
   vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, latestThread: null, sources: [] }], generatedAt: 100, coverage: "recent" });
   setup();
@@ -159,7 +156,6 @@ it("shows pending shared generation as loading rather than an error", async () =
   expect(await screen.findByText("Updating your briefing…")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
 });
-
 
 it("does not claim an update needs a reply when no next step is provided", async () => {
   vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, status: "updated", nextAction: undefined }], generatedAt: 100, coverage: "recent" });

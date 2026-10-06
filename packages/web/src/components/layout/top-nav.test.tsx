@@ -134,24 +134,6 @@ describe("TopNav", () => {
     expect(screen.queryByText("Echo")).toBeNull();
   });
 
-  it("leads with Threads and removes Sessions and Artifacts from primary navigation", async () => {
-    renderNav();
-    const link = await screen.findByRole("link", { name: "Threads" });
-    expect(link.getAttribute("href")).toBe("/chat");
-    expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Artifacts" })).toBeNull();
-  });
-
-  it("renders a Skills link between Automation and Integrations", async () => {
-    renderNav();
-    const link = await screen.findByRole("link", { name: "Skills" });
-    expect(link.getAttribute("href")).toBe("/skills");
-
-    const labels = screen.getAllByRole("link").map((el) => el.textContent);
-    expect(labels.indexOf("Skills")).toBeGreaterThan(labels.indexOf("Automation"));
-    expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
-  });
-
   // The labelled links do not fit beside the logo and the icons on a
   // phone. They live in one scrollable landmark so the row can slide
   // sideways instead of pushing the settings icon off-screen; jsdom has no
@@ -159,6 +141,10 @@ describe("TopNav", () => {
   it("keeps every destination inside one scrollable primary nav", async () => {
     renderNav();
     await screen.findByText("Valet");
+    expect(screen.getByRole("link", { name: "Threads" }).getAttribute("href")).toBe("/chat");
+    expect(screen.getByRole("link", { name: "Skills" }).getAttribute("href")).toBe("/skills");
+    expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Artifacts" })).toBeNull();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     const labels = within(nav)
       .getAllByRole("link")

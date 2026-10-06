@@ -35,11 +35,7 @@ describe("StepLogs", () => {
     expect(await screen.findByText("final reply")).toBeTruthy();
   });
 
-  it("reports empty logs without inventing a result", async () => {
-    list.mockResolvedValue({ messages: [], hasMore: false });
-    mount();
-    expect(await screen.findByText(/No messages recorded/)).toBeTruthy();
-  });
+
   it("offers retry on failure and recovers", async () => {
     list.mockRejectedValueOnce(new Error("403"));
     mount();

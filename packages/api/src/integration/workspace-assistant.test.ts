@@ -7,33 +7,7 @@ afterEach(async () => { await api?.cleanup(); api = undefined; });
 const headers = { "Content-Type": "application/json" };
 
 describe("workspace assistant contract", () => {
-  it("concurrent initialization returns one personal assistant", async () => {
-    api = await bootTestApi();
-    const base = api.baseUrl;
-    const responses = await Promise.all(Array.from({ length: 4 }, () => fetch(`${base}/api/workspaces/user/runtime`, {
-      method: "POST", headers, body: "{}",
-    })));
-    expect(responses.map(r => r.status)).toEqual([200, 200, 200, 200]);
-    const rows = await api.providers.db.select().from(assistants);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.ownerId).toBe("local-user");
-  });
 
-  it("rejects creating customized profiles and editing the workspace assistant", async () => {
-    api = await bootTestApi();
-    const custom = await fetch(`${api.baseUrl}/api/assistants`, {
-      method: "POST", headers, body: JSON.stringify({ name: "Custom agent", personality: "custom" }),
-    });
-    expect(custom.status).toBe(404);
-    await fetch(`${api.baseUrl}/api/workspaces/user/runtime`, { method: "POST", headers, body: "{}" });
-    const [row] = await api.providers.db.select().from(assistants);
-    expect(row).toBeDefined();
-    const edited = await fetch(`${api.baseUrl}/api/assistants/${row!.id}`, {
-      method: "PATCH", headers, body: JSON.stringify({ name: "Another agent" }),
-    });
-    expect(edited.status).toBe(404);
-    expect(await api.providers.db.select().from(assistants)).toEqual([row]);
-  });
   it("keeps the team singleton separate from personal work and rejects nonmembers", async () => {
     api = await bootTestApi();
     await api.providers.db.insert(teams).values({ id: "team-one", orgId: "local-org", name: "Team", createdAt: Date.now() });

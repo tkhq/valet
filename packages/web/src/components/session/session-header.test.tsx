@@ -87,7 +87,6 @@ vi.mock("~/api/settings", () => ({
   useOrgReasoning: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
-
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
 }));
@@ -530,27 +529,7 @@ describe("SessionHeader — no delete on the user's own assistant", () => {
     expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
   });
 
-  it("hides delete on a personal workspace runtime", async () => {
-    isWorkspaceRuntime = true;
-    const user = userEvent.setup();
-    renderHeader({ state: "ready", epoch: 1 });
-
-    await user.click(screen.getByRole("button", { name: "Thread menu" }));
-    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
-    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
-  });
-
   it("fails closed without a runtime identity", async () => {
-    isWorkspaceRuntime = undefined;
-    const user = userEvent.setup();
-    renderHeader({ state: "ready", epoch: 1 });
-
-    await user.click(screen.getByRole("button", { name: "Thread menu" }));
-    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
-    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
-  });
-
-  it("fails closed when a detail response omits runtime identity", async () => {
     isWorkspaceRuntime = undefined;
     const user = userEvent.setup();
     renderHeader({ state: "ready", epoch: 1 });

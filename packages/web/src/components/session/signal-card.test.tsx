@@ -133,10 +133,9 @@ describe("truncateBody", () => {
   });
 });
 
-
 describe("workflow operations", () => {
   it.each(["workflow.request", "workflow.settled"])("collapses %s without losing the full report or run link", (signalType) => {
-    const content = "A short report.\n\nFinal source detail.";
+    const content = Array.from({ length: 40 }, (_, i) => `Workflow source ${i}`).join("\n\n");
     const { container } = render(<SignalCard message={baseMessage({ content,
       signal: { signalType, attributes: { runId: "run-1", outcome: "completed" } },
     })} />);
@@ -146,19 +145,10 @@ describe("workflow operations", () => {
     expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/run-1");
     fireEvent.click(container.querySelector("summary")!);
     expect(details.open).toBe(true);
-    expect(screen.getByText("Final source detail.")).toBeTruthy();
+    expect(screen.getByText("Workflow source 39")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Show full message" })).toBeNull();
     fireEvent.click(container.querySelector("summary")!);
     expect(details.open).toBe(false);
-  });
-
-  it("expands the complete long workflow body in one step", () => {
-    const content = Array.from({ length: 40 }, (_, i) => `Workflow source ${i}`).join("\n\n");
-    const { container } = render(<SignalCard message={baseMessage({ content, signal: { signalType: "workflow.request" } })} />);
-    fireEvent.click(container.querySelector("summary")!);
-    expect(container.querySelector("details")?.open).toBe(true);
-    expect(screen.getByText("Workflow source 39")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Show full message" })).toBeNull();
   });
 
   it("keeps legacy workflow reports compact without inventing a run link", () => {

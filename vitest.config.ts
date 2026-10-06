@@ -1,4 +1,6 @@
 import { defineConfig } from 'vitest/config';
+import { apiProjects } from './packages/api/vitest.config';
+import { TESTED_PLUGINS } from './scripts/e2e/lib';
 
 export default defineConfig({
   test: {
@@ -12,7 +14,20 @@ export default defineConfig({
     projects: [
       'packages/shared',
       'packages/sdk',
-      'packages/api',
+      ...apiProjects,
+      'packages/workflow',
+      ...TESTED_PLUGINS.map((name) => `packages/${name.replace('@valet/', '')}`),
+      {
+        test: {
+          name: '@valet/sandbox-docker:unit',
+          include: [
+            'packages/sandbox-docker/test/run-args.test.ts',
+            'packages/sandbox-docker/test/browser-companion.test.ts',
+            'packages/sandbox-docker/test/browser-companion-lifecycle.test.ts',
+          ],
+          testTimeout: 60_000,
+        },
+      },
       'packages/engine',
       'packages/web',
       // The `make e2e` runner's pure library (step table, scorecard).

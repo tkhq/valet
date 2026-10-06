@@ -85,13 +85,15 @@ explicitly — the goal is that anything that could break during a v2 change has
 a row, so `make e2e` is sufficient validation on its own (it does not assume
 `pnpm test` was run separately).
 
+Root CI includes workflow, tested plugins, and daemon-free Docker suites in its four shards. API root and package runs share unit/integration settings and infrastructure exclusions. Only API unit tests scrub ambient keys.
+
 **Static + unit (always armed, no external deps):**
 
 | Step | Wraps |
 |---|---|
 | `typecheck` | root `pnpm typecheck` (all packages except frozen `worker`) |
 | `conventions` | `scripts/check-conventions.ts` — recurring review rules as executable checks: `@ts-ignore`/`@ts-expect-error` banned, `as unknown as` ratcheted via allowlist (`scripts/e2e/conventions.ts`), every `ws`-consuming package declares both `@types/ws` and `@types/node`. Legacy packages (worker, client, runner) excluded. |
-| `unit` | root `pnpm test --project '!@valet/engine'` (`shared`, `sdk`, `api`, `web`, and e2e runner tests); engine and keyless integration files run only in their dedicated rows |
+| `unit` | root `pnpm test` with dedicated engine, workflow, plugin, Docker, and core integration suites excluded; each runs once in its own row |
 | `engine-unit` | `pnpm --filter @valet/engine test` — store contract, compaction, gates, signals, kill-mid-turn, model switching |
 | `workflow-unit` | `pnpm --filter @valet/workflow test` — DAG interpreter, node executors, expression eval, checkpoints |
 | `gateway-unit` | `pnpm --filter @valet/sandbox-gateway test` — sandbox JWT mint/verify, WS proxy |

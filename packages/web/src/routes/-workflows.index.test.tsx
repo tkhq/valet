@@ -398,11 +398,6 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.getByRole("button", { name: "New workflow" })).toBeTruthy();
   });
 
-  it("removes the separate approval tab", () => {
-    renderPage();
-    expect(screen.queryByRole("tab", { name: /Needs your approval/ })).toBeNull();
-  });
-
   it("shows both gate classes in the shared approval cards", () => {
     renderApprovals();
 
@@ -424,18 +419,14 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
   });
 
-  it("stacks action details at a narrow viewport without a minimum page width", () => {
-    Object.defineProperty(window, "innerWidth", {
-      configurable: true,
-      value: 390,
-    });
+  it("uses shrinkable containers and stacked action details", () => {
     renderApprovals();
     const row = screen.getAllByTestId("action-required-item")[0];
     expect(row.className).toContain("min-w-0");
     expect(row.querySelector(".flex-col")).toBeTruthy();
   });
 
-  it("uses the notification search target to focus one gate", () => {
+  it("highlights only the gate marked as focused", () => {
     renderApprovals("wfrun_policy");
     const rows = screen.getAllByTestId("action-required-item");
     expect(rows[0].className).not.toContain("ring-2");

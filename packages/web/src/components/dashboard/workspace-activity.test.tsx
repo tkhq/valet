@@ -27,7 +27,9 @@ it("groups PRs and published files under their work with real source links", asy
   vi.mocked(api.listArtifacts).mockResolvedValue({ artifacts: [{ id: "a", title: "Routing report", path: "report.md", format: "markdown", icon: "", ownerType: "user", version: 1, sharedVersion: null, token: "report-token", url: "https://api.example/a/report-token", visibility: "org", actorUserId: "u", revoked: false, createdAt: 2, updatedAt: 3, sourceSessionId: "s", sourceThreadId: "thread-a" }], nextCursor: null });
   setup();
   const results = await screen.findByRole("region", { name: "Recent results" });
+  expect(results.querySelector("details")?.open).toBe(false);
   fireEvent.click(within(results).getByText("Recent results"));
+  expect(results.querySelector("details")?.open).toBe(true);
   const pr = await screen.findByRole("link", { name: "Route events PR" });
   expect(pr.getAttribute("href")).toBe("https://github.com/acme/app/pull/42");
   expect(within(results).getByRole("link", { name: "Routing report" }).getAttribute("href")).toBe("/a/report-token");
@@ -136,17 +138,6 @@ it("puts Valet's questions under Needs attention and plain replies in their own 
   fireEvent.click(within(replies).getByRole("button", { name: "Archive Lockfile fix" }));
   await waitFor(() => expect(api.patchThread).toHaveBeenCalledWith("told", { archived: true }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "Conversation updates" })).toBeNull());
-});
-
-it("keeps recent results collapsed until expanded", async () => {
-  vi.mocked(api.listWorkspaceOutcomes).mockResolvedValue({ items: [{ id: "result", kind: "review", title: "Review submitted", occurredAt: 1, workflowRunId: "run", url: "https://github.com/acme/app/pull/42" }], nextCursor: null });
-  setup();
-  await waitFor(() => expect(screen.queryByText(/Loading results/)).toBeNull());
-  const results = await screen.findByRole("region", { name: "Recent results" });
-  expect(results.querySelector("details")?.open).toBe(false);
-  fireEvent.click(within(results).getByText("Recent results"));
-  expect(results.querySelector("details")?.open).toBe(true);
-  expect(within(results).getByRole("link", { name: "acme/app #42" })).toBeTruthy();
 });
 
 it("keeps navigation through empty filtered artifact pages", async () => {

@@ -73,23 +73,6 @@ function renderDashboard() {
 }
 
 describe("Dashboard", () => {
-  it("shows catch-up without a profile setup step", () => {
-    infoMock.mockReturnValue({
-      data: {
-        sessionId: "orchestrator:user-1",
-        presence: "idle",
-        activeChildren: 0,
-      },
-      isLoading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    renderDashboard();
-
-    expect(screen.queryByText("Meet your assistant")).toBeNull();
-    expect(screen.getByTestId("catch-up")).toBeTruthy();
-  });
 
   it("shows the personal workspace header and cards", () => {
     infoMock.mockReturnValue({

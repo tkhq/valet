@@ -25,14 +25,11 @@ beforeEach(() => {
   legacy.mockResolvedValue({ sessionId: "legacy-session" });
 });
 describe("workspace conversation", () => {
-  it("ensures the personal default without selecting or creating a profile", async () => {
-    const { result } = renderHook(() => useWorkspaceConversation(), { wrapper: harness() });
-    await waitFor(() => expect(result.current.data?.sessionId).toBe("personal-session"));
-    expect(personal).toHaveBeenCalledTimes(1); expect(legacy).not.toHaveBeenCalled();
-  });
+
   it("switches by owner and never shows the previous workspace while ensuring", async () => {
     const { result, rerender } = renderHook(() => useWorkspaceConversation(), { wrapper: harness() });
     await waitFor(() => expect(result.current.data?.sessionId).toBe("personal-session"));
+    expect(personal).toHaveBeenCalledTimes(1); expect(legacy).not.toHaveBeenCalled();
     scope = { key: "team-a", teamId: "team-a" }; rerender();
     expect(result.current.data).toBeUndefined();
     await waitFor(() => expect(result.current.data?.sessionId).toBe("team-session"));

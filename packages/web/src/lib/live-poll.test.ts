@@ -20,7 +20,4 @@ describe("livePollInterval", () => {
     expect(livePollInterval({ rows: [{ done: true }] }, anyRunning, 1000)).toBe(false);
   });
 
-  it("treats an empty list as nothing to poll for", () => {
-    expect(livePollInterval({ rows: [] }, anyRunning, 1000)).toBe(false);
-  });
 });

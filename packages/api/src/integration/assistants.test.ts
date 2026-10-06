@@ -28,7 +28,7 @@ describe("removed assistant profile endpoints", () => {
       expect(response.status).toBe(404);
     }
     expect((await fetch(`${api.baseUrl}/api/assistants`)).status).toBe(404);
-    expect(await api.providers.db.select().from(assistants)).toHaveLength(1);
+    expect(await api.providers.db.select().from(assistants)).toEqual([row]);
   });
 });
 

@@ -137,21 +137,11 @@ describe("multi-thread isolation", () => {
 });
 
 describe("thread_read built-in tool", () => {
-  it("thread A can read messages from thread B via thread_read", async () => {
+  it.each(["key", "link"] as const)("thread A can read thread B via a %s", async (reference) => {
     const faux = registerFauxProvider({ provider: "thread-read" });
     // Thread B will be primed with one back-and-forth.
     // Then thread A's first response will call thread_read on B.
     // Thread A's second response will be a text reply containing the read result.
-    faux.setResponses([
-      fauxAssistantMessage("B-said-this"), // B's response
-      // A's first response: invokes thread_read on B
-      fauxAssistantMessage(
-        [fauxToolCall("thread_read", { key: "task:B", limit: 10 }, { id: "tr1" })],
-        { stopReason: "toolUse" },
-      ),
-      fauxAssistantMessage("A read B"), // A's final response
-    ]);
-
     const { engine, events } = makeEngine();
     const session = await engine.createSession({
       userId: "u1",
@@ -160,6 +150,16 @@ describe("thread_read built-in tool", () => {
       sandbox: {},
       model: faux.getModel(),
     });
+
+    faux.setResponses([
+      fauxAssistantMessage("B-said-this"), // B's response
+      // A's first response: invokes thread_read on B
+      fauxAssistantMessage(
+        [fauxToolCall("thread_read", { key: reference === "key" ? "task:B" : `https://valet.example.com/threads/${session.thread("task:B").id}`, limit: 10 }, { id: "tr1" })],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("A read B"), // A's final response
+    ]);
 
     const tA = session.thread("task:A");
     const tB = session.thread("task:B");
@@ -194,34 +194,10 @@ describe("thread_read built-in tool", () => {
     expect(toolEnds.length).toBeGreaterThanOrEqual(1);
     const lastToolEnd = toolEnds.at(-1);
     const result = (lastToolEnd!.event as { result: string }).result;
-    expect(result).toContain("thread:task:B");
+    expect(result).toContain(`thread:${reference === "key" ? "task:B" : tB.id}`);
     expect(result).toContain("hello B");
     expect(result).toContain("B-said-this");
 
-    faux.unregister();
-  });
-});
-
-describe("thread_read in an agent turn", () => {
-  it("reads a sibling thread from a pasted Valet link, not only a key", async () => {
-    const faux = registerFauxProvider({ provider: "thread-read-link-turn" });
-    faux.setResponses([fauxAssistantMessage("B-said-this")]);
-    const { engine, events } = makeEngine();
-    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
-    const tB = session.thread("task:B");
-    await tB.submitPrompt("hello B", {});
-    await waitFor(() => events.some((e) => e.threadId === tB.id && e.event.type === "turn_end"));
-
-    faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("thread_read", { key: `https://valet.example.com/threads/${tB.id}` }, { id: "tr-link" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage("A read B"),
-    ]);
-    const tA = session.thread("task:A");
-    await tA.submitPrompt("read the linked thread", {});
-    await waitFor(() => events.some((e) => e.threadId === tA.id && e.event.type === "turn_end"
-      && (e.event as { reason: string }).reason === "end_turn"));
-    const toolEnd = events.filter((e) => e.threadId === tA.id && e.event.type === "tool_end").at(-1);
-    expect((toolEnd!.event as { result: string }).result).toContain("B-said-this");
     faux.unregister();
   });
 });
