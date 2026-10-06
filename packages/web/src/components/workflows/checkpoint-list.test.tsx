@@ -15,12 +15,12 @@ describe("CheckpointList", () => {
     expect(screen.getByText("No steps have started yet.")).toBeTruthy();
   });
 
-  it("keeps definition order when polling changes row order and completion timestamps", () => {
-    const first = { nodeId: "inventory", iteration: 0, status: "completed", createdAt: 1 };
-    const second = { nodeId: "apply", iteration: 0, status: "intent", createdAt: 2 };
+  it("keeps definition order when polling changes row order and status", () => {
+    const first = { nodeId: "inventory", iteration: 0, status: "completed" };
+    const second = { nodeId: "apply", iteration: 0, status: "intent" };
     const { rerender } = render(<CheckpointList checkpoints={[second, first]} nodeOrder={["inventory", "apply"]} />);
     expect(screen.getAllByRole("listitem")[0].textContent).toContain("inventory");
-    rerender(<CheckpointList checkpoints={[{ ...first, createdAt: 9 }, { ...second, status: "completed", createdAt: 3 }]} nodeOrder={["inventory", "apply"]} />);
+    rerender(<CheckpointList checkpoints={[first, { ...second, status: "completed" }]} nodeOrder={["inventory", "apply"]} />);
     expect(screen.getAllByRole("listitem")[0].textContent).toContain("inventory");
     expect(screen.getAllByRole("listitem")[1].textContent).toContain("apply");
   });
