@@ -37,6 +37,26 @@ Human text/file/image prompts fail visibly when credentials are missing or trans
 
 Slack acknowledges verification only after encrypted durable inbox admission. Startup/new deliveries drain pending requests; consumer failures retain them. Replay uses captured verification time and encrypted signing secret across replay-window expiry/rotation. DMs check admission before rebuilding attachments. Changed connected workspaces wait for restoration. Dispatch leases/deduplication and terminal retry recovery follow the isolation contract; diagnostic receipts remain best-effort.
 
+## Current UI and approval contracts
+
+Thread search matches literal title/message text within the current workspace and existing audience filters. It excludes tool output/reasoning, limits queries to 500 characters, and debounces requests by 250ms. Selection follows thread identity as results arrive.
+
+Chat gates use the composer column and shared primitives. Pending actions disable duplicate submissions, errors retain input, and reasons remain wrapped. Ordinary workflow approval submits directly; workflow-wide permission keeps confirmation. Scope, named-lender, iteration, and authorization checks remain enforced. Question fields submit with Command/Control+Enter, excluding empty, pending, repeated, and composing input; plain Enter adds a newline.
+
+Workflow approval commits its signal, grants, audit, and wake flag together. Only the unique signal winner writes grants. Conflicting decisions return already_resolved; grant failure rolls back everything. Shared-account grants remain run-scoped, and durable wake recovers after restart.
+
+Workflow signals use collapsed operation rows with outcome/run link visible and full report on expansion. Recent results starts collapsed; questions, failures, and approvals remain visible. Conversation updates use Open thread; detected questions use Reply. Briefings without a next step avoid claiming no action is needed.
+
+Automation creation/editing share event matching and filter validation. Deselecting events prunes unsupported filters; catalog loading preserves stored filters. Fixed channel scope or explicit Any channel is required for mention rules. Edits send changed fields only; rename and collision retry retain existing behavior.
+
+## Background reconciliation
+
+Thread list reads never start GitHub requests. A non-overlapping minute sweep claims at most five organization/URL groups stale for ten minutes, under a short organization lock. Credential/network work occurs after commit, with a 30-second request timeout. Failures consume the check window; verified webhooks take precedence. Shutdown stops and awaits the sweep.
+
+Overheard digests group only matching origin thread, author ID, and external-sender authority (absent equals false). Crash repair settles saved constituents without mixing groups. Existing mixed digests are not rewritten.
+
+Named approvers on private child sessions receive exact pending-gate decision access, subject to organization/team membership. Other gates, history, prompts, and metadata remain private; access ends after resolution. A thread URL never grants access to a gate in another thread.
+
 ## Validation
 
 Exercise both route families against retained history, thread-local decisions, private/team access, malformed origins, named gate-only approvals, credential revocation races, account switching, and recovery. Retain unique API/client regression coverage and the final end-to-end scorecard. Removing obsolete aliases requires client-floor evidence; deployment requires the separate database-copy migration and artifact-cutover checks.

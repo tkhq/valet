@@ -440,3 +440,9 @@ The API integration harness binds port zero and keeps that listener open.
 Engine callback URLs resolve the assigned port after listening starts.
 This removes the port probe and release window that caused parallel CI boots to collide.
 The production server adapter and test coverage remain unchanged.
+
+Superseded PR CI runs are canceled; branch/tag publishing runs are retained.
+The Docker row excludes files owned by the daemon-free row and dedicated DinD row.
+The Kubernetes cluster row runs only cluster files; the unit row owns the others.
+The live GitHub row runs only the App JWT check; integration-core owns the fixture loop.
+These changes remove repeated execution, not test cases.

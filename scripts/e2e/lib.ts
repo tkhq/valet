@@ -217,9 +217,9 @@ export const STEPS: StepDef[] = [
 
   // ── docker / cluster gated ───────────────────────────────────────────────
   { id: "browser-docker", group: "docker", title: "managed browser isolation, persistence, approvals and HTTP flow", command: ["pnpm", "exec", "tsx", "scripts/e2e/browser.ts"], needs: ["docker"], timeoutMs: 20 * MIN },
-  { id: "sandbox-docker", group: "docker", title: "sandbox-docker suite", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test"], needs: ["docker"], timeoutMs: 15 * MIN },
+  { id: "sandbox-docker", group: "docker", title: "sandbox-docker suite", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "--exclude", "test/run-args.test.ts", "--exclude", "test/browser-companion.test.ts", "--exclude", "test/browser-companion-lifecycle.test.ts", "--exclude", "test/dind.e2e.test.ts"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "sandbox-dind", group: "docker", title: "rootless docker-in-sandbox", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/dind.e2e.test.ts"], needs: ["docker"], timeoutMs: 15 * MIN },
-  { id: "sandbox-k8s", group: "docker", title: "sandbox-kubernetes cluster suite", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test"], needs: ["k8sContext"], timeoutMs: 20 * MIN },
+  { id: "sandbox-k8s", group: "docker", title: "sandbox-kubernetes cluster suite", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", ".cluster.test.ts"], needs: ["k8sContext"], timeoutMs: 20 * MIN },
   { id: "store-postgres", group: "docker", title: "real-Postgres conformance", command: ["make", "test-pg"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "workspace-prep-docker", group: "docker", title: "workspace prep against real sandbox", command: apiTest("src/engine/workspace-prep.docker.test.ts", "src/engine/workspace-prep-prebuilt.docker.test.ts"), needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "prebuilds-docker", group: "docker", title: "image prebuild pipeline", command: apiTest("src/integration/prebuilds.e2e.test.ts"), needs: ["docker"], timeoutMs: 20 * MIN },
@@ -232,7 +232,7 @@ export const STEPS: StepDef[] = [
 
   // ── live external ────────────────────────────────────────────────────────
   { id: "telegram", group: "live", title: "live Telegram outbound", command: apiTest("src/integration/telegram.e2e.test.ts"), needs: ["telegram"], timeoutMs: 10 * MIN },
-  { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts"), needs: ["githubLive"], timeoutMs: 10 * MIN },
+  { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts", "-t", "live App JWT check"), needs: ["githubLive"], timeoutMs: 10 * MIN },
   { id: "openai", group: "live", title: "OpenAI provider path", command: apiTest("src/integration/llm-providers.e2e.test.ts"), needs: ["openai"], timeoutMs: 10 * MIN },
   {
     id: "onepassword",
