@@ -8,8 +8,8 @@ Runtime ensure returns a writable helper target and the team workspace root sepa
 Deleting a person's helper allows a fresh helper identity on next open, without restoring its deleted execution or files. Deleted shared execution keys stay retired.
 Private Slack audiences require current membership. Team API keys cannot access private executions. Configuration changes evict all mapped execution catalogs.
 
-Default writes, exports and imports use the execution namespace. Reads, searches and snapshots also expose explicit shared team memory under `team:<id>/`.
-Shared projections are read-only. Publication requires a separately authorized copy. Legacy quarantine never enters this union.
+Shared web conversations and originless team workflows use the existing team memory corpus, including writes, exports and imports. Private and external conversations retain execution namespaces; their reads, searches and snapshots expose shared team memory under `team:<id>/`. Shared projections are read-only; publication requires a separately authorized copy.
+Workflow agent steps inherit their origin's memory scope. A legacy mixed-audience origin resolves by its thread, never by the root alone. Slack-event workflows use a stable workflow/channel scope, narrowed by the origin when present. Thread-step dispatch with both a Slack event and a separate conversation origin is rejected because the runtime cannot enforce both audiences. Missing channel or origin provenance fails closed. A new run ID does not reset persistent memory.
 Filesystem, terminal, artifacts, memory and child-work routes apply governing-thread authorization; team administration alone cannot read another member's private helper.
 
 ## Upgrade and recovery
@@ -17,8 +17,8 @@ Filesystem, terminal, artifacts, memory and child-work routes apply governing-th
 Do not copy legacy working directories into new executions. Retain mixed-audience runtimes as read-only transcript sources.
 Restoration aborts their queued/interrupted submissions and withdraws gates without replaying tools. Existing admission receipts remain authoritative.
 Workflow nodes and reports resolve live legacy origins into isolated executions with the same governing audience. Missing/archived origins never widen access.
-Legacy team memory moves to `legacy`; personal memory keeps its namespace. Back up the database and working directories before cutover.
-Recover ambiguous notes only after their owner confirms the audience. Never bulk-copy legacy memory into shared memory.
+Existing team memory retains its original paths and team permissions; personal memory is unchanged. The namespace column isolates new private writes without reclassifying old team files. Back up the database and working directories before cutover.
+Earlier pre-release databases may contain team files in `legacy`. Boot restores them to the shared namespace atomically. A shared-path collision stops boot with both versions retained: inspect and explicitly rename or reconcile the conflict before retrying. Private execution namespaces are untouched.
 This is a one-way schema cutover: stop old writers before repair. Rollback requires restoring the pre-upgrade database and files, not reusing migrated data.
 Legacy personal overrides cannot distinguish workflow pre-approvals from global settings. Mark existing overrides `legacy_unscoped`; ignore their allow authority in both chat and workflows until the person explicitly re-saves the setting. Deny/approval rules remain enforced, rows are retained, and new workflow grants remain scoped to their definition.
 Upgrade the server before shipping the new CLI. Retired assistant profile/read endpoints are intentionally removed; integrations must use workspace runtime/thread routes before cutover. Legacy POST ensure aliases remain for older clients against the new server.

@@ -129,11 +129,30 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   }
 
   await addColumnsMissingFromAppliedMigrations(db);
+  await restoreSharedTeamMemory(db);
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
   await syncAssistantSessionStatus(db);
   await reportRetiredAssistantSettings(db);
+}
+
+/** Undo the pre-release blanket quarantine without choosing between conflicting files.
+ * Old team memory already had team-wide access. New private namespaces are untouched.
+ * A conflict stops boot with both versions retained for an explicit resolution. */
+export async function restoreSharedTeamMemory(db: PgDb): Promise<void> {
+  await db.query(`DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM memory_files WHERE owner_type = 'team' AND namespace = 'legacy') THEN
+      LOCK TABLE memory_files IN SHARE ROW EXCLUSIVE MODE;
+      IF EXISTS (SELECT 1 FROM memory_files old JOIN memory_files current
+        ON current.owner_type = old.owner_type AND current.owner_id = old.owner_id
+        AND current.path = old.path AND current.namespace = ''
+        WHERE old.owner_type = 'team' AND old.namespace = 'legacy') THEN
+        RAISE EXCEPTION 'Team memory recovery has conflicting legacy/shared paths. Both versions are retained; resolve these conflicts before restarting.';
+      END IF;
+      UPDATE memory_files SET namespace = '' WHERE owner_type = 'team' AND namespace = 'legacy';
+    END IF;
+  END $$`);
 }
 
 /** A stored integration allow-list keeps limiting its workspace until an
@@ -348,7 +367,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
 )` },
   { describe: "assistant execution conversation identity", probe: { kind: "index", index: "assistant_executions_conversation" }, sql: 'CREATE UNIQUE INDEX assistant_executions_conversation ON assistant_executions (assistant_id, conversation_key)' },
   { describe: "memory execution namespace", probe: { kind: "column", table: "memory_files", column: "namespace" }, sql: `DO $$ BEGIN ALTER TABLE memory_files ADD COLUMN namespace text NOT NULL DEFAULT '';
-    UPDATE memory_files SET namespace = 'legacy' WHERE owner_type = 'team';
     ALTER TABLE memory_files DROP CONSTRAINT memory_files_pkey;
     ALTER TABLE memory_files ADD PRIMARY KEY (owner_type, owner_id, namespace, path); END $$` },
   { describe: "assistants.behavior column", probe: { kind: "column", table: "assistants", column: "behavior" }, sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "behavior" text' },

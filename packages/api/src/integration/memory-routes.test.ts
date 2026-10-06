@@ -499,7 +499,7 @@ describe("api integration: memory owner scope", () => {
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/runtime.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(404);
   });
 
-  it("uses the stored workflow owner for sandbox memory", async () => {
+  it("preserves shared workflow memory across nodes and subsequent runs", async () => {
     const target = api = await bootWithTeam([{ userId: "local-user", role: "admin" }]);
     await target.providers.db.insert(workflowDefinitions).values({ id: "memory-wf", orgId: "local-org", ownerType: "team",
       ownerId: "team_1", name: "Memory", definition: {}, createdAt: 1, updatedAt: 1 });
@@ -508,10 +508,16 @@ describe("api integration: memory owner scope", () => {
     const { token } = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:step", userId: "local-user", orgId: "local-org" });
     expect((await fetch(`${target.baseUrl}/api/memory`, { method: "PUT", headers: { ...JSON_HEADERS, "x-valet-sandbox": token },
       body: JSON.stringify({ path: "notes/workflow.md", content: "# Team workflow" }) })).status).toBe(200);
-    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md&${TEAM_QUERY}`)).status).toBe(404);
+    expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md&${TEAM_QUERY}`)).status).toBe(200);
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": token } })).status).toBe(200);
     const next = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run:next", userId: "local-user", orgId: "local-org" });
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": next.token } })).status).toBe(200);
+    await target.providers.db.insert(workflowRuns).values({ id: "memory-run-again", workflowId: "memory-wf", definitionVersionId: "v",
+      definition: {}, params: {}, ownerType: "team", ownerId: "team_1", createdAt: 2, updatedAt: 2 });
+    const again = await mintSandboxToken(target.providers.db, { sessionId: "wf:memory-run-again:step", userId: "local-user", orgId: "local-org" });
+    const persisted = await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`, { headers: { "x-valet-sandbox": again.token } });
+    expect(persisted.status).toBe(200);
+    expect(await persisted.json()).toMatchObject({ rendered: expect.stringContaining("Team workflow") });
     expect((await fetch(`${target.baseUrl}/api/memory?path=notes/workflow.md`)).status).toBe(404);
   });
 

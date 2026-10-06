@@ -1,3 +1,6 @@
+import { drizzle } from "drizzle-orm/pglite";
+import * as schema from "../schema/index.js";
+import { readFile, writeFile, searchFiles } from "../services/memory.js";
 import { PGlite } from "@electric-sql/pglite";
 import { applyEngineMigrations, pgDbFromPglite } from "@valet/store-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -73,9 +76,31 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("INSERT INTO memory_files(owner_type, owner_id, namespace, path, content, created_at, updated_at) VALUES ('team', 'memory-upgrade', 'private', 'note.md', 'Private', 2, 2)");
     await applyAppMigrations(db);
     expect((await db.query("SELECT namespace, content FROM memory_files WHERE owner_id = 'memory-upgrade' ORDER BY namespace")).rows).toEqual([
-      { namespace: "legacy", content: "Legacy" }, { namespace: "private", content: "Private" },
+      { namespace: "", content: "Legacy" }, { namespace: "private", content: "Private" },
     ]);
+    const app = drizzle(pglite, { schema });
+    const scope = { owner: { type: "team", id: "memory-upgrade" }, actorUserId: "member" } as const;
+    expect(await readFile(app, scope, "note.md")).toMatchObject({ rendered: expect.stringContaining("Legacy") });
+    expect(await searchFiles(app, scope, { query: "Legacy" })).toMatchObject([{ path: "note.md" }]);
+    await writeFile(app, scope, { path: "note.md", content: "Updated on next run" });
+    await applyAppMigrations(db);
+    expect(await readFile(app, scope, "note.md")).toMatchObject({ rendered: expect.stringContaining("Updated on next run") });
     await db.query("DELETE FROM memory_files WHERE owner_id = 'memory-upgrade'");
+  });
+
+  it("recovers a quarantined corpus once and refuses to overwrite a shared-path collision", async () => {
+    await db.query(`INSERT INTO memory_files(owner_type, owner_id, namespace, path, content, created_at, updated_at)
+      VALUES ('team', 'recover', 'legacy', 'note.md', 'Original', 1, 1),
+             ('team', 'recover', '', 'note.md', 'Newer', 2, 2)`);
+    await expect(applyAppMigrations(db)).rejects.toThrow("conflicting legacy/shared paths");
+    expect((await db.query("SELECT content FROM memory_files WHERE owner_id = 'recover' ORDER BY content")).rows)
+      .toEqual([{ content: "Newer" }, { content: "Original" }]);
+    await db.query("UPDATE memory_files SET path = 'newer.md' WHERE owner_id = 'recover' AND namespace = ''");
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT namespace, path, content FROM memory_files WHERE owner_id = 'recover' ORDER BY path")).rows)
+      .toEqual([{ namespace: "", path: "newer.md", content: "Newer" }, { namespace: "", path: "note.md", content: "Original" }]);
+    await db.query("DELETE FROM memory_files WHERE owner_id = 'recover'");
   });
 
   it("repairs a missing legacy behavior column before the boot report", async () => {

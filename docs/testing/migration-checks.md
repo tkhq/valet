@@ -1,6 +1,6 @@
 # Workspace upgrade checks
 
-The maintained `drizzle-singleton.test.ts` suite checks retained workflows, transcripts, legacy memory quarantine, and repeated repairs.
+The maintained `drizzle-singleton.test.ts` suite checks retained workflows, transcripts, shared memory read/write continuity, and repeated repairs.
 
 ## Target-data rehearsal for each deployment
 
@@ -15,6 +15,6 @@ The maintained `drizzle-singleton.test.ts` suite checks retained workflows, tran
 
 ## Expected changes, not data loss
 
-Existing personal allow overrides require explicit reapproval because legacy workflow permissions lack workflow provenance; deny and approval rules remain enforced and override rows remain retained. Duplicate assistant identities retire; their session rows remain but are marked deleted in active listings. Legacy mixed-audience team conversations become read-only. Runtime restoration aborts their pending submissions and withdraws their decision gates without replaying tools. Workflow definitions and settled history remain; obsolete assistant routing fields are normalized. Missing or retired explicit workflow origins fail closed rather than redirecting to another audience. Team memory and artifacts with ambiguous provenance remain retained for authorized recovery instead of becoming shared automatically.
+Existing personal allow overrides require explicit reapproval because legacy workflow permissions lack workflow provenance; deny and approval rules remain enforced and override rows remain retained. Duplicate assistant identities retire; their session rows remain but are marked deleted in active listings. Legacy mixed-audience team conversations become read-only. Runtime restoration aborts their pending submissions and withdraws their decision gates without replaying tools. Workflow definitions and settled history remain; obsolete assistant routing fields are normalized. Missing or retired explicit workflow origins fail closed rather than redirecting to another audience. Existing team memory keeps its paths and permissions. Recovery from the earlier `legacy` namespace refuses shared-path conflicts without overwriting either version. Artifacts with ambiguous provenance remain retained for authorized recovery instead of becoming shared automatically.
 
 See [thread execution isolation](../specs/2026-10-05-thread-execution-isolation-design.md) for the required artifact inventory and the recovery boundaries. Schema preservation checks do not prove runtime cutover or access behavior. Verify those separately with the focused engine and API regression suites.

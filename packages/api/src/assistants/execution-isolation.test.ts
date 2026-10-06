@@ -2,9 +2,10 @@ import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { restoreOneSession } from "../boot-restore.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { addMember, createTeam } from "../services/teams.js";
-import { agentSessions, assistants } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, workflowDefinitions, workflowRuns, teamMembers } from "../schema/index.js";
 import { eq, sql } from "drizzle-orm";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "./service.js";
 
@@ -160,4 +161,110 @@ it("deletes a team execution individually and tears down every runtime when dele
   expect(p.engineHost.liveSession(second.sessionId)).toBeNull();
   expect(await p.engineStore.getSession(second.sessionId)).toBeNull();
   await expect(ensureAssistantExecution(p, owner, meta, "web:default")).rejects.toThrow();
+});
+
+it("keeps shared team memory across web threads and private workflow memory across runs", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Memory continuity", creatorUserId: "local-user" });
+  await addMember(p.db, { teamId: team.id, userId: "test-member", role: "member" });
+  const owner = { type: "team", id: team.id } as const;
+  const open = (key: string, actorUserId = "local-user") => ensureAssistantExecution(p, owner, { orgId: "local-org", actorUserId }, key);
+  const alice = await open("app-assistant:local-user");
+  const bob = await open("app-assistant:test-member", "test-member");
+  const first = await open("web:one");
+  const second = await open("web:two", "test-member");
+  const request = (sessionId: string, path: string, content?: string) => fetch(`${api.baseUrl}/api/memory?path=${encodeURIComponent(path)}`, {
+    method: content === undefined ? "GET" : "PUT",
+    headers: { "content-type": "application/json", "x-valet-internal": internalToken(), "x-valet-owner": `team:${team.id}`,
+      "x-valet-actor": "local-user", "x-valet-session-id": sessionId, "x-valet-org-id": "local-org" },
+    body: content === undefined ? undefined : JSON.stringify({ path, content }),
+  });
+  expect((await request(first.sessionId, "notes/shared.md", "Team onboarding instructions")).status).toBe(200);
+  expect(await (await request(second.sessionId, "notes/shared.md")).json())
+    .toMatchObject({ rendered: expect.stringContaining("Team onboarding instructions") });
+  const browserPath = `${api.baseUrl}/api/memory?ownerType=team&ownerId=${team.id}&path=notes/shared.md`;
+  expect((await fetch(browserPath, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(200);
+  p.engineHost.evictCache(second.sessionId);
+  const restored = await open("web:two", "test-member");
+  expect(await (await request(restored.sessionId, "notes/shared.md")).json())
+    .toMatchObject({ rendered: expect.stringContaining("Team onboarding instructions") });
+
+  const thread = await alice.session.ensureDefaultThread();
+  await p.db.insert(workflowDefinitions).values({ id: "memory-continuity", orgId: "local-org", ownerType: "team", ownerId: team.id,
+    name: "Continuity", definition: {}, createdAt: 1, updatedAt: 1 });
+  const deps = buildWorkflowEngineDeps({ host: p.engineHost, store: p.workflowStore, db: p.db,
+    engineStore: p.engineStore, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials });
+  for (const [id, channel] of [["thread-first", undefined], ["thread-again", undefined], ["slack-thread-first", "D_ALICE"], ["slack-thread-again", "D_ALICE"]]) {
+    if (!id) throw new Error("Missing fixture run ID");
+    await p.workflowStore.createRun(id, { workflowId: "memory-continuity", definitionVersionId: "v",
+      ...(channel ? { input: { type: "event" as const, data: { key: "slack.message", refs: { channel } } } } : {}) },
+      { version: "dag/v1", nodes: [], edges: [] }, "v", { ownerType: "team", ownerId: team.id });
+    const receipt = await deps.promptOrchestrator("Inspect memory", { dispatchId: `workflow:${id}:step`,
+      queueMode: "followup", ownerHint: { ownerType: "team", ownerId: team.id } });
+    const path = channel ? "notes/channel-step.md" : "notes/shared-step.md";
+    if (id.endsWith("first")) {
+      expect((await request(receipt.sessionId, path, "Persisted thread node memory")).status).toBe(200);
+    } else {
+      expect(await (await request(receipt.sessionId, path)).json())
+        .toMatchObject({ rendered: expect.stringContaining("Persisted thread node memory") });
+    }
+    expect(await (await request(`wf:${id}:another`, path)).json())
+      .toMatchObject({ rendered: expect.stringContaining("Persisted thread node memory") });
+  }
+  const root = await ensureDefaultAssistantSession(p, owner, { orgId: "local-org", actorUserId: "local-user" });
+  const legacyThread = await root.session.createThread("workflow:memory-continuity:local-user");
+  await p.workflowStore.createRun("legacy-origin", { workflowId: "memory-continuity", definitionVersionId: "v",
+    origin: { assistantSessionId: root.sessionId, threadId: legacyThread.id } },
+    { version: "dag/v1", nodes: [], edges: [] }, "v", { ownerType: "team", ownerId: team.id });
+  expect(await p.db.select().from(assistantExecutions).where(eq(assistantExecutions.governingThreadId, legacyThread.id))).toEqual([]);
+  expect((await request("wf:legacy-origin:session-step", "notes/legacy-origin.md", "Must not strand memory")).status).toBe(404);
+  await deps.createSession({ id: "wf:legacy-origin:session-step", purpose: "workflow" });
+  expect(await p.db.select().from(assistantExecutions).where(eq(assistantExecutions.governingThreadId, legacyThread.id))).toHaveLength(1);
+  expect((await request("wf:legacy-origin:session-step", "notes/legacy-origin.md", "Shared by both step types")).status).toBe(200);
+  const legacyReceipt = await deps.promptOrchestrator("Continue the legacy workflow", { dispatchId: "workflow:legacy-origin:thread-step",
+    queueMode: "followup", ownerHint: { ownerType: "team", ownerId: team.id } });
+  expect(await (await request(legacyReceipt.sessionId, "notes/legacy-origin.md")).json())
+    .toMatchObject({ rendered: expect.stringContaining("Shared by both step types") });
+  expect(await (await request("wf:legacy-origin:session-step", "notes/legacy-origin.md")).json())
+    .toMatchObject({ rendered: expect.stringContaining("Shared by both step types") });
+  for (const id of ["private-first", "private-again"]) {
+    await p.db.insert(workflowRuns).values({ id, workflowId: "memory-continuity", definitionVersionId: "v", definition: {},
+      params: { origin: { assistantSessionId: alice.sessionId, threadId: thread.id } },
+      ownerType: "team", ownerId: team.id, createdAt: 1, updatedAt: 1 });
+  }
+  expect((await request("wf:private-first:step", "notes/private.md", "Private hiring plan")).status).toBe(200);
+  expect(await (await request("wf:private-again:next", "notes/private.md")).json())
+    .toMatchObject({ rendered: expect.stringContaining("Private hiring plan") });
+  expect((await request(alice.sessionId, "notes/private.md")).status).toBe(200);
+  expect((await request(bob.sessionId, "notes/private.md")).status).toBe(404);
+  expect((await request(first.sessionId, "notes/private.md")).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/memory/search?ownerType=team&ownerId=${team.id}&q=hiring`)).status).toBe(200);
+  expect(await (await fetch(`${api.baseUrl}/api/memory/search?ownerType=team&ownerId=${team.id}&q=hiring`)).json()).toMatchObject({ results: [] });
+
+  for (const [id, channel] of [["event-first", "D_ALICE"], ["event-again", "D_ALICE"], ["event-bob", "D_BOB"]]) {
+    await p.db.insert(workflowRuns).values({ id, workflowId: "memory-continuity", definitionVersionId: "v", definition: {},
+      params: { input: { type: "event", data: { key: "slack.message", refs: { channel } } } },
+      ownerType: "team", ownerId: team.id, createdAt: 1, updatedAt: 1 });
+  }
+  expect((await request("wf:event-first:step", "notes/dm.md", "Private Slack context")).status).toBe(200);
+  expect(await (await request("wf:event-again:step", "notes/dm.md")).json())
+    .toMatchObject({ rendered: expect.stringContaining("Private Slack context") });
+  expect((await request("wf:event-bob:step", "notes/dm.md")).status).toBe(404);
+  expect((await request(first.sessionId, "notes/dm.md")).status).toBe(404);
+  const bobThread = await bob.session.ensureDefaultThread();
+  for (const [id, sessionId, threadId] of [["mixed-alice", alice.sessionId, thread.id], ["mixed-bob", bob.sessionId, bobThread.id]]) {
+    await p.db.insert(workflowRuns).values({ id, workflowId: "memory-continuity", definitionVersionId: "v", definition: {},
+      params: { workflowId: "memory-continuity", origin: { assistantSessionId: sessionId, threadId },
+        input: { type: "event", data: { key: "slack.message", refs: { channel: "D_SHARED" } } } },
+      ownerType: "team", ownerId: team.id, createdAt: 1, updatedAt: 1 });
+  }
+  await expect(deps.promptOrchestrator("Channel-private input", { dispatchId: "workflow:mixed-alice:thread-step",
+    queueMode: "followup", ownerHint: { ownerType: "team", ownerId: team.id } })).rejects.toThrow("separate origin conversation");
+  expect((await request("wf:mixed-alice:step", "notes/mixed.md", "Narrower than channel")).status).toBe(200);
+  expect((await request("wf:mixed-bob:step", "notes/mixed.md")).status).toBe(404);
+  await p.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, alice.sessionId));
+  expect((await request("wf:private-again:step", "notes/private.md")).status).toBe(404);
+  await p.db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
+  expect((await fetch(browserPath, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
 });

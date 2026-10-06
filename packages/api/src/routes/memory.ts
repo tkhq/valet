@@ -38,6 +38,8 @@ import type { RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { assistantMemoryNamespace, workflowMemoryNamespace } from "../services/memory-scope.js";
+import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import { agentSessions, memoryFiles } from "../schema/index.js";
 import { canAccessSessionResources, canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
@@ -170,13 +172,15 @@ export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Pro
       || (orgId && session.orgId !== orgId)) throw new NotFoundError("owner");
     if (!internal && !c.var.sandbox && !await canAccessSessionResources(c.var.providers, session, c.var.principal)) throw new NotFoundError("owner");
   } else {
-    // Workflow nodes share only their run's memory, never the team's default corpus.
+    // Authenticate the run before deriving its persistent memory audience.
     const owner = orgId ? await workflowSessionOwner(db, sessionId, orgId) : null;
     if (!owner || owner.type !== scope.owner.type || owner.id !== scope.owner.id || (!internal && !c.var.sandbox)) {
       throw new NotFoundError("owner");
     }
   }
-  const namespace = sessionId.startsWith("wf:") ? `wf:${sessionId.split(":")[1]}` : sessionId;
+  const namespace = session
+    ? await assistantMemoryNamespace(db, sessionId, scope.owner.id, orgId ?? session.orgId)
+    : await workflowMemoryNamespace(db, parseWorkflowSessionId(sessionId).runId, scope.owner.id, orgId!);
   return { ...scope, namespace };
 }
 

@@ -57,8 +57,6 @@ describe("memory service", () => {
     expect(await readFile(db, bob, `team:${team.id}/notes/plan.md`)).toMatchObject({ kind: "file", file: { content: "Shared plan" } });
     expect((await searchFiles(db, bob, { query: "plan" })).map(row => row.path)).toEqual(expect.arrayContaining(["notes/plan.md", `team:${team.id}/notes/plan.md`]));
     await expect(writeFile(db, bob, { path: `team:${team.id}/notes/plan.md`, content: "Unsafe publication" })).rejects.toThrow();
-    await writeFile(db, { ...shared, namespace: "legacy" }, { path: "old.md", content: "Quarantined private content" });
-    expect(await searchFiles(db, bob, { query: "Quarantined" })).toEqual([]);
     const exported = await exportFiles(db, alice);
     expect(exported["notes/private.md"]?.content).toContain("Confidential merger");
     expect(exported).not.toHaveProperty("notes/plan.md");

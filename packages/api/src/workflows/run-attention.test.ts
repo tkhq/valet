@@ -246,11 +246,14 @@ describe("buildRunThreadArchive", () => {
     const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Run cache", creatorUserId: LOCAL_USER.id });
     const owner = { type: "team", id: team.id } as const;
     const meta = { orgId: LOCAL_ORG.id, actorUserId: LOCAL_USER.id };
+    await db.insert(workflowDefinitions).values({ id: "wf_cache", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Run cache", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1 });
+    await workflowStore.createRun("run_cache", { workflowId: "wf_cache", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id });
     const execution = await ensureAssistantExecution(api.providers, owner, meta, "signal:workflow:run_cache");
     const origin = await ensureAssistantExecution(api.providers, owner, meta, "app-assistant:local-user");
     const thread = execution.session.thread("signal:workflow:run_cache");
     await thread.pause();
-    await seedRun(api, "run_cache", "wf_cache");
     const receipt = await thread.submitPrompt("report", {});
     await recordDispatch(api, "run_cache", { sessionId: execution.sessionId, threadId: thread.id, queueItemId: receipt.queueItemId });
     const archive = buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost });

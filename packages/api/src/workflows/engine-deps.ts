@@ -73,7 +73,7 @@ import {
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { assistants, workflowDefinitions } from "../schema/index.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { workflowReasoningLevel } from "../services/reasoning.js";
 import type { OnePasswordService } from "../services/onepassword.js";
@@ -210,6 +210,13 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
   }
 
   const slackChannel = runEventChannel(run.params);
+  const input = run.params.input;
+  const data = input && typeof input === "object" && "type" in input && input.type === "event" && "data" in input
+    ? input.data : undefined;
+  if (!slackChannel && data && typeof data === "object" && "key" in data
+    && typeof data.key === "string" && data.key.startsWith("slack.")) {
+    throw new Error("The Slack workflow event has no channel audience.");
+  }
   return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
     origin: run.params.origin, ...(slackChannel ? { slackChannel } : {}) };
 }
@@ -294,6 +301,20 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   }
   const parts = parseWorkflowSessionId(sessionId);
   const ctx = await resolveRunContext(opts, parts.runId);
+  if (ctx.owner.type === "team" && ctx.origin) {
+    const [root] = await opts.db.select().from(assistants)
+      .where(eq(assistants.sessionId, ctx.origin.assistantSessionId)).limit(1);
+    if (root?.ownerType === "team" && root.ownerId === ctx.owner.id) {
+      const thread = await opts.engineStore.getThread(root.sessionId, ctx.origin.threadId);
+      if (root.orgId !== ctx.orgId || root.archivedAt !== null || !thread) {
+        throw new Error("The workflow origin is unavailable.");
+      }
+      // Establish the same durable execution a later thread node/report uses,
+      // before a session node can write any memory for a legacy origin.
+      await ensureAssistantExecution({ db: opts.db, engineHost: opts.host }, ctx.owner,
+        { orgId: ctx.orgId, actorUserId: ctx.actorUserId }, thread.key);
+    }
+  }
   const workspace = workspaceFor(parts);
   await mkdir(workspace, { recursive: true });
   return opts.host.workflowSessionFor(sessionId, {
@@ -464,6 +485,12 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         );
       }
       const ctx = await resolveRunContext(opts, runId);
+      // An origin runtime cannot represent the intersection of a conversation
+      // and a Slack-event audience. Reusing it could publish channel-private
+      // inputs through shared memory. Do not dispatch until both can be carried.
+      if (principal.type === "team" && ctx.slackChannel && ctx.origin) {
+        throw new Error("A Slack-event workflow cannot dispatch a thread step into a separate origin conversation. Run it without a conversation origin.");
+      }
 
       // An explicit conversation origin takes precedence over definition
       // routing. Older and unattended runs keep the snapshot/default route.

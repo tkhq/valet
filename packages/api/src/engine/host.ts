@@ -1,3 +1,4 @@
+import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions } from "../schema/index.js";
 import { isDisabledModel } from "@valet/engine/model-catalog";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
@@ -2623,7 +2624,7 @@ export class EngineHost {
       : join(homedir(), ".valet", "assistants", assistantId);
     await mkdir(workspace, { recursive: true });
 
-    const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId, ...(principal.type === "team" ? { namespace: sessionId } : {}) };
+    const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, scope);
