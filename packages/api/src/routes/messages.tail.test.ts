@@ -36,6 +36,7 @@ describe("GET /messages: bounded tail", () => {
       role: "user",
       content: `message ${index + 1}`,
       createdAt: 1,
+      queueItemId: index < 3 ? "q-step" : "q-other",
     }));
     await api.providers.engineStore.appendEntries(sessionId, thread.id, entries);
 
@@ -46,6 +47,12 @@ describe("GET /messages: bounded tail", () => {
     expect(tail.messages.map((message) => message.id)).toEqual(
       Array.from({ length: 200 }, (_, index) => `m${index + 2}`),
     );
+
+    const scopedRes = await fetch(`${api.baseUrl}/api/threads/${thread.id}/messages?limit=2&queueItemId=q-step`);
+    expect(scopedRes.status).toBe(200);
+    const scoped = (await scopedRes.json()) as ListMessagesResponse;
+    expect(scoped.hasMore).toBe(true);
+    expect(scoped.messages.map((message) => message.id)).toEqual(["m2", "m3"]);
 
     const fullRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages?limit=201`);
     expect(fullRes.status).toBe(200);

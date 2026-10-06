@@ -509,3 +509,5 @@ The `parallel` step type exists in the compiler and engine, but executes sub-ste
 - No UI for configuring `allowSelfModification` constraint.
 - No real-time step progress reporting during execution (completion reports all steps at once).
 - No workflow definition editor in the client.
+
+Run details show recorded agent summaries above collapsed raw output. Step logs load inline on request, restricted to the checkpoint receipt's latest queue item and its authorized thread; repairs replace that receipt, so the view labels them as latest-attempt logs. Older checkpoints without a receipt cannot display unrelated assistant history as a substitute. Log reads filter before taking a bounded tail (200 initially, at most 2,000), and poll only while the displayed attempt is active.

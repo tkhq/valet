@@ -696,11 +696,22 @@ export class PgSessionStore implements SessionStore {
         // routine within one turn, so seq — a monotonic insertion counter — breaks
         // them in insertion order (TKAI-303). Without it Postgres may return a tie
         // in any order, which surfaced as chat bubbles rendering out of sequence.
-        const result = await this.db.query(
-          "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
-          [sessionId, threadId],
-        );
+        const scoped = opts?.queueItemId !== undefined;
+        const conditions = ["session_id = $1", "thread_id = $2"];
+        const params: unknown[] = [sessionId, threadId];
+        if (scoped) {
+          params.push(opts.queueItemId);
+          conditions.push(`queue_item_id = $${params.length}`);
+          if (opts.includeCompacted === false) conditions.push("entry_type != 'compaction'");
+        }
+        let query = `SELECT * FROM engine_entries WHERE ${conditions.join(" AND ")} ORDER BY created_at ${scoped ? "DESC" : "ASC"}, seq ${scoped ? "DESC" : "ASC"}`;
+        if (scoped && opts.limit && opts.limit > 0) {
+          params.push(opts.limit);
+          query += ` LIMIT $${params.length}`;
+        }
+        const result = await this.db.query(query, params);
         let rows = result.rows.map(rawToEntryRow);
+        if (scoped) rows.reverse();
         if (opts?.includeCompacted === false) rows = rows.filter((r) => r.entryType !== "compaction");
         if (opts?.limit && opts.limit > 0) rows = rows.slice(-opts.limit);
         span.setAttribute("valet.entries.loaded", rows.length);

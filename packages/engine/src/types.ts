@@ -532,6 +532,8 @@ export type SessionEntry =
   | CommandResultEntry;
 
 export interface MessageQuery {
+  /** Exact submission filter, applied before the tail limit. */
+  queueItemId?: string;
   limit?: number;
   cursor?: string;
   afterEntryId?: string;

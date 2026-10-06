@@ -28,10 +28,21 @@ describe("RunResultPanel", () => {
     expect(paragraph.className).toContain("whitespace-pre-wrap");
   });
 
-  it("renders a structured output as JSON under an Output heading", () => {
+  it("renders a structured output as JSON inside collapsed raw output", () => {
     render(<RunResultPanel result={result({ output: { count: 3 } })} />);
-    expect(screen.getByText("Output")).toBeTruthy();
+    expect(screen.getByText("Raw output").closest("details")?.open).toBe(false);
     expect(screen.getByText(/"count"/)).toBeTruthy();
+  });
+
+  it("promotes agent summaries while retaining the original output", () => {
+    render(<RunResultPanel result={result({ output: {
+      apply: { summary: "Applied four approved changes.", applied: ["journal.md"] },
+      review: { summary: "Reviewed four candidates." },
+    } })} />);
+    expect(screen.getByText("Applied four approved changes.").tagName).toBe("P");
+    expect(screen.getByText("Reviewed four candidates.").tagName).toBe("P");
+    expect(screen.getByText("Raw output").closest("details")?.open).toBe(false);
+    expect(screen.getByText(/"journal.md"/)).toBeTruthy();
   });
 
   it("renders a string output as prose instead of quoted JSON", () => {
@@ -52,7 +63,7 @@ describe("RunResultPanel", () => {
 
   it("names the corrective action when the run recorded nothing to read", () => {
     render(<RunResultPanel result={result()} />);
-    expect(screen.getByText(/set a message on its stop node/i)).toBeTruthy();
+    expect(screen.getByText(/Expand the steps below/i)).toBeTruthy();
   });
 
   it("tells a reader where to look when a failure recorded no reason", () => {

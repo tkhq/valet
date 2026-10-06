@@ -844,11 +844,13 @@ export async function listMessages(c: Context<AppEnv>, sessionId: string, thread
   }
 
   const parsedLimit = Number.parseInt(c.req.query("limit") ?? "100", 10);
-  const limit = Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit);
+  const queueItemId = c.req.query("queueItemId") || undefined;
+  const requestedLimit = Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit);
+  const limit = queueItemId ? Math.min(2000, requestedLimit) : requestedLimit;
   const cursor = c.req.query("cursor") ?? undefined;
   // Read one extra row so the bounded tail can report whether older rows
   // exist. The response still contains at most the requested limit.
-  const entries = await thread.readEntries({ limit: limit + 1, cursor });
+  const entries = await thread.readEntries({ limit: limit + 1, cursor, queueItemId });
   const hasMore = entries.length > limit;
   const tail = hasMore ? entries.slice(1) : entries;
 

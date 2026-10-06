@@ -10,7 +10,7 @@
  */
 import { CodeBlock } from "~/components/code-block";
 import { RUN_STATUS_GLYPH } from "./editor/flow-node";
-import { formatRunOutput, type RunResult, type RunResultDiagnostic } from "./run-detail-helpers";
+import { formatRunOutput, runOutputSummaries, type RunResult, type RunResultDiagnostic } from "./run-detail-helpers";
 
 /** Headline per outcome. The chip in the header already carries the outcome
  * word, so the panel names its contents instead of repeating it. */
@@ -45,7 +45,7 @@ const BORDER: Record<RunResult["outcome"], string> = {
  */
 const EMPTY_BODY: Record<RunResult["outcome"], string> = {
   completed:
-    "The workflow finished without a result message. To summarize a run here, set a message on its stop node.",
+    "The workflow finished without a summary. Expand the steps below to inspect their results.",
   failed:
     "No step recorded a reason. Expand the steps below to inspect their output and agent logs.",
   cancelled: "The run stopped where it was. To run the workflow again, select Retry run.",
@@ -57,6 +57,7 @@ export interface RunResultPanelProps {
 
 export function RunResultPanel({ result }: RunResultPanelProps) {
   const output = formatRunOutput(result.output);
+  const summaries = runOutputSummaries(result.output);
   const hasBody = result.message !== undefined || output !== undefined;
 
   return (
@@ -88,22 +89,22 @@ export function RunResultPanel({ result }: RunResultPanelProps) {
         </p>
       )}
 
-      {output && (
-        <div className="mt-3">
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted">Output</h3>
-          {output.kind === "json" ? (
-            // A large output must not push the steps off the screen, so the
-            // block scrolls inside its own box.
-            <div className="mt-1 max-h-96 overflow-auto">
-              <CodeBlock code={output.text} language="json" />
-            </div>
-          ) : (
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">
-              {output.text}
-            </p>
-          )}
+      {summaries.map(({ label, text }) => (
+        <div key={label} className="mt-3">
+          <h3 className="text-xs font-medium capitalize text-muted">{label}</h3>
+          <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{text}</p>
         </div>
-      )}
+      ))}
+      {output && (output.kind === "json" ? (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs text-muted">Raw output</summary>
+          <div className="mt-2 max-h-96 overflow-auto">
+            <CodeBlock code={output.text} language="json" />
+          </div>
+        </details>
+      ) : (
+        <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{output.text}</p>
+      ))}
 
       {!hasBody && <p className="mt-3 text-sm text-muted">{EMPTY_BODY[result.outcome]}</p>}
 

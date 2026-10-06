@@ -1712,17 +1712,18 @@ export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
     // `effects.receipt`). Without it here, "Open session" could only name
     // the session — and for the caller's own assistant that redirects to
     // /chat, which then lands on the NEWEST thread rather than the run's.
-    threadId: threadIdOf(effects),
+    threadId: receiptField(effects, "threadId"),
+    queueItemId: receiptField(effects, "queueItemId"),
   };
 }
 
-/** `effects.receipt.threadId`, when the node recorded one. `effects` is
- * stored JSON, so every hop is checked rather than asserted. */
-function threadIdOf(effects: NodeCheckpoint["effects"]): string | undefined {
+/** Stored receipts are JSON; only validated identifiers reach the wire. */
+function receiptField(effects: NodeCheckpoint["effects"], field: "threadId" | "queueItemId"): string | undefined {
   const receipt = effects?.receipt;
   if (typeof receipt !== "object" || receipt === null) return undefined;
-  const threadId = (receipt as Record<string, unknown>).threadId;
-  return typeof threadId === "string" ? threadId : undefined;
+  const value = field === "threadId" && "threadId" in receipt ? receipt.threadId
+    : field === "queueItemId" && "queueItemId" in receipt ? receipt.queueItemId : undefined;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /**

@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { StepLogs } from "./step-logs";
 import { Link } from "@tanstack/react-router";
 import { RUN_STATUS_GLYPH, type NodeRunStatus } from "./editor/flow-node";
 import { formatRunOutput } from "./run-detail-helpers";
@@ -11,6 +13,7 @@ export interface CheckpointLike {
   sessionId?: string;
   childRunId?: string;
   threadId?: string;
+  queueItemId?: string;
 }
 
 function toRunStatus(raw: string): NodeRunStatus {
@@ -90,6 +93,7 @@ function CheckpointRow({ checkpoint, number, promoted, waiting }: {
   promoted: boolean;
   waiting: boolean;
 }) {
+  const [showLogs, setShowLogs] = useState(false);
   const status = waiting ? "waiting" : toRunStatus(checkpoint.status);
   const denied = deniedResult(checkpoint.result);
   const output = formatRunOutput(checkpoint.result);
@@ -109,14 +113,12 @@ function CheckpointRow({ checkpoint, number, promoted, waiting }: {
         <div className="min-w-0 space-y-3 border-t border-line px-4 py-3 sm:pl-16">
           {(checkpoint.threadId || checkpoint.sessionId || checkpoint.childRunId) && (
             <div className="flex flex-wrap gap-x-4 text-xs">
-              {checkpoint.threadId ? (
-                <Link to="/threads/$threadId" params={{ threadId: checkpoint.threadId }} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
-                  View agent logs
-                </Link>
-              ) : checkpoint.sessionId && (
-                <Link to="/sessions/$sessionId" params={{ sessionId: checkpoint.sessionId }} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
-                  View runtime logs
-                </Link>
+              {checkpoint.sessionId && checkpoint.threadId && checkpoint.queueItemId ? (
+                <button type="button" aria-expanded={showLogs} onClick={() => setShowLogs(!showLogs)} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
+                  {showLogs ? "Hide agent logs" : "View agent logs"}
+                </button>
+              ) : (checkpoint.sessionId || checkpoint.threadId) && (
+                <span className="text-muted">Scoped agent logs were not recorded for this step.</span>
               )}
               {checkpoint.childRunId && (
                 <Link to="/workflows/runs/$runId" params={{ runId: checkpoint.childRunId }} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
@@ -124,6 +126,11 @@ function CheckpointRow({ checkpoint, number, promoted, waiting }: {
                 </Link>
               )}
             </div>
+          )}
+          {showLogs && checkpoint.sessionId && checkpoint.threadId && checkpoint.queueItemId && (
+            <StepLogs key={`${checkpoint.sessionId}:${checkpoint.threadId}:${checkpoint.queueItemId}`}
+              sessionId={checkpoint.sessionId} threadId={checkpoint.threadId} queueItemId={checkpoint.queueItemId}
+              active={status === "running" || waiting} />
           )}
           {denied ? (
             <p className="break-words text-xs text-danger-500">Denied by {denied.resolvedBy ?? "policy"}</p>

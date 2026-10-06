@@ -426,3 +426,20 @@ export function runLabel(run: { createdAt: number; actorUserId?: string; parentR
     : run.actorUserId !== undefined ? "Manual run" : "Automatic run";
   return `${kind} · ${when}`;
 }
+
+/** Surface summaries already recorded by agents; never infer success from raw data. */
+export function runOutputSummaries(output: unknown): { label: string; text: string }[] {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) return [];
+  const summaries: { label: string; text: string }[] = [];
+  if ("summary" in output && typeof output.summary === "string" && output.summary.trim()) {
+    summaries.push({ label: "Summary", text: output.summary });
+  }
+  for (const [label, value] of Object.entries(output)) {
+    if (summaries.length >= 8) break;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    if ("summary" in value && typeof value.summary === "string" && value.summary.trim()) {
+      summaries.push({ label, text: value.summary });
+    }
+  }
+  return summaries;
+}

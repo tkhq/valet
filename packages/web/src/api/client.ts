@@ -859,11 +859,12 @@ export const api = {
     ),
   listMessages: (
     sessionId: string,
-    opts?: { limit?: number; cursor?: string; threadId?: string },
+    opts?: { limit?: number; cursor?: string; threadId?: string; queueItemId?: string },
   ) => {
     const qs = new URLSearchParams();
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.queueItemId) qs.set("queueItemId", opts.queueItemId);
 
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListMessagesResponse>(

@@ -2047,6 +2047,8 @@ export interface WorkflowRunCheckpoint {
    * exact conversation it started rather than the newest one.
    */
   threadId?: string;
+  /** Latest dispatched attempt; used to isolate inline logs from other turns. */
+  queueItemId?: string;
 }
 
 /** One pending approval gate on a parked workflow run. */
