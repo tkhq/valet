@@ -595,6 +595,11 @@ The active conversation path is reconstructed by following `parentId` pointers f
 
 **Suspension history rules:** Decision-gated turns are represented in the DAG by a first-class `DecisionGateEntry`, not by synthetic system messages. The entry is created when the gate is opened and then updated in place as it moves through `pending`, `resolved`, `expired`, or `withdrawn` states. This keeps the history model explicit and replayable: gates are decision artifacts, not conversation utterances.
 
+**User cancellation:** Dismissing a thread decision cancels its submission. Persist abort intent before withdrawing the gate.
+The cancellation does not trigger another model call. Other threads and queued submissions are preserved.
+Approval denial remains a decision response; dismissal is not approval denial.
+An explicit user instruction to wait should end the agent turn without opening a question.
+
 **One gate cycle at a time per thread (TKAI-238):** pi-agent-core runs a block's tool calls in parallel, but the gate machinery holds two single-slot resources: the strict `running↔blocked_on_decision_gate` queue toggle and the per-thread suspended-turn checkpoint. `Thread` therefore serializes gate open/wait cycles — a second gated tool call waits until the previous gate resolves and releases the blocked toggle, then opens its own gate. A queued cycle re-checks the turn before it opens: if the thread aborted or the agent run's signal aborted (steer supersession) while it waited, it unwinds with a withdrawal error and persists nothing. Supporting rules keep pending rows honest:
 
 - A gate open writes the suspended-turn checkpoint BEFORE the gate row. The checkpoint is the ownership anchor for the orphan repair below, so a resolve that lands before the waiter arms is left alone (retryable), and a crash in the window leaves an inert checkpoint rather than an orphan row.

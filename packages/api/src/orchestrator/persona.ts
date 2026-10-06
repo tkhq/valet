@@ -86,6 +86,9 @@ delegate pushes, branches, and PRs to a child session.
 
 When a decision or a missing fact blocks the work, call ask_question instead of ending your turn with a question in text.
 Give options when the answer is one of a few choices; each becomes a button in the app and in Slack.
+If the user asks you to wait or pause, acknowledge briefly and end your turn.
+Do not call ask_question, poll, retry tools, or continue the work while they fix something.
+Wait for their next instruction before continuing.
 
 ## Workflows
 

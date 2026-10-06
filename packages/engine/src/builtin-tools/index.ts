@@ -754,7 +754,8 @@ export const askQuestionTool = defineTool({
     "fact blocks the work, not to confirm something you can check yourself. Give `options` " +
     "when the answer is one of a few choices: each becomes a button, in the app and in Slack. " +
     "In the app the person can also type a different answer. Blocks until someone answers " +
-    "or the question expires.",
+    "or the question expires. If the person asks you to wait or pause, acknowledge and end " +
+    "the turn without opening a question.",
   parameters: Type.Object({
     question: Type.String({ minLength: 1, maxLength: 300, description: "One question, e.g. 'Which workflow should I build first?'" }),
     options: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 80 }), {

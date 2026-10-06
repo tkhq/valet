@@ -140,6 +140,43 @@ describe("decision gates: pending -> resolved", () => {
   });
 });
 
+describe("decision gates: user cancellation", () => {
+  it.each(["approval", "question"] as const)("dismisses a %s without another model turn and accepts a fresh prompt", async (type) => {
+    const faux = registerFauxProvider({ provider: `gate-cancel-${type}` });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("wait_for_person", {}, { id: "wait-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("must not continue after cancellation"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const tool: ToolDef = {
+      name: "wait_for_person", description: "Wait for a decision", parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        await ctx.requestDecision({ type, title: "Continue?", resumeKey: "wait-1" });
+        return { text: "answered" };
+      },
+    };
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool] });
+    try {
+      const receipt = await session.prompt("ask me");
+      await waitFor(() => gatesFrom(events).length === 1);
+      const gate = gatesFrom(events)[0];
+      if (!gate) throw new Error("missing gate");
+      await session.withdrawDecision(gate.id, "cancel");
+      await waitForAsync(async () => (await store.getQueueItem(session.id, receipt.queueItemId))?.status === "settled");
+      expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+      expect((await store.getDecisionGate(session.id, gate.id))?.status).toBe("withdrawn");
+      expect(events.some((e) => e.event.type === "decision_gate_withdrawn" && e.event.gateId === gate.id && e.event.reason === "cancel")).toBe(true);
+      expect(await store.getSuspendedTurn(session.id, gate.threadId)).toBeFalsy();
+      expect(JSON.stringify(await session.readEntries("web:default"))).not.toContain("must not continue after cancellation");
+      faux.setResponses([fauxAssistantMessage("fresh prompt accepted")]);
+      const next = await session.prompt("continue now");
+      await waitForAsync(async () => (await store.getQueueItem(session.id, next.queueItemId))?.status === "settled");
+      expect((await store.getQueueItem(session.id, next.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+      expect(JSON.stringify(await session.readEntries("web:default"))).toContain("fresh prompt accepted");
+    } finally { faux.unregister(); }
+  });
+});
+
 describe("decision gates: sender with no Valet account", () => {
   it("refuses the request without opening a gate", async () => {
     const faux = registerFauxProvider({ provider: "gate-external-sender" });

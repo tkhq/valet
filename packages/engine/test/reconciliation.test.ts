@@ -1545,6 +1545,27 @@ describe("reconciliation executor (integration)", () => {
     faux.unregister();
   });
 
+  it("cancels a re-armed decision without continuing the model after restart", async () => {
+    const store = new InMemorySessionStore();
+    const spy = spyTool();
+    const { itemId } = await seedCrashedRunningTurn(store, { withGate: true });
+    const faux = registerFauxProvider({ provider: "recon-gate-cancel" });
+    faux.setResponses([fauxAssistantMessage("must not continue after cancelled restart")]);
+    const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+    try {
+      const session = await engine.restoreSession({ sessionId: SESSION, options: {
+        userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spy.def],
+      } });
+      await session.withdrawDecision("g-crash", "cancel");
+      await waitForAsync(async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled");
+      expect((await store.getQueueItem(SESSION, itemId))?.outcome).toEqual({ outcome: "aborted" });
+      expect((await store.getDecisionGate(SESSION, "g-crash"))?.status).toBe("withdrawn");
+      expect(await store.getSuspendedTurn(SESSION, THREAD)).toBeNull();
+      expect(spy.calls()).toBe(0);
+      expect(JSON.stringify(await store.getEntries(SESSION, THREAD))).not.toContain("must not continue after cancelled restart");
+    } finally { faux.unregister(); }
+  });
+
   it("re-armed pending gate that expires AFTER restart terminalizes and settles the turn", async () => {
     const store = new InMemorySessionStore();
     const spy = spyTool();

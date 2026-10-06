@@ -1310,7 +1310,7 @@ export class Thread {
   }
 
   /** Cancel one submission without aborting other work on this thread. */
-  async abortSubmission(queueItemId: string): Promise<void> {
+  async abortSubmission(queueItemId: string, withdrawReason: DecisionWithdrawReason = "abort"): Promise<void> {
     const store = this.session.providers.store;
     // Mark the live item before I/O so a stale store read cannot start it.
     if (this.runningItem?.id === queueItemId) this.runningItem.abortRequestedAt ??= Date.now();
@@ -1321,7 +1321,7 @@ export class Thread {
       this.agent.abort();
     }
     for (const gate of this.pendingDecisionGates()) {
-      if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, "abort");
+      if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, withdrawReason);
     }
     const settled = await store.settleUnclaimed(this.session.id, this.id, queueItemId, { outcome: "aborted" });
     if (settled) await this.emitSettled(queueItemId, { outcome: "aborted" });

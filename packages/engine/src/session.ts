@@ -1415,7 +1415,14 @@ export class Session {
     }
     for (const t of this.threads.values()) {
       if (t.isPendingGate(gateId)) {
-        t.withdrawDecision(gateId, reason);
+        const gate = t.pendingDecisionGates().find((pending) => pending.id === gateId);
+        if (reason === "cancel" && gate) {
+          // Stamp abort intent before unblocking the tool. Otherwise its
+          // cancellation error triggers another model call.
+          await t.abortSubmission(gate.queueItemId, reason);
+        } else {
+          t.withdrawDecision(gateId, reason);
+        }
         return;
       }
     }
