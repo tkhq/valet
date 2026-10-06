@@ -14,14 +14,14 @@ describe("workspace runtime authorization", () => {
     expect(await (await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" })).json()).toEqual(first);
     expect((await fetch(`${api.baseUrl}/api/teams/unknown/orchestrator`, { method: "POST" })).status).toBe(404);
   });
-  it("reactivates the runtime session an older pod marked deleted", async () => {
+  it("preserves explicit runtime session deletion", async () => {
     api = await bootTestApi();
     const root = `${api.baseUrl}/api/workspaces/user/runtime`;
     const { sessionId } = await (await fetch(root, { method: "POST" })).json() as { sessionId: string };
     await api.providers.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, sessionId));
-    expect(await (await fetch(root, { method: "POST" })).json()).toEqual({ sessionId });
+    expect((await fetch(root, { method: "POST" })).status).toBeGreaterThanOrEqual(400);
     const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId));
-    expect(row?.status).toBe("active");
+    expect(row?.status).toBe("deleted");
   });
   it("answers a team runtime on the older team path for a member", async () => {
     api = await bootTestApi();

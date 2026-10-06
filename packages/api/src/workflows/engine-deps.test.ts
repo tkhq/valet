@@ -18,7 +18,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
 import { eq } from "drizzle-orm";
-import { assistants, orgs, workflowDefinitions } from "../schema/index.js";
+import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { ensureDefaultAssistantSession, loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
@@ -693,6 +693,29 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     } finally {
       faux.unregister();
     }
+  });
+
+  it.each(["", ":repair"])("retains the original upgrade admission when a rendered workflow prompt changes%s", async (suffix) => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+      actionPluginByService, credentials: engineCredentials });
+    await seedRun(api, "old_render", "old_render_workflow");
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id },
+      { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const thread = await root.session.createThread("signal:workflow:old_render");
+    const dispatchId = `workflow:old_render:node${suffix}`;
+    const id = `old-admission${suffix}`, now = Date.now();
+    await engineStore.admitSubmission(root.sessionId, thread.id, { id, threadId: thread.id, dispatchId,
+      content: { kind: "signal", signalType: "workflow.request", body: "Original rendered prompt", attributes: { runId: "old_render" } },
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    await db.insert(legacyWorkflowAdmissions).values({ queueItemId: id, sessionId: root.sessionId,
+      threadId: thread.id, dispatchId, orgId: LOCAL_ORG.id });
+    const receipt = await deps.promptOrchestrator("Original rendered prompt with a newly appended output schema", {
+      dispatchId, queueMode: "followup", ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id } });
+    expect(receipt).toEqual({ sessionId: root.sessionId, threadId: thread.id, queueItemId: id });
+    expect((await engineStore.getQueueItem(root.sessionId, id))?.content).toMatchObject({ body: "Original rendered prompt" });
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toHaveLength(1);
   });
 
   it("keeps an existing per-run thread for retries after an upgrade", async () => {

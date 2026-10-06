@@ -41,11 +41,12 @@
  * build the principal with `userPrincipal`.
  *
  * Sandbox credentials and file access also require `canAccessSessionResources`.
- * That check verifies the execution audience and rejects mixed legacy runtimes.
+ * That check verifies new execution audiences and preserves legacy runtime access.
  */
 import { and, eq, isNull } from "drizzle-orm";
 import type { Providers } from "../providers/types.js";
 import { assistants, assistantExecutions, childWatches } from "../schema/index.js";
+import { isLegacyAssistantRuntime } from "./legacy-runtime.js";
 import { threadVisibility } from "./thread-access.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
@@ -180,7 +181,7 @@ export async function isSessionDirectOwner(
   return true;
 }
 
-/** Session-wide tools require one verifiable audience. Legacy team runtimes mixed audiences. */
+/** Preserve established legacy access; new executions use their governing audience. */
 export async function canAccessSessionResources(
   deps: Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword">,
   session: SessionOwnerLike & { id: string; orgId: string; status: string },
@@ -190,7 +191,7 @@ export async function canAccessSessionResources(
   if (session.ownerType !== "team") return isSessionDirectOwner(deps.db, session, caller);
   const [root] = await deps.db.select({ id: assistants.id }).from(assistants)
     .where(eq(assistants.sessionId, session.id)).limit(1);
-  if (root) return false;
+  if (root) return isLegacyAssistantRuntime(deps.db, session.id, session.orgId);
   const stored = await deps.engineStore.getSession(session.id);
   if (!stored) {
     if (session.id.startsWith("execution:")) return false;

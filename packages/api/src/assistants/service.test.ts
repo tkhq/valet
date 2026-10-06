@@ -56,21 +56,20 @@ describe("resolveDefaultAssistant", () => {
     await expect(db.insert(assistants).values({ id: "duplicate", orgId: ORG, ownerType: TEAM.type, ownerId: TEAM.id, sessionId: "assistant:duplicate", createdAt: Date.now() })).rejects.toThrow();
   });
 
-  it("restores a retired identity whose team still exists, keeping its session", async () => {
+  it("preserves archival of an identity whose team still exists", async () => {
     await db.insert(teams).values({ id: TEAM.id, orgId: ORG, name: "Team", createdAt: Date.now() });
     const first = await resolveDefaultAssistant(db, ORG, TEAM);
     await db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, first.id));
-    const restored = await resolveDefaultAssistant(db, ORG, TEAM);
-    expect(restored).toMatchObject({ id: first.id, sessionId: first.sessionId, archivedAt: null });
-    expect((await findDefaultAssistant(db, ORG, TEAM))?.archivedAt).toBeNull();
+    await expect(resolveDefaultAssistant(db, ORG, TEAM)).rejects.toThrow(ArchivedAssistantError);
+    expect((await findDefaultAssistant(db, ORG, TEAM))?.archivedAt).not.toBeNull();
   });
 
-  it("restores a retired personal identity, since users are never torn down", async () => {
+  it("preserves archival of a personal identity", async () => {
     const user = { type: "user", id: "user_1" } as const;
     await db.insert(users).values({ id: user.id, name: "User", email: "user_1@example.test" });
     const first = await resolveDefaultAssistant(db, ORG, user);
     await db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, first.id));
-    expect((await resolveDefaultAssistant(db, ORG, user)).archivedAt).toBeNull();
+    await expect(resolveDefaultAssistant(db, ORG, user)).rejects.toThrow(ArchivedAssistantError);
   });
 
 });

@@ -52,6 +52,7 @@ import {
   getArtifactByToken,
   getArtifactComment,
   hasArtifactTeamAccess,
+  hasRetainedArtifactSource,
   listArtifactComments,
   listArtifacts,
   listArtifactsForOwner,
@@ -200,9 +201,10 @@ async function resolveArtifactCaller(
   return { user: identity?.user, teamKey: false };
 }
 
-/** Legacy team publications need verified provenance before any browser access. */
-function hasUnknownTeamSource(artifact: ArtifactRow): boolean {
-  return artifact.ownerType === "team" && !!artifact.sourceSessionId && !artifact.sourceThreadId;
+/** Retained runtimes preserve publications that predate source-thread metadata. */
+async function hasUnknownTeamSource(db: AppDb, artifact: ArtifactRow): Promise<boolean> {
+  return artifact.ownerType === "team" && !!artifact.sourceSessionId && !artifact.sourceThreadId
+    && !(await hasRetainedArtifactSource(db, artifact));
 }
 
 /** Resolve the artifact + caller for a token-addressed comment route.
@@ -216,7 +218,7 @@ async function loadCommentContext(
     getArtifactByToken(db, c.req.param("token")),
     resolveArtifactCaller(c, auth),
   ]);
-  if (!artifact || hasUnknownTeamSource(artifact)) return { error: c.json({ error: "not found" }, 404) };
+  if (!artifact || await hasUnknownTeamSource(db, artifact)) return { error: c.json({ error: "not found" }, 404) };
   if (caller.teamKey) return { error: c.json({ error: TEAM_KEY_ARTIFACT_MESSAGE }, 403) };
   const { user } = caller;
   const allowPublic =
@@ -258,8 +260,10 @@ async function canSendToSourceSession(
     .limit(1);
   const row = rows[0];
   if (!row) return { ok: false };
-  if (row.ownerType === "team" && !artifact.sourceThreadId) return { ok: false };
+  const retained = await hasRetainedArtifactSource(db, artifact);
+  if (row.ownerType === "team" && !artifact.sourceThreadId && !retained) return { ok: false };
   if (!(await canViewSession(db, row, userPrincipal(user.id)))) return { ok: false };
+  if (retained && !artifact.sourceThreadId) return { ok: true, row };
   const thread = artifact.sourceThreadId ? await providers.engineStore.getThread(row.id, artifact.sourceThreadId) : null;
   if (artifact.sourceThreadId && !thread) return { ok: false };
   const visible = threadVisibility(providers, row, { orgId: artifact.orgId, userId: user.id });
@@ -320,7 +324,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       getArtifactByToken(db, c.req.param("token")),
       resolveArtifactCaller(c, auth),
     ]);
-    if (!artifact || hasUnknownTeamSource(artifact)) return c.json({ error: "not found" }, 404);
+    if (!artifact || await hasUnknownTeamSource(db, artifact)) return c.json({ error: "not found" }, 404);
     const { user } = caller;
     // The opt-in only matters for `public` rows — skip the orgs read for
     // the default `org` visibility (`decideArtifactAccess` ignores it).
@@ -631,10 +635,16 @@ function truthyQuery(value: string | undefined): boolean {
 /** Drops the team artifacts published from a thread this request may not
  * see, such as another member's helper thread or a private channel's thread
  * (`services/thread-access.ts`). */
-async function keepVisibleSources<T extends { ownerType: string; sourceSessionId: string | null; sourceThreadId: string | null }>(
+async function keepVisibleSources<T extends { id: string; ownerId: string; orgId: string; ownerType: string; sourceSessionId: string | null; sourceThreadId: string | null }>(
   c: Context<AppEnv>, rows: T[],
 ): Promise<T[]> {
-  const judged = rows.filter((row) => row.ownerType === "team" && row.sourceSessionId);
+  const retained = new Set<string>();
+  for (const row of rows) {
+    if (row.ownerType === "team" && row.sourceSessionId && !retained.has(row.id) && await hasRetainedArtifactSource(c.var.providers.db, row)) {
+      retained.add(row.id);
+    }
+  }
+  const judged = rows.filter((row) => row.ownerType === "team" && row.sourceSessionId && !retained.has(row.id));
   if (judged.length === 0) return rows;
   const shown = await visibleThreadIds(c.var.providers, { ownerType: "team" }, viewerOf(c),
     judged.filter((row) => row.sourceThreadId).map((row) => ({ sessionId: row.sourceSessionId!, threadId: row.sourceThreadId! })));
@@ -745,7 +755,7 @@ async function loadManagedArtifact(
 ): Promise<{ row: ArtifactRow } | { error: Response }> {
   const { db } = c.var.providers;
   const row = await getArtifactById(db, c.req.param("id"));
-  if (!row || hasUnknownTeamSource(row) || row.orgId !== user.orgId || !(await hasArtifactTeamAccess(db, row, user))) {
+  if (!row || await hasUnknownTeamSource(db, row) || row.orgId !== user.orgId || !(await hasArtifactTeamAccess(db, row, user))) {
     return { error: c.json({ error: "not found" }, 404) };
   }
   if (!(await hasArtifactManagerRole(db, row, user))) {

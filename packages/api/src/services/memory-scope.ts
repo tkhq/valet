@@ -2,12 +2,17 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, assistantExecutions, assistants, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { isLegacyAssistantRuntime, legacyWorkflowRuntime } from "./legacy-runtime.js";
 import { runEventChannel } from "./thread-access.js";
 
 /** Shared web conversations retain the team's established corpus. Private and
  * external conversations keep their execution storage, regardless of who wakes them. */
 export async function assistantMemoryNamespace(db: AppDb, sessionId: string, teamId: string, orgId: string, depth = 0): Promise<string> {
   if (depth > 8) throw new NotFoundError("memory origin ancestry");
+  const [legacyOwner] = await db.select({ id: assistants.id }).from(assistants)
+    .where(and(eq(assistants.sessionId, sessionId), eq(assistants.ownerType, "team"), sql`(${assistants.ownerId} = ${teamId} OR EXISTS (SELECT 1 FROM legacy_assistant_runtimes l
+      WHERE l.session_id = ${sessionId} AND l.owner_id = ${teamId} AND l.owner_type = 'team'))`)).limit(1);
+  if (legacyOwner && await isLegacyAssistantRuntime(db, sessionId, orgId)) return "";
   const [execution] = await db.select({ key: assistantExecutions.conversationKey })
     .from(assistantExecutions).innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
     .where(and(eq(assistantExecutions.sessionId, sessionId), eq(assistants.ownerType, "team"),
@@ -39,6 +44,8 @@ export async function workflowMemoryNamespace(db: AppDb, runId: string, teamId: 
         OR (${workflowRuns.ownerType} = 'user' AND ${workflowRuns.ownerId} = ${`team:${teamId}`}))`)).limit(1);
   const params = record(run?.params);
   if (!run || !params) throw new NotFoundError("workflow memory");
+  const binding = await legacyWorkflowRuntime(db, run.workflowId, orgId);
+  if (binding) return await isLegacyAssistantRuntime(db, binding, orgId) ? "" : binding;
   const input = record(params.input);
   const data = record(input?.data);
   let channel: string | undefined;
@@ -65,6 +72,7 @@ export async function workflowMemoryNamespace(db: AppDb, runId: string, teamId: 
     const [root] = await db.select({ id: assistants.id }).from(assistants)
       .where(and(eq(assistants.sessionId, origin.assistantSessionId), eq(assistants.orgId, orgId))).limit(1);
     if (!root) return scoped(await assistantMemoryNamespace(db, origin.assistantSessionId, teamId, orgId, depth + 1));
+    if (await isLegacyAssistantRuntime(db, origin.assistantSessionId, orgId)) return "";
     // Old assistant roots held many audiences; never use the root ID as a private scope.
     if (source.key.startsWith("web:")) return scoped("");
     const [execution] = await db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)

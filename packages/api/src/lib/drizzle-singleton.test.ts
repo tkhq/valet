@@ -171,7 +171,7 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
   });
 
-  it("reactivates the session of a deleted assistant the cutover restores", async () => {
+  it("preserves explicit assistant deletion during the singleton cutover", async () => {
     await restorePreviousSchema();
     await db.query(`INSERT INTO teams(id, org_id, name, created_at) VALUES ('live-team', 'org', 'Live team', 1)`);
     // dev-v2 deleted a team assistant by archiving it and marking its session deleted.
@@ -180,8 +180,8 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query(`INSERT INTO agent_sessions(id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
       VALUES ('deleted-profile-session', 'u', 'org', '/', 'deleted', 'team', 'live-team', 1, 1)`);
     await applyAppMigrations(db);
-    expect((await db.query("SELECT archived_at FROM assistants WHERE id = 'deleted-profile'")).rows).toEqual([{ archived_at: null }]);
-    expect((await db.query("SELECT status FROM agent_sessions WHERE id = 'deleted-profile-session'")).rows).toEqual([{ status: "active" }]);
+    expect((await db.query("SELECT archived_at FROM assistants WHERE id = 'deleted-profile'")).rows).toEqual([{ archived_at: 2 }]);
+    expect((await db.query("SELECT status FROM agent_sessions WHERE id = 'deleted-profile-session'")).rows).toEqual([{ status: "deleted" }]);
     await db.query("DELETE FROM agent_sessions WHERE id = 'deleted-profile-session'");
     await db.query("DELETE FROM assistants WHERE org_id = 'org'");
     await db.query("DELETE FROM teams WHERE id = 'live-team'");
@@ -354,7 +354,7 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM event_subscriptions WHERE org_id = 'strip-org'");
   });
 
-  it("keeps one row per owner and restores retired rows of owners that still exist", async () => {
+  it("keeps one row per owner without restoring archived profiles", async () => {
     await restorePreviousSchema();
     await db.query(`INSERT INTO "user"(id, name, email, email_verified, created_at, updated_at)
       VALUES ('dup-owner', 'Owner', 'dup-owner@example.test', false, now(), now()),
@@ -374,7 +374,7 @@ describe("workspace singleton repair on an already migrated database", () => {
       { id: "gone-team", owner_id: "deleted-team", live: false, session_id: "gone-session" },
       { id: "live-default", owner_id: "dup-owner", live: true, session_id: "default-session" },
       { id: "live-extra", owner_id: "dup-owner:retired:live-extra", live: false, session_id: "extra-session" },
-      { id: "lone-archived", owner_id: "lone-owner", live: true, session_id: "lone-session" },
+      { id: "lone-archived", owner_id: "lone-owner", live: false, session_id: "lone-session" },
     ]);
     expect(await missingSchemaRepairs(db)).toEqual([]);
     await db.query("DELETE FROM assistants WHERE org_id = 'dup-org'");

@@ -129,12 +129,58 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   }
 
   await addColumnsMissingFromAppliedMigrations(db);
+  await classifyLegacyRuntimes(db);
   await restoreSharedTeamMemory(db);
   await expandLegacySlackWildcards(db);
   await stripRetiredAssistantTargets(db);
   await normalizeLegacyWorkflowDefinitions(db);
   await syncAssistantSessionStatus(db);
   await reportRetiredAssistantSettings(db);
+}
+
+/** Snapshot existing runtime relationships once, before any runtime is restored. */
+export async function classifyLegacyRuntimes(db: PgDb): Promise<void> {
+  await db.transaction(async tx => {
+    // Serialize concurrent API boots; the marker and snapshots commit together.
+    await tx.query("LOCK TABLE __valet_app_migrations IN EXCLUSIVE MODE");
+    const marker = "legacy-runtime-continuity-v1";
+    if ((await tx.query("SELECT 1 FROM __valet_app_migrations WHERE filename = $1", [marker])).rows.length) return;
+    await tx.query(`INSERT INTO legacy_assistant_runtimes (session_id, org_id, assistant_id, owner_type, owner_id)
+      SELECT a.session_id, a.org_id, a.id, a.owner_type, a.owner_id FROM assistants a
+      JOIN engine_sessions e ON e.id = a.session_id
+      LEFT JOIN agent_sessions s ON s.id = a.session_id
+      WHERE a.archived_at IS NULL AND (s.id IS NULL OR s.status <> 'deleted')
+      ON CONFLICT DO NOTHING`);
+    await tx.query(`INSERT INTO legacy_assistant_conversations (thread_id, session_id, conversation_key)
+      SELECT t.id, t.session_id, t.key FROM engine_threads t
+      JOIN legacy_assistant_runtimes l ON l.session_id = t.session_id
+      ON CONFLICT DO NOTHING`);
+    await tx.query(`INSERT INTO legacy_workflow_runtimes (workflow_id, session_id, org_id)
+      SELECT w.id, a.session_id, w.org_id FROM workflow_definitions w
+      JOIN assistants a ON a.org_id = w.org_id AND a.owner_type = w.owner_type AND a.owner_id = w.owner_id
+        AND (CASE WHEN w.definition ? 'assistantId' THEN a.id = w.definition->>'assistantId'
+          ELSE a.id = (SELECT chosen.id FROM assistants chosen WHERE chosen.org_id = w.org_id
+            AND chosen.owner_type = w.owner_type AND chosen.owner_id = w.owner_id
+            AND chosen.archived_at IS NULL ORDER BY COALESCE((to_jsonb(chosen)->>'is_default')::boolean, false) DESC, chosen.created_at DESC, chosen.id LIMIT 1) END)
+      JOIN legacy_assistant_runtimes l ON l.session_id = a.session_id
+      ON CONFLICT DO NOTHING`);
+    await tx.query(`INSERT INTO legacy_workflow_run_runtimes (run_id, session_id, org_id)
+      SELECT r.id, a.session_id, w.org_id FROM workflow_runs r
+      JOIN workflow_definitions w ON w.id = r.workflow_id
+      JOIN assistants a ON a.id = r.definition->>'assistantId' AND a.org_id = w.org_id
+        AND a.owner_type = w.owner_type AND a.owner_id = w.owner_id
+      JOIN legacy_assistant_runtimes l ON l.session_id = a.session_id
+      WHERE r.definition ? 'assistantId' ON CONFLICT DO NOTHING`);
+    await tx.query(`INSERT INTO legacy_workflow_admissions (queue_item_id, session_id, thread_id, dispatch_id, org_id)
+      SELECT q.id, q.session_id, q.thread_id, q.dispatch_id, e.org_id
+      FROM engine_queue_items q JOIN engine_sessions e ON e.id = q.session_id
+      JOIN workflow_runs r ON r.id = split_part(q.dispatch_id, ':', 2)
+      JOIN workflow_definitions w ON w.id = r.workflow_id AND w.org_id = e.org_id
+      WHERE q.dispatch_id LIKE 'workflow:%' ON CONFLICT DO NOTHING`);
+    await tx.query(`INSERT INTO legacy_artifact_publications (artifact_id, org_id, owner_type, owner_id, source_session_id)
+      SELECT id, org_id, owner_type, owner_id, source_session_id FROM artifacts ON CONFLICT DO NOTHING`);
+    await tx.query("INSERT INTO __valet_app_migrations (filename, applied_at) VALUES ($1, $2)", [marker, Date.now()]);
+  });
 }
 
 /** Undo the pre-release blanket quarantine without choosing between conflicting files.
@@ -170,26 +216,14 @@ export async function reportRetiredAssistantSettings(db: PgDb): Promise<string |
   return message;
 }
 
-/** Keeps each assistant's session status in line with the assistant.
- * dev-v2 deleted an assistant by archiving it and marking its session
- * `deleted`. The singleton cutover restores that assistant when its owner
- * still exists, so its session becomes `active` again; otherwise the
- * reconcile sweep destroys the runtime's sandbox and its threads drop out
- * of every list. The cutover also retires extra assistants, and their
- * sessions become `deleted`, so thread, brief, active-work, and approval
- * lists stop showing threads a retired assistant can no longer open.
- * Runs on every boot, so databases cut over before it existed are fixed
- * too. Idempotent: rows already in line are untouched. */
+/** Keep explicit archival effective. Snapshot-proven duplicate retirement retains its runtime. */
 export async function syncAssistantSessionStatus(db: PgDb): Promise<void> {
   const now = Date.now();
   await db.query(
-    `UPDATE agent_sessions s SET status = 'active', updated_at = $1 FROM assistants a
-      WHERE s.id = a.session_id AND a.archived_at IS NULL AND s.status = 'deleted'`,
-    [now],
-  );
-  await db.query(
     `UPDATE agent_sessions s SET status = 'deleted', updated_at = $1 FROM assistants a
-      WHERE s.id = a.session_id AND a.archived_at IS NOT NULL AND s.status <> 'deleted'`,
+      WHERE s.id = a.session_id AND a.archived_at IS NOT NULL AND s.status <> 'deleted'
+        AND NOT EXISTS (SELECT 1 FROM legacy_assistant_runtimes l WHERE l.session_id = a.session_id
+          AND a.owner_id = l.owner_id || ':retired:' || a.id)`,
     [now],
   );
 }
@@ -361,6 +395,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     ALTER TABLE action_policy_overrides ADD COLUMN legacy_unscoped boolean NOT NULL DEFAULT true;
     ALTER TABLE action_policy_overrides ALTER COLUMN legacy_unscoped SET DEFAULT false; END $$` },
   { describe: "pending approval pagination", probe: { kind: "index", index: "engine_decision_gates_pending" }, sql: "CREATE INDEX \"engine_decision_gates_pending\" ON \"engine_decision_gates\" (\"created_at\", \"id\" COLLATE \"C\") WHERE \"status\" = 'pending';" },
+  { describe: "legacy_workflow_admissions", probe: { kind: "table", table: "legacy_workflow_admissions" }, sql: 'CREATE TABLE "legacy_workflow_admissions" (queue_item_id text PRIMARY KEY, session_id text NOT NULL, thread_id text NOT NULL, dispatch_id text NOT NULL, org_id text NOT NULL)' },
+  { describe: "legacy_workflow_run_runtimes", probe: { kind: "table", table: "legacy_workflow_run_runtimes" }, sql: 'CREATE TABLE "legacy_workflow_run_runtimes" (run_id text PRIMARY KEY, session_id text NOT NULL, org_id text NOT NULL)' },
+  { describe: "global dispatch recovery lookup", probe: { kind: "index", index: "engine_queue_items_dispatch_lookup" }, sql: 'CREATE INDEX engine_queue_items_dispatch_lookup ON engine_queue_items (dispatch_id) WHERE dispatch_id IS NOT NULL' },
+  { describe: "legacy_artifact_publications", probe: { kind: "table", table: "legacy_artifact_publications" }, sql: 'CREATE TABLE "legacy_artifact_publications" (artifact_id text PRIMARY KEY, org_id text NOT NULL, owner_type text NOT NULL, owner_id text NOT NULL, source_session_id text NOT NULL)' },
+  { describe: "legacy_assistant_runtimes", probe: { kind: "table", table: "legacy_assistant_runtimes" }, sql: 'CREATE TABLE "legacy_assistant_runtimes" (session_id text PRIMARY KEY, org_id text NOT NULL, assistant_id text, owner_type text, owner_id text)' },
+  { describe: "legacy_assistant_conversations", probe: { kind: "table", table: "legacy_assistant_conversations" }, sql: 'CREATE TABLE "legacy_assistant_conversations" (thread_id text PRIMARY KEY, session_id text NOT NULL, conversation_key text NOT NULL)' },
+  { describe: "legacy_workflow_runtimes", probe: { kind: "table", table: "legacy_workflow_runtimes" }, sql: 'CREATE TABLE "legacy_workflow_runtimes" (workflow_id text PRIMARY KEY, session_id text NOT NULL, org_id text NOT NULL)' },
   { describe: "assistant execution identities", probe: { kind: "table", table: "assistant_executions" }, sql: `CREATE TABLE "assistant_executions" (
   "session_id" text PRIMARY KEY, "assistant_id" text NOT NULL,
   "conversation_key" text NOT NULL, "governing_thread_id" text NOT NULL, "created_at" bigint NOT NULL
@@ -448,6 +489,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "event receipts page index", probe: { kind: "index", index: "event_receipts_page" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id")' },
   {
     describe: "workspace assistant singleton cutover",
+    prepare: classifyLegacyRuntimes,
     probe: { kind: "index", index: "assistants_workspace" },
     // The earlier model allowed several assistant rows per owner, and
     // deleting a profile archived it. One statement, so it commits or rolls
@@ -456,10 +498,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     //      newest. Move every other row to a retired owner key
     //      (`<owner>:retired:<id>`) and archive it. No row or history is
     //      deleted, and the unique index below can be built.
-    //   2. Un-retire an archived survivor whose user, team, or org still
-    //      exists: that is a deleted profile, not a teardown. Team teardown
-    //      removes the team row in the same transaction that archives its
-    //      assistant, so a real teardown stays retired and keeps its slot.
     sql: `DO $$ DECLARE now_ms bigint := (extract(epoch from clock_timestamp()) * 1000)::bigint; BEGIN
       WITH ranked AS (
         SELECT id, row_number() OVER (
@@ -473,11 +511,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
             archived_at = COALESCE(a.archived_at, now_ms)
         FROM ranked r
         WHERE a.id = r.id AND r.rank > 1;
-      UPDATE assistants a SET archived_at = NULL
-        WHERE a.archived_at IS NOT NULL AND position(':retired:' in a.owner_id) = 0 AND (
-          (a.owner_type = 'user' AND EXISTS (SELECT 1 FROM "user" u WHERE u.id = a.owner_id)) OR
-          (a.owner_type = 'team' AND EXISTS (SELECT 1 FROM teams t WHERE t.id = a.owner_id)) OR
-          (a.owner_type = 'org' AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = a.owner_id)));
       CREATE UNIQUE INDEX assistants_workspace ON assistants(org_id, owner_type, owner_id);
     END $$`,
   },
@@ -1801,9 +1834,13 @@ const REPAIR_ATTEMPTS = 3;
  * replaces.
  */
 async function addColumnsMissingFromAppliedMigrations(db: PgDb): Promise<void> {
-  for (const repair of await missingSchemaRepairs(db)) {
-    await runSchemaRepair(db, repair);
+  const pending = await missingSchemaRepairs(db);
+  // Snapshot before identity normalization, after all referenced old-schema tables are repaired.
+  const singleton = pending.find(repair => repair.describe === "workspace assistant singleton cutover");
+  for (const repair of pending) {
+    if (repair !== singleton) await runSchemaRepair(db, repair);
   }
+  if (singleton) await runSchemaRepair(db, singleton);
 }
 
 async function runSchemaRepair(db: PgDb, repair: SchemaRepair): Promise<void> {

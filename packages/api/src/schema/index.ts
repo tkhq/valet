@@ -2791,3 +2791,44 @@ export const slackWebhookInbox = pgTable("slack_webhook_inbox", {
   attempts: integer("attempts").notNull().default(0),
   failedAt: bigint("failed_at", { mode: "number" }),
 }, t => [index("slack_webhook_inbox_due").on(t.nextAttemptAt)]);
+
+/** Upgrade snapshots. Only the one-time continuity migration inserts these rows. */
+export const legacyAssistantRuntimes = pgTable("legacy_assistant_runtimes", {
+  assistantId: text("assistant_id"),
+  ownerType: text("owner_type", { enum: ["user", "team", "org"] }),
+  ownerId: text("owner_id"),
+  sessionId: text("session_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+});
+export const legacyAssistantConversations = pgTable("legacy_assistant_conversations", {
+  threadId: text("thread_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+});
+export const legacyWorkflowRuntimes = pgTable("legacy_workflow_runtimes", {
+  workflowId: text("workflow_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyWorkflowAdmissions = pgTable("legacy_workflow_admissions", {
+  queueItemId: text("queue_item_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  dispatchId: text("dispatch_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyWorkflowRunRuntimes = pgTable("legacy_workflow_run_runtimes", {
+  runId: text("run_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyArtifactPublications = pgTable("legacy_artifact_publications", {
+  artifactId: text("artifact_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  sourceSessionId: text("source_session_id").notNull(),
+});

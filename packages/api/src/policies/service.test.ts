@@ -455,17 +455,21 @@ describe("buildPolicyResolver", () => {
 // ── loadPolicyRows shape ───────────────────────────────────────────
 
 describe("loadPolicyRows", () => {
-  it("ignores legacy allows in chat and workflows until explicit reapproval, preserving deny rules", async () => {
+  it("preserves legacy personal allows in chat and workflows within their original scope", async () => {
     await db.insert(actionPolicyOverrides).values([
-      { id: "old-allow", orgId: ORG, userId: MEMBER, service: "gmail", mode: "allow", legacyUnscoped: true, createdAt: 1, updatedAt: 1 },
+      { id: "old-allow", orgId: ORG, userId: MEMBER, actionId: "gmail.send_email", paramMatchers: [{ path: "to", op: "eq", value: "approved@example.com" }], mode: "allow", legacyUnscoped: true, createdAt: 1, updatedAt: 1 },
       { id: "old-deny", orgId: ORG, userId: MEMBER, actionId: "github.create_issue", mode: "deny", legacyUnscoped: true, createdAt: 1, updatedAt: 1 },
     ]);
-    const input = { service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: {},
+    const input = { service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params: { to: "approved@example.com" },
       userId: MEMBER, orgId: ORG, sessionId: SESSION, pluginDefault: undefined, now: 2 } as const;
     for (const appliesIn of ["session", "workflow"] as const) {
-      expect((await resolveActionPolicy(db, { ...input, appliesIn, workflowExecutionId: RUN })).mode).toBe("require_approval");
+      expect((await resolveActionPolicy(db, { ...input, appliesIn, workflowExecutionId: RUN })).mode).toBe("allow");
     }
-    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION })).overrides.map(row => row.id)).toEqual(["old-deny"]);
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION })).overrides.map(row => row.id)).toEqual(["old-allow", "old-deny"]);
+    expect((await resolveActionPolicy(db, { ...input, userId: ADMIN, appliesIn: "session" })).mode).toBe("require_approval");
+    expect((await resolveActionPolicy(db, { ...input, params: { to: "other@example.com" }, appliesIn: "session" })).mode).toBe("require_approval");
+    expect((await resolveActionPolicy(db, { ...input, actionId: "gmail.delete_email", appliesIn: "session" })).mode).toBe("require_approval");
+    expect((await loadPolicyRows(db, { orgId: "other-org", userId: MEMBER })).overrides).toEqual([]);
     expect(await upsertOverride(db, ORG, MEMBER, { service: "gmail", mode: "allow", now: 3 }, new Map())).toMatchObject({ ok: true });
     expect((await resolveActionPolicy(db, { ...input, appliesIn: "session" })).mode).toBe("allow");
   });

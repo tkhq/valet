@@ -2546,3 +2546,19 @@ CREATE TABLE IF NOT EXISTS "slack_channel_privacy" (
 CREATE TABLE "slack_webhook_inbox" ("id" text PRIMARY KEY, "org_id" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "next_attempt_at" bigint NOT NULL, "attempts" integer NOT NULL DEFAULT 0, "failed_at" bigint);
 --> statement-breakpoint
 CREATE INDEX "slack_webhook_inbox_due" ON "slack_webhook_inbox" ("next_attempt_at");
+
+--> statement-breakpoint
+CREATE TABLE "legacy_assistant_runtimes" (session_id text PRIMARY KEY, org_id text NOT NULL, assistant_id text, owner_type text, owner_id text);
+--> statement-breakpoint
+CREATE TABLE "legacy_assistant_conversations" (thread_id text PRIMARY KEY, session_id text NOT NULL, conversation_key text NOT NULL);
+--> statement-breakpoint
+CREATE TABLE "legacy_workflow_runtimes" (workflow_id text PRIMARY KEY, session_id text NOT NULL, org_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "legacy_workflow_admissions" (queue_item_id text PRIMARY KEY, session_id text NOT NULL, thread_id text NOT NULL, dispatch_id text NOT NULL, org_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "legacy_workflow_run_runtimes" (run_id text PRIMARY KEY, session_id text NOT NULL, org_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "legacy_artifact_publications" (artifact_id text PRIMARY KEY, org_id text NOT NULL, owner_type text NOT NULL, owner_id text NOT NULL, source_session_id text NOT NULL);

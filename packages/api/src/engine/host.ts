@@ -98,6 +98,7 @@ import {
 } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
+import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { resolveModelFallback } from "../services/model-fallback.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
@@ -2563,7 +2564,7 @@ export class EngineHost {
       const assistant = this.opts.db ? await loadAssistant(this.opts.db, assistantId) : undefined;
       const [app] = this.opts.db ? await this.opts.db.select({ status: agentSessions.status }).from(agentSessions)
         .where(eq(agentSessions.id, sessionId)).limit(1) : [];
-      if (!assistant || assistant.archivedAt !== null || (sessionId.startsWith("execution:") && app?.status === "deleted")) {
+      if (!assistant || assistant.archivedAt !== null || app?.status === "deleted") {
         this.evictCache(sessionId);
         throw new ArchivedAssistantError();
       }
@@ -2623,7 +2624,11 @@ export class EngineHost {
 
     const [execution] = await db.select().from(assistantExecutions)
       .where(and(eq(assistantExecutions.sessionId, sessionId), eq(assistantExecutions.assistantId, assistantId))).limit(1);
-    const workspace = execution
+    const existing = await this.opts.engineStore.getSession(sessionId);
+    const legacyRuntime = await isLegacyAssistantRuntime(db, sessionId, meta.orgId);
+    // Existing scripts can depend on absolute paths. Keep the recorded working
+    // directory when adopting a legacy runtime, rather than allocating a new one.
+    const workspace = legacyRuntime && existing ? existing.workspace : execution
       ? join(homedir(), ".valet", "assistants", assistantId, "executions", execution.sessionId)
       : join(homedir(), ".valet", "assistants", assistantId);
     await mkdir(workspace, { recursive: true });
@@ -2644,7 +2649,6 @@ export class EngineHost {
       ownerDisplayName = rows[0]?.name;
     }
 
-    const existing = await this.opts.engineStore.getSession(sessionId);
     // A team/org assistant session is SHARED: whoever happens to wake it
     // first is not its owner, so their personal default must not persist
     // onto every other member — only a user-principal assistant reads the
@@ -2754,7 +2758,7 @@ export class EngineHost {
       resolveFallbackModel: this.makeResolveFallbackModel(meta.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       ...(execution ? { parentSessionId: assistant.sessionId, parentThreadId: execution.governingThreadId } : {}),
-      ...(principal.type === "team" && !execution ? {
+      ...(principal.type === "team" && !execution && !legacyRuntime ? {
         readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
@@ -2821,7 +2825,7 @@ export class EngineHost {
     const currentAssistant = await loadAssistant(db, assistantId);
     const [currentApp] = await db.select({ status: agentSessions.status }).from(agentSessions)
       .where(eq(agentSessions.id, sessionId)).limit(1);
-    if (!currentAssistant || currentAssistant.archivedAt !== null || (execution && currentApp?.status === "deleted")) {
+    if (!currentAssistant || currentAssistant.archivedAt !== null || currentApp?.status === "deleted") {
       session.suspendTimers();
       throw new ArchivedAssistantError();
     }
@@ -3918,6 +3922,7 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
+    const workspace = existing?.workspace ?? opts.workspace;
     // Team- and org-owned builds are shared: omit `userId` so the acting
     // member's personal default cannot freeze onto the shared session.
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.orgId, {
@@ -3950,7 +3955,7 @@ export class EngineHost {
       id: sessionId,
       userId: opts.owner.type === "user" ? opts.owner.id : `${opts.owner.type}:${opts.owner.id}`,
       orgId: opts.orgId,
-      workspace: opts.workspace,
+      workspace,
       profile: "headless" as const,
       ownerType: opts.owner.type,
       ownerId: opts.owner.id,
@@ -3963,7 +3968,7 @@ export class EngineHost {
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
-      workspace: opts.workspace,
+      workspace,
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(specProvider ? { specProvider } : {}),
@@ -3986,7 +3991,7 @@ export class EngineHost {
       warmSandboxOnClaim: false,
       sandbox: {
         browser: { enabled: this.opts.sandboxProvider.capabilities().browserAutomation === true, viewer: true },
-        workspace: opts.workspace,
+        workspace,
         image: this.opts.defaultImage,
         env: sandboxMint?.env,
         profile: "headless" as const,

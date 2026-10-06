@@ -1,3 +1,4 @@
+import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { visibleWorkOrigin } from "../services/work-origin.js";
 import { Hono } from "hono";
 import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
@@ -906,6 +907,7 @@ sessionsRouter.get("/:id", async (c) => {
 
   const runtime = await loadAssistantBySessionId(db, id);
   const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
+    && !await isLegacyAssistantRuntime(db, id, row.orgId)
     ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
   const detail: GetSessionResponse = {
     readOnlyReason,
@@ -1217,6 +1219,7 @@ sessionsRouter.patch("/:id", async (c) => {
   const unsettled = await engineStore.listUnsettledSubmissions(id);
   const runtime = await loadAssistantBySessionId(db, id);
   const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
+    && !await isLegacyAssistantRuntime(db, id, effectiveRow.orgId)
     ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
   const detail: GetSessionResponse = {
     readOnlyReason,

@@ -4,11 +4,12 @@
  */
 import { assistantSessionId, type Principal, type Session } from "@valet/engine";
 import { and, eq, sql, type SQL } from "drizzle-orm";
+import { isLegacyAssistantConversation, isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { randomUUID } from "node:crypto";
 import { lockTeamForOwnership } from "../services/teams.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, assistantExecutions, assistants, orgs, teams, users, type AssistantRow } from "../schema/index.js";
+import { legacyAssistantConversations, legacyAssistantRuntimes, agentSessions, assistantExecutions, assistants, orgs, teams, users, type AssistantRow } from "../schema/index.js";
 
 /** Raised when a request targets an assistant that is already archived. */
 export class ArchivedAssistantError extends Error {
@@ -28,10 +29,18 @@ function ownerMatch(orgId: string, principal: Principal): SQL | undefined {
   );
 }
 
+/** Restore original ownership only for a live identity retired by the singleton migration. */
+async function legacyAssistantRow(db: AppQueryable, row: AssistantRow | undefined): Promise<AssistantRow | undefined> {
+  if (!row || row.archivedAt === null || !await isLegacyAssistantRuntime(db, row.sessionId, row.orgId)) return row;
+  const [legacy] = await db.select().from(legacyAssistantRuntimes).where(eq(legacyAssistantRuntimes.sessionId, row.sessionId)).limit(1);
+  if (!legacy?.ownerType || !legacy.ownerId || !await ownerExists(db, row.orgId, { type: legacy.ownerType, id: legacy.ownerId })) return row;
+  return { ...row, ownerType: legacy.ownerType, ownerId: legacy.ownerId, archivedAt: null };
+}
+
 /** One row by id. Returns undefined for an id that does not exist. */
 export async function loadAssistant(db: AppQueryable, assistantId: string): Promise<AssistantRow | undefined> {
   const rows = await db.select().from(assistants).where(eq(assistants.id, assistantId)).limit(1);
-  return rows[0];
+  return legacyAssistantRow(db, rows[0]);
 }
 
 /**
@@ -51,7 +60,7 @@ export async function loadAssistantBySessionId(
     .from(assistants)
     .where(eq(assistants.sessionId, sessionId))
     .limit(1);
-  if (rows[0]) return rows[0];
+  if (rows[0]) return legacyAssistantRow(db, rows[0]);
   const [execution] = await db.select({ assistant: assistants }).from(assistantExecutions)
     .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
     .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
@@ -103,15 +112,10 @@ async function ownerExists(db: AppQueryable, orgId: string, principal: Principal
   return rows.length > 0;
 }
 
-/** Returns a live row. An archived row stays retired (and throws) only when
- * its owner is gone; otherwise it is restored, so a workspace cannot be left
- * with a retired identity and no way to replace it. */
-async function liveOrRestored(db: AppQueryable, orgId: string, principal: Principal, row: AssistantRow): Promise<AssistantRow> {
-  if (row.archivedAt === null) return row;
-  if (!(await ownerExists(db, orgId, principal))) throw new ArchivedAssistantError();
-  const [restored] = await db.update(assistants).set({ archivedAt: null })
-    .where(eq(assistants.id, row.id)).returning();
-  return restored ?? { ...row, archivedAt: null };
+/** Explicit archival remains effective while the owner's unique slot stays reserved. */
+async function liveOrRestored(_db: AppQueryable, _orgId: string, _principal: Principal, row: AssistantRow): Promise<AssistantRow> {
+  if (row.archivedAt !== null) throw new ArchivedAssistantError();
+  return row;
 }
 
 /** Resolve the sole workspace identity. Concurrent first use converges via
@@ -167,6 +171,21 @@ export async function ensureAssistantExecution(
 ): Promise<{ assistant: AssistantRow; sessionId: string; session: Session }> {
   if (principal.type !== "team") return ensureDefaultAssistantSession(deps, principal, meta);
   const root = await ensureDefaultAssistantSession(deps, principal, meta);
+  const [existingExecution] = await deps.db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
+    .where(and(eq(assistantExecutions.assistantId, root.assistant.id), eq(assistantExecutions.conversationKey, conversationKey))).limit(1);
+  if (!existingExecution && await isLegacyAssistantConversation(deps.db, root.sessionId, conversationKey, meta.orgId)) return root;
+  if (!existingExecution) {
+    const retained = await deps.db.select({ sessionId: legacyAssistantRuntimes.sessionId }).from(legacyAssistantRuntimes)
+      .innerJoin(legacyAssistantConversations, eq(legacyAssistantConversations.sessionId, legacyAssistantRuntimes.sessionId))
+      .where(and(eq(legacyAssistantRuntimes.orgId, meta.orgId), eq(legacyAssistantRuntimes.ownerType, principal.type),
+        eq(legacyAssistantRuntimes.ownerId, principal.id), eq(legacyAssistantConversations.conversationKey, conversationKey)));
+    for (const candidate of retained) {
+      if (await isLegacyAssistantConversation(deps.db, candidate.sessionId, conversationKey, meta.orgId)) {
+        const assistant = await loadAssistantBySessionId(deps.db, candidate.sessionId);
+        if (assistant?.archivedAt === null) return ensureAssistantSession(deps, assistant, meta);
+      }
+    }
+  }
   const data = await root.session.toData();
   const governing = await deps.engineHost.ensureFreshThread(root.session, conversationKey,
     { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, meta.actorUserId);
@@ -220,16 +239,9 @@ async function ensureAssistantSession(
     .from(agentSessions)
     .where(eq(agentSessions.id, sessionId))
     .limit(1);
-  if (existingRows[0]?.status === "deleted" && sessionId.startsWith("execution:")) {
+  if (existingRows[0]?.status === "deleted") {
     deps.engineHost.evictCache(sessionId);
     throw new ArchivedAssistantError();
-  }
-  if (existingRows[0]?.status === "deleted") {
-    // A live assistant's session is never deleted by this version. During a
-    // rolling deploy an older pod can still mark it deleted; the boot sweep
-    // (syncAssistantSessionStatus) repairs that only on restart, so use does it now.
-    await deps.db.update(agentSessions).set({ status: "active", updatedAt: Date.now() })
-      .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "deleted")));
   }
   if (!existingRows[0]) {
     const now = Date.now();
@@ -259,6 +271,7 @@ async function ensureAssistantSession(
 }
 
 export async function retireAssistant(db: AppQueryable, assistantId: string): Promise<void> {
+  await db.delete(legacyAssistantRuntimes).where(eq(legacyAssistantRuntimes.assistantId, assistantId));
   const updated = await db
     .update(assistants)
     .set({

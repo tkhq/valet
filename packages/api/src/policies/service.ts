@@ -170,8 +170,7 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
     const rows = await db
       .select()
       .from(actionPolicyOverrides)
-      .where(and(eq(actionPolicyOverrides.orgId, scope.orgId), eq(actionPolicyOverrides.userId, scope.userId),
-        or(eq(actionPolicyOverrides.legacyUnscoped, false), ne(actionPolicyOverrides.mode, "allow"))));
+      .where(and(eq(actionPolicyOverrides.orgId, scope.orgId), eq(actionPolicyOverrides.userId, scope.userId)));
     overrides = rows.map((r) => ({
       id: r.id,
       service: r.service,

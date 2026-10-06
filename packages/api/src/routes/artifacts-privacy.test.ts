@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { internalToken } from "../lib/internal-auth.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, artifacts, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
+import { agentSessions, assistants, legacyAssistantRuntimes, legacyArtifactPublications, artifacts, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
 import { addArtifactComment, getArtifactById, listArtifactComments, publishArtifact, revokeArtifactByPath, shareArtifact, setArtifactVisibility } from "../services/artifacts.js";
 import type { GetArtifactResponse, ListArtifactsResponse } from "../wire/types.js";
 
@@ -69,6 +69,55 @@ describe("team artifact privacy", () => {
     const posted = await request(`/${row.token}/comments`, "test-member", "POST", { body: "Stay in this org", sendToSession: true });
     expect(posted.status).toBe(200);
     expect(await posted.json()).toMatchObject({ sent: false, comment: { sentToSession: null } });
+  });
+
+  it("preserves marked legacy threadless artifacts while honoring revoke and deletion", async () => {
+    const { db, row, request } = await setup();
+    await db.insert(agentSessions).values({ id: "retained-source", userId: "local-user", orgId: "local-org",
+      workspace: "fixture", ownerType: "team", ownerId: "private-team", createdAt: 1, updatedAt: 1 });
+    await db.insert(assistants).values({ id: "retained-assistant", sessionId: "retained-source", orgId: "local-org",
+      ownerType: "team", ownerId: "private-team", createdAt: 1 });
+    await db.insert(legacyAssistantRuntimes).values({ sessionId: "retained-source", orgId: "local-org" });
+    await db.update(artifacts).set({ sourceSessionId: "retained-source", sourceThreadId: null }).where(eq(artifacts.id, row.id));
+    await db.insert(legacyArtifactPublications).values({ artifactId: row.id, orgId: row.orgId, ownerType: row.ownerType,
+      ownerId: row.ownerId, sourceSessionId: "retained-source" });
+    expect((await request(`/${row.token}`)).status).toBe(200);
+    expect((await request(`/${row.token}/comments`)).status).toBe(200);
+    expect((await request(`/${row.id}/versions`, "local-user")).status).toBe(200);
+    const listed = await request("?ownerType=team&ownerId=private-team");
+    expect(await listed.json()).toMatchObject({ artifacts: [expect.objectContaining({ id: row.id })] });
+    const updated = await publishArtifact(db, { owner: { type: "team", id: "private-team" }, actorUserId: "test-member" }, {
+      orgId: "local-org", key: row.sourceMemoryPath, content: "Retained updated content", format: "html",
+    });
+    expect(updated).toMatchObject({ id: row.id, token: row.token, version: 2, sourceSessionId: "retained-source", sourceThreadId: null });
+    expect((await request(`/${row.token}`)).status).toBe(200);
+
+    await db.update(artifacts).set({ revokedAt: 2 }).where(eq(artifacts.id, row.id));
+    expect((await request(`/${row.token}`)).status).toBe(404);
+    await db.update(artifacts).set({ revokedAt: null }).where(eq(artifacts.id, row.id));
+    await db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, "retained-source"));
+    expect((await request(`/${row.token}`)).status).toBe(404);
+  });
+
+  it.each(["wf:old-run:node", "old-normal-session"])("retains only snapshotted publications from %s", async (sourceSessionId) => {
+    const { db, row, request } = await setup();
+    await db.update(artifacts).set({ sourceSessionId, sourceThreadId: null }).where(eq(artifacts.id, row.id));
+    await db.insert(legacyArtifactPublications).values({ artifactId: row.id, orgId: row.orgId, ownerType: row.ownerType,
+      ownerId: row.ownerId, sourceSessionId });
+    expect((await request(`/${row.token}`)).status).toBe(200);
+    expect((await request(`/${row.id}/versions`, "local-user")).status).toBe(200);
+    expect(await (await request("?ownerType=team&ownerId=private-team")).json())
+      .toMatchObject({ artifacts: [expect.objectContaining({ id: row.id })] });
+    const updated = await publishArtifact(db, { owner: { type: "team", id: row.ownerId }, actorUserId: "test-member" }, {
+      orgId: row.orgId, key: row.sourceMemoryPath, content: "Updated old publication", format: "html",
+    });
+    expect(updated).toMatchObject({ id: row.id, token: row.token, version: 2 });
+    const fresh = await publishArtifact(db, { owner: { type: "team", id: row.ownerId }, actorUserId: "test-member" }, {
+      orgId: row.orgId, key: "new-private.html", content: "New private publication", format: "html", sourceSessionId,
+    });
+    expect((await request(`/${fresh.token}`)).status).toBe(404);
+    await db.update(artifacts).set({ sourceSessionId: "changed-source" }).where(eq(artifacts.id, row.id));
+    expect((await request(`/${row.token}`)).status).toBe(404);
   });
 
   it("quarantines legacy threadless team artifacts on token and management routes", async () => {
