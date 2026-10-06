@@ -547,7 +547,11 @@ describe("buildActionInvoker", () => {
     }
   });
 
-  it.each(["u1", "team:t1"])("team workflow DM uses the team display name when actor is %s", async (userId) => {
+  it.each([
+    { userId: "u1", senderName: undefined, expectedName: "Hestia" },
+    { userId: "team:t1", senderName: undefined, expectedName: "Hestia" },
+    { userId: "team:t1", senderName: "Hestia · People", expectedName: "Hestia · People" },
+  ])("team workflow DM uses $expectedName when actor is $userId", async ({ userId, senderName, expectedName }) => {
     const db = await makeDb();
     await db.insert(orgs).values({ id: "org1", name: "Organization", createdAt: 1 });
     await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Hestia", createdAt: 1 });
@@ -565,7 +569,7 @@ describe("buildActionInvoker", () => {
     vi.stubGlobal("fetch", fetchMock);
     try {
       const result = await invoke(
-        { service: "slack", action: "dm_user", params: { user: "URECIPIENT", text: "Hello" }, invocationId: "team-explicit-dm" },
+        { service: "slack", action: "dm_user", params: { user: "URECIPIENT", text: "Hello", ...(senderName ? { sender_name: senderName, sender_avatar_url: "https://example.com/hestia.png" } : {}) }, invocationId: "team-explicit-dm" },
         { userId, orgId: "org1", owner: { type: "team", id: "t1" } },
       );
       expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "DRECIPIENT" } });
@@ -573,7 +577,8 @@ describe("buildActionInvoker", () => {
       expect(fetchMock.mock.calls[0][0]).toContain("conversations.open");
       expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ users: "URECIPIENT" });
       expect(fetchMock.mock.calls[1][0]).toContain("chat.postMessage");
-      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channel: "DRECIPIENT", text: "Hello", username: "Hestia" });
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channel: "DRECIPIENT", text: "Hello", username: expectedName });
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).icon_url).toBe(senderName ? "https://example.com/hestia.png" : undefined);
       for (const [, init] of fetchMock.mock.calls) {
         expect(init.headers).toMatchObject({ Authorization: "Bearer org-bot" });
       }

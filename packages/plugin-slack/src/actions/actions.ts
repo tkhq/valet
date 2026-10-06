@@ -46,6 +46,21 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+const senderParameters = {
+  sender_name: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 80,
+    pattern: '\\S',
+    description: 'Custom Slack message display name, such as Hestia · People. Overrides the workspace name for this message. This does not change the bot account or DM conversation.',
+  })),
+  sender_avatar_url: Type.Optional(Type.String({
+    pattern: '^https://[^\\s]+$',
+    description: 'Public HTTPS image URL for this message’s profile picture. Slack must be able to fetch it. Omit to use the default avatar.',
+  })),
+};
+
+type SenderParams = { sender_name?: string; sender_avatar_url?: string };
+
 type SlackPostData = { ok: boolean; error?: string; ts?: string; channel?: string };
 
 async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: string; iconUrl?: string }> {
@@ -67,8 +82,12 @@ async function postActionMessage(
   token: string,
   body: Record<string, unknown>,
   ctx: PluginActionContext,
+  sender: SenderParams = {},
 ): Promise<{ res: Response; data: SlackPostData }> {
-  const override = await actionIdentity(ctx);
+  const override = {
+    ...await actionIdentity(ctx),
+    ...slackIdentityOverride({ displayName: sender.sender_name, avatarUrl: sender.sender_avatar_url }),
+  };
   const post = async (postBody: Record<string, unknown>) => {
     const res = await slackFetch('chat.postMessage', token, postBody);
     try {
@@ -320,6 +339,7 @@ async function openAndSendDM(
   userId: string,
   text: string,
   ctx: PluginActionContext,
+  sender: SenderParams,
 ): Promise<PluginActionResult> {
   const openRes = await slackFetch('conversations.open', token, { users: userId });
   if (!openRes.ok) return slackError(openRes);
@@ -337,7 +357,7 @@ async function openAndSendDM(
     body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
 
-  const { res, data } = await postActionMessage(token, body, ctx);
+  const { res, data } = await postActionMessage(token, body, ctx, sender);
   if (!res.ok) return slackError(res);
   if (!data.ok) return slackError(res, data);
 
@@ -347,6 +367,7 @@ async function openAndSendDM(
 // ─── Action Definitions ──────────────────────────────────────────────────────
 
 const dmOwner = action(Type.Object({
+    ...senderParameters,
     text: Type.String({ description: 'Message text' }),
   }))({
   id: 'slack.dm_owner',
@@ -363,11 +384,12 @@ const dmOwner = action(Type.Object({
     }
     const ownerSlackId = ownerSlackUserId(cred);
     if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link Slack in Settings → Connected accounts.' };
-    return openAndSendDM(token, ownerSlackId, p.text, ctx);
+    return openAndSendDM(token, ownerSlackId, p.text, ctx, p);
   },
 });
 
 const dmUser = action(Type.Object({
+    ...senderParameters,
     user: Type.String({ description: 'User ID (U...)' }),
     text: Type.String({ description: 'Message text' }),
   }))({
@@ -380,7 +402,7 @@ const dmUser = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    return openAndSendDM(token, p.user, p.text, ctx);
+    return openAndSendDM(token, p.user, p.text, ctx, p);
   },
 });
 
@@ -1000,6 +1022,7 @@ const getReactions = action(Type.Object({
 });
 
 const sendMessage = action(Type.Object({
+    ...senderParameters,
     channel: Type.String({ description: 'Channel ID (C...) or channel name with # prefix (e.g. #proj-valet). Use list_channels to find IDs.' }),
     text: Type.String({ description: 'Message body in CommonMark. Valet converts it to Slack mrkdwn. Use **bold**, *italic*, ~~strike~~, [text](url), and backticks for code.' }),
     thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply under an existing message. Use the ts value returned by a previous send_message call (e.g. "1780887543.189519").' })),
@@ -1088,7 +1111,7 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
-    const { res, data } = await postActionMessage(token, body, ctx);
+    const { res, data } = await postActionMessage(token, body, ctx, p);
     if (!res.ok || !data.ok) {
       return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
     }
@@ -1127,6 +1150,7 @@ async function resolveSlackOrigin(
 }
 
 const replyToOrigin = action(Type.Object({
+    ...senderParameters,
     text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
   }))({
   id: 'slack.reply_to_origin',
@@ -1142,7 +1166,7 @@ const replyToOrigin = action(Type.Object({
       thread_ts: o.threadTs,
       text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
-    }, ctx);
+    }, ctx, args);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
     return { success: true, data: { channel: o.channelId, ts: data.ts } };

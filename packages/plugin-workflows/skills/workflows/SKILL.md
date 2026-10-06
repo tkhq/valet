@@ -148,3 +148,10 @@ Automated workflows, child sessions, signals, and unlinked channel senders canno
 borrow a creator's admin role or submit a deletion request as that person. Ask a
 signed-in person to continue in web chat or team settings. Do not repeat an
 ordinary tool approval as a substitute for the resource's admin check.
+
+### Slack sender identity
+
+To send as a named workflow identity, set `sender_name` and optional `sender_avatar_url` on each Slack messaging tool step.
+Use a public HTTPS image URL supplied by the user. These fields customize messages, not the Slack account or DM conversation.
+An upstream `set` node can hold both values. Reference them through `{{nodes.identity.result.sender_name}}` and `{{nodes.identity.result.sender_avatar_url}}`.
+For agent steps, include the identity and these tool arguments in the prompt. See the `slack-tools` skill.

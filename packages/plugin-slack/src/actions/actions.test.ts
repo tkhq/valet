@@ -95,6 +95,29 @@ describe('slack actions', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(['slack.dm_owner', 'slack.dm_user', 'slack.send_message', 'slack.reply_to_origin'])(
+    '%s sends with the requested name instead of the workspace name', async (id) => {
+      if (id.startsWith('slack.dm_')) {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D1' } }));
+      } else if (id === 'slack.send_message') {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '1.2', channel: 'C1' }));
+      const result = await action(id).execute(
+        { text: 'Welcome', user: 'U999', channel: 'C1', sender_name: 'Hestia · People', sender_avatar_url: 'https://example.com/hestia.png' },
+        pluginCtx({
+          credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U999' } }),
+          origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+          resolveOutboundSender: async () => ({ displayName: 'People' }),
+        }),
+      );
+      expect(result.success).toBe(true);
+      const posts = fetchMock.mock.calls.filter(([url]) => url.endsWith('/chat.postMessage'));
+      expect(posts).toHaveLength(1);
+      expect(JSON.parse(posts[0][1].body)).toMatchObject({ username: 'Hestia · People', icon_url: 'https://example.com/hestia.png', text: 'Welcome' });
+    },
+  );
+
   it('dm_owner opens a DM with the owner and posts the message', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D1' } }))

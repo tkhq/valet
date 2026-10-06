@@ -81,3 +81,19 @@ Access is scoped to channels the session owner is a member of. If access is deni
 ## Pagination
 
 Large channels require paging via `cursor` / `next_cursor`. Prefer narrowing with `oldest` / `latest` over paging through the full history.
+
+## Custom sender identity
+
+When asked to send as an identity, set `sender_name` on `dm_user`, `dm_owner`, `send_message`, or `reply_to_origin`.
+Set `sender_avatar_url` to a public HTTPS image URL for a custom profile picture. Do not invent an image URL.
+For example, use `sender_name: "Hestia · People"` and the user-provided image URL.
+These fields affect that message only. They do not change the bot account, credentials, or DM conversation.
+If omitted, messages use the existing workspace name or bot identity.
+Slack requires `chat:write.customize`. If Slack rejects customization, Valet retries with the bot identity to deliver the message.
+
+For a workflow, save both fields in its Slack tool steps. To share one identity, declare it in an upstream `set` node.
+For example, use node `identity` with `values: { sender_name: "Hestia · People", sender_avatar_url: "https://example.com/hestia.png" }`.
+Set each Slack step's parameters to `sender_name: "{{nodes.identity.result.sender_name}}"` and `sender_avatar_url: "{{nodes.identity.result.sender_avatar_url}}"`.
+Connect the identity node before those steps. Replace the example URL with the supplied image URL, or omit the avatar field.
+For agent steps, put the identity and the instruction to pass these tool arguments in the step's prompt.
+Automatic replies, approval cards, and file uploads keep their existing identity.

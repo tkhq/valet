@@ -50,7 +50,7 @@ async function allowSlackSend(api: TestApi): Promise<void> {
   );
 }
 
-function queueSlackSend(): void {
+function queueSlackSend(sender: { sender_name?: string; sender_avatar_url?: string } = {}): void {
   if (!faux) throw new Error("faux model is not registered");
   faux.setResponses([
     fauxAssistantMessage(
@@ -59,7 +59,7 @@ function queueSlackSend(): void {
           "call_tool",
           {
             tool_id: "slack.send_message",
-            params: { channel: "C1", text: "from a workflow session" },
+            params: { channel: "C1", text: "from a workflow session", ...sender },
             summary: "Send the workflow result",
           },
           { id: "tc-slack-send" },
@@ -82,8 +82,11 @@ function mockSlackPost(): ReturnType<typeof vi.fn> {
   return fetchMock;
 }
 
-async function postThroughSession(session: { prompt(content: string): Promise<unknown> }): Promise<Record<string, unknown>> {
-  queueSlackSend();
+async function postThroughSession(
+  session: { prompt(content: string): Promise<unknown> },
+  sender: { sender_name?: string; sender_avatar_url?: string } = {},
+): Promise<Record<string, unknown>> {
+  queueSlackSend(sender);
   const fetchMock = mockSlackPost();
   await session.prompt("Send the workflow result.");
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
@@ -139,7 +142,7 @@ describe("EngineHost outbound sender identity", () => {
     expect(await senderFor(session)).toEqual({ displayName: "Release team renamed" });
   });
 
-  it("posts a personal workflow action with org credentials and the bot identity", async () => {
+  it("posts a workflow agent action with org credentials and its requested name", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     api = await bootTestApi({ plugins: [slackPlugin] });
@@ -154,9 +157,11 @@ describe("EngineHost outbound sender identity", () => {
       workspace: "/tmp",
     });
 
-    await expect(postThroughSession(session)).resolves.toMatchObject({
+    await expect(postThroughSession(session, { sender_name: "Hestia · People", sender_avatar_url: "https://example.com/hestia.png" })).resolves.toMatchObject({
       channel: "C1",
       text: "from a workflow session",
+      username: "Hestia · People",
+      icon_url: "https://example.com/hestia.png",
     });
   });
 
