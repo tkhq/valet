@@ -85,13 +85,15 @@ explicitly — the goal is that anything that could break during a v2 change has
 a row, so `make e2e` is sufficient validation on its own (it does not assume
 `pnpm test` was run separately).
 
+Root CI includes workflow, tested plugins, and daemon-free Docker suites in its four shards. API root and package runs share unit/integration settings and infrastructure exclusions. Only API unit tests scrub ambient keys.
+
 **Static + unit (always armed, no external deps):**
 
 | Step | Wraps |
 |---|---|
 | `typecheck` | root `pnpm typecheck` (all packages except frozen `worker`) |
 | `conventions` | `scripts/check-conventions.ts` — recurring review rules as executable checks: `@ts-ignore`/`@ts-expect-error` banned, `as unknown as` ratcheted via allowlist (`scripts/e2e/conventions.ts`), every `ws`-consuming package declares both `@types/ws` and `@types/node`. Legacy packages (worker, client, runner) excluded. |
-| `unit` | root `pnpm test` (`shared`, `sdk`, `api`, `web` projects) |
+| `unit` | root `pnpm test` with dedicated engine, workflow, plugin, Docker, and core integration suites excluded; each runs once in its own row |
 | `engine-unit` | `pnpm --filter @valet/engine test` — store contract, compaction, gates, signals, kill-mid-turn, model switching |
 | `workflow-unit` | `pnpm --filter @valet/workflow test` — DAG interpreter, node executors, expression eval, checkpoints |
 | `gateway-unit` | `pnpm --filter @valet/sandbox-gateway test` — sandbox JWT mint/verify, WS proxy |
@@ -394,3 +396,55 @@ The row uses `VALET_BROWSER_TEST_IMAGE` when set.
 Otherwise, it builds `valet-browser-e2e:local` from the sandbox Dockerfile if that local image is absent.
 The row needs Docker but no external model credentials.
 These two rows bring the scorecard to 37 rows.
+
+### Isolated PostgreSQL test instances (2026-09-29)
+
+`make test-pg` creates its own temporary container on an ephemeral loopback port.
+It waits for readiness, shares that instance between the store and API suites,
+and stops only that container on exit. Concurrent development servers and test
+runs no longer collide on port 5433 or a shared container name.
+
+The live Kubernetes image-build smoke test uses a Git-capable base image and a
+unique resource ID for each run. It requires the image to reach `pushed`; a
+terminal failure no longer counts as success. This catches broken build execution
+instead of only checking that polling terminates.
+
+## Development validation scope (2026-10-04)
+
+Root CI excludes the frozen worker, client, and runner packages. Keep their tests outside the v2 development loop.
+The root suite still includes current API integration tests. During `make e2e`, exclude only the explicit `integration-core` file list from `unit`.
+The dedicated keyless integration row runs those files once, with the same credential scrub. Do not exclude new integration files by a directory wildcard.
+
+Use the smallest scope that covers the changed behavior during development:
+
+| Change | Local validation |
+|---|---|
+| Web component or store | `pnpm --filter @valet/web test <file-filter>`; inspect the changed UI |
+| Queue, steering, or provider recovery | Relevant engine queue/retry suites, API wire tests, and web stream tests |
+| Authorization, approvals, or credentials | Relevant API security suites and the owning engine/workflow tests |
+| Workflow interpreter | `pnpm --filter @valet/workflow test <file-filter>` plus API routing tests when affected |
+| Persistence or schema | Store contract, migration, and affected API suites; real Postgres before release |
+| Deployment or sandbox | Relevant chart/backend suites and the corresponding e2e row |
+| Documentation only | Docs lint; no application tests unless examples change behavior |
+
+Use `-t '<case name>'` for one regression while editing. Run the affected files before committing.
+Do not rerun passing suites on unchanged code. Run broad CI for the release candidate and full `make e2e` before release.
+`make test` runs the root v2 suite once and propagates failures. `make test-integration` runs only the keyless integration row.
+The legacy `make test-e2e` target is not the v2 release command; use `make e2e`.
+
+CI performs semantic typechecking once in its required typecheck job. Each test shard uses `tsc --build --noCheck` only to emit imported packages.
+This keeps shards parallel without artifact-transfer dependencies. The aggregate check still requires typecheck and every test shard to pass.
+Test count alone is not grounds to remove coverage. Preserve distinct authorization, migration, recovery, and backend contract cases.
+
+### Integration listener allocation
+
+The API integration harness binds port zero and keeps that listener open.
+Engine callback URLs resolve the assigned port after listening starts.
+This removes the port probe and release window that caused parallel CI boots to collide.
+The production server adapter and test coverage remain unchanged.
+
+Superseded PR CI runs are canceled; branch/tag publishing runs are retained.
+The Docker row excludes files owned by the daemon-free row and dedicated DinD row.
+The Kubernetes cluster row runs only cluster files; the unit row owns the others.
+The live GitHub row runs only the App JWT check; integration-core owns the fixture loop.
+These changes remove repeated execution, not test cases.

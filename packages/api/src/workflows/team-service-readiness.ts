@@ -63,6 +63,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions } from "../schema/index.js";
 import { credentialSecret } from "@valet/engine";
 import { CredentialReferenceBrokenError, TeamCredentialStore } from "../plugins/team-credential-store.js";
+import { listTeamShares, membersSharing } from "../services/credential-shares.js";
 import {
   lookupInOnePassword,
   onePasswordScopesFor,
@@ -219,7 +220,7 @@ function credentialFreeServices(plugins: ValetPlugin[]): Set<string> {
  * `broken` is a delegated reference whose delegator left the team or lost
  * the source row. `refused` is a row the run's read rejects with a typed
  * message: a 1Password reference no client can dereference. `empty` is a stub with no secret and no
- * delegation, which gates like no row at all so an org-provided service is
+ * share, which gates like no row at all so an org-provided service is
  * not blocked by it.
  */
 type TeamRowState = { kind: "resolves" } | { kind: "broken" } | { kind: "refused"; reason: string } | { kind: "empty" };
@@ -231,16 +232,18 @@ type TeamRowState = { kind: "resolves" } | { kind: "broken" } | { kind: "refused
  * would refuse on every fire is blocked with the message the run gives.
  */
 async function teamRowState(
-  deps: { credentials: TeamCredentialStore; onePassword?: OnePasswordService },
+  deps: { credentials: TeamCredentialStore; onePassword?: OnePasswordService; shares: (teamId: string, service: string) => Promise<string[]> },
   orgId: string,
   teamId: string,
   service: string,
 ): Promise<TeamRowState> {
   let row: StoredCredential | null;
   try {
+    // Any member's working share counts: a run uses its creator's own share,
+    // or asks the member whose share it would use.
     row = await resolveTeamCredentialRead(
       deps,
-      { orgId, teamId, userId: "", scopes: onePasswordScopesFor("team", teamId) },
+      { orgId, teamId, userId: "", scopes: onePasswordScopesFor("team", teamId), mayBorrow: async () => true },
       service,
       "none",
     );
@@ -350,13 +353,8 @@ export async function teamServiceReadiness(
   if (services.length === 0) return { ready: [], blocked: [], unverifiable, warnings: [] };
   const credentialFree = credentialFreeServices(deps.plugins);
 
-  // A team row is read through the same decorator a run resolves it with,
-  // so a delegated reference counts only while it still follows to a live
-  // member's row. Wrapping a store that already follows references is a
-  // no-op: the inner store returns the source row, and the outer keeps it.
-  const store = new TeamCredentialStore(deps.credentials, {
-    isMember: (teamId, userId) => isTeamMember(deps.db, teamId, userId),
-  });
+  // A team row is read through the same decorator a run resolves it with.
+  const store = new TeamCredentialStore(deps.credentials);
 
   const env = deps.env ?? process.env;
   const [teamRows, orgProvided] = await Promise.all([
@@ -368,7 +366,7 @@ export async function teamServiceReadiness(
       env,
     }),
   ]);
-  const teamServices = new Set(teamRows.map((row) => row.service));
+  const teamServices = new Set([...teamRows.map((row) => row.service), ...(await listTeamShares(deps.db, opts.teamId)).map((share) => share.service)]);
 
   const ready: string[] = [];
   const organizationProvided: string[] = [];
@@ -406,7 +404,7 @@ export async function teamServiceReadiness(
     }
     if (teamServices.has(service)) {
       const state = await teamRowState(
-        { credentials: store, onePassword: deps.onePassword },
+        { credentials: store, onePassword: deps.onePassword, shares: (teamId, svc) => membersSharing(deps.db, teamId, svc) },
         opts.orgId,
         opts.teamId,
         service,
@@ -418,7 +416,7 @@ export async function teamServiceReadiness(
       if (state.kind === "broken") {
         // The run does not stop here when the organization provides the
         // service: `resolveTeamCredentialRead` falls through to the org
-        // row once the team delegation breaks. Readiness gives the run's
+        // row once the shared account breaks. Readiness gives the run's
         // answer, or a team's workflows stay disarmed while every run of
         // them succeeds. The broken row is still worth repairing, so it
         // reports as a warning that blocks nothing.

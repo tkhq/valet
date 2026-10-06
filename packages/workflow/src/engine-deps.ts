@@ -45,6 +45,8 @@ export interface WorkflowLlmCompleteRequest {
   prompt: string;
   temperature?: number;
   maxOutputTokens?: number;
+  /** The node's reasoning level; omitted means the run owner's default. */
+  reasoning?: string;
 }
 
 /**
@@ -113,7 +115,9 @@ export interface WorkflowInvokeActionRequest {
 export type WorkflowInvokeActionResult =
   | { ok: true; result: unknown }
   | { ok: false; error: string }
-  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string };
+  /** `approver`: the one member who may answer, because the action would use
+   * their shared account. */
+  | { ok: false; requiresApproval: true; riskLevel?: string; provenance?: string; approver?: { userId: string; name?: string; shareGeneration?: string } };
 
 /**
  * Engine surface available to node executors and the interpreter's cancel
@@ -156,7 +160,7 @@ export interface WorkflowEngineDeps {
   llmComplete(req: WorkflowLlmCompleteRequest): Promise<WorkflowLlmCompleteResult>;
 
   /**
-   * The `orchestrator` node's (Task 5) dispatch primitive — resolves
+   * The `orchestrator` (Thread) node's (Task 5) dispatch primitive — resolves
    * `opts.ownerHint`'s orchestrator session and submits `prompt` as a
    * followup (internal signals must never steer-abort the assistant's live
    * turn). Idempotent by `opts.dispatchId`, exactly like `prompt`: a

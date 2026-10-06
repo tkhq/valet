@@ -17,9 +17,9 @@
  * rather than inventing a second admin signal.
  *
  * Preference gating: `user_notification_preferences` (userId, kind, web)
- * gates web delivery only (this phase ships no other channel). A user with
- * no row for a kind defaults to enabled — the table only ever needs a row
- * for someone who opted OUT.
+ * gates web delivery and opt-in team DM copies. A missing row enables web
+ * delivery and disables team DM copies. Shared home-channel delivery is
+ * configured by the team.
  *
  * Idempotent insert: wired producers pass `dedupeKey` (a gate id or queue
  * item id) so the notification row id is deterministic
@@ -30,10 +30,12 @@
  * are inherently one-shot, so there's nothing to dedupe against.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, like } from "drizzle-orm";
+import { and, eq, isNull, like, sql } from "drizzle-orm";
 import type { DecisionAction, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { notifications, orgMembers, teamMembers, userNotificationPreferences } from "../schema/index.js";
+import type { Providers } from "../providers/types.js";
+import { governingThreadKey, privateThreadOwner, sharedWithWholeTeamSql, threadVisibility } from "../services/thread-access.js";
+import { notifications, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
 export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
 export type AttentionUrgency = "low" | "normal" | "high";
@@ -44,6 +46,12 @@ export interface AttentionEvent {
   owner: Principal;
   actorUserId?: string;
   sessionId?: string;
+  /** Origin thread, when attention belongs to an existing conversation. */
+  threadId?: string;
+  /** The thread key that decides who may see this, when no thread carries
+   * it: a workflow run a Slack channel's event started reaches that
+   * channel's audience (`slackEventsThreadKey`). */
+  audienceKey?: string;
   title: string;
   body?: string;
   href?: string;
@@ -90,11 +98,17 @@ export function principalFromOwner(
 /** Best-effort per-recipient channel delivery (e.g. Telegram DM). Must never throw. */
 export interface AttentionChannelDeliverer {
   deliver(userId: string, event: AttentionEvent): Promise<void>;
+  /** One shared destination per event, separate from personal DM copies. */
+  deliverTeam?(event: AttentionEvent): Promise<void>;
 }
 
 export interface AttentionDeps {
   db: AppDb;
   channels?: AttentionChannelDeliverer[];
+  /** Credential access for a private Slack channel's membership check. Without
+   * it, a thread from a channel stored as private reaches no member's inbox;
+   * the channel itself still shows its gate. */
+  access?: Pick<Providers, "engineCredentials"> & { onePassword?: Providers["onePassword"] };
 }
 
 /** Membership resolved once by the caller of `resolveAudience` — see module doc. */
@@ -129,6 +143,8 @@ async function fetchMembership(db: AppDb, owner: Principal): Promise<Membership>
     const rows = await db
       .select({ userId: teamMembers.userId, role: teamMembers.role })
       .from(teamMembers)
+      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+      .innerJoin(orgMembers, and(eq(orgMembers.orgId, teams.orgId), eq(orgMembers.userId, teamMembers.userId)))
       .where(eq(teamMembers.teamId, owner.id));
     return { teamMembers: rows };
   }
@@ -206,9 +222,26 @@ export async function markAttentionNotificationsRead(db: AppDb, kind: AttentionK
  */
 export async function routeAttention(deps: AttentionDeps, event: AttentionEvent): Promise<void> {
   const membership = await fetchMembership(deps.db, event.owner);
-  const audience = resolveAudience(event.owner, event.kind, membership);
+  // A team thread only some members may see (a person's helper or workflow
+  // editor thread, or a private Slack channel's) reaches only them: no team
+  // channel post, and no other member's inbox or DM (`thread-access.ts`).
+  const key = await teamThreadKey(deps.db, event);
+  const restricted = key !== undefined && !(await isSharedTeamThread(deps.db, event.owner.id, key));
+  let audience = resolveAudience(event.owner, event.kind, membership);
+  if (restricted) {
+    const orgId = await orgOf(deps.db, event.owner);
+    const shown = await Promise.all(audience.map((userId) => deps.access && orgId
+      ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId })(key)
+      : Promise.resolve(privateThreadOwner(key) === userId)));
+    audience = audience.filter((_, i) => shown[i]);
+  }
   if (audience.length === 0) return;
 
+  for (const ch of deps.channels ?? []) {
+    if (event.owner.type === "team" && ch.deliverTeam && !restricted) {
+      await ch.deliverTeam(event).catch(err => console.error("attention router: team delivery failed:", err));
+    }
+  }
   const now = Date.now();
   for (const userId of audience) {
     if (await isWebEnabled(deps.db, userId, event.kind)) {
@@ -229,10 +262,41 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
         .onConflictDoNothing();
     }
 
+    if (event.owner.type === "team") {
+      const [preference] = await deps.db.select({ teamDm: userNotificationPreferences.teamDm })
+        .from(userNotificationPreferences)
+        .where(and(eq(userNotificationPreferences.userId, userId), eq(userNotificationPreferences.kind, event.kind))).limit(1);
+      if (preference?.teamDm !== true) continue;
+    }
     for (const ch of deps.channels ?? []) {
       void ch.deliver(userId, event).catch((err) => {
         console.error("attention router: channel deliverer failed:", err);
       });
     }
   }
+}
+
+/** The key that decides who may see a team event's thread, or undefined for
+ * any other event. A child's gate is judged by the thread that started it. */
+async function teamThreadKey(db: AppDb, event: AttentionEvent): Promise<string | null | undefined> {
+  if (event.owner.type !== "team") return undefined;
+  if (event.audienceKey !== undefined) return event.audienceKey;
+  if (!event.sessionId || !event.threadId) return undefined;
+  // The event references a thread; a missing row cannot establish its audience.
+  return governingThreadKey(db, event.sessionId, event.threadId, "parent link");
+}
+
+/** Whether every member may see a team thread, from stored channel privacy. */
+async function isSharedTeamThread(db: AppDb, teamId: string, key: string | null): Promise<boolean> {
+  const orgId = await orgOf(db, { type: "team", id: teamId });
+  if (!orgId) return false;
+  const result = await db.execute(sql`SELECT ${sharedWithWholeTeamSql(orgId, sql`${key}::text`)} AS shared`) as { rows: Array<{ shared: boolean }> };
+  return result.rows[0]?.shared === true;
+}
+
+async function orgOf(db: AppDb, owner: Principal): Promise<string | undefined> {
+  if (owner.type === "org") return owner.id;
+  if (owner.type !== "team") return undefined;
+  const [team] = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, owner.id)).limit(1);
+  return team?.orgId;
 }

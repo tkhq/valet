@@ -39,6 +39,8 @@ pass "helm lint clean"
 echo "== helm template (bundled postgres, default values) =="
 helm template valet "$CHART_DIR" --kube-version 1.30.0 > "$TMP_DIR/bundled.yaml"
 pass "renders with default values"
+grep -q 'type: Recreate' "$TMP_DIR/bundled.yaml" && grep -q 'rollingUpdate: null' "$TMP_DIR/bundled.yaml" \
+  || fail "API updates must stop old schema writers"
 
 grep -q 'VALET_BROWSER_ENABLED: "0"' "$TMP_DIR/bundled.yaml" \
   || fail "managed browser must remain opt-in until nodes have the seccomp profile"

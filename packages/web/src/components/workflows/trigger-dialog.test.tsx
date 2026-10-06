@@ -38,6 +38,8 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({
     data: {
       catalog: [
+        { service: "linear", readiness: { ready: false, reason: "Ask an organization admin to connect Linear in Organization settings > Linear." },
+          entries: [{ key: "linear.issue.update", description: "Issue updated in Linear", filters: [] }] },
         {
           service: "github",
           entries: [
@@ -57,13 +59,13 @@ vi.mock("~/api/workflows", () => ({
 import { TriggerDialog } from "./trigger-dialog";
 
 describe("TriggerDialog", () => {
-  it("creates an orchestrator schedule from the form", async () => {
+  it("creates an assistant schedule from the form", async () => {
     createScheduleMutateAsync.mockClear().mockResolvedValue({});
     render(<TriggerDialog open onOpenChange={() => {}} />);
     fireEvent.click(screen.getByText(/^Schedule$/));
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "digest" } });
     fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "0 9 * * *" } });
-    fireEvent.click(screen.getByLabelText(/orchestrator/i));
+    fireEvent.click(screen.getByLabelText(/^assistant$/i));
     fireEvent.change(screen.getByLabelText(/prompt/i), { target: { value: "summarize" } });
     fireEvent.click(screen.getByText(/^Create$/));
     await waitFor(() =>
@@ -239,4 +241,18 @@ describe("TriggerDialog", () => {
     const callArg = updateEventMutateAsync.mock.calls[updateEventMutateAsync.mock.calls.length - 1][0];
     expect(callArg.body.filters).toEqual([]);
   });
+});
+
+it("distinguishes Linear triggers from actions and blocks an unconfigured Linear connection", () => {
+  createEventTriggerMutateAsync.mockClear();
+  render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" />);
+  fireEvent.click(screen.getByText(/^Event$/));
+  fireEvent.change(screen.getByLabelText(/event/i), { target: { value: "linear.issue.update" } });
+  expect(screen.getByRole("option", { name: "Issue updated in Linear" })).toBeTruthy();
+  expect(screen.getByText(/Ask an organization admin to connect Linear in Organization settings > Linear/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Linear settings" }).getAttribute("href")).toBe("/settings/organization/linear");
+  const button = screen.getByRole("button", { name: "Create" });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(button);
+  expect(createEventTriggerMutateAsync).not.toHaveBeenCalled();
 });

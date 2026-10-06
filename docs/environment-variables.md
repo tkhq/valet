@@ -17,6 +17,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 | `VALET_PLUGINS` | No | Extra plugin module specifiers to load beyond the bundled registry |
 | `VALET_CONFIG` | No | Path to the instance config file (`valet.yaml`). `make dev-local` points it at `config/valet.dev.yaml`; the helm chart mounts `api.instanceConfig` and sets it. See docs/specs/2026-08-14-instance-config-design.md |
 | `OPENAI_API_KEY` | No | Fallback OpenAI key |
+| `VALET_BRIEFING_MODEL` | No | Model or tier that writes workspace briefs, resolved through the organization's model settings, such as `openai/gpt-5.6-luna` or `xs`. Default: the `s` tier |
 
 The instance config's `mcpServers` entries with `auth: bearer` each name
 their own env var (`tokenEnv`). Set that variable in the api's environment;
@@ -33,6 +34,7 @@ stub applies. Provider variable pairs are all-or-none.
 | `BETTER_AUTH_URL` | Public base URL (default `http://localhost:8788`) |
 | `AUTH_TRUSTED_ORIGINS` | Extra CORS/trusted origins (`http://localhost:5173` is always included) |
 | `AUTH_ALLOWED_EMAIL_DOMAINS` | Comma-separated signup domain allowlist |
+| `AUTH_ALLOW_SIGNUP` | `1` admits uninvited accounts only when `AUTH_ALLOWED_EMAIL_DOMAINS` is empty; new accounts get the member role. Default: invitation or domain admission only |
 | `AUTH_OIDC_ISSUER` / `AUTH_OIDC_CLIENT_ID` / `AUTH_OIDC_CLIENT_SECRET` | Generic OIDC SSO (e.g. Keycloak). Optional: `AUTH_OIDC_NAME`, `AUTH_OIDC_DOMAIN` |
 | `AUTH_OIDC_TEAM_CLAIM` | Claim carrying the user's group paths (default `groups`) — see below. Prefer `auth.sso.teams.claim` in `valet.yaml` |
 | `AUTH_OIDC_TEAM_ASSERTED_CLAIM` | Claim that proves the group mapper ran (default `groups_asserted`). Prefer `auth.sso.teams.assertedClaim` |
@@ -299,6 +301,20 @@ semantics.
 | `GITHUB_APP_CLIENT_SECRET` | Yes | OAuth client secret |
 | `GITHUB_APP_PRIVATE_KEY` | Yes | The App's private key PEM, raw or base64-encoded |
 | `GITHUB_APP_WEBHOOK_SECRET` | No | Webhook HMAC secret. Leave unset for a webhook-less App |
+
+## Linear
+
+Personal Linear connections enable MCP tools. An organization admin configures
+native event delivery in Settings > Organization > Linear. See
+[Organization Linear application setup](specs/2026-07-20-event-system-design.md#organization-linear-application-setup-2026-09-29)
+for app creation, credential verification, and token renewal.
+
+| Variable | Description |
+|----------|-------------|
+| `VALET_PUBLIC_URL` | Public HTTPS API base URL. Local webhook delivery needs a public HTTPS tunnel |
+
+`LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are no longer read; app credentials
+are stored through Organization settings.
 
 ## Channels
 

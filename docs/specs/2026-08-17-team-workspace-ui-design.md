@@ -22,6 +22,19 @@ A workspace is a place, not a filter. One rule, applied everywhere:
 The design adds no new controls. It makes the one existing control —
 the switcher — legible and trustworthy.
 
+## Browser tabs
+
+Each browser tab keeps its workspace choice in `sessionStorage`. Reloading a tab
+restores its own choice. Workspace choices in other tabs do not replace it.
+An explicit workspace link still takes precedence. A new tab without a stored
+choice or an explicit workspace starts in Personal.
+
+Browser titles show the active chat thread or session title, the workspace name,
+and Valet. Renames update the title through the existing query data. Other pages
+show the workspace name and Valet. Child panels and assistant docks do not replace
+the page title. Notification counts prefix the current title without replacing it.
+Public pages keep their own titles.
+
 ## Decisions
 
 1. **The workspace clause.** One shared grammar names the active
@@ -220,7 +233,7 @@ Unavailable teams show a recovery message instead of another team's controls.
 ### Team integration empty state
 
 An empty team credential list does not mean the team has no integrations.
-The empty state describes stored team connections. The separate Organization access section reports organization-provided integrations.
+The empty state describes stored team connections. Organization-provided integrations are managed in Organization settings, not on this page.
 Personal sharing is optional and grants access through that member's account.
 The copy does not claim that an organization integration is currently connected.
 
@@ -233,7 +246,7 @@ Slack and the GitHub App stay organization-managed. Team Integrations shows comp
 
 Slack status uses the catalog's organization-derived `connect` mode, never the personal `connected` flag. GitHub status uses the member-readable organization status query. Save, delete, and refresh mutations invalidate the affected status queries using their existing keys. During refetch, the strip hides the previous status and shows loading. Failed reads show an error, not a setup or availability claim. Suspended GitHub installations are labeled suspended.
 
-Manual token entry asks for the intended account's token without assuming bot or service-account support. If the team credential read fails, the open connection form closes and discards its token and consent. Recovery does not reopen the form. Legacy Slack and GitHub removal dialogs explain that team setup cannot recreate those connections. Organization access is managed separately and can have different permissions.
+Manual token entry asks for the intended account's token without assuming bot or service-account support. If the team credential read fails, the open connection form closes and discards its token and consent. Recovery does not reopen the form. Legacy Slack and GitHub removal dialogs explain that team setup cannot recreate those connections. Organization connections are managed in Organization settings and can have different permissions.
 
 Workflow template setup links point to integration access. Their copy does not require sharing a personal account, because access can come from organization apps or direct team connections.
 

@@ -1,3 +1,4 @@
+import type { GetLinearConnectionResponse } from "@valet/api/wire";
 import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
@@ -8,15 +9,18 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * auth lands we'll wire token storage here.
  */
 import type {
+  WorkspaceOutcomesResponse,
+  WorkspaceBriefingsResponse,
+  ListChannelsResponse,
+  WorkspaceIntegrationLimitResponse,
+  ChannelDetailResponse,
+  ThreadChannelActivity,
+  DismissWorkspaceBriefingResponse,
+  WaitingThreadsResponse,
+  WorkspaceActiveWorkResponse,
   AbortThreadRequest,
   AddTeamMemberRequest,
   AuthConfigResponse,
-  CreateAssistantRequest,
-  CreateAssistantResponse,
-  EnsureAssistantSessionResponse,
-  ListAssistantsResponse,
-  PatchAssistantRequest,
-  PatchAssistantResponse,
   AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
@@ -54,7 +58,8 @@ import type {
   DeleteOrgPolicyResponse,
   DeletePolicyOverrideRequest,
   DeletePolicyOverrideResponse,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
+  WorkspaceRuntimeInfoResponse,
   GetArtifactResponse,
   GetChangelogResponse,
   GetGithubAppResponse,
@@ -67,9 +72,7 @@ import type {
   ShareArtifactResponse,
   OrgSettingsResponse,
   PatchOrgSettingsRequest,
-  GetOrchestratorChildrenResponse,
-  GetOrchestratorInfoResponse,
-  GetPrebuildForRepoResponse,
+  ChildWorkResponse,
   GetReposResponse,
   GetSlackAppResponse,
   GetWorkflowImportFileResponse,
@@ -83,14 +86,12 @@ import type {
   SecurityFileIssueResponse,
   SecurityFindingSeverity,
   SecurityFindingStatus,
-  SecurityPlanCellInput,
   SecurityPreviewRequest,
   SecurityPreviewResponse,
   SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
-  SecuritySetConfigResponse,
-  SecuritySetPlanResponse,
   GetWorkflowResponse,
+  EnsureWorkflowConversationResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
   DeliverIdentityLinkFallback,
@@ -105,7 +106,6 @@ import type {
   ListGrantsResponse,
   ListIdentityLinksResponse,
   ListInvitesResponse,
-  ListAllWorkflowRunsResponse,
   ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
@@ -123,6 +123,7 @@ import type {
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
+  ListNotificationDecisionsResponse,
   ListModelsResponse,
   ListPluginsResponse,
   ListSessionsResponse,
@@ -141,16 +142,10 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
-  GetTeamChildrenResponse,
   ListWorkflowTriggersResponse,
-  WorkflowRunOutcome,
-  WorkflowRunStatus,
   ListWorkflowVersionsResponse,
   GetWorkflowVersionResponse,
   ListWorkflowsResponse,
-  ListWorkflowTemplatesResponse,
-  InstallWorkflowTemplateRequest,
-  InstallWorkflowTemplateResponse,
   MeResponse,
   OnePasswordSettingsResponse,
   TeamOnePasswordStatusResponse,
@@ -163,8 +158,6 @@ import type {
   PatchMeRequest,
   PatchMeResponse,
   ProfilePictureUploadResponse,
-  PatchOrchestratorInfoRequest,
-  PatchOrchestratorInfoResponse,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
   PatchIdentityLinkRequest,
@@ -201,8 +194,8 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
-  ListEventsResponse,
+  EventLogResponse,
+  ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
@@ -235,14 +228,10 @@ import type {
   WorkflowScheduleResponse,
   WithdrawDecisionRequest,
   ListCommandsResponse,
-  ProxyUsageSummary,
-  ProxyRequestDetail,
   ProxyRequestListResponse,
   ProxySettingsResponse,
   UsageBreakdownResponse,
-  UsageSessionsResponse,
   UsageDrillResponse,
-  UsageDrillItem,
   UsageScopeName,
   UsageToolEfficiencyResponse,
   UsageOutcomesResponse,
@@ -312,7 +301,6 @@ class ApiError extends Error {
     this.name = "ApiError";
   }
 }
-
 
 export interface MemoryCopyRequest {
   from: string;
@@ -522,15 +510,6 @@ export interface SecurityFindingsQuery {
   limit?: number;
 }
 
-/** Filters the cross-workflow run list accepts. Array fields match any-of. */
-export interface WorkflowRunFilter extends WorkflowRunPage {
-  workflowIds?: string[];
-  status?: WorkflowRunStatus[];
-  outcome?: WorkflowRunOutcome[];
-  parentRunId?: string;
-  since?: number;
-}
-
 export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearchParams {
   if (period.kind === "lookback") return new URLSearchParams({ window: period.window });
   if (period.kind === "month") return new URLSearchParams({ month: period.month });
@@ -563,6 +542,31 @@ export const api = {
       "GET",
       kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
     ),
+  listWorkspaceActiveWork: (owner: OwnerFilter, cursor?: string) =>
+    request<WorkspaceActiveWorkResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/active-work?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  getWorkspaceBriefings: (owner: OwnerFilter) =>
+    request<WorkspaceBriefingsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings`),
+  getWaitingThreads: (owner: OwnerFilter) =>
+    request<WaitingThreadsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/waiting`),
+  listWorkspaceChannels: (owner: OwnerFilter) =>
+    request<ListChannelsResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channels`),
+  getIntegrationLimit: (owner: OwnerFilter) =>
+    request<WorkspaceIntegrationLimitResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
+  clearIntegrationLimit: (owner: OwnerFilter) =>
+    request<void>("DELETE", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
+  getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
+    request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
+  getThreadChannelActivity: (threadId: string) =>
+    request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
+  /** Download URL for a file attached to the thread; an `<a download>` target. */
+  threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
+    `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,
+  dismissWorkspaceBriefing: (owner: OwnerFilter, briefingId: string) =>
+    request<DismissWorkspaceBriefingResponse>("POST", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/briefings/${encodeURIComponent(briefingId)}/dismiss`),
+  listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
+    request<WorkspaceOutcomesResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/outcomes?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  getThreadAddress: (id: string) =>
+    request<{ id: string; sessionId: string }>("GET", `/threads/${encodeURIComponent(id)}`),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   /** GET /sessions/:id/security — the session's engagement + cells
@@ -591,27 +595,6 @@ export const api = {
     request<ListSecurityCoverageResponse>(
       "GET",
       `/sessions/${encodeURIComponent(id)}/security/coverage`,
-    ),
-  /** POST /sessions/:id/security/plan/cells — replace the plan from structured
-   * steps during planning (dynamic-config M-F2; session admin). The server
-   * assigns dense ordinals in array order. Returns the new cell count. */
-  setSecurityPlanCells: (id: string, cells: SecurityPlanCellInput[]) =>
-    request<SecuritySetPlanResponse>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/security/plan/cells`,
-      { cells },
-    ),
-  /** POST /sessions/:id/security/config — edit the engagement's focus, known
-   * invariants, and loaded threat categories during planning (dynamic-config
-   * M-F3, M-P2a; session admin). Returns the saved values. */
-  setSecurityConfig: (
-    id: string,
-    body: { focus?: string | null; invariants?: string[]; categories?: string[] },
-  ) =>
-    request<SecuritySetConfigResponse>(
-      "POST",
-      `/sessions/${encodeURIComponent(id)}/security/config`,
-      body,
     ),
   /** POST /sessions/:id/security/findings/:findingId/status — human
    * verify/refute (forward-only; session admin). */
@@ -700,8 +683,6 @@ export const api = {
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
   getSessionRatings: (id: string) =>
     request<GetSessionRatingsResponse>("GET", `/sessions/${encodeURIComponent(id)}/ratings`),
-  rateSession: (id: string, body: PutRatingRequest) =>
-    request<PutRatingResponse>("POST", `/sessions/${encodeURIComponent(id)}/rating`, body),
   rateMessage: (sessionId: string, entryId: string, body: PutRatingRequest) =>
     request<PutRatingResponse>(
       "POST",
@@ -714,53 +695,22 @@ export const api = {
     request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
   replaceSandbox: (id: string) =>
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
-  // orchestrator (session ids contain colons — always encoded above too, but
-  // this entry point never touches a raw id itself, only ensures one exists)
-  ensureOrchestrator: () =>
-    request<EnsureOrchestratorResponse>("POST", "/orchestrator"),
-  getOrchestratorInfo: () =>
-    request<GetOrchestratorInfoResponse>("GET", "/orchestrator/info"),
-  patchOrchestratorInfo: (body: PatchOrchestratorInfoRequest) =>
-    request<PatchOrchestratorInfoResponse>("PATCH", "/orchestrator/info", body),
-  /** `sessionId` scopes the list to one assistant's children — the open
-   * assistant in the chat thread tree, so a team assistant's runs nest under
-   * it. Omitted = your own default assistant. */
-  getOrchestratorChildren: (sessionId?: string) =>
-    request<GetOrchestratorChildrenResponse>(
-      "GET",
-      sessionId
-        ? `/orchestrator/children?sessionId=${encodeURIComponent(sessionId)}`
-        : "/orchestrator/children",
-    ),
-  dismissChild: (childSessionId: string) =>
-    request<{ ok: true }>(
-      "POST",
-      `/orchestrator/children/${encodeURIComponent(childSessionId)}/dismiss`,
-    ),
-
-  // assistants (`docs/specs/2026-08-13-assistants-design.md`). The list is
-  // also how the client learns each assistant's session id, so it replaces
-  // the client-side id derivation the rail used to do.
-  listAssistants: () => request<ListAssistantsResponse>("GET", "/assistants"),
-  createAssistant: (body: CreateAssistantRequest) =>
-    request<CreateAssistantResponse>("POST", "/assistants", body),
-  patchAssistant: (id: string, body: PatchAssistantRequest) =>
-    request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
-  uploadAssistantAvatar: (id: string, file: File) =>
-    uploadProfilePicture(`/assistants/${encodeURIComponent(id)}/avatar`, file),
-  // Archive, not destroy: the row keeps `archived_at` and the conversation
-  // it held survives. `DELETE` carries it because the wire's
-  // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
-  // house convention for a soft remove is the same verb as `deleteTeam`.
-  archiveAssistant: (id: string) =>
-    request<{ ok: true }>("DELETE", `/assistants/${encodeURIComponent(id)}`),
-  /** Get-or-create one assistant's session. Creating an assistant writes no
-   * session, so the chat page calls this before opening the conversation. */
-  ensureAssistantSession: (id: string) =>
-    request<EnsureAssistantSessionResponse>(
-      "POST",
-      `/assistants/${encodeURIComponent(id)}/session`,
-    ),
+  // workspace runtime: these entry points take a workspace key, never a raw
+  // session id, and only ensure the runtime exists
+  ensureWorkspaceConversation: (workspace: string) =>
+    request<{ sessionId: string; threadId: string }>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`),
+  ensureWorkspaceRuntime: (workspace: string) =>
+    request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
+  getWorkspaceRuntimeInfo: (workspace: string) =>
+    request<WorkspaceRuntimeInfoResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/runtime/info`),
+  getChildWork: (sessionId: string, opts?: { cursor?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (opts?.cursor) qs.set("cursor", opts.cursor);
+    if (opts?.limit !== undefined) qs.set("limit", String(opts.limit));
+    return request<ChildWorkResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/children?${qs}`);
+  },
+  dismissChild: (sessionId: string, childSessionId: string) =>
+    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(sessionId)}/children/${encodeURIComponent(childSessionId)}/dismiss`),
 
   // memory (assistant-centered web UI decision 7; dashboard memory card +
   // the Task 6 explorer share these reads)
@@ -776,14 +726,14 @@ export const api = {
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
-  getTeamChildren: (teamId: string) =>
-    request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
   // `mine=1` is the caller-scoped gallery view (server-filtered — see the
   // route's comment on why this replaced a client-side `actorUserId` match)
   // and composes with nothing, so it is a separate option, not `OwnerFilter`.
-  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean; limit?: number; cursor?: string }) => {
+  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean; limit?: number; cursor?: string; sourceSessionId?: string; sourceThreadId?: string }) => {
     const qs = new URLSearchParams(ownerParams(owner));
     if (opts?.mine) qs.set("mine", "1");
+    if (opts?.sourceSessionId) qs.set("sourceSessionId", opts.sourceSessionId);
+    if (opts?.sourceThreadId) qs.set("sourceThreadId", opts.sourceThreadId);
     if (opts?.limit !== undefined) qs.set("limit", String(opts.limit));
     if (opts?.cursor !== undefined) qs.set("cursor", opts.cursor);
     return request<ListArtifactsResponse>("GET", `/artifacts${qs.size ? `?${qs}` : ""}`);
@@ -845,53 +795,56 @@ export const api = {
     request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean }) =>
+  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string }) =>
     request<ListThreadsResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.archived ? "?archived=1" : ""}`,
+      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.q ? `?q=${encodeURIComponent(opts.q)}${opts.archived ? "&archived=1" : ""}` : opts?.archived ? "?archived=1" : ""}`,
     ),
+  markThreadsRead: (sessionId: string, threadIds?: string[]) =>
+    request<void>("POST", `/sessions/${encodeURIComponent(sessionId)}/threads/read`, threadIds ? { threadIds } : {}),
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>
     request<CreateThreadResponse>(
       "POST",
       `/sessions/${encodeURIComponent(sessionId)}/threads`,
       body,
     ),
-  patchThread: (sessionId: string, threadId: string, body: PatchThreadRequest) =>
+  patchThread: (threadId: string, body: PatchThreadRequest) =>
     request<PatchThreadResponse>(
       "PATCH",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}`,
+      `/threads/${encodeURIComponent(threadId)}`,
       body,
     ),
   listMessages: (
     sessionId: string,
-    opts?: { limit?: number; cursor?: string; threadId?: string },
+    opts?: { limit?: number; cursor?: string; threadId?: string; queueItemId?: string },
   ) => {
     const qs = new URLSearchParams();
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
-    if (opts?.threadId) qs.set("threadId", opts.threadId);
+    if (opts?.queueItemId) qs.set("queueItemId", opts.queueItemId);
+
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListMessagesResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
+      opts?.threadId ? `/threads/${encodeURIComponent(opts.threadId)}/messages${tail}` : `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
     );
   },
   sendPrompt: (sessionId: string, body: SendPromptRequest) =>
     request<SendPromptResponse>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/messages`,
+      body.threadId ? `/threads/${encodeURIComponent(body.threadId)}/messages` : `/sessions/${encodeURIComponent(sessionId)}/messages`,
       body,
     ),
-  abortThread: (sessionId: string, threadId: string, body: AbortThreadRequest) =>
+  abortThread: (threadId: string, body: AbortThreadRequest) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/abort`,
+      `/threads/${encodeURIComponent(threadId)}/abort`,
       body,
     ),
-  resumeThread: (sessionId: string, threadId: string) =>
+  resumeThread: (threadId: string) =>
     request<{ ok: true }>(
       "POST",
-      `/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/resume`,
+      `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
 
   // slash commands
@@ -902,6 +855,7 @@ export const api = {
     ),
 
   // decision gates
+  listNotificationDecisions: (cursor?: string) => request<ListNotificationDecisionsResponse>("GET", `/notifications/decisions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
   listDecisions: (sessionId: string) =>
     request<ListDecisionsResponse>(
       "GET",
@@ -950,6 +904,7 @@ export const api = {
    * half-specified pair rather than guessing. */
   listWorkflows: (owner?: OwnerFilter) =>
     request<ListWorkflowsResponse>("GET", `/workflows${ownerQuery(owner)}`),
+  ensureWorkflowConversation: (workflowId: string) => request<EnsureWorkflowConversationResponse>("POST", `/workflows/${encodeURIComponent(workflowId)}/conversation`),
   getWorkflow: (id: string) =>
     request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: CreateWorkflowRequest) =>
@@ -986,31 +941,12 @@ export const api = {
       `/workflows/${encodeURIComponent(id)}/runs${tail}`,
     );
   },
-  // Cross-workflow run list. `parentRunId` is how a batch parent's child
-  // runs come back in one request.
-  listRuns: (opts?: WorkflowRunFilter): Promise<ListAllWorkflowRunsResponse> => {
-    // An any-of filter with no values matches nothing. A query string cannot
-    // carry an empty repeated field, so an unguarded request would drop the
-    // filter and list every readable run — the opposite of what was asked.
-    for (const values of [opts?.workflowIds, opts?.status, opts?.outcome]) {
-      if (values?.length === 0) return Promise.resolve({ runs: [] });
-    }
-    const qs = new URLSearchParams();
-    for (const workflowId of opts?.workflowIds ?? []) qs.append("workflowId", workflowId);
-    for (const status of opts?.status ?? []) qs.append("status", status);
-    for (const outcome of opts?.outcome ?? []) qs.append("outcome", outcome);
-    if (opts?.parentRunId) qs.set("parentRunId", opts.parentRunId);
-    if (opts?.since !== undefined) qs.set("since", String(opts.since));
-    if (opts?.limit) qs.set("limit", String(opts.limit));
-    if (opts?.cursor) qs.set("cursor", opts.cursor);
-    const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
-  },
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(
       "GET",
       `/workflows/${encodeURIComponent(id)}/permissions`,
     ),
+  revokeWorkflowPermissions: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/allow`),
   allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest = {}) =>
     request<AllowWorkflowPermissionsResponse>(
       "POST",
@@ -1041,6 +977,8 @@ export const api = {
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/cancel`,
     ),
+  dismissWorkflowRun: (runId: string) =>
+    request<{ ok: true }>("POST", `/workflows/runs/${encodeURIComponent(runId)}/dismiss`),
   retryWorkflowRun: (runId: string) =>
     request<RetryWorkflowRunResponse>(
       "POST",
@@ -1061,20 +999,19 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  listEvents: (params?: { service?: string; key?: string }, owner?: OwnerFilter) => {
-    const qs = new URLSearchParams();
-    if (params?.service) qs.set("service", params.service);
-    if (params?.key) qs.set("key", params.key);
-    const q = qs.toString();
-    const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
-    return request<ListEventsResponse>("GET", path);
+  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; q?: string; cursor?: string }) => {
+    const qs = new URLSearchParams({ ownerType: params.owner.ownerType, ownerId: params.owner.ownerId });
+    if (params.problems) qs.set("problems", "1");
+    if (params.q) qs.set("q", params.q);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
   },
-  listEventDrops: (params: { q?: string; cursor?: string; direction?: "previous" } = {}) => {
+  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.cursor) qs.set("cursor", params.cursor);
-    if (params.direction) qs.set("direction", params.direction);
-    return request<ListEventDropsResponse>("GET", `/events/drops${qs.size ? `?${qs}` : ""}`);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return request<ListEventReceiptsResponse>("GET", `/events/receipts${qs.size ? `?${qs}` : ""}`);
   },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>
@@ -1100,21 +1037,6 @@ export const api = {
   deleteWorkflowWebhook: (id: string) =>
     request<DeleteWorkflowWebhookResponse>("DELETE", `/workflows/${encodeURIComponent(id)}/webhook`),
 
-  // workflow templates — the starting points the gallery on /workflows offers.
-  // `teamId` scopes the requirements to a team workspace: the server stamps
-  // each template against the principal the install would act as.
-  listWorkflowTemplates: (teamId?: string) =>
-    request<ListWorkflowTemplatesResponse>(
-      "GET",
-      teamId === undefined ? "/templates" : `/templates?teamId=${encodeURIComponent(teamId)}`,
-    ),
-  installWorkflowTemplate: (id: string, body: InstallWorkflowTemplateRequest = {}) =>
-    request<InstallWorkflowTemplateResponse>(
-      "POST",
-      `/templates/${encodeURIComponent(id)}/install`,
-      body,
-    ),
-
   // workflow triggers (spec 2026-08-15). `owner` scopes the flat hub list to
   // one workspace; the per-workflow editor passes `workflowId` and no owner.
   listWorkflowTriggers: (owner?: OwnerFilter, workflowId?: string) =>
@@ -1127,17 +1049,6 @@ export const api = {
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
   listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
-  listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
-    const qs = new URLSearchParams();
-    if (page?.limit) qs.set("limit", String(page.limit));
-    if (page?.cursor) qs.set("cursor", page.cursor);
-    const owned = ownerParams(owner);
-    const joined = [qs.toString(), owned].filter(Boolean).join("&");
-    return request<ListAllWorkflowRunsResponse>(
-      "GET",
-      `/workflows/runs${joined ? `?${joined}` : ""}`,
-    );
-  },
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
   updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>
@@ -1208,11 +1119,6 @@ export const api = {
     qs.set("granularity", granularity);
     qs.set("validate", "1");
     return request<void>("GET", `/usage/export.csv?${qs}`);
-  },
-  usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
-    const qs = new URLSearchParams({ window });
-    if (useCase) qs.set("useCase", useCase);
-    return request<UsageSessionsResponse>("GET", `/usage/sessions?${qs}`);
   },
   getJournalSummary: () =>
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
@@ -1302,8 +1208,6 @@ export const api = {
       "DELETE",
       `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
-  ensureTeamOrchestrator: (id: string) =>
-    request<EnsureOrchestratorResponse>("POST", `/teams/${encodeURIComponent(id)}/orchestrator`),
   listTeamApiKeys: (id: string) =>
     request<ListTeamApiKeysResponse>("GET", `/teams/${encodeURIComponent(id)}/api-keys`),
   createTeamApiKey: (id: string, body: CreateTeamApiKeyRequest) =>
@@ -1348,10 +1252,11 @@ export const api = {
       `/credentials/${encodeURIComponent(service)}/delegate`,
       body,
     ),
-  revokeDelegation: (service: string, teamId: string) =>
+  /** Ends a share: the caller's own, or a member's (`userId`) as a team admin. */
+  revokeDelegation: (service: string, teamId: string, userId?: string) =>
     request<DeleteCredentialResponse>(
       "DELETE",
-      `/credentials/${encodeURIComponent(service)}/delegations/${encodeURIComponent(teamId)}`,
+      `/credentials/${encodeURIComponent(service)}/delegations/${encodeURIComponent(teamId)}${userId ? `?userId=${encodeURIComponent(userId)}` : ""}`,
     ),
 
   // 1Password picker backend + settings. `scope` selects which
@@ -1414,12 +1319,6 @@ export const api = {
   // the caller has access to — only `github` today.
   getRepos: () => request<GetReposResponse>("GET", "/repos"),
 
-  getPrebuildForRepo: (fullName: string) =>
-    request<GetPrebuildForRepoResponse>(
-      "GET",
-      `/sources/for-repo?fullName=${encodeURIComponent(fullName)}`,
-    ),
-
   // sandbox image sources (sandbox-reconciliation plan, Task 18): org-admin
   // CRUD for all source kinds (external/base/repo) and bake history.
   listBakeQueue: () => request<ListBakeQueueResponse>("GET", "/org/sources/queue"),
@@ -1433,6 +1332,10 @@ export const api = {
   listSourceBakes: (id: string) => request<ListBakesResponse>("GET", `/org/sources/${encodeURIComponent(id)}/bakes`),
 
   // org GitHub App setup (GitHub/repo integration plan, Task 5) — admin-gated
+  getLinearConnection: () => request<GetLinearConnectionResponse>("GET", "/org/linear"),
+  putLinearConnection: (body: { clientId: string; clientSecret: string; webhookSecret: string }) =>
+    request<GetLinearConnectionResponse>("PUT", "/org/linear", body),
+  deleteLinearConnection: () => request<undefined>("DELETE", "/org/linear"),
   getGithubApp: () => request<GetGithubAppResponse>("GET", "/org/github-app"),
   postGithubAppManifest: (body: PostGithubAppManifestRequest = {}) =>
     request<PostGithubAppManifestResponse>("POST", "/org/github-app/manifest", body),
@@ -1540,8 +1443,6 @@ export const api = {
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),
 
   // ── LLM proxy usage (recording-gateway dashboard) ──────────────────────
-  proxyUsageSummary: (window: string = "7d") =>
-    request<ProxyUsageSummary>("GET", `/proxy/usage/summary?window=${encodeURIComponent(window)}`),
   proxyRequests: (opts: {
     model?: string;
     harness?: string;
@@ -1560,8 +1461,6 @@ export const api = {
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`);
   },
-  proxyRequestDetail: (id: string) =>
-    request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),
   proxySettings: () =>
     request<ProxySettingsResponse>("GET", "/proxy/settings"),
   setProxyMode: (mode: "centralized" | "passthrough") =>

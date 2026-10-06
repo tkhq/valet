@@ -7,20 +7,7 @@ on:
 permissions:
   contents: read
 
-# Typecheck and Test were one sequential job, so every run cost the sum of
-# both and the whole suite ran on one core. They are independent — neither
-# reads the other's output — so they run as separate jobs now, and the tests
-# split across shards.
-#
-# Sharding is what actually moves the number. Test was 5m21s of a 6m27s run,
-# because 106 of the api test files each boot a whole API and its own PGlite.
-# Until those share a fixture, the work is genuinely serial per file, and the
-# only way to finish sooner is to run fewer files per runner. Vitest shards by
-# FILE, so the split is even and needs no test changes.
-#
-# Raise SHARDS if the suite grows. Each shard re-pays checkout and install
-# (~20s), so there is a floor: past roughly 6 shards the setup cost dominates
-# and the wall clock stops improving.
+# Typecheck once; run current v2 tests across four independent shards.
 jobs:
   typecheck:
     runs-on: ubuntu-latest
@@ -38,22 +25,6 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-
-      # Two steps used to run here and covered the frozen V1 stack only.
-      #
-      # "Generate plugin registries" ran the worker's generator, which writes
-      # into `packages/worker/src/**` and nothing else. V2's registry
-      # (`packages/api/src/plugins/registry.gen.ts`) is committed and that
-      # script never touches it, so the step produced output no later step
-      # read. Removing it also removes the need for bun on the runner.
-      #
-      # "Typecheck client" ran `tsc` over the V1 React SPA. The root
-      # tsconfig does not reference `packages/client`, so no V2 package
-      # depends on it compiling.
-      #
-      # Run either by hand if you ever need to touch V1:
-      #   cd packages/worker && bun scripts/generate-plugin-registry.ts
-      #   cd packages/client && npx tsc --noEmit
 
       - name: Test application release workflow
         run: node --test scripts/release/*.test.mjs
@@ -96,26 +67,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # The tests need this, and it is not obvious why.
-      #
-      # About fifteen workspace packages point `main`/`exports` at `dist`
-      # (`@valet/sdk`, `@valet/shared`, most `plugin-*`), while others point
-      # at `src` (`@valet/engine`, `@valet/api`, `@valet/workflow`). The ones
-      # that resolve to `dist` cannot be imported until something emits it,
-      # and `tsc --build` is that something.
-      #
-      # It used to happen by accident: Typecheck ran ahead of Test in ONE
-      # job, so the emit it performs as a side effect was already on disk.
-      # Splitting the jobs removed that, and the shards failed with
-      # `ERR_MODULE_NOT_FOUND` for `@valet/sdk/mcp`.
-      #
-      # So the dependency is stated here instead of inherited. The proper
-      # fix is to make every package resolve from source the way `engine`
-      # already does — every package here is private and none is published —
-      # which would delete this step. See the PR for why that is a change
-      # worth making on its own.
-      - name: Build workspace packages
-        run: pnpm typecheck
+      # Tests import emitted workspace packages. Emit them without repeating
+      # semantic checks in all four shards. The required typecheck job still
+      # checks the whole workspace and builds/typechecks the web app.
+      - name: Emit workspace packages
+        run: pnpm exec tsc --build --noCheck
 
       # No `--` before the flag. pnpm drops what follows it here, and vitest
       # would then run the WHOLE suite in every shard — four times the work,

@@ -8,7 +8,6 @@ import type {
   UsageDrillResponse,
   UsagePeriodSelection,
   UsageBreakdownResponse,
-  UsageSessionsResponse,
   UsageScopeName,
   UsageToolEfficiencyResponse,
   UsageOutcomesResponse,
@@ -19,8 +18,6 @@ import { api } from "~/api/client";
 export const qkUsage = {
   breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
     ["usage", "breakdown", period, scope, teamId] as const,
-  sessions: (window: string, useCase?: "orchestrator" | "session") =>
-    ["usage", "sessions", window, useCase] as const,
   items: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
     ["usage", "items", period, scope, useCase, teamId] as const,
   toolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) =>
@@ -81,20 +78,6 @@ export function useUsageItems(
   return useQuery<UsageDrillResponse>({
     queryKey: qkUsage.items(period, scope, useCase, teamId),
     queryFn: () => api.usageItems(period, scope, useCase, teamId),
-    staleTime: 60_000,
-    ...opts,
-  });
-}
-
-/** Kept for backward compatibility with any other callers. */
-export function useUsageSessions(
-  window: string = "7d",
-  useCase?: "orchestrator" | "session",
-  opts?: Partial<UseQueryOptions<UsageSessionsResponse>>,
-) {
-  return useQuery<UsageSessionsResponse>({
-    queryKey: qkUsage.sessions(window, useCase),
-    queryFn: () => api.usageSessions(window, useCase),
     staleTime: 60_000,
     ...opts,
   });

@@ -40,10 +40,14 @@
  * every row they touched. Agent-facing callers that hold only a user id
  * build the principal with `userPrincipal`.
  *
- * `POST /api/sessions/:id/sandbox-jwt` stays direct-owner-only
- * (`isSessionDirectOwner`) and uses neither check. It mints a credential
- * bound to one user, not a view of a shared resource.
+ * Sandbox credentials and file access also require `canAccessSessionResources`.
+ * That check verifies new execution audiences and preserves legacy runtime access.
  */
+import { and, eq, isNull } from "drizzle-orm";
+import type { Providers } from "../providers/types.js";
+import { assistants, assistantExecutions, childWatches } from "../schema/index.js";
+import { isLegacyAssistantRuntime } from "./legacy-runtime.js";
+import { threadVisibility } from "./thread-access.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { canAdministerTeam, isTeamMember } from "./teams.js";
@@ -133,6 +137,23 @@ export async function canResolveSessionGate(
   return canViewSession(db, session, caller);
 }
 
+/** The one person who may answer a gate, when the gate names one: a gate
+ * asking a member to lend their shared account (`PolicyDecision.approver`). */
+export function gateApprover(gate: { context?: Record<string, unknown> }): { userId: string; name?: string } | undefined {
+  const raw = gate.context?.approver;
+  if (!raw || typeof raw !== "object") return undefined;
+  const { userId, name } = raw as Record<string, unknown>;
+  return typeof userId === "string" && userId ? { userId, ...(typeof name === "string" ? { name } : {}) } : undefined;
+}
+
+/** Whether `caller` may answer `gate` once they may resolve the session's
+ * gates (`canResolveSessionGate`). A gate that names an approver answers to
+ * that person alone. */
+export function answersGate(gate: { context?: Record<string, unknown> }, caller: RequestPrincipal): boolean {
+  const approver = gateApprover(gate);
+  return !approver || (caller.type === "user" && caller.id === approver.userId);
+}
+
 /**
  * True when `caller` owns `session` outright: no membership, no admin
  * recovery path. A user owns the row stamped with its id. A team principal
@@ -158,4 +179,37 @@ export async function isSessionDirectOwner(
   if (session.userId !== caller.id) return false;
   if (session.ownerType === "team" && session.ownerId) return isTeamMember(db, session.ownerId, caller.id);
   return true;
+}
+
+/** Preserve established legacy access; new executions use their governing audience. */
+export async function canAccessSessionResources(
+  deps: Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword">,
+  session: SessionOwnerLike & { id: string; orgId: string; status: string },
+  caller: RequestPrincipal,
+): Promise<boolean> {
+  if (session.status === "deleted" || !await canViewSession(deps.db, session, caller)) return false;
+  if (session.ownerType !== "team") return isSessionDirectOwner(deps.db, session, caller);
+  const [root] = await deps.db.select({ id: assistants.id }).from(assistants)
+    .where(eq(assistants.sessionId, session.id)).limit(1);
+  if (root) return isLegacyAssistantRuntime(deps.db, session.id, session.orgId);
+  const stored = await deps.engineStore.getSession(session.id);
+  if (!stored) {
+    if (session.id.startsWith("execution:")) return false;
+    const [child] = await deps.db.select({ id: childWatches.childSessionId }).from(childWatches)
+      .where(eq(childWatches.childSessionId, session.id)).limit(1);
+    return !child && isSessionDirectOwner(deps.db, session, caller);
+  }
+  if (stored.orgId !== session.orgId || stored.owner.type !== "team" || stored.owner.id !== session.ownerId) return false;
+  const [execution] = await deps.db.select({ parentId: assistants.sessionId, threadId: assistantExecutions.governingThreadId })
+    .from(assistantExecutions).innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(and(eq(assistantExecutions.sessionId, session.id), eq(assistants.orgId, session.orgId),
+      eq(assistants.ownerType, "team"), eq(assistants.ownerId, session.ownerId), isNull(assistants.archivedAt))).limit(1);
+  if (execution) {
+    if (stored.parentSessionId !== execution.parentId || stored.parentThreadId !== execution.threadId) return false;
+  } else if (session.id.startsWith("execution:")) return false;
+  if (stored.parentSessionId || stored.parentThreadId) {
+    if (!stored.parentSessionId || !stored.parentThreadId) return false;
+    return threadVisibility(deps, session, { orgId: session.orgId, userId: caller.type === "user" ? caller.id : undefined })(null);
+  }
+  return isSessionDirectOwner(deps.db, session, caller);
 }

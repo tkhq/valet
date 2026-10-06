@@ -388,3 +388,26 @@ describe("EngineHost idle sweep", () => {
     host.evictAll();
   });
 });
+
+it("evicts an idle detached execution without deleting history, while retaining pending work", async () => {
+  vi.useFakeTimers();
+  const store = new InMemorySessionStore();
+  const host = buildHost(store, new HibernatingTestProvider(), { idleMinutes: 1 });
+  try {
+    const idle = await host.sessionFor("execution:idle", { userId: "u1", orgId: "o1", workspace: "/tmp/idle" });
+    const idleThread = await idle.ensureDefaultThread();
+    await store.saveDecisionGate(idle.id, idleThread.id, {
+      id: "resolved-gate", sessionId: idle.id, threadId: idleThread.id, queueItemId: "old-q",
+      resumeKey: "approval", ordinal: 0, type: "approval", title: "Resolved approval", actions: [],
+      status: "resolved", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const blocked = await host.sessionFor("execution:blocked", { userId: "u1", orgId: "o1", workspace: "/tmp/blocked" });
+    const thread = await blocked.ensureDefaultThread();
+    await thread.pause();
+    await thread.submitPrompt("Pending work", {});
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(host.liveSession(idle.id)).toBeNull();
+    expect(await store.getSession(idle.id)).not.toBeNull();
+    expect(host.liveSession(blocked.id)).toBe(blocked);
+  } finally { host.evictAll(); vi.useRealTimers(); }
+});

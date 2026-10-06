@@ -233,7 +233,22 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
     expect(draft.outputShape.paths).toContain("nodes.draft.result.text");
   });
 
-  it("describes an orchestrator node and still reports its unresolved paths", async () => {
+  it("stores the Thread step as orchestrator, the type an older binary can run", async () => {
+    api = await bootTestApi();
+    const create = (type: string) => fetch(`${api!.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `Step ${type}`, definition: {
+        version: "dag/v1",
+        nodes: [{ id: "start", type: "trigger" }, { id: "ask", type, prompt: "hello" }],
+        edges: [{ from: "start", to: "ask" }],
+      } }),
+    });
+    expect((await create("orchestrator")).status).toBe(201);
+    expect((await create("thread")).status).toBe(400);
+  });
+
+  it("describes a thread node and still reports its unresolved paths", async () => {
     api = await bootTestApi();
     const created = await createWorkflow(api.baseUrl, EFFECTFUL_DEFINITION);
 
@@ -242,6 +257,7 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
     const handOff = nodeNamed(body, "hand-off");
     expect(handOff.fidelity).toBe("described");
     expect(handOff.output).toBeUndefined();
+    expect(handOff.outputShape.paths).toContain("nodes.hand-off.result.threadId");
     // `draft` never ran, so its result is genuinely absent. The preview says
     // so rather than rendering the prompt with a hole in it and staying quiet.
     expect(handOff.unresolved.map((u) => u.path)).toEqual(["nodes.draft.result.response"]);
@@ -261,6 +277,7 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
 
     const kick = nodeNamed(await preview(api.baseUrl, created.id), "kick");
     expect(kick.warnings.join(" ")).toContain("wait.mode is 'none'");
+    expect(kick.outputShape.paths).toContain("nodes.kick.result.threadId");
     expect(kick.outputShape.paths).not.toContain("nodes.kick.result.response");
     expect(kick.outputShape.note).toContain("until_idle");
   });

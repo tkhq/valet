@@ -1,9 +1,9 @@
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * The three reads behind the team dashboard
  * (`docs/specs/2026-08-27-team-dashboard-design.md`):
  *
- *   - GET /api/teams/:id/children       — assistant runs across every team
- *     assistant, newest first, attributed to the spawning assistant.
+ *   - GET /api/sessions/:sessionId/children       — child work from the team runtime.
  *   - GET /api/usage/breakdown?scope=team:<id> — team-owned spend,
  *     member-gated.
  *   - GET /api/artifacts?ownerType=team&ownerId=<id> — team artifacts,
@@ -12,16 +12,15 @@
  * `local-user` is the member; `test-member` (the `x-valet-test-user-id`
  * stub header) stays OFF the team so every gate has a non-member to refuse.
  */
-import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
-import { bootTestApi, type TestApi } from "./_setup.js";
+import { afterEach, describe, expect, it } from "vitest";
 import { agentSessions, artifacts, childWatches, teamMembers, teams } from "../schema/index.js";
 import type {
-  CreateAssistantResponse,
-  GetTeamChildrenResponse,
+  ChildWorkResponse,
   ListArtifactsResponse,
   UsageBreakdownResponse,
 } from "../wire/types.js";
+import { bootTestApi, type TestApi } from "./_setup.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -41,14 +40,8 @@ async function seedTeam(target: TestApi): Promise<void> {
     .values({ teamId: "team_1", userId: "local-user", role: "admin" });
 }
 
-async function createTeamAssistant(target: TestApi, name: string): Promise<CreateAssistantResponse> {
-  const res = await fetch(`${target.baseUrl}/api/assistants`, {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ name, owner: { type: "team", id: "team_1" } }),
-  });
-  expect(res.status).toBe(201);
-  return (await res.json()) as CreateAssistantResponse;
+async function createTeamRuntime(target: TestApi) {
+  return await seedWorkspaceAssistant(target.providers.db, "local-org", { type: "team", id: "team_1" });
 }
 
 async function seedChild(
@@ -68,6 +61,9 @@ async function seedChild(
     createdAt: opts.createdAt,
     updatedAt: opts.createdAt,
   });
+  await db.execute(sql`INSERT INTO engine_threads(id,session_id,key,status,queue_mode,created_at,updated_at)
+    VALUES ('th-1',${opts.parentSessionId},'web:shared','idle','steer',1,1)
+    ON CONFLICT DO NOTHING`);
   await db.insert(childWatches).values({
     childSessionId: opts.childId,
     queueItemId: `qi-${opts.childId}`,
@@ -80,41 +76,36 @@ async function seedChild(
   });
 }
 
-describe("GET /api/teams/:id/children", () => {
-  it("lists runs across every team assistant, newest first, attributed to the spawning assistant", async () => {
+describe("GET /api/sessions/:sessionId/children", () => {
+  it("lists runs from the singleton team runtime, newest first", async () => {
     api = await bootTestApi();
     await seedTeam(api);
-    const sentinel = await createTeamAssistant(api, "Sentinel");
-    const triage = await createTeamAssistant(api, "Triage");
+    const sentinel = await createTeamRuntime(api);
 
     const now = Date.now();
     await seedChild(api, { childId: "child-a", parentSessionId: sentinel.sessionId, title: "Audit PR", settled: true, createdAt: now });
-    await seedChild(api, { childId: "child-b", parentSessionId: triage.sessionId, title: "Rotate creds", settled: false, createdAt: now + 1 });
+    await seedChild(api, { childId: "child-b", parentSessionId: sentinel.sessionId, title: "Rotate creds", settled: false, createdAt: now + 1 });
 
-    const res = await fetch(`${api.baseUrl}/api/teams/team_1/children`);
+    const res = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent((await createTeamRuntime(api)).sessionId)}/children`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as GetTeamChildrenResponse;
+    const body = (await res.json()) as ChildWorkResponse;
 
     expect(body.children).toHaveLength(2);
     expect(body.children[0]).toMatchObject({
       sessionId: "child-b",
       title: "Rotate creds",
       status: "running",
-      assistantId: triage.id,
-      assistantName: "Triage",
     });
     expect(body.children[1]).toMatchObject({
       sessionId: "child-a",
       status: "settled",
-      assistantId: sentinel.id,
-      assistantName: "Sentinel",
     });
   });
 
   it("keeps a running child visible past the 20-newest window", async () => {
     api = await bootTestApi();
     await seedTeam(api);
-    const sentinel = await createTeamAssistant(api, "Sentinel");
+    const sentinel = await createTeamRuntime(api);
 
     const base = Date.now() - 60_000;
     // The long-running child starts FIRST...
@@ -124,24 +115,27 @@ describe("GET /api/teams/:id/children", () => {
       await seedChild(api, { childId: `child-q${i}`, parentSessionId: sentinel.sessionId, title: `Quick ${i}`, settled: true, createdAt: base + 1000 + i });
     }
 
-    const res = await fetch(`${api.baseUrl}/api/teams/team_1/children`);
-    const body = (await res.json()) as GetTeamChildrenResponse;
+    const res = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent((await createTeamRuntime(api)).sessionId)}/children?limit=5`);
+    const body = (await res.json()) as ChildWorkResponse;
     const running = body.children.filter((c) => c.status === "running");
     expect(running.map((c) => c.sessionId)).toContain("child-old-running");
+    expect(body.children).toHaveLength(5);
+    expect(body.runningCount).toBe(1);
+    expect(body.nextCursor).toBeTruthy();
   });
 
-  it("404s a non-member, and answers an assistant-less team with an empty list", async () => {
+  it("404s a non-member, and answers an empty runtime without materializing its session", async () => {
     api = await bootTestApi();
     await seedTeam(api);
 
-    const nonMember = await fetch(`${api.baseUrl}/api/teams/team_1/children`, {
+    const nonMember = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent((await createTeamRuntime(api)).sessionId)}/children`, {
       headers: NON_MEMBER_HEADERS,
     });
     expect(nonMember.status).toBe(404);
 
-    const empty = await fetch(`${api.baseUrl}/api/teams/team_1/children`);
+    const empty = await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent((await createTeamRuntime(api)).sessionId)}/children`);
     expect(empty.status).toBe(200);
-    const body = (await empty.json()) as GetTeamChildrenResponse;
+    const body = (await empty.json()) as ChildWorkResponse;
     expect(body.children).toEqual([]);
   });
 });
@@ -230,7 +224,7 @@ describe("GET /api/usage/breakdown?scope=team&teamId=", () => {
 describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
   async function seedArtifact(
     target: TestApi,
-    opts: { id: string; ownerType: string; ownerId: string; title: string },
+    opts: { id: string; ownerType: string; ownerId: string; title: string; source?: { sessionId: string; threadId: string } },
   ): Promise<void> {
     const now = Date.now();
     await target.providers.db.insert(artifacts).values({
@@ -241,6 +235,7 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
       orgId: "local-org",
       actorUserId: "local-user",
       sourceMemoryPath: `notes/${opts.id}.md`,
+      ...(opts.source ? { sourceSessionId: opts.source.sessionId, sourceThreadId: opts.source.threadId } : {}),
       title: opts.title,
       content: "# hi",
       createdAt: now,
@@ -266,5 +261,23 @@ describe("GET /api/artifacts?ownerType=team&ownerId=<id>", () => {
 
     const malformed = await fetch(`${api.baseUrl}/api/artifacts?ownerType=user`);
     expect(malformed.status).toBe(400);
+  });
+
+  it("leaves out an artifact published from another member's helper thread", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await api.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    const open = async (asUser?: string) => await (await fetch(`${api!.baseUrl}/api/workspaces/team_1/conversation`, {
+      method: "POST", headers: asUser ? { "x-valet-test-user-id": asUser } : {},
+    })).json() as { sessionId: string; threadId: string };
+    await seedArtifact(api, { id: "art-theirs", ownerType: "team", ownerId: "team_1", title: "Theirs", source: await open("test-member") });
+    await seedArtifact(api, { id: "art-own", ownerType: "team", ownerId: "team_1", title: "Own", source: await open() });
+    await seedArtifact(api, { id: "art-shared", ownerType: "team", ownerId: "team_1", title: "Shared" });
+
+    const ids = async (query: string) => ((await (await fetch(`${api!.baseUrl}/api/artifacts${query}`)).json()) as ListArtifactsResponse)
+      .artifacts.map((a) => a.id).sort();
+    expect(await ids("?ownerType=team&ownerId=team_1")).toEqual(["art-own", "art-shared"]);
+    expect(await ids("?ownerType=team&ownerId=team_1&limit=10")).toEqual(["art-own", "art-shared"]);
+    expect(await ids("")).toEqual(["art-own", "art-shared"]);
   });
 });

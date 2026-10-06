@@ -35,6 +35,8 @@ import {
 /** Personal memory spans organizations; team access follows live membership, not an active org. */
 export interface MemoryScope {
   owner: Principal;
+  /** Host-selected execution scope; empty means explicitly shared owner memory. */
+  namespace?: string;
   actorUserId: string;
 }
 
@@ -112,17 +114,21 @@ export function renderFile(row: MemoryFileRow): string {
 interface ReadableOwner {
   ownerType: string;
   ownerId: string;
+  namespace: string;
   /** '' for the caller's own scope; `team:{id}/` for a read-time-projected
    * team scope. Never stored — purely a display/routing prefix. */
   prefix: string;
 }
 
 async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<ReadableOwner[]> {
-  const owners: ReadableOwner[] = [{ ownerType: scope.owner.type, ownerId: scope.owner.id, prefix: "" }];
+  const owners: ReadableOwner[] = [{ ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", prefix: "" }];
+  if (scope.owner.type === "team" && scope.namespace) {
+    owners.push({ ownerType: "team", ownerId: scope.owner.id, namespace: "", prefix: `team:${scope.owner.id}/` });
+  }
   if (scope.owner.type === "user") {
     const teams = await listTeamsForUser(db, scope.owner.id);
     for (const team of teams) {
-      owners.push({ ownerType: "team", ownerId: team.id, prefix: `team:${team.id}/` });
+      owners.push({ ownerType: "team", ownerId: team.id, namespace: "", prefix: `team:${team.id}/` });
     }
   }
   return owners;
@@ -149,16 +155,19 @@ async function resolveReadTarget(
   db: AppDb,
   scope: MemoryScope,
   path: string,
-): Promise<{ ownerType: string; ownerId: string; realPath: string } | null> {
+): Promise<{ ownerType: string; ownerId: string; namespace: string; realPath: string } | null> {
   const m = TEAM_PREFIX_RE.exec(path);
   if (!m) {
-    return { ownerType: scope.owner.type, ownerId: scope.owner.id, realPath: path };
+    return { ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", realPath: path };
+  }
+  const [, teamId, rest] = m;
+  if (scope.owner.type === "team" && scope.namespace && scope.owner.id === teamId) {
+    return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
   }
   if (scope.owner.type !== "user") return null;
-  const [, teamId, rest] = m;
   const member = await isTeamMember(db, teamId, scope.owner.id);
   if (!member) return null;
-  return { ownerType: "team", ownerId: teamId, realPath: rest };
+  return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
 }
 
 // ─── writeFile ─────────────────────────────────────────────────────────
@@ -199,7 +208,7 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
   const existingRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, path)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, path)))
     .limit(1);
   const existing = existingRows[0];
 
@@ -232,6 +241,7 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
   const row: MemoryFileRow = {
     ownerType: scope.owner.type,
     ownerId: scope.owner.id,
+    namespace: scope.namespace ?? "",
     path,
     title,
     content: finalContent,
@@ -264,7 +274,7 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
       await tx
         .update(memoryFiles)
         .set(row)
-        .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)));
+        .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.namespace, row.namespace), eq(memoryFiles.path, row.path)));
     } else {
       await tx.insert(memoryFiles).values(row);
     }
@@ -290,7 +300,7 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
   const existingRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, path)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, path)))
     .limit(1);
   const existing = existingRows[0];
 
@@ -327,7 +337,7 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
     .where(
       and(
         eq(memoryFiles.ownerType, scope.owner.type),
-        eq(memoryFiles.ownerId, scope.owner.id),
+        eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
         eq(memoryFiles.path, normalized),
       ),
     )
@@ -340,7 +350,7 @@ export async function removeFile(db: AppDb, scope: MemoryScope, path: string): P
     .where(
       and(
         eq(memoryFiles.ownerType, scope.owner.type),
-        eq(memoryFiles.ownerId, scope.owner.id),
+        eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
         eq(memoryFiles.path, normalized),
       ),
     );
@@ -381,7 +391,7 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
   const source = rows.find((r) => r.path === from);
   if (!source) {
     throw new NotFoundError("memory file", from);
@@ -408,13 +418,13 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
         updatedAt: now,
         actorUserId: scope.actorUserId,
       })
-      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, from)));
+      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, from)));
     for (const ref of referencers) {
       await tx
         .update(memoryFiles)
         .set({ content: ref.content, version: ref.row.version + 1, updatedAt: now, actorUserId: scope.actorUserId })
         .where(
-          and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, ref.row.path)),
+          and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, ref.row.path)),
         );
     }
   });
@@ -427,7 +437,7 @@ export async function moveFile(db: AppDb, scope: MemoryScope, params: MoveFilePa
   const movedRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, to)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, to)))
     .limit(1);
   const moved = movedRows[0];
   if (!moved) {
@@ -464,7 +474,7 @@ export async function linksForFile(db: AppDb, scope: MemoryScope, path: string):
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
   const byPath = new Map(rows.map((r) => [r.path, r]));
   const source = byPath.get(normalized);
   if (!source) {
@@ -579,7 +589,7 @@ async function readDirectory(db: AppDb, scope: MemoryScope, path: string): Promi
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)));
+    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.namespace, target.namespace)));
 
   const { subdirs: subdirSet0, files } = groupEntries(rows, normalizedReal);
 
@@ -619,7 +629,7 @@ export async function readFile(
   const rowRows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.path, normalized)))
+    .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.namespace, target.namespace), eq(memoryFiles.path, normalized)))
     .limit(1);
   const row = rowRows[0];
 
@@ -629,7 +639,7 @@ export async function readFile(
     const rows = await db
       .select({ path: memoryFiles.path })
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId)));
+      .where(and(eq(memoryFiles.ownerType, target.ownerType), eq(memoryFiles.ownerId, target.ownerId), eq(memoryFiles.namespace, target.namespace)));
     const prefix = `${normalized}/`;
     if (rows.some((r) => r.path.startsWith(prefix))) {
       return readDirectory(db, scope, `${path}/`);
@@ -655,7 +665,7 @@ export async function readOwnFile(db: AppDb, scope: MemoryScope, path: string): 
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, normalized)))
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, normalized)))
     .limit(1);
   return rows[0] ?? null;
 }
@@ -739,12 +749,12 @@ async function copyTeamFile(
     const sourceOwner = direction === "push" ? scope.owner : teamOwner;
     const destinationOwner = direction === "push" ? teamOwner : scope.owner;
     const [source] = await tx.select().from(memoryFiles).where(and(
-      eq(memoryFiles.ownerType, sourceOwner.type), eq(memoryFiles.ownerId, sourceOwner.id),
+      eq(memoryFiles.ownerType, sourceOwner.type), eq(memoryFiles.ownerId, sourceOwner.id), eq(memoryFiles.namespace, direction === "push" ? scope.namespace ?? "" : ""),
       eq(memoryFiles.path, from),
     )).limit(1);
     if (!source) throw new NotFoundError("memory file", input.from);
     const destinationWhere = and(eq(memoryFiles.ownerType, destinationOwner.type),
-      eq(memoryFiles.ownerId, destinationOwner.id), eq(memoryFiles.path, path));
+      eq(memoryFiles.ownerId, destinationOwner.id), eq(memoryFiles.namespace, direction === "pull" ? scope.namespace ?? "" : ""), eq(memoryFiles.path, path));
     // The row lock serializes revision comparison with all updates and deletes,
     // including writers that do not acquire the team ownership lock.
     const [destination] = await tx.select().from(memoryFiles).where(destinationWhere).for("update");
@@ -758,7 +768,7 @@ async function copyTeamFile(
     const now = Date.now();
     const row: MemoryFileRow = {
       ...source,
-      ownerType: destinationOwner.type, ownerId: destinationOwner.id, path,
+      ownerType: destinationOwner.type, ownerId: destinationOwner.id, namespace: direction === "pull" ? scope.namespace ?? "" : "", path,
       orgId: direction === "push" ? team.orgId : "",
       actorUserId: scope.actorUserId, sourceSessionId: "", version: (destination?.version ?? 0) + 1,
       sourceId: null, upstreamPath: null, contentSha: null,
@@ -800,7 +810,7 @@ export async function listFiles(db: AppDb, scope: MemoryScope, opts?: { prefix?:
     const rows = await db
       .select()
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId)));
+      .where(and(eq(memoryFiles.ownerType, owner.ownerType), eq(memoryFiles.ownerId, owner.ownerId), eq(memoryFiles.namespace, owner.namespace)));
     for (const row of rows) {
       const virtualPath = `${owner.prefix}${row.path}`;
       if (opts?.prefix && !virtualPath.startsWith(opts.prefix)) continue;
@@ -978,7 +988,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
   const now = Date.now();
 
   const ownerClause = or(
-    ...owners.map((o) => and(eq(memoryFiles.ownerType, o.ownerType), eq(memoryFiles.ownerId, o.ownerId))),
+    ...owners.map((o) => and(eq(memoryFiles.ownerType, o.ownerType), eq(memoryFiles.ownerId, o.ownerId), eq(memoryFiles.namespace, o.namespace))),
   );
 
   const rankExpr = sql<number>`ts_rank_cd(search_vector, ${tsQuery})`;
@@ -1001,6 +1011,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     type: string;
     ownerType: string;
     ownerId: string;
+    namespace: string;
     rank: number;
     snippet: string;
   }>;
@@ -1013,6 +1024,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
         type: memoryFiles.type,
         ownerType: memoryFiles.ownerType,
         ownerId: memoryFiles.ownerId,
+        namespace: memoryFiles.namespace,
         rank: rankExpr,
         snippet: snippetExpr,
       })
@@ -1039,10 +1051,10 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     throw err;
   }
 
-  const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}`, o.prefix]));
+  const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}:${o.namespace}`, o.prefix]));
 
   return rows.map((r) => ({
-    path: `${prefixByOwner.get(`${r.ownerType}:${r.ownerId}`) ?? ""}${r.path}`,
+    path: `${prefixByOwner.get(`${r.ownerType}:${r.ownerId}:${r.namespace}`) ?? ""}${r.path}`,
     title: r.title,
     description: r.description,
     type: r.type,
@@ -1068,7 +1080,7 @@ export async function exportFiles(db: AppDb, scope: MemoryScope): Promise<Record
   const rows = await db
     .select()
     .from(memoryFiles)
-    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id)));
+    .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? "")));
 
   const manifest: Record<string, ExportEntry> = {};
   for (const row of rows) {
@@ -1199,7 +1211,7 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
     const existingRows = await db
       .select()
       .from(memoryFiles)
-      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.path, finalPath)))
+      .where(and(eq(memoryFiles.ownerType, scope.owner.type), eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""), eq(memoryFiles.path, finalPath)))
       .limit(1);
     const existing = existingRows[0];
 
@@ -1223,6 +1235,7 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
     const row: MemoryFileRow = {
       ownerType: scope.owner.type,
       ownerId: scope.owner.id,
+      namespace: scope.namespace ?? "",
       path: finalPath,
       title,
       content: parsed.body,
@@ -1254,7 +1267,7 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
         await tx
           .update(memoryFiles)
           .set(row)
-          .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.path, row.path)));
+          .where(and(eq(memoryFiles.ownerType, row.ownerType), eq(memoryFiles.ownerId, row.ownerId), eq(memoryFiles.namespace, row.namespace), eq(memoryFiles.path, row.path)));
       } else {
         await tx.insert(memoryFiles).values(row);
       }

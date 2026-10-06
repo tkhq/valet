@@ -1,7 +1,7 @@
 /**
  * Workflows queries (engine v2 Phase 5 decision 19 — deliberately spartan
  * web surface). House pattern: a query-key factory per resource file,
- * mirroring `~/api/memory` / `~/api/orchestrator`.
+ * mirroring `~/api/memory` / `~/api/workspace-runtime`.
  */
 import {
   useMutation,
@@ -21,7 +21,6 @@ import type {
   WorkflowWebhookResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
-  ListAllWorkflowRunsResponse,
   ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
@@ -37,9 +36,9 @@ import type {
   ListWorkflowVersionsResponse,
   WorkflowEventTriggerResponse,
   WorkflowScheduleResponse,
+  WorkflowTriggerItem,
 } from "@valet/api/wire";
-import { api, ApiError, type OwnerFilter, type WorkflowRunFilter, type WorkflowRunPage } from "./client";
-import { qkPolicies } from "./policies";
+import { api, ApiError, type OwnerFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
   /** The owner is a trailing element, so `["workflows"]` stays the prefix
@@ -53,8 +52,6 @@ export const qkWorkflows = {
   // invalidates all of them.
   runs: (id: string, page?: WorkflowRunPage) =>
     ["workflows", id, "runs", ...(page ? [page] : [])] as const,
-  runList: (filter?: WorkflowRunFilter) =>
-    ["workflows", "run-list", ...(filter ? [filter] : [])] as const,
   run: (runId: string) => ["workflows", "runs", runId] as const,
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
@@ -166,19 +163,6 @@ export function useWorkflowRuns(
   });
 }
 
-/** Runs across every workflow the caller can reach. Pass `parentRunId` to
- * list one batch parent's child runs. */
-export function useRuns(
-  filter?: WorkflowRunFilter,
-  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
-) {
-  return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.runList(filter),
-    queryFn: () => api.listRuns(filter),
-    ...opts,
-  });
-}
-
 /** Every active workflow gate the calling principal can resolve. */
 export function useWorkflowActionRequired() {
   return useQuery<ListWorkflowActionRequiredResponse>({
@@ -249,20 +233,6 @@ export function useTriggerCatalog() {
   });
 }
 
-/** `owner` scopes the hub Runs tab to one workspace. */
-export function useAllWorkflowRuns(
-  owner?: OwnerFilter,
-  page?: WorkflowRunPage,
-  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
-) {
-  return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.allRuns(owner, page),
-    queryFn: () => api.listAllWorkflowRuns(owner, page),
-    refetchInterval: 5000, // runs move; same cadence as run detail
-    ...opts,
-  });
-}
-
 // ── Mutations ────────────────────────────────────────────────────────────
 
 export function useCreateWorkflow() {
@@ -330,18 +300,22 @@ export function useWorkflowPermissions(
   });
 }
 
-/** Pre-approves every gating action of the workflow: the server derives the
- * set from the stored definition and writes one per-user allow override per
- * action. Refreshes the predictions and the settings overrides list. */
+/** Persist permissions for this workflow only. */
 export function useAllowWorkflowPermissions(id: string) {
   const qc = useQueryClient();
-  return useMutation<AllowWorkflowPermissionsResponse, Error, void>({
-    mutationFn: () => api.allowWorkflowPermissions(id),
+  return useMutation<AllowWorkflowPermissionsResponse, Error, string[]>({
+    mutationFn: (actionIds) => api.allowWorkflowPermissions(id, { actionIds }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
-      qc.invalidateQueries({ queryKey: qkPolicies.myOverrides() });
     },
   });
+}
+
+export function useRevokeWorkflowPermissions(id: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: () => api.revokeWorkflowPermissions(id), onSuccess: () => {
+    qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
+  } });
 }
 
 export function useStartRun(id: string) {
@@ -434,6 +408,17 @@ export function useCancelRun(runId: string) {
   });
 }
 
+/** Takes a failed run out of the viewer's Needs attention list. */
+export function useDismissRun() {
+  const qc = useQueryClient();
+  return useMutation<{ ok: true }, Error, string>({
+    mutationFn: (runId) => api.dismissWorkflowRun(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkWorkflows.list() });
+    },
+  });
+}
+
 // ── Triggers: webhook, schedules, event triggers ─────────────────────────
 
 /** The webhook status read treats "no webhook configured" (404) as `null`
@@ -481,6 +466,26 @@ export function useDeleteWorkflowWebhook(id: string) {
 function useInvalidateTriggers() {
   const qc = useQueryClient();
   return () => qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+}
+
+/** Turns a workflow on or off: every schedule and event trigger it has.
+ * Turning it on leaves a proposal (a trigger Valet suggested, id
+ * `proposal-…`) off, because a person must still review it. Each trigger
+ * saves on its own, so a failure is reported, and the trigger list is read
+ * again either way to show what actually saved. */
+export function useSetWorkflowEnabled() {
+  const invalidate = useInvalidateTriggers();
+  return useMutation<void, Error, { triggers: WorkflowTriggerItem[]; enabled: boolean }>({
+    mutationFn: async ({ triggers, enabled }) => {
+      const targets = enabled ? triggers.filter((trigger) => trigger.enabled || !trigger.id.startsWith("proposal-")) : triggers;
+      const results = await Promise.allSettled(targets.map((trigger) => trigger.kind === "schedule"
+        ? api.updateWorkflowSchedule(trigger.id, { enabled })
+        : api.updateWorkflowEventTrigger(trigger.id, { enabled })));
+      const failed = results.filter((result) => result.status === "rejected").length;
+      if (failed > 0) throw new Error(`${failed} of ${targets.length} triggers did not save.`);
+    },
+    onSettled: invalidate,
+  });
 }
 
 export function useCreateSchedule() {

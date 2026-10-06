@@ -7,7 +7,12 @@ description: How to effectively use Slack tools to read, understand, and interac
 
 ## Reading Channels
 
-Use `slack.list_channels` to find channel IDs. Use `slack.read_history` to read messages. Key parameters:
+Use `slack.list_channels` to find channel IDs. Read its `access_note` before concluding that a channel is missing.
+`scope="all"` lists public channels only. Use `scope="joined"` (the default) to find private channels where Valet is a member.
+Team and organization runs use the connected bot’s membership for private channels. Personal runs also require their linked owner to be a channel member. Direct messages remain restricted.
+Use a public channel or an authorized personal run. Do not borrow a member's access for a team workflow.
+
+Use `slack.read_history` to read messages. Key parameters:
 
 - **`filter`** -- case-insensitive keyword filter, useful for finding specific topics in noisy channels
 - **`threads_only`** -- only return messages with thread replies, good for finding discussions in alert channels
@@ -76,3 +81,23 @@ Access is scoped to channels the session owner is a member of. If access is deni
 ## Pagination
 
 Large channels require paging via `cursor` / `next_cursor`. Prefer narrowing with `oldest` / `latest` over paging through the full history.
+
+## Custom sender identity
+
+When asked to send as an identity, set `sender_name` on `dm_user`, `dm_owner`, `send_message`, or `reply_to_origin`.
+For an uploaded photo, call `profile_pictures.publish_avatar` in the chat containing it.
+The tool publishes a resized copy of the selected image. It does not publish the chat or other attachments.
+Use its returned `avatar_url` as `sender_avatar_url`. Store that URL in the workflow so future runs need no access to this chat.
+Use `image_index` to select among multiple photos, or `message_id` to select a recent upload.
+Alternatively, use a public HTTPS image URL. Do not invent an image URL.
+For example, use `sender_name: "Hestia · People"` and the user-provided image URL.
+These fields affect that message only. They do not change the bot account, credentials, or DM conversation.
+If omitted, messages use the existing workspace name or bot identity.
+Slack requires `chat:write.customize`. If Slack rejects customization, Valet retries with the bot identity to deliver the message.
+
+For a workflow, save both fields in its Slack tool steps. To share one identity, declare it in an upstream `set` node.
+For example, use node `identity` with `values: { sender_name: "Hestia · People", sender_avatar_url: "https://example.com/hestia.png" }`.
+Set each Slack step's parameters to `sender_name: "{{nodes.identity.result.sender_name}}"` and `sender_avatar_url: "{{nodes.identity.result.sender_avatar_url}}"`.
+Connect the identity node before those steps. Replace the example URL with the supplied image URL, or omit the avatar field.
+For agent steps, put the identity and the instruction to pass these tool arguments in the step's prompt.
+Automatic replies, approval cards, and file uploads keep their existing identity.

@@ -4,7 +4,7 @@ export interface RuntimeModelContext {
   activeSelection: string;
   provider: string;
   modelId: string;
-  temporaryOverride?: "switch_model" | "role model" | "submission model";
+  temporaryOverride?: "switch_model" | "role model" | "submission model" | "provider fallback";
 }
 
 /** Append current facts without changing the stored prompt or inferring a model tier. */

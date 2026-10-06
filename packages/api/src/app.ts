@@ -1,3 +1,4 @@
+import { threadsRouter } from "./routes/threads.js";
 /**
  * Hono app factory. Wiring lives here; main.ts only handles boot + listen.
  *
@@ -34,12 +35,17 @@ import { teamsRouter } from "./routes/teams.js";
 import { teamApiKeysRouter } from "./routes/team-api-keys.js";
 import { memoryRouter } from "./routes/memory.js";
 import { securityRouter } from "./routes/security.js";
-import { orchestratorRouter } from "./routes/orchestrator.js";
-import { assistantsRouter } from "./routes/assistants.js";
+import { workspaceBriefingsRouter } from "./routes/workspace-briefings.js";
+import { workspaceChannelsRouter } from "./routes/workspace-channels.js";
+import { workspaceActiveWorkRouter } from "./routes/workspace-active-work.js";
+import { workspaceOutcomesRouter } from "./routes/workspace-outcomes.js";
+import { legacyOrchestratorRouter, workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
+import { childWorkRouter } from "./routes/child-work.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { changelogRouter } from "./routes/changelog.js";
 import { workflowPreviewRouter } from "./routes/workflow-preview.js";
 import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
+import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { templatesRouter } from "./routes/templates.js";
@@ -64,7 +70,7 @@ import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js"
 import { githubConnectRouter } from "./routes/github-connect.js";
 import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
-import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
+import { sourcesRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { browserRouter } from "./routes/browser.js";
@@ -82,6 +88,7 @@ import { SLACK_WEBHOOK_MOUNT } from "./services/slack-app.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { artifactsRouter, buildArtifactsPublicRouter } from "./routes/artifacts.js";
+import { eventReceiptsRouter } from "./routes/event-receipts.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
@@ -304,6 +311,8 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
 
+  app.route("/api/threads", threadsRouter);
+  app.route("/api/sessions", childWorkRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
@@ -313,6 +322,9 @@ export function createApp(
   app.route("/api/sessions", ratingsRouter);
   app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
+  // Before the teams router, so the legacy team runtime path is not read as a team route.
+  // Installed CLI builds and team-key CI clients still call these to find their target.
+  app.route("/api", legacyOrchestratorRouter);
   app.route("/api/teams", teamDeletionRequestsRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/teams", teamApiKeysRouter);
@@ -320,11 +332,13 @@ export function createApp(
   // Authed artifact surface (share/list/manage). The public `GET /:token`
   // half is mounted pre-auth above.
   app.route("/api/artifacts", artifactsRouter);
-  app.route("/api/orchestrator", orchestratorRouter);
-  // Upload endpoints are mounted before the assistants router so its /:id
-  // routes cannot claim the profile-picture path.
+  app.route("/api/workspaces", workspaceRuntimeRouter);
+  app.route("/api/workspaces", workspaceOutcomesRouter);
+  app.route("/api/workspaces", workspaceActiveWorkRouter);
+  app.route("/api/workspaces", workspaceBriefingsRouter);
+  app.route("/api/workspaces", workspaceChannelsRouter);
+
   app.route("/api", profilePicturesRouter);
-  app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);
   app.route("/api/changelog", changelogRouter);
   // Trigger routes first: workflowsRouter's `GET /:id` would otherwise
@@ -333,6 +347,7 @@ export function createApp(
   // Preview before the CRUD router for the same reason: `POST /:id/preview`
   // must not be read as a path under one of its routes.
   app.route("/api/workflows", workflowPreviewRouter);
+  app.route("/api/workflows", workflowConversationRouter);
   app.route("/api/workflows", workflowsRouter);
   app.route("/api/templates", templatesRouter);
   app.route("/api/plugins", pluginsRouter);
@@ -373,12 +388,12 @@ export function createApp(
   app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/slack", slackAppRouter);
   app.route("/api/org/sources", sourcesRouter);
-  app.route("/api/sources", sourcesPublicRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
   // Mounted at /api (not /api/events) because the router carries both the
   // /events* and /event-subscriptions* path families. Placed after every
   // more-specific /api/* router above so nothing gets shadowed.
+  app.route("/api", eventReceiptsRouter);
   app.route("/api", eventsRouter);
 
   // WebSocket — must be registered against the same Hono instance the runtime

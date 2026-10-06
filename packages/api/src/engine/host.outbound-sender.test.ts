@@ -1,3 +1,5 @@
+import { createTeam } from "../services/teams.js";
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Session-backed agent actions must resolve their sender identity when they
  * post through a Slack action. `Session.options` is the engine's public seam.
@@ -7,12 +9,11 @@ import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { createAssistant } from "../assistants/service.js";
-import { actionPolicies, assistants } from "../schema/index.js";
+
+import { actionPolicies, teams } from "../schema/index.js";
 
 const USER = "local-user";
 const ORG = "local-org";
-const AVATAR_URL = "https://cdn.example.com/release-bot.png";
 
 let faux: FauxProviderRegistration | undefined;
 
@@ -49,7 +50,7 @@ async function allowSlackSend(api: TestApi): Promise<void> {
   );
 }
 
-function queueSlackSend(): void {
+function queueSlackSend(sender: { sender_name?: string; sender_avatar_url?: string } = {}): void {
   if (!faux) throw new Error("faux model is not registered");
   faux.setResponses([
     fauxAssistantMessage(
@@ -58,7 +59,7 @@ function queueSlackSend(): void {
           "call_tool",
           {
             tool_id: "slack.send_message",
-            params: { channel: "C1", text: "from a workflow session" },
+            params: { channel: "C1", text: "from a workflow session", ...sender },
             summary: "Send the workflow result",
           },
           { id: "tc-slack-send" },
@@ -81,8 +82,11 @@ function mockSlackPost(): ReturnType<typeof vi.fn> {
   return fetchMock;
 }
 
-async function postThroughSession(session: { prompt(content: string): Promise<unknown> }): Promise<Record<string, unknown>> {
-  queueSlackSend();
+async function postThroughSession(
+  session: { prompt(content: string): Promise<unknown> },
+  sender: { sender_name?: string; sender_avatar_url?: string } = {},
+): Promise<Record<string, unknown>> {
+  queueSlackSend(sender);
   const fetchMock = mockSlackPost();
   await session.prompt("Send the workflow result.");
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
@@ -103,13 +107,10 @@ describe("EngineHost outbound sender identity", () => {
     api = undefined;
   });
 
-  it("uses the current default assistant for a workflow session node", async () => {
+  it("uses the bot identity for a personal workflow session", async () => {
     api = await bootTestApi({ plugins: [] });
-    const assistant = await createAssistant(api.providers.db, ORG, { type: "user", id: USER }, "Release bot");
-    await api.providers.db
-      .update(assistants)
-      .set({ avatarUrl: AVATAR_URL })
-      .where(eq(assistants.id, assistant.id));
+    const assistant = await seedWorkspaceAssistant(api.providers.db, ORG, { type: "user", id: USER });
+
 
     const session = await api.providers.engineHost.workflowSessionFor("wf:run1:node1", {
       actorUserId: USER,
@@ -118,43 +119,36 @@ describe("EngineHost outbound sender identity", () => {
       workspace: "/tmp",
     });
 
-    expect(await senderFor(session)).toEqual({ displayName: "Release bot", avatarUrl: AVATAR_URL });
+    expect(await senderFor(session)).toBeUndefined();
   });
 
-  it("uses the current parent assistant for a child-agent session", async () => {
+  it("uses the current team name for a child-agent session", async () => {
     api = await bootTestApi({ plugins: [] });
-    const assistant = await createAssistant(api.providers.db, ORG, { type: "user", id: USER }, "Release bot");
-    await api.providers.db
-      .update(assistants)
-      .set({ avatarUrl: AVATAR_URL })
-      .where(eq(assistants.id, assistant.id));
+    const team = await createTeam(api.providers.db, { orgId: ORG, name: "Release team", creatorUserId: USER });
+    const assistant = await seedWorkspaceAssistant(api.providers.db, ORG, { type: "team", id: team.id });
+
 
     const session = await api.providers.engineHost.childSessionFor("child:release", {
       parentSessionId: assistant.sessionId,
       parentThreadId: "thread:parent",
       actorUserId: USER,
       orgId: ORG,
-      owner: { type: "user", id: USER },
+      owner: { type: "team", id: team.id },
       workspace: "/tmp",
     });
-    await api.providers.db
-      .update(assistants)
-      .set({ name: "Release captain", avatarUrl: null })
-      .where(eq(assistants.id, assistant.id));
 
-    expect(await senderFor(session)).toEqual({ displayName: "Release captain" });
+
+    await api.providers.db.update(teams).set({ name: "Release team renamed" }).where(eq(teams.id, team.id));
+    expect(await senderFor(session)).toEqual({ displayName: "Release team renamed" });
   });
 
-  it("posts a workflow session action with the configured Slack identity", async () => {
+  it("posts a workflow agent action with org credentials and its requested name", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     api = await bootTestApi({ plugins: [slackPlugin] });
     await allowSlackSend(api);
-    const assistant = await createAssistant(api.providers.db, ORG, { type: "user", id: USER }, "Release bot");
-    await api.providers.db
-      .update(assistants)
-      .set({ avatarUrl: AVATAR_URL })
-      .where(eq(assistants.id, assistant.id));
+    const assistant = await seedWorkspaceAssistant(api.providers.db, ORG, { type: "user", id: USER });
+
 
     const session = await api.providers.engineHost.workflowSessionFor("wf:run1:node1", {
       actorUserId: USER,
@@ -163,11 +157,11 @@ describe("EngineHost outbound sender identity", () => {
       workspace: "/tmp",
     });
 
-    await expect(postThroughSession(session)).resolves.toMatchObject({
+    await expect(postThroughSession(session, { sender_name: "Hestia · People", sender_avatar_url: "https://example.com/hestia.png" })).resolves.toMatchObject({
       channel: "C1",
       text: "from a workflow session",
-      username: "Release bot",
-      icon_url: AVATAR_URL,
+      username: "Hestia · People",
+      icon_url: "https://example.com/hestia.png",
     });
   });
 

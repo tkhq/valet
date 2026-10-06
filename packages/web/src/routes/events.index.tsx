@@ -1,48 +1,35 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
-import { TabBar, tabPanelId } from "~/components/primitives";
+import { TabBar, tabPanelId, pageClass } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
-import { EventFeed, type FeedScope } from "~/components/events/feed";
+import { EventLog, type LogFilter } from "~/components/events/event-log";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
-import { DropsPanel } from "~/components/events/drops-panel";
+import { ChannelsPanel } from "~/components/channels/channels-panel";
 import { textParam } from "~/lib/search-params";
 
-/**
- * `/events` — the UI over the event system (feed, catalog, subscriptions;
- * see the events router in packages/api). Three tabs:
- *
- * - Activity: ingested events, filterable by service/key, each expandable
- *   into its payload and delivery attempts. The scope control starts at the
- *   active workspace's events and opens to the whole org on request.
- * - Subscriptions: the rules that turn a matching event into a workflow
- *   run or an orchestrator prompt, listed for the active workspace.
- * - Problems: reasons why an event did not become an activity row.
- *
- * The selected tab and the feed scope live in search params. A shared
- * Problems search or cursor must also select Problems after reload. This
- * follows the workflows hub's `?tab=` pattern. One event has its own URL,
- * `/events/$eventId`, because a broken run needs a paste-able reference.
- */
-type TabId = "activity" | "subscriptions" | "problems";
+/** Channels, the Log (events and problems in one list), and subscriptions.
+ * Legacy tab URLs (`activity`, `logs`, `problems`, `receipts`) open the Log. */
+type TabId = "channels" | "log" | "subscriptions";
 
 interface EventsSearch {
   tab?: TabId;
-  scope?: FeedScope;
-  problemsQ?: string;
-  problemsCursor?: string;
-  problemsDirection?: "previous";
+  review?: string;
+  status?: LogFilter;
+  q?: string;
 }
 
 /** Only non-default values are written to the URL. An absent or hand-edited
- * value reads as the default tab and workspace scope. */
+ * value reads as the default tab and the whole Log. */
 export function readEventsSearch(raw: unknown): EventsSearch {
   const tabValue = textParam(raw, "tab");
-  const tab = tabValue === "subscriptions" || tabValue === "problems" ? tabValue : undefined;
-  const scope = textParam(raw, "scope") === "all" ? "all" : undefined;
-  const problemsQ = textParam(raw, "problemsQ");
-  const problemsCursor = textParam(raw, "problemsCursor");
-  const problemsDirection = textParam(raw, "problemsDirection") === "previous" ? "previous" as const : undefined;
-  return { ...(tab ? { tab } : {}), ...(scope ? { scope } : {}), ...(problemsQ ? { problemsQ } : {}), ...(problemsCursor ? { problemsCursor } : {}), ...(problemsDirection ? { problemsDirection } : {}) };
+  const tab = tabValue === "subscriptions" ? tabValue
+    : ["log", "activity", "logs", "problems", "receipts"].includes(tabValue ?? "") ? "log" : undefined;
+  const statusValue = tabValue === "receipts" ? "receipts" : tabValue === "problems" ? "problems" : textParam(raw, "status");
+  const status = statusValue === "problems" || statusValue === "receipts" ? statusValue : undefined;
+  // `problemsQ` is the old Event Logs search; it now searches the Log.
+  const q = textParam(raw, "q") ?? textParam(raw, "problemsQ");
+  const review = textParam(raw, "review");
+  return { ...(review ? { review } : {}), ...(tab ? { tab } : {}), ...(status ? { status } : {}), ...(q ? { q } : {}) };
 }
 
 export const Route = createFileRoute("/events/")({
@@ -52,9 +39,9 @@ export const Route = createFileRoute("/events/")({
 
 const TABS_LABEL = "Events sections";
 const TABS = [
-  { id: "activity", label: "Activity" },
+  { id: "channels", label: "Channels" },
+  { id: "log", label: "Log" },
   { id: "subscriptions", label: "Subscriptions" },
-  { id: "problems", label: "Problems" },
 ] as const;
 
 export function EventsPage() {
@@ -62,25 +49,37 @@ export function EventsPage() {
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
-  const [tab, setTab] = useState<TabId>(search.tab ?? "activity");
-  useEffect(() => setTab(search.tab ?? "activity"), [search.tab]);
-  const scope: FeedScope = search.scope ?? "workspace";
+  const [selectedTab, setTab] = useState<TabId>(search.tab ?? "channels");
+  const tab = selectedTab;
+  useEffect(() => setTab(search.tab ?? "channels"), [search.tab]);
+
+  /** Writes the Log's filters to the URL, so Back and a shared link restore them. */
+  function setLog(next: Partial<Pick<EventsSearch, "status" | "q">>) {
+    const merged = { status: search.status, q: search.q, ...next };
+    void navigate({
+      to: "/events",
+      search: {
+        tab: "log" as const,
+        ...(merged.status && merged.status !== "all" ? { status: merged.status } : {}),
+        ...(merged.q ? { q: merged.q } : {}),
+      },
+    });
+  }
 
   function selectTab(next: TabId) {
     setTab(next);
     void navigate({
       to: "/events",
       search: (previous) => {
-        const current = readEventsSearch(previous);
-        const { tab: _tab, ...rest } = current;
-        return next === "activity" ? rest : { ...rest, tab: next };
+        const { tab: _tab, ...rest } = readEventsSearch(previous);
+        return next === "channels" ? rest : { ...rest, tab: next };
       },
     });
   }
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="font-display text-2xl text-ink">Events</h1>
           <WorkspaceClause />
@@ -99,28 +98,16 @@ export function EventsPage() {
           aria-labelledby={`${tabPanelId(TABS_LABEL, tab)}-tab`}
           className="mt-6"
         >
-          {tab === "activity" && (
-            <EventFeed
-              scope={scope}
-              onScopeChange={(next) =>
-                void navigate({ to: "/events", search: { ...(tab === "activity" ? {} : { tab }), ...(next === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(search.problemsCursor ? { problemsCursor: search.problemsCursor } : {}), ...(search.problemsDirection ? { problemsDirection: search.problemsDirection } : {}) } })
-              }
+          {tab === "channels" && <ChannelsPanel />}
+          {tab === "log" && (
+            <EventLog
+              filter={search.status ?? "all"}
+              onFilterChange={(status) => setLog({ status })}
+              query={search.q ?? ""}
+              onQueryChange={(q) => setLog({ q })}
             />
           )}
-          {tab === "subscriptions" && <SubscriptionsPanel />}
-          {tab === "problems" && (
-            <DropsPanel
-              query={search.problemsQ}
-              cursor={search.problemsCursor}
-              direction={search.problemsDirection}
-              onQueryChange={(problemsQ) => {
-                problemsQ = problemsQ.trim() ? problemsQ : "";
-                void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(problemsQ ? { problemsQ } : {}) } });
-              }}
-              onPrevious={(problemsCursor) => void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), ...(problemsCursor ? { problemsCursor, problemsDirection: "previous" as const } : {}) } })}
-              onNext={(problemsCursor) => void navigate({ to: "/events", search: { tab: "problems", ...(scope === "all" ? { scope: "all" as const } : {}), ...(search.problemsQ ? { problemsQ: search.problemsQ } : {}), problemsCursor } })}
-            />
-          )}
+          {tab === "subscriptions" && <SubscriptionsPanel reviewId={search.review} onReviewClose={() => void navigate({ to: "/events", search: { tab: "subscriptions" } })} />}
         </div>
       </div>
     </div>

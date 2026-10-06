@@ -28,12 +28,14 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AttentionEvent } from "../orchestrator/attention.js";
+import { savedGatePrompts } from "./gate-prompts.js";
+import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -90,6 +92,10 @@ class KeyedTransport extends FakeTransport {
   override readonly channelType: string = "keyed";
   conversationKeyFromThreadKey(threadKey: string): string | null {
     return threadKey.startsWith("keyed:") ? `keyed:R1:${threadKey.slice("keyed:".length)}` : null;
+  }
+  /** Not a Slack key, so a sent reply records nothing unless a case overrides this. */
+  threadKeyFromConversationKey(_conversationKey: string): string | null {
+    return null;
   }
 }
 
@@ -273,6 +279,35 @@ describe("ChannelHost outbound delivery", () => {
     vi.restoreAllMocks();
   });
 
+  it("home channel receives a safe new notification, never a Slack-thread reply or foreign team", async () => {
+    await host.stop();
+    class HomeTransport extends FakeTransport {
+      override readonly channelType = "slack";
+      async sendToChannel(channelId: string, message: OutboundChannelMessage) {
+        return this.send(channelId, message);
+      }
+    }
+    const home = new HomeTransport();
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "fake" });
+    host = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials, workflowStore, actionPluginByService,
+      plugins: [{ name: "home-test", version: "0", transports: [{ channelType: "slack", create: () => home }] }], resolveOrgId: async () => ORG_ID });
+    await host.start();
+    await testDb.appDb.insert(teams).values({ id: "home-team", orgId: ORG_ID, name: "Home", createdAt: Date.now(), slackHomeChannelId: "C0123456789" });
+    const event: AttentionEvent = { kind: "approval", owner: { type: "team", id: "home-team" }, title: "private approval content", body: "sensitive" };
+    await host.attentionDeliverer().deliverTeam?.(event);
+    expect(home.sent).toHaveLength(1);
+    expect(home.sent[0]?.conversationKey).toBe("C0123456789");
+    expect(home.sent[0]?.message.markdown).not.toContain("private");
+    expect(home.sent[0]?.message.markdown).not.toContain("sensitive");
+    expect(home.gatePrompts).toHaveLength(0);
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const thread = session.thread("slack:COTHER:123.456");
+    await host.attentionDeliverer().deliverTeam?.({ ...event, sessionId: session.id, threadId: thread.id });
+    expect(home.sent).toHaveLength(1);
+    await host.attentionDeliverer().deliverTeam?.({ ...event, owner: { type: "team", id: "inaccessible-team" } });
+    expect(home.sent).toHaveLength(1);
+  });
+
   async function emitTerminalTurn(args: {
     queueItemId: string;
     messageId?: string;
@@ -306,6 +341,78 @@ describe("ChannelHost outbound delivery", () => {
     );
     return { session, threadId };
   }
+
+  it("delivers the recovered answer once and skips text from failed provider attempts", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    const queueItemId = "recovered-provider";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "keyed.message", tagName: "signal", origin: { channelType: "keyed", threadKey: "keyed:C1:original-root", reply: "auto" } } }),
+      { type: "message", id: "failed-attempt", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", queueItemId, content: "Partial failed answer", stopReason: "error" },
+    ]);
+    const emit = async (event: BusEvent["event"]) => eventStream.append({ sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event }, randomUUID());
+    await emit({ type: "message_end", threadId, messageId: "failed-attempt", reason: "error" });
+    await emit({ type: "error", threadId, code: "turn_provider_fallback", error: "Recovering", recoverable: true });
+    await emit({ type: "turn_end", threadId, reason: "error" });
+    await engineStore.appendEntries(session.id, threadId, [
+      { type: "message", id: "recovered-attempt", sessionId: session.id, threadId, parentId: null, createdAt: Date.now(), role: "assistant", queueItemId, content: "Recovered answer", stopReason: "end_turn" },
+    ]);
+    await emit({ type: "message_end", threadId, messageId: "recovered-attempt", reason: "end_turn" });
+    await emit({ type: "submission_settled", sessionId: session.id, threadId, queueItemId, outcome: { outcome: "completed" } });
+    await emit({ type: "message_end", threadId, messageId: "recovered-attempt", reason: "end_turn" });
+    await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(1));
+    expect(keyedTransport.sent[0]).toEqual({ conversationKey: "keyed:R1:C1:original-root", message: expect.objectContaining({ markdown: "Recovered answer" }) });
+  });
+
+  it("reports exhausted recovery once in the persisted Slack origin thread", async () => {
+    await host.stop();
+    class Slack extends FakeTransport {
+      override readonly channelType = "slack";
+      conversationKeyFromThreadKey(key: string) { return `slack:T1:${key.slice(6)}`; }
+    }
+    const slack = new Slack();
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "fake" });
+    host = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "slack-test", version: "0", transports: [{ channelType: "slack", create: () => slack }] }], resolveOrgId: async () => ORG_ID });
+    await host.start();
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    const queueItemId = "exhausted-provider";
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId, signal: { signalType: "slack.message", tagName: "signal", origin: { channelType: "slack", threadKey: "slack:C1:original-root", reply: "auto" } } }),
+      userEntry({ sessionId: session.id, threadId, queueItemId: "newer-item", signal: { signalType: "slack.message", tagName: "signal", origin: { channelType: "slack", threadKey: "slack:C1:newer-root", reply: "auto" } } }),
+    ]);
+    const emit = async (outcome: "completed" | "failed") => eventStream.append({ sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "submission_settled", sessionId: session.id, threadId, queueItemId, outcome: { outcome } } }, randomUUID());
+    await emit("failed");
+    await emit("failed");
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(1));
+    expect(slack.sent[0]).toEqual({
+      conversationKey: "slack:T1:C1:original-root",
+      message: expect.objectContaining({ markdown: expect.stringContaining("This turn failed") }),
+    });
+  });
+
+  it("keeps failure notices off manual, web, and explicitly answered submissions", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    for (const queueItemId of ["manual", "web", "explicit", "visible-failure"]) {
+      await engineStore.appendEntries(session.id, threadId, [
+        userEntry({ sessionId: session.id, threadId, queueItemId,
+          ...(queueItemId === "web" ? {} : { signal: { signalType: "keyed.message", tagName: "signal", origin: { channelType: "keyed", threadKey: "keyed:C1:original-root", reply: queueItemId === "manual" ? "manual" as const : "auto" as const } } }),
+        }),
+        ...(queueItemId === "explicit" ? [{
+          type: "message" as const, id: "explicit-reply", sessionId: session.id, threadId, parentId: null,
+          createdAt: Date.now(), role: "assistant" as const, content: "", queueItemId,
+          parts: [{ type: "tool_call" as const, callId: "explicit-call", toolName: "call_tool", status: "completed" as const,
+            args: { tool_id: "keyed.reply_to_origin", params: { text: "Already answered" } }, result: { details: { ok: true } } }],
+        }] : []),
+      ]);
+      await eventStream.append({ sessionId: session.id, threadId, queueItemId, timestamp: Date.now(), event: { type: "submission_settled", sessionId: session.id, threadId, queueItemId, outcome: { outcome: "failed" } } }, randomUUID());
+    }
+    await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(1));
+    expect(keyedTransport.sent[0]?.message.markdown).toContain("This turn failed");
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
 
   async function replyFeedbackEntries(sessionId: string, threadId: string) {
     return (await engineStore.getEntries(sessionId, threadId)).filter(
@@ -385,12 +492,9 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["internal response"]);
   });
 
-  it("delivers a branded command_result to the channel the command came from", async () => {
+  it("delivers a command_result with the bot identity to the channel the command came from", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
-    await testDb.appDb
-      .update(assistants)
-      .set({ name: "Ledger", avatarUrl: "https://cdn.example.com/ledger.png" })
-      .where(eq(assistants.sessionId, session.id));
+
     const sessionId = session.id;
     const threadId = session.thread("fake:99").id;
 
@@ -423,10 +527,7 @@ describe("ChannelHost outbound delivery", () => {
     });
     const hit = fakeTransport.sent.find((s) => s.message.markdown.includes("Queue"));
     expect(hit?.message.markdown).toContain("/status");
-    expect(hit?.message.sender).toEqual({
-      displayName: "Ledger",
-      avatarUrl: "https://cdn.example.com/ledger.png",
-    });
+    expect(hit?.message.sender).toBeUndefined();
     // Dedup: the second append must not double-deliver.
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("Queue"))).toHaveLength(1);
@@ -839,6 +940,22 @@ describe("ChannelHost outbound delivery", () => {
       expect(feedback?.type === "message" ? feedback.content : "").toContain(`Delivery failed: ${reason}`);
       expect(feedback?.type === "message" ? feedback.content : "").not.toContain(forbidden);
     });
+  });
+
+  it("never asks for a retry when only recording a posted reply fails", async () => {
+    faux.setResponses([fauxAssistantMessage("retrying")]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const send = vi.spyOn(keyedTransport, "send");
+    vi.spyOn(keyedTransport, "threadKeyFromConversationKey").mockImplementation(() => { throw new Error("store unavailable"); });
+    const { session, threadId } = await emitTerminalTurn({
+      queueItemId: "qi-record-failure",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+      content: "first response",
+    });
+
+    await vi.waitFor(() => expect(error.mock.calls.some(([message]) => message === "[channels] could not record a sent reply")).toBe(true));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(await replyFeedbackEntries(session.id, threadId)).toHaveLength(0);
   });
 
   it("retries and logs unrelated feedback admission failures", async () => {
@@ -1332,8 +1449,18 @@ describe("ChannelHost outbound delivery", () => {
    * Opens one approval gate on a channel-bound thread and waits for its card.
    * Returns the gate, the thread it lives on, and the card's prompt ref.
    */
-  async function openChannelGate(): Promise<{ sessionId: string; threadId: string; gateId: string; ref: GatePromptRef }> {
-    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+  async function openChannelGate(
+    owner: { type: "user" | "team"; id: string } = { type: "user", id: USER_ID },
+    shape: Pick<DecisionGate, "type" | "title" | "actions"> = {
+      type: "approval",
+      title: "Approve the thing?",
+      actions: [
+        { id: "approve", label: "Approve", style: "primary" },
+        { id: "deny", label: "Deny", style: "danger" },
+      ],
+    },
+  ): Promise<{ sessionId: string; threadId: string; gateId: string; ref: GatePromptRef }> {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, owner, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     const gateId = `gate-${randomUUID()}`;
     await eventStream.append(
@@ -1351,12 +1478,7 @@ describe("ChannelHost outbound delivery", () => {
             queueItemId: `qi-${gateId}`,
             resumeKey: `rk-${gateId}`,
             ordinal: 1,
-            type: "approval",
-            title: "Approve the thing?",
-            actions: [
-              { id: "approve", label: "Approve", style: "primary" },
-              { id: "deny", label: "Deny", style: "danger" },
-            ],
+            ...shape,
             status: "pending",
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -1387,6 +1509,43 @@ describe("ChannelHost outbound delivery", () => {
       actions: target["gateActions"].size,
     };
   }
+
+  it("tells the channel that only the team can approve a team Valet's card", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-ops", orgId: ORG_ID, name: "Ops", createdAt: 1 });
+    await openChannelGate({ type: "team", id: "team-ops" });
+    expect(fakeTransport.gatePrompts[0]?.prompt.body).toContain("Only members of Ops can approve.");
+  });
+
+  it("tells a non-member who clicks a team's card that only the team can approve", async () => {
+    await testDb.appDb.insert(teams).values({ id: "team-ops", orgId: ORG_ID, name: "Ops", createdAt: 1 });
+    const { ref } = await openChannelGate({ type: "team", id: "team-ops" });
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId: "approve", callbackId: "cb-non-member", ref },
+    }));
+    await vi.waitFor(() => expect(fakeTransport.answered).toContainEqual({
+      callbackId: "cb-non-member", text: "Only members of Ops can approve. Ask a team member to answer it.",
+    }));
+  });
+
+  it("tells the channel to answer an open question in Valet", async () => {
+    await openChannelGate(undefined, { type: "question", title: "Which repo?", actions: [] });
+    expect(fakeTransport.gatePrompts[0]?.prompt.actions).toEqual([]);
+    expect(fakeTransport.gatePrompts[0]?.prompt.body).toContain("Answer this question in Valet.");
+  });
+
+  it("keeps a posted card usable when saving its callback reference fails", async () => {
+    vi.spyOn(engineStore, "getDecisionGate").mockImplementation(async (sessionId, gateId) => ({
+      id: gateId, sessionId, threadId: "t", queueItemId: "qi", resumeKey: "rk", ordinal: 1, type: "approval",
+      title: "Approve the thing?", actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending", createdAt: 1, updatedAt: 1,
+    }));
+    const save = vi.spyOn(engineStore, "saveDecisionGateRef").mockRejectedValue(new Error("database unavailable"));
+    const { gateId, ref } = await openChannelGate();
+    await vi.waitFor(() => expect(save).toHaveBeenCalled());
+    expect(host.gateForRef(ref)).toMatchObject({ gateId });
+  });
 
   it("a withdrawn gate clears its card instead of leaving live buttons", async () => {
     const { sessionId, threadId, gateId, ref } = await openChannelGate();
@@ -1551,6 +1710,165 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.answered.some((a) => a.callbackId === "cb2" && a.text === undefined)).toBe(true);
   });
 
+  it("posts a child's approval card in the channel thread that spawned it (TKAI-564)", async () => {
+    const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const childId = `child-origin-${randomUUID()}`;
+    await testDb.appDb.insert(agentSessions).values({
+      id: childId, userId: USER_ID, orgId: ORG_ID, workspace: "/tmp/child-origin",
+      ownerType: "user", ownerId: USER_ID, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: parent.id, parentThreadId: parent.thread().id,
+      actorUserId: USER_ID, orgId: ORG_ID, owner: parent.owner, workspace: "/tmp/child-origin",
+    });
+    // What the spawner records when a channel message started the work.
+    await testDb.appDb.insert(childWatches).values({
+      childSessionId: childId, queueItemId: "qi-origin", parentSessionId: parent.id,
+      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled: false,
+      originJson: JSON.stringify({ channelType: "fake", threadKey: "fake:C-origin", reply: "auto" }), createdAt: Date.now(),
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "child action" }, { id: "child-origin-action" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("child finished"),
+    ]);
+    await child.thread().submitPrompt({ text: "perform the child action" }, { dispatchId: `child:${randomUUID()}` });
+    await vi.waitFor(() => expect(fakeTransport.gatePrompts).toHaveLength(1), { timeout: 5000 });
+    const prompt = fakeTransport.gatePrompts[0]!;
+    // The same conversation the parent's own channel thread posts to.
+    expect(prompt.conversationKey).toBe(host.channelThreadFor("fake:C-origin")?.conversationKey);
+    expect(host.gateForRef(prompt)).toMatchObject({ sessionId: child.id, gateId: prompt.prompt.gateId });
+  });
+
+  it.each([
+    ["stays in the web app when a person prompted the child there", { id: USER_ID, name: "Ada" }, 0],
+    ["goes to the spawning channel when the parent agent prompted the child", undefined, 1],
+  ] as const)("a child's gate %s", async (_label, author, posted) => {
+    const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const childId = `child-web-${randomUUID()}`;
+    await testDb.appDb.insert(agentSessions).values({
+      id: childId, userId: USER_ID, orgId: ORG_ID, workspace: "/tmp/child-web",
+      ownerType: "user", ownerId: USER_ID, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: parent.id, parentThreadId: parent.thread().id,
+      actorUserId: USER_ID, orgId: ORG_ID, owner: parent.owner, workspace: "/tmp/child-web",
+    });
+    await testDb.appDb.insert(childWatches).values({
+      childSessionId: childId, queueItemId: "qi-child", parentSessionId: parent.id,
+      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled: false,
+      originJson: JSON.stringify({ channelType: "fake", threadKey: "fake:C-web", reply: "auto" }), createdAt: Date.now(),
+    });
+    const threadId = child.thread().id;
+    await engineStore.appendEntries(child.id, threadId, [
+      { ...webUserEntry({ sessionId: child.id, threadId, queueItemId: "qi-child-gate" }), ...(author ? { author } : {}) },
+    ]);
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`, sessionId: child.id, threadId, queueItemId: "qi-child-gate", resumeKey: "rk-child",
+      ordinal: 1, type: "approval", title: "Approve the child action?", body: "do it",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }], status: "pending", createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    await eventStream.append({ sessionId: child.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } }, `childgate-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.gatePrompts).toHaveLength(posted);
+  });
+
+  it("routes a child gate through its parent audience to Slack and resolves only the child after host restart", async () => {
+    await host.stop();
+    class SlackContractTransport extends FakeTransport {
+      override readonly channelType = "slack";
+    }
+    const slack = new SlackContractTransport();
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "slack", { type: "bot_token", accessToken: "contract-token" });
+    await linkIdentity(testDb.appDb, { provider: "slack", externalId: "U_PARENT", userId: USER_ID });
+    host = new ChannelHost({
+      db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials, workflowStore, actionPluginByService,
+      plugins: [{ name: "slack-contract", version: "0", transports: [{ channelType: "slack", create: () => slack }] }],
+      resolveOrgId: async () => ORG_ID,
+    });
+    await host.start();
+    const unwire = wireAttentionRouter({ db: testDb.appDb, engineStore, eventStream, channels: [host.attentionDeliverer()] });
+    try {
+      const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+      const childId = `child-slack-${randomUUID()}`;
+      await testDb.appDb.insert(agentSessions).values({
+        id: childId, userId: USER_ID, orgId: ORG_ID, workspace: "/tmp/child-slack-contract",
+        ownerType: "user", ownerId: USER_ID, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const child = await engineHost.childSessionFor(childId, {
+        parentSessionId: parent.id, parentThreadId: parent.thread().id,
+        actorUserId: USER_ID, orgId: ORG_ID, owner: parent.owner, workspace: "/tmp/child-slack-contract",
+      });
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "fake.do_thing", params: {}, summary: "child action" }, { id: "child-action" })], { stopReason: "toolUse" }),
+        fauxAssistantMessage("child finished"),
+      ]);
+      await child.thread().submitPrompt({ text: "perform the child action" }, { dispatchId: `child:${randomUUID()}` });
+      await vi.waitFor(() => expect(slack.gatePrompts).toHaveLength(1), { timeout: 5000 });
+      const prompt = slack.gatePrompts[0];
+      expect(prompt.conversationKey).toContain("U_PARENT");
+      expect(host.gateForRef(prompt)).toMatchObject({ sessionId: child.id, gateId: prompt.prompt.gateId });
+      expect(await parent.pendingDecisionGates()).toHaveLength(0);
+      // Rebuild the channel host; its callback maps must come from durable refs.
+      await host.stop();
+      host = new ChannelHost({
+        db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials, workflowStore, actionPluginByService,
+        plugins: [{ name: "slack-contract", version: "0", transports: [{ channelType: "slack", create: () => slack }] }],
+        resolveOrgId: async () => ORG_ID,
+      });
+      await host.start();
+      expect(host.gateForRef(prompt)).toMatchObject({ sessionId: child.id, gateId: prompt.prompt.gateId });
+      expect(slack.gatePrompts).toHaveLength(1);
+      await linkIdentity(testDb.appDb, { provider: "slack", externalId: "U_OUTSIDER", userId: "outsider" });
+      await host.handleUpdate("slack", inbound({
+        dispatchId: `slack:${randomUUID()}`, conversationKey: prompt.conversationKey,
+        sender: { externalId: "U_OUTSIDER" }, kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId: "outsider", ref: prompt },
+      }));
+      expect((await engineStore.getDecisionGate(child.id, prompt.prompt.gateId))?.status).toBe("pending");
+      expect(slack.answered.find(answer => answer.callbackId === "outsider")?.text).toContain("expired");
+      await host.handleUpdate("slack", inbound({
+        dispatchId: `slack:${randomUUID()}`, conversationKey: prompt.conversationKey,
+        sender: { externalId: "U_PARENT" }, kind: "gate_callback",
+        gateCallback: { actionId: "approve", callbackId: "child-slack-approve", ref: prompt },
+      }));
+      await vi.waitFor(async () => {
+        expect((await engineStore.getDecisionGate(child.id, prompt.prompt.gateId))?.status).toBe("resolved");
+        expect(slack.gateEdits).toHaveLength(1);
+      });
+      expect(await parent.pendingDecisionGates()).toHaveLength(0);
+      expect(slack.answered).toContainEqual({ callbackId: "child-slack-approve", text: undefined });
+    } finally {
+      unwire();
+    }
+  });
+
+  it.each(["resolved", "expired", "withdrawn"] as const)("clears a gate card that became %s while the channel host was offline", async (status) => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const gate: DecisionGate = {
+      id: "offline-gate", sessionId: session.id, threadId: session.thread().id, queueItemId: "offline-q",
+      resumeKey: "offline", ordinal: 0, type: "approval", title: "Offline approval",
+      actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+    };
+    await engineStore.saveDecisionGate(session.id, gate.threadId, gate);
+    await host.attentionDeliverer().deliver(USER_ID, {
+      kind: "approval", owner: session.owner, sessionId: session.id, title: gate.title,
+      gate: { id: gate.id, actions: gate.actions },
+    });
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    await host.stop();
+    await engineStore.saveDecisionGate(session.id, gate.threadId, {
+      ...gate, status, ...(status === "resolved" ? { resolution: { actionId: "approve", resolvedBy: USER_ID, resolvedAt: Date.now() } } : {}),
+    });
+    host = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: () => fakeTransport }] }],
+      resolveOrgId: async () => ORG_ID,
+    });
+    await host.start();
+    expect(fakeTransport.gateEdits).toHaveLength(1);
+    expect(host.gateForRef(fakeTransport.gatePrompts[0])).toBeNull();
+    expect(await savedGatePrompts(testDb.appDb, ORG_ID)).toEqual([]);
+  });
+
   it("a Slack approval resolves its originating workflow gate", async () => {
     const now = Date.now();
     await testDb.appDb.insert(workflowDefinitions).values({
@@ -1663,6 +1981,32 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text === undefined)).toHaveLength(1);
     expect(fakeTransport.answered.filter((answer) => answer.callbackId.startsWith("workflow-callback") && answer.text?.includes("already resolved"))).toHaveLength(1);
+  });
+
+  it("allows only the named private-workflow gate in DMs and callbacks", async () => {
+    await testDb.appDb.insert(teams).values({ id: "private-team", orgId: ORG_ID, name: "Private", createdAt: 1 });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "private-team", userId: USER_ID, role: "member" });
+    const { ref, sessionId } = await seedWorkflowGate({ workflowId: "private-wf", runId: "private-run", workflowOrgId: ORG_ID,
+      owner: { ownerType: "team", ownerId: "private-team" }, gateId: "named-gate" });
+    // The original private thread is gone; no actor fallback grants this viewer access.
+    await testDb.appDb.update(workflowRuns).set({ params: { workflowId: "private-wf", definitionVersionId: "v1",
+      origin: { assistantSessionId: "private-origin", threadId: "private-thread" } } }).where(eq(workflowRuns.id, "private-run"));
+    const gate = await engineStore.getDecisionGate(sessionId, "named-gate");
+    if (!gate) throw new Error("Missing gate fixture");
+    await engineStore.saveDecisionGate(sessionId, gate.threadId, { ...gate, context: { approver: { userId: USER_ID } } });
+    await engineStore.saveDecisionGate(sessionId, gate.threadId, { ...gate, id: "other-gate", resumeKey: "other-rk" });
+    const otherRef = { conversationKey: "fake:dm:other", messageId: "other-message" };
+    host.recordGatePrompt("other-gate", otherRef, sessionId);
+    await host.attentionDeliverer().deliver(USER_ID, { kind: "approval", owner: { type: "user", id: USER_ID }, sessionId,
+      title: "Other gate", gate: { id: "other-gate", actions: gate.actions } });
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    await host.attentionDeliverer().deliver(USER_ID, { kind: "approval", owner: { type: "user", id: USER_ID }, sessionId,
+      title: "Named gate", gate: { id: "named-gate", actions: gate.actions } });
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    await callback(otherRef, "other-callback");
+    expect((await engineStore.getDecisionGate(sessionId, "other-gate"))?.status).toBe("pending");
+    await callback(ref, "named-callback");
+    expect((await engineStore.getDecisionGate(sessionId, "named-gate"))?.status).toBe("resolved");
   });
 
   it("rejects a cross-org workflow callback with the uniform expired response", async () => {
@@ -2083,7 +2427,7 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(host.gateForRef(ref)).toMatchObject({ gateId: "gate-1", sessionId: "sess-1" });
   });
 
-  it("an approval event without a gate keeps a branded plain summary message", async () => {
+  it("an approval event without a gate keeps a plain summary with the bot identity", async () => {
     host = await buildHost({ publicUrl: "https://valet.example.com" });
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     await testDb.appDb.insert(assistants).values({
@@ -2091,10 +2435,7 @@ describe("ChannelHost.attentionDeliverer", () => {
       orgId: ORG_ID,
       ownerType: "user",
       ownerId: USER_ID,
-      name: "Ledger",
-      avatarUrl: "https://cdn.example.com/ledger.png",
       sessionId: "sess-1",
-      isDefault: false,
       createdAt: Date.now(),
     });
 
@@ -2105,10 +2446,7 @@ describe("ChannelHost.attentionDeliverer", () => {
 
     expect(fakeTransport.gatePrompts).toHaveLength(0);
     expect(fakeTransport.sent).toHaveLength(1);
-    expect(fakeTransport.sent[0]?.message.sender).toEqual({
-      displayName: "Ledger",
-      avatarUrl: "https://cdn.example.com/ledger.png",
-    });
+    expect(fakeTransport.sent[0]?.message.sender).toBeUndefined();
   });
 
   it("resolution edits EVERY recorded prompt for the gate — one message per recipient DM", async () => {
@@ -2166,6 +2504,26 @@ describe("ChannelHost.attentionDeliverer", () => {
     for (const p of fakeTransport.gatePrompts) {
       expect(host.gateForRef({ conversationKey: p.conversationKey, messageId: p.messageId })).toBeNull();
     }
+  });
+
+  it("a prompt sent after its gate expired gets the expired edit, not live buttons", async () => {
+    host = await buildHost({ publicUrl: "https://valet.example.com" });
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({
+      id: "sess-late", userId: USER_ID, orgId: ORG_ID, workspace: "w", ownerType: "user", ownerId: USER_ID,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    // The expiry lands first: routeAttention does not await its deliverers.
+    await eventStream.append({
+      sessionId: "sess-late", threadId: "t-late", timestamp: Date.now(),
+      event: { type: "decision_gate_expired", threadId: "t-late", gateId: "gate-late" },
+    }, `gate-late-expire-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await host.attentionDeliverer().deliver(USER_ID, event({
+      kind: "approval", sessionId: "sess-late", gate: { id: "gate-late", actions: [{ id: "approve", label: "Approve" }] },
+    }));
+    await vi.waitFor(() => expect(fakeTransport.gateEdits).toHaveLength(1));
+    expect(fakeTransport.gateEdits[0]!.resolution.label).toMatch(/Expired/);
   });
 
   it("a recipient who may not resolve the gate gets the plain summary, not dead buttons", async () => {

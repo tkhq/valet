@@ -108,7 +108,11 @@ it("lets current team members reach an existing workflow agent gate without an a
   const outsider = { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" };
   expect((await fetch(base, { headers: outsider })).status).toBe(404);
   expect((await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: outsider, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
-  const approved = await fetch(`${base}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
+  const threadBase = `${api.baseUrl}/api/threads/${threadId}/decisions`;
+  expect((await fetch(threadBase)).status).toBe(200);
+  expect((await fetch(threadBase, { headers: outsider })).status).toBe(404);
+  expect((await fetch(`${api.baseUrl}/api/threads/${threadId}/messages`)).status).toBe(404);
+  const approved = await fetch(`${threadBase}/join-channel/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) });
   expect(approved.status).toBe(200);
   expect(await p.engineStore.getDecisionGate(sessionId, "join-channel")).toMatchObject({ status: "resolved", resolution: { actionId: "approve", resolvedBy: "local-user" } });
   const guessed = "wf:approval-run:never-created";
@@ -125,4 +129,40 @@ it("lets current team members reach an existing workflow agent gate without an a
   expect(await orgResolve.json()).toEqual({ error: "gate not pending" });
   await p.db.delete(teamMembers).where(eq(teamMembers.teamId, "approval-team"));
   expect((await fetch(base)).status).toBe(404);
+});
+
+describe("POST /decisions/:gateId/resolve — answer types", () => {
+  it("refuses a non-text answer before it can resolve a gate", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/decisions/nonexistent-gate/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 123 }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toContain("as text");
+  });
+});
+
+it("persists question images, rejects remote images, and refuses images on approval gates", async () => {
+  api = await bootTestApi();
+  const sessionId = await createSession(api.baseUrl);
+  const store = api.providers.engineStore;
+  // Loading decisions materializes the session's default thread.
+  await fetch(`${api.baseUrl}/api/sessions/${sessionId}/decisions`);
+  const thread = { id: "question-thread", sessionId, key: "web:question", status: "active" as const, queueMode: "followup" as const, createdAt: 1, updatedAt: 1 };
+  await store.saveThread(sessionId, thread);
+  const headers = { "Content-Type": "application/json" };
+  const attachments = [{ kind: "image", url: "data:image/png;base64,cGhvdG8=", mimeType: "image/png", name: "avatar.png" }];
+  for (const type of ["question", "approval"] as const) {
+    await store.saveDecisionGate(sessionId, thread.id, { id: type, sessionId, threadId: thread.id, type, queueItemId: "q", resumeKey: "image", ordinal: 0, title: "Which image?", actions: [], status: "pending", createdAt: 1, updatedAt: 1 });
+    const url = `${api.baseUrl}/api/sessions/${sessionId}/decisions/${type}/resolve`;
+    const invalid = await fetch(url, { method: "POST", headers, body: JSON.stringify({ attachments: [{ ...attachments[0], url: "https://example.com/photo.png" }] }) });
+    expect(invalid.status).toBe(400);
+    expect((await store.getDecisionGate(sessionId, type))?.status).toBe("pending");
+    const response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ attachments }) });
+    expect(response.status).toBe(type === "question" ? 200 : 400);
+    expect(await store.getDecisionGate(sessionId, type)).toMatchObject(type === "question" ? { status: "resolved", resolution: { attachments } } : { status: "pending" });
+  }
 });

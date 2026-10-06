@@ -1,5 +1,6 @@
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
-import { ErrorRow, LoadingRow } from "~/components/primitives";
+import { ErrorRow, LoadingRow, pageClass } from "~/components/primitives";
+import { IntegrationLimitNotice } from "./integration-limit-notice";
 import { Section } from "~/components/settings/section";
 import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
@@ -18,9 +19,10 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <h1 className="font-display text-2xl text-ink">Integrations</h1>
         {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
+        <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
         <div className="mt-10 space-y-6">
           {loading && <LoadingRow label="Loading team integrations…" />}
           {!loading && failed && (
@@ -45,13 +47,12 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                   canMutate={canMutate}
                 />
-                <TeamConnectionSetup teamId={teamId} canManage={canMutate} orgAdmin={meQ.data?.orgRole === "admin"} />
-
-                {/* The team's own 1Password service account. It is what makes
-                    every op:// reference and valet-secrets work for this
-                    team's sessions, so it belongs on the page a person opens
-                    when they want the team to have 1Password. */}
-                <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />
+                {/* The team's own 1Password service account sits with the other
+                    connections: it is what makes op:// references and
+                    valet-secrets work for this team's sessions. */}
+                <TeamConnectionSetup teamId={teamId} canManage={canMutate}>
+                  <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />
+                </TeamConnectionSetup>
 
                 <div className="flex flex-wrap items-center gap-3">
                   <PullFromPersonal teamId={teamId} teamName={team.name} />

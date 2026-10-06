@@ -1,26 +1,11 @@
-/**
- * Workflow permissions preview + bulk pre-approval.
- *
- * `analyzeWorkflowPermissions` predicts, per tool node in the stored
- * definition, how the policy ladder would resolve the node's action for its
- * stored owner if a run started now. It runs the same `resolveActionPolicy` core as
- * the run-time invoker (`plugins/action-invoker.ts`) with `appliesIn:
- * "workflow"` and NO execution id — a run that has not started has no
- * exec-scoped grants, so the grant rung never matches here.
- *
- * `allowWorkflowPermissions` writes one per-user `allow` override for each
- * gating action of a personal workflow. Team workflows refuse this operation;
- * their policies are managed in the team's settings. The pairs come from the stored
- * definition, never from the request — the same server-derivation rule that
- * removed `grantActions` from the approval route (approval-UX spec,
- * Deviations #3). The bounded `upsertOverride` rejects an override that
- * would bypass an org `deny`/`require_approval` policy; those come back as
- * `blocked` with the rejection reason.
- *
- * Approval nodes are deliberately not analyzed: an author-placed approval
- * node is an intended gate, not a permission requirement.
+/** Permission preview and durable grants scoped to one workflow and its owner.
+ * Explicit policy restrictions remain authoritative; human approval nodes are separate.
  */
-import { upsertOverride } from "../policies/admin.js";
+import { sql } from "drizzle-orm";
+import type { AppQueryable } from "../lib/drizzle.js";
+import { sameWorkflowSteps } from "./definition-version.js";
+import { workflowActionGrants } from "../schema/index.js";
+import { canAdministerTeam } from "../services/teams.js";
 import { resolvePolicyDecision } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
@@ -29,7 +14,7 @@ import type {
   WorkflowNodePermissionWire,
   WorkflowDefinitionSummary,
 } from "../wire/types.js";
-import { getWorkflowDefinition, type WorkflowOwner, type WorkflowServiceDeps } from "./service.js";
+import { getWorkflowDefinition, revokeWorkflowGrants, type WorkflowOwner, type WorkflowServiceDeps } from "./service.js";
 
 /** A tool node's identity, narrowed from the stored definition JSON. The
  * definition was validated at save time, but tool-node rows can predate the
@@ -114,7 +99,8 @@ async function analyzeDefinitionPermissions(
   // consistent snapshot.
   const rows = await loadPolicyRows(deps.db, {
     orgId: owner.orgId,
-    userId: owner.userId,
+    workflowId: summary.id,
+    userId: summary.ownerType === "user" ? summary.ownerId : owner.userId,
     teamId: summary.ownerType === "team" ? summary.ownerId : undefined,
   });
   const nodes: WorkflowNodePermissionWire[] = [];
@@ -152,14 +138,14 @@ async function analyzeDefinitionPermissions(
 }
 
 export type AllowWorkflowPermissionsOutcome =
-  | { ok: true; result: AllowWorkflowPermissionsResponse }
+  /** `definition` is the one the grants were read from, so a write can check
+   * the steps have not changed since. */
+  | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[]; definition: unknown }
   | { ok: false; badRequest: string }
   | null;
 
-/** Writes a per-user `allow` override for each gating action of the
- * personal workflow (all of them, or the `actionIds` subset). Returns null when the
- * workflow does not exist for this owner. */
-export async function allowWorkflowPermissions(
+/** Grants only the stored workflow's declared gating actions, never caller-invented actions. */
+export async function prepareWorkflowPermissions(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
@@ -167,11 +153,8 @@ export async function allowWorkflowPermissions(
 ): Promise<AllowWorkflowPermissionsOutcome> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
-  if (summary.ownerType === "team") {
-    return {
-      ok: false,
-      badRequest: "Personal pre-approval does not apply to team workflows. Ask a team admin to select this team's workspace and open Settings → Policies.",
-    };
+  if (!(await canGrantWorkflowPermissions(deps, owner, summary))) {
+    return { ok: false, badRequest: "Only the workflow owner or a team admin can manage its permissions." };
   }
   const analysis = await analyzeDefinitionPermissions(deps, owner, summary);
 
@@ -202,17 +185,56 @@ export async function allowWorkflowPermissions(
 
   const now = Date.now();
   const allowed: string[] = [];
+  const grants: (typeof workflowActionGrants.$inferInsert)[] = [];
   const blocked: { actionId: string; reason: string }[] = [];
   for (const actionId of targets) {
-    const result = await upsertOverride(
-      deps.db,
-      owner.orgId,
-      owner.userId,
-      { actionId, mode: "allow", now },
-      deps.actionPluginByService ?? new Map(),
-    );
-    if (result.ok) allowed.push(actionId);
-    else blocked.push({ actionId, reason: result.error });
+    const node = analysis.find((node) => node.actionId === actionId);
+    if (node?.provenance === "org_policy" || node?.provenance === "team_policy" || node?.provenance === "override") {
+      blocked.push({ actionId, reason: "An explicit policy requires approval. Ask its administrator to review it." });
+      continue;
+    }
+    grants.push({
+      id: JSON.stringify([owner.orgId, workflowId, summary.ownerType, summary.ownerId, actionId]),
+      orgId: owner.orgId, workflowId, ownerType: summary.ownerType, ownerId: summary.ownerId,
+      actionId, grantedBy: owner.userId, createdAt: now,
+    });
+    allowed.push(actionId);
   }
-  return { ok: true, result: { allowed, blocked } };
+  return { ok: true, result: { allowed, blocked }, grants, definition: summary.definition };
+}
+
+/** Who may approve a workflow's actions for every later run: the owning user, or an admin of the owning team. */
+export async function canGrantWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, summary: Pick<WorkflowDefinitionSummary, "ownerType" | "ownerId">) {
+  if (owner.principal?.type === "team") return false;
+  return summary.ownerType === "user" ? summary.ownerId === owner.userId
+    : summary.ownerType === "team" && await canAdministerTeam(deps.db, summary.ownerId, owner.userId);
+}
+
+export async function revokeWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
+  const summary = await getWorkflowDefinition(deps, owner, workflowId);
+  if (!summary || !(await canGrantWorkflowPermissions(deps, owner, summary))) return false;
+  await revokeWorkflowGrants(deps.db, owner.orgId, workflowId);
+  return true;
+}
+
+export async function persistWorkflowPermissions(db: AppQueryable, grants: (typeof workflowActionGrants.$inferInsert)[]) {
+  if (grants.length) await db.insert(workflowActionGrants).values(grants).onConflictDoNothing();
+}
+
+export async function allowWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined): Promise<AllowWorkflowPermissionsOutcome> {
+  const prepared = await prepareWorkflowPermissions(deps, owner, workflowId, actionIds);
+  if (!prepared?.ok) return prepared;
+  // Lock the definition and compare the steps again, as an approval for the
+  // whole workflow does: an edit that committed after the read above must not
+  // keep grants for steps nobody reviewed. A later edit waits on this lock,
+  // and its revoke-after-write removes the grants.
+  const current = await deps.db.transaction(async (tx) => {
+    const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions WHERE id = ${workflowId} FOR UPDATE`) as {
+      rows: Array<{ definition: unknown }>;
+    };
+    if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, prepared.definition)) return false;
+    await persistWorkflowPermissions(tx, prepared.grants);
+    return true;
+  });
+  return current ? prepared : { ok: false, badRequest: "This workflow's steps changed while you allowed them. Review the steps again, then allow them." };
 }

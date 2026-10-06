@@ -1,24 +1,11 @@
-/**
- * A team's orchestrator is one agent session that several people share, so
- * the questions here are not the ones a single-owner session raises: can two
- * members hold it at once, does one member's turn reach the other, and does
- * losing membership actually take access away.
- *
- * What these cases can and cannot reach, stated plainly so the next reader
- * does not mistake a bounded result for a complete one: the test environment
- * has no model key, so a submitted turn is admitted and queued but never
- * runs, and the user's own entry is not persisted until it does. That makes
- * "member B sees member A's message text" unverifiable here. What IS
- * verifiable is that neither member is treated differently from the other —
- * same status, same payload — which is the access question. The text
- * question belongs to an environment with a live model.
- */
+/** Shared team executions admit both members and recheck membership on access. */
 import { describe, it, expect, afterEach } from "vitest";
 import { WebSocket } from "ws";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { teamMembers, teams } from "../schema/index.js";
-import type { EnsureOrchestratorResponse, WireEvent } from "../wire/types.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
+import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -38,10 +25,9 @@ async function seedTeamWithTwoMembers(target: TestApi): Promise<string> {
     { teamId: "team_1", userId: "local-user", role: "admin" },
     { teamId: "team_1", userId: "test-member", role: "member" },
   ]);
-  const created = (await (
-    await fetch(`${target.baseUrl}/api/teams/team_1/orchestrator`, { method: "POST" })
-  ).json()) as EnsureOrchestratorResponse;
-  return created.sessionId;
+  const shared = await ensureAssistantExecution(target.providers, { type: "team", id: "team_1" },
+    { orgId: "local-org", actorUserId: "local-user" }, "web:default");
+  return shared.sessionId;
 }
 
 interface Socket {
@@ -87,8 +73,6 @@ describe("team orchestrator — two members at once", () => {
     b.ws.close();
 
     expect(ready).toBe(true);
-    // Neither socket was refused. A shared session that only admits one
-    // member at a time is not shared.
     expect(a.closes).toHaveLength(0);
     expect(b.closes).toHaveLength(0);
   });
@@ -114,10 +98,6 @@ describe("team orchestrator — two members at once", () => {
     a.ws.close();
     b.ws.close();
 
-    // This is the load-bearing assertion of the whole file. If a member's
-    // prompt reached only their own socket, the other member would sit
-    // looking at a still page while the agent worked, and the session would
-    // be shared in name only.
     expect(reached).toBe(true);
   });
 });

@@ -69,6 +69,9 @@ jobs:
       - name: Store contract against real Postgres
         run: pnpm --filter @valet/store-postgres test
 
+      - name: Workflow start/delete races against real Postgres
+        run: pnpm --filter @valet/api test service.delete-race.postgres.test.ts
+
       # Web SPA: run vite directly (its plugin generates routeTree.gen.ts and it
       # bundles without a full typecheck) so the binary has a real web asset.
       - name: Build web SPA

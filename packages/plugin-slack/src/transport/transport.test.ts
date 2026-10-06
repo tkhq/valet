@@ -134,6 +134,14 @@ describe("send threads on the conversation key's thread root", () => {
     expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000100");
   });
 
+  it("keeps a delayed reply on its original root after another inbound turn", async () => {
+    const transport = makeTransport();
+    const original = primeTurn(transport, "1700000000.000100");
+    primeTurn(transport, "1700000000.000200");
+    await transport.send(original, { markdown: "Recovered answer" });
+    expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000100");
+  });
+
   it("threads a primed (inbound) conversation, unchanged", async () => {
     const transport = makeTransport();
     const key = primeTurn(transport, "1700000000.000200");
@@ -145,6 +153,15 @@ describe("send threads on the conversation key's thread root", () => {
     const transport = makeTransport();
     const key = await transport.openDirectConversation("U9");
     await transport.send(key, { markdown: "nudge" });
+    expect(lastCall("chat.postMessage").thread_ts).toBeUndefined();
+  });
+});
+
+describe("home channel", () => {
+  it("starts a new top-level message", async () => {
+    const transport = makeTransport();
+    await transport.sendToChannel("C0123456789", { markdown: "Team update" });
+    expect(lastCall("chat.postMessage").channel).toBe("C0123456789");
     expect(lastCall("chat.postMessage").thread_ts).toBeUndefined();
   });
 });
@@ -647,6 +664,17 @@ describe("parseUpdate — gate callbacks", () => {
   });
 });
 
+describe("sendPrivateNotice", () => {
+  it("sends only an ephemeral message and propagates provider failures", async () => {
+    const transport = makeTransport();
+    await transport.sendPrivateNotice(CHANNEL, "U1", "Link your account.");
+    expect(fake.calls.find(c => c.method === "chat.postEphemeral")?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: "Link your account." });
+    expect(fake.calls.some(c => c.method === "chat.postMessage")).toBe(false);
+    fake.failNext("chat.postEphemeral", "channel_not_found");
+    await expect(transport.sendPrivateNotice(CHANNEL, "U1", "Link your account.")).rejects.toThrow("channel_not_found");
+  });
+});
+
 describe("answerCallback", () => {
   const EXPIRED = "This approval has expired — resolve it on the web.";
 
@@ -968,6 +996,24 @@ describe("gate prompts", () => {
       type: "section",
       text: { type: "mrkdwn", text: "Ask &lt;!here> to review." },
     });
+  });
+
+  it("shortens a button label to Slack's 75-character limit, keeping the action id", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-long", title: "Pick one", actions: [{ id: "long", label: "x".repeat(80) }] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    const button = blocks.find((b: { type: string }) => b.type === "actions").elements[0];
+    expect(button.text.text.length).toBeLessThanOrEqual(75);
+    expect(button.action_id).toBe("long");
+  });
+
+  it("sends an open question with no actions block, which Slack would reject empty", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, { gateId: "gate-open", title: "Which repo?", actions: [] });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    expect(blocks.map((b: { type: string }) => b.type)).toEqual(["header"]);
   });
 
   it("posts the gate under the turn that raised it, with the gate id in the button", async () => {

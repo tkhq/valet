@@ -45,10 +45,10 @@ function MemoryLayout() {
         "flex min-h-0 min-w-0 flex-col border-b border-line md:h-auto md:w-72 md:shrink-0 md:border-b-0 md:border-r",
         activePath || isGraph ? "shrink-0" : "flex-1 md:flex-none",
       )}>
-        <div className="flex items-center gap-1 px-2 pt-2">
+        <div className="flex min-w-0 items-center gap-1 px-2 pt-2">
           <ViewTab to="/memory" label="Files" active={!isGraph} back={Boolean(activePath) || isGraph} />
           <ViewTab to="/memory/graph" label="Graph" active={isGraph} />
-          <span className="ml-auto pr-1">
+          <span className="ml-auto flex min-w-0 justify-end pr-1">
             <WorkspaceClause />
           </span>
         </div>
@@ -69,7 +69,7 @@ function ViewTab({ to, label, active, back }: { to: string; label: string; activ
     <Link
       to={to}
       className={cn(
-        "inline-flex min-h-11 items-center rounded px-2.5 py-1 text-sm md:min-h-0 md:text-xs font-medium transition-colors",
+        "inline-flex min-h-11 shrink-0 items-center rounded px-2.5 py-1 text-sm md:min-h-0 md:text-xs font-medium transition-colors",
         active ? "bg-moss-wash text-moss" : "text-muted hover:bg-ink-wash hover:text-ink",
       )}
     >

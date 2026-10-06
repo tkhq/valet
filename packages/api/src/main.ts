@@ -1,3 +1,4 @@
+import { configureSlackIngress } from "./routes/slack-webhook.js";
 /**
  * Node server boot.
  *
@@ -37,6 +38,8 @@ import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/mo
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
+import { wireChildGateReports } from "./orchestrator/children.js";
+import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
 import { initTelemetry } from "./observability/otel.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -322,7 +325,12 @@ wireAttentionRouter({
   engineStore: providers.engineStore,
   eventStream: providers.eventStream,
   channels: [providers.channelHost.attentionDeliverer()],
+  access: providers,
 });
+// A child stopped at a gate tells its parent thread (TKAI-564). Settlement
+// alone left the parent unaware of a blocked child until it finished.
+wireChildGateReports(providers.eventStream, providers.childWatcher);
+wireThreadPullRequests(providers.eventStream, providers.db);
 // A restored submission can settle during the first boot-chain step. Subscribe
 // before that work starts so automatic naming does not miss the completion.
 providers.autoTitleHost.start();
@@ -368,6 +376,7 @@ getAttachmentRefStore().startSweep();
 let closed = false;
 let bootReady = false;
 let installationSweep: InstallationSweepHandle | undefined;
+let pullRequestSweep: ReturnType<typeof startPullRequestSweep> | undefined;
 
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
@@ -568,6 +577,7 @@ async function runBootChain(): Promise<void> {
   // Event dispatcher (event-system plan Task 6): begin the delivery drain loop
   // so pending/failed event_deliveries left over from a prior process (and
   // freshly-ingested ones between nudges) get delivered.
+  configureSlackIngress(providers);
   providers.eventDispatcher.start();
 
   // Repository content sync: re-reads every tracked repository on its own
@@ -602,6 +612,11 @@ async function runBootChain(): Promise<void> {
   });
 
   if (closed) return;
+
+  // Repair PR state when GitHub webhook delivery is absent or missed.
+  pullRequestSweep = startPullRequestSweep({
+    db: providers.db, credentials: providers.engineCredentials, key: deriveSecretKey(encryptionKey),
+  }, providers.db);
 
   // GitHub App installations: pick up a new installation without anybody
   // pressing "Refresh installations". The tick wakes every minute and checks at
@@ -681,6 +696,11 @@ async function close(): Promise<void> {
     // Awaited, unlike the sweeps above it: a pass in flight holds a database
     // query open, and closing the store under it logs errors that look like
     // real failures during every shutdown.
+    await pullRequestSweep?.stop();
+  } catch (err) {
+    console.error("pullRequestSweep.stop failed:", err);
+  }
+  try {
     await installationSweep?.stop();
   } catch (err) {
     console.error("installationSweep.stop failed:", err);

@@ -103,9 +103,16 @@ export interface FlaggedSessionExport {
 }
 
 /**
- * Read every session-level rating row with the given value (across all
- * users — the pull harvests the whole instance's feedback) and attach each
- * session's full thread entries.
+ * Read every rating with the given value (across all users: the pull
+ * harvests the whole instance's feedback) and attach the rated threads'
+ * entries.
+ *
+ * The thread UI rates messages, and each message rating names its thread,
+ * so a thread with a matching message rating is harvested on its own. A
+ * workspace runtime holds all of a workspace's conversations, so harvesting
+ * the whole session for one message would add threads nobody endorsed
+ * (TKAI-358). A session-level rating, which older clients wrote, still
+ * harvests every thread of that session.
  */
 export async function readFlaggedSessions(
   src: EvalDataSource,
@@ -114,6 +121,8 @@ export async function readFlaggedSessions(
   const rows = await src.appDb
     .select({
       sessionId: ratings.sessionId,
+      threadId: ratings.threadId,
+      targetType: ratings.targetType,
       rating: ratings.rating,
       updatedAt: ratings.updatedAt,
       userId: ratings.userId,
@@ -121,14 +130,31 @@ export async function readFlaggedSessions(
     })
     .from(ratings)
     .leftJoin(agentSessions, eq(agentSessions.id, ratings.sessionId))
-    .where(and(eq(ratings.targetType, "session"), eq(ratings.rating, opts.rating)))
+    .where(eq(ratings.rating, opts.rating))
     .orderBy(desc(ratings.updatedAt));
 
-  const out: FlaggedSessionExport[] = [];
+  // One export per session. `threadIds` undefined means every thread.
+  const bySession = new Map<string, { row: (typeof rows)[number]; threadIds: Set<string> | undefined }>();
   for (const row of rows) {
+    // A message rating names its thread; a session rating covers them all.
+    const threadId = row.targetType === "entry" ? row.threadId : undefined;
+    if (threadId === null) continue;
+    const seen = bySession.get(row.sessionId);
+    if (!seen) {
+      bySession.set(row.sessionId, { row, threadIds: threadId === undefined ? undefined : new Set([threadId]) });
+    } else if (threadId === undefined) {
+      seen.threadIds = undefined;
+    } else {
+      seen.threadIds?.add(threadId);
+    }
+  }
+
+  const out: FlaggedSessionExport[] = [];
+  for (const { row, threadIds } of bySession.values()) {
     const threads = await src.engineStore.listThreads(row.sessionId);
     const withEntries: FlaggedSessionExport["threads"] = [];
     for (const thread of threads) {
+      if (threadIds !== undefined && !threadIds.has(thread.id)) continue;
       const entries = await src.engineStore.getEntries(row.sessionId, thread.id);
       if (entries.length > 0) withEntries.push({ threadId: thread.id, entries });
     }

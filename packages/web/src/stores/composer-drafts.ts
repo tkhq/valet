@@ -1,6 +1,6 @@
 /**
  * Per-thread composer drafts: text, attachments, and intake errors, keyed
- * by `draftKey(sessionId, threadId)`.
+ * by the signed-in account and `draftKey(sessionId, threadId)`.
  *
  * The draft lives OUTSIDE the Composer component for two reasons:
  *
@@ -11,6 +11,10 @@
  *    the user switches away. Its result folds into the ORIGINATING
  *    thread's slot here — component state would have dropped it on
  *    unmount, silently losing the attachment.
+ *
+ * The text also persists to localStorage, so a draft survives a reload and
+ * shows in another window. Attachments stay in memory: they are uploads in
+ * flight, not text that can be written back.
  */
 import { create } from "zustand";
 import type { ComposerImage } from "~/components/session/composer-images";
@@ -40,12 +44,12 @@ export const EMPTY_DRAFT: ComposerDraft = {
 
 /**
  * NUL (`"\u0000"`) cannot appear in either id, so keys never collide across
- * (sessionId, threadId) pairs. An undefined threadId (threads query still
+ * (account, sessionId, threadId) tuples. An undefined threadId (threads query still
  * loading) gets the session's "no-thread" slot; `adoptOrphanDraft` moves
  * that slot's content once the real thread id is known.
  */
 export function draftKey(sessionId: string, threadId: string | undefined): string {
-  return `${sessionId}\u0000${threadId ?? ""}`;
+  return `${useComposerDraftStore.getState().owner}\u0000${sessionId}\u0000${threadId ?? ""}`;
 }
 
 type ListUpdate<T> = T[] | ((prev: T[]) => T[]);
@@ -65,6 +69,8 @@ function isEmpty(draft: ComposerDraft): boolean {
 }
 
 interface ComposerDraftStore {
+  owner: string;
+  activateOwner(owner: string): void;
   byKey: Record<string, ComposerDraft>;
   setText(key: string, text: string): void;
   setImages(key: string, update: ListUpdate<ComposerImage>): void;
@@ -83,10 +89,37 @@ interface ComposerDraftStore {
   adoptOrphanDraft(sessionId: string, threadId: string): void;
 }
 
+/** One localStorage entry per draft, so a write in one window names exactly
+ * the draft it changed and leaves the others alone. localStorage can be
+ * absent or throw (private windows, blocked site data, a full quota). A draft
+ * that cannot be saved still works for this tab. */
+const STORAGE_PREFIX = "valet:composer-draft:v2:";
+
+function storedDrafts(owner: string): Record<string, ComposerDraft> {
+  const byKey: Record<string, ComposerDraft> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const name = localStorage.key(i);
+      const text = name?.startsWith(STORAGE_PREFIX + owner + "\u0000") ? localStorage.getItem(name) : null;
+      if (name && text) byKey[name.slice(STORAGE_PREFIX.length)] = { ...EMPTY_DRAFT, text };
+    }
+  } catch { /* nothing stored */ }
+  return byKey;
+}
+
+function storeText(key: string, text: string): void {
+  try {
+    if (!useComposerDraftStore.getState().owner) return;
+    if (text) localStorage.setItem(STORAGE_PREFIX + key, text);
+    else localStorage.removeItem(STORAGE_PREFIX + key);
+  } catch { /* keep the in-memory draft */ }
+}
+
 export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
   /** Apply `fn` to the slot; an all-empty result deletes the slot. */
   function patch(key: string, fn: (prev: ComposerDraft) => ComposerDraft): void {
     set((state) => {
+      if (!key.startsWith(state.owner + "\u0000")) return state;
       const next = fn(state.byKey[key] ?? EMPTY_DRAFT);
       if (isEmpty(next)) {
         if (state.byKey[key] === undefined) return state;
@@ -97,7 +130,10 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
     });
   }
   return {
+    owner: "",
     byKey: {},
+    // Never attribute legacy unscoped drafts to whichever account signs in next.
+    activateOwner: (owner) => set((state) => state.owner === owner ? state : { owner, byKey: owner ? storedDrafts(owner) : {} }),
     setText: (key, text) => patch(key, (d) => ({ ...d, text })),
     setImages: (key, update) => patch(key, (d) => ({ ...d, images: resolve(update, d.images) })),
     setFiles: (key, update) => patch(key, (d) => ({ ...d, files: resolve(update, d.files) })),
@@ -107,7 +143,7 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
       patch(key, (d) => ({ ...d, fileErrors: resolve(update, d.fileErrors) })),
     clear: (key) =>
       set((state) => {
-        if (state.byKey[key] === undefined) return state;
+        if (!key.startsWith(state.owner + "\u0000") || state.byKey[key] === undefined) return state;
         const { [key]: _, ...rest } = state.byKey;
         return { byKey: rest };
       }),
@@ -124,7 +160,33 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
   };
 });
 
+useComposerDraftStore.subscribe((state, prev) => {
+  if (state.owner !== prev.owner || state.byKey === prev.byKey) return;
+  for (const key of new Set([...Object.keys(state.byKey), ...Object.keys(prev.byKey)])) {
+    const text = state.byKey[key]?.text ?? "";
+    if (text !== (prev.byKey[key]?.text ?? "")) storeText(key, text);
+  }
+});
+
+// Another window changed one draft. Apply that draft only.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (!event.key?.startsWith(STORAGE_PREFIX)) return;
+    useComposerDraftStore.getState().setText(event.key.slice(STORAGE_PREFIX.length), event.newValue ?? "");
+  });
+}
+
 /** The draft for one (sessionId, threadId) slot, or the stable empty draft. */
 export function useComposerDraft(key: string): ComposerDraft {
   return useComposerDraftStore((s) => s.byKey[key] ?? EMPTY_DRAFT);
+}
+
+/** Starter buttons fill an empty draft; repeated clicks never append or erase user text. */
+export function prefillComposerDraft(sessionId: string, threadId: string, prompt: string): void {
+  const store = useComposerDraftStore.getState();
+  const key = draftKey(sessionId, threadId);
+  const existing = store.byKey[key]?.text;
+  if (!existing?.trim() || existing.split("\n\n").every((part) => part.trim() === prompt)) {
+    store.setText(key, prompt);
+  }
 }

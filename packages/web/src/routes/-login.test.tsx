@@ -13,6 +13,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 const navigate = vi.fn();
+vi.mock("~/lib/auth-navigation", () => ({ finishAuthChange: (to: string) => navigate({ to }) }));
 const signInEmail = vi.fn().mockResolvedValue({ data: { user: {} }, error: null });
 const signInSocial = vi.fn();
 const signInSso = vi.fn();

@@ -24,21 +24,27 @@
  * would claim the row.) A crash mid-delivery leaves the row pending; it
  * becomes due again when the lease lapses.
  */
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { slackEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
+import type { ChannelOrigin, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
-import type { ChannelOrigin, SignalContent, ValetPlugin } from "@valet/engine";
+import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { allCatalogEntries } from "./ingest.js";
-import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
+import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
+import { hasTeamCoverage } from "./delivery-policy.js";
+import { allCatalogEntries } from "./ingest.js";
+import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
+import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, threadForPullRequest, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
   mentionAudience,
+  channelMessageAuthor,
+  newcomerAuthor,
   teamMentionActor,
 } from "./team-slack-gate.js";
-import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
+import { resolvePath } from "./match.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -64,8 +70,13 @@ export interface OrchestratorDeliverFn {
     actorUserId: string;
     signal: SignalContent;
     dispatchId: string;
-    /** Which of the owner's assistants answers. Absent → the owner's default. */
-    assistantId?: string;
+    /** The thread to deliver to, when the event names one other than its origin's. */
+    threadKey?: string;
+    target?: { sessionId: string; threadId: string };
+    /** The channel message this delivery carries, for the channel record. */
+    inbound?: InboundChannelMessage;
+    /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
+    author?: PromptAuthor;
   }): Promise<void>;
 }
 
@@ -114,11 +125,11 @@ function channelText(payload: unknown): string | undefined {
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
   workflowId?: string;
-  /** Which of the owner's assistants answers. Absent → the owner's default. */
-  assistantId?: string;
   /** When true, an orchestrator channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
+  pauseOnOverlap?: boolean;
+  overlapPausedAt?: number;
   /** Standing instruction rendered above the event. Absent → no instruction. */
   systemPrompt?: string;
   /** The event message, in place of the default body. Absent → the default. */
@@ -128,14 +139,20 @@ interface SubscriptionTarget {
 export class EventDispatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private draining = false;
+  private wakeRequested = false;
   private stopped = false;
+  private drainIngress?: () => Promise<void>;
+  private ingressInFlight: Promise<void> | null = null;
+  private ingressWakeRequested = false;
+
+  setIngressDrain(drain: () => Promise<void>): void { this.drainIngress = drain; }
 
   constructor(private readonly deps: EventDispatcherDeps) {}
 
   start(): void {
     if (this.timer) return;
     this.stopped = false;
-    this.timer = setInterval(() => void this.pollOnce(), POLL_MS);
+    this.timer = setInterval(this.nudge, POLL_MS);
   }
 
   async stop(): Promise<void> {
@@ -143,11 +160,14 @@ export class EventDispatcher {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     while (this.draining) await new Promise((r) => setTimeout(r, 25));
+    await this.ingressInFlight;
   }
 
   /** In-process nudge from the ingest path. Arrow property so callers can pass it unbound. */
   nudge = (): void => {
     if (this.stopped) return;
+    if (this.ingressInFlight) this.ingressWakeRequested = true;
+    if (this.draining) { this.wakeRequested = true; return; }
     void this.pollOnce().catch((err) => console.error("event dispatcher poll failed:", err));
   };
 
@@ -155,6 +175,16 @@ export class EventDispatcher {
     if (this.stopped || this.draining) return;
     this.draining = true;
     try {
+      // Slack media and sandbox startup must not stall unrelated deliveries.
+      // Keep one ingress drain in flight; durable claims cover process restarts.
+      if (this.drainIngress && !this.ingressInFlight) {
+        this.ingressInFlight = Promise.resolve().then(() => this.drainIngress?.())
+          .catch(err => console.error("event ingress drain failed:", err))
+          .finally(() => {
+            this.ingressInFlight = null;
+            if (this.ingressWakeRequested) { this.ingressWakeRequested = false; this.nudge(); }
+          });
+      }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving
       // next_attempt_at forward in the same statement that selects them.
@@ -184,13 +214,14 @@ export class EventDispatcher {
       }
     } finally {
       this.draining = false;
+      if (this.wakeRequested) { this.wakeRequested = false; this.nudge(); }
     }
   }
 
   private async deliverOne(deliveryId: string): Promise<void> {
     const { db } = this.deps;
     const [delivery] = await db.select().from(eventDeliveries).where(eq(eventDeliveries.id, deliveryId)).limit(1);
-    if (!delivery || delivery.status === "delivered" || delivery.status === "dead") return;
+    if (!delivery || delivery.status === "delivered" || delivery.status === "dead" || delivery.status === "skipped") return;
     const [event] = await db.select().from(events).where(eq(events.id, delivery.eventId)).limit(1);
     const [sub] = await db
       .select()
@@ -211,12 +242,33 @@ export class EventDispatcher {
       // is Record<string, string>). Same narrowing convention as ingest.ts.
       const target = sub.target as SubscriptionTarget;
       const refs = event.refs as Record<string, string>;
+      if (event.orgId !== sub.orgId) throw new Error("Event and subscription organizations differ.");
+      const covered = sub.enabled && await hasTeamCoverage(db, sub, event, allCatalogEntries(this.deps.plugins ?? []));
+      if (!sub.enabled || covered) {
+        let paused = false;
+        if (covered && target.pauseOnOverlap) {
+          const changed = await db.update(eventSubscriptions)
+            .set({ enabled: false, target: { ...target, overlapPausedAt: Date.now() }, updatedAt: Math.max(Date.now(), sub.updatedAt + 1) })
+            .where(and(eq(eventSubscriptions.id, sub.id), eq(eventSubscriptions.orgId, event.orgId),
+              eq(eventSubscriptions.updatedAt, sub.updatedAt), eq(eventSubscriptions.enabled, true)))
+            .returning({ id: eventSubscriptions.id });
+          paused = changed.length > 0;
+        }
+        await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
+          ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
+          : "Skipped — subscription is disabled." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
+        return;
+      }
+
       if (target.kind === "workflow" && target.workflowId) {
-        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
+        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy);
       } else if (target.kind === "orchestrator") {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
-        const actorUserId = teamMention ? await teamMentionActor(db, sub, event.payload) : sub.createdBy;
+        // A verified mention carries a human actor. Other shared event work
+        // acts as its owner, never as the member who created the rule.
+        const actorUserId = teamMention ? await teamMentionActor(db, sub, event.payload)
+          : sub.ownerType === "user" ? sub.createdBy : `${sub.ownerType}:${sub.ownerId}`;
         if (event.orgId !== sub.orgId || actorUserId === null) {
           // Name the membership this rule's audience actually requires, the
           // same split the drop log makes in `team-slack-gate.ts`.
@@ -232,8 +284,12 @@ export class EventDispatcher {
         // text, not the machine summary or raw `<@U…>` markup and ids.
         // A non-channel event keeps the compact JSON excerpt it always had.
         const origin = this.deps.resolveChannelOrigin?.(event.service, event.eventKey, event.payload) ?? null;
+        // A Slack event from a channel with no thread to reply into stays
+        // with that channel's audience, not the shared events thread.
+        const slackChannel = slackEventChannel(event);
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
         let body: string;
+        let channelBody = "";
         if (origin) {
           // `actor` is untyped jsonb, owned by ingest (NormalizedEvent.actor is
           // `{ externalId, login? }`) — same narrowing convention as `refs`.
@@ -246,6 +302,7 @@ export class EventDispatcher {
           // The clean text is the body; fall back to the summary only when the
           // message carries no text of its own (e.g. a file-only post).
           body = (normalized.text || event.summary).slice(0, MAX_BODY_EXCERPT_CHARS);
+          channelBody = normalized.text;
           const sender = normalized.senderName ?? actor?.login ?? actor?.externalId;
           if (sender) attributes.sender = sender;
         } else {
@@ -276,6 +333,41 @@ export class EventDispatcher {
               ),
           );
         }
+        // A pull request comment continues in the thread that opened the
+        // pull request, when that thread is in this owner's runtime.
+        const parsedComment = origin ? null : pullRequestComment(event.eventKey, event.payload);
+        const commentThread = parsedComment && sub.ownerType !== "org"
+          ? await threadForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, parsedComment.pullRequestUrl)
+          : null;
+        const commentThreadKey = commentThread?.key ?? null;
+        // Valet posts with a person's GitHub token, so its own comment arrives
+        // as that person. A comment it recorded as sent is its own: it never
+        // wakes an assistant.
+        const ownWrite = parsedComment !== null
+          && await isOwnPullRequestWrite(db, event.orgId, event.eventKey, parsedComment);
+        if (ownWrite) {
+          await db.update(eventDeliveries).set({ status: "skipped", lastError: "Valet's own pull-request write", attempts: delivery.attempts + 1 })
+            .where(eq(eventDeliveries.id, deliveryId));
+          return;
+        }
+        // The webhook can arrive before Valet records its write. A fresh
+        // comment waits for the record before any assistant wakes, then this
+        // delivery runs again. It stays pending, so the attempt is not counted.
+        const settledAt = (parsedComment?.postedAt ?? 0) + OWN_WRITE_SETTLE_MS;
+        if (parsedComment !== null && settledAt > Date.now()) {
+          await db.update(eventDeliveries).set({ nextAttemptAt: settledAt }).where(eq(eventDeliveries.id, deliveryId));
+          return;
+        }
+        const prComment = parsedComment;
+        const prThreadKey = prComment ? commentThreadKey : null;
+        const inbound = origin
+          ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
+          : prThreadKey && prComment ? prComment.message : undefined;
+        const author = teamMention
+          ? await newcomerAuthor(db, event.orgId, actorUserId, resolvePath(event.payload, "user"), attributes.sender)
+          : sub.ownerType === "team" && event.service === "slack"
+            ? await channelMessageAuthor(db, sub.ownerId, event.payload, attributes.sender)
+            : undefined;
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
           ownerType: sub.ownerType,
@@ -289,12 +381,17 @@ export class EventDispatcher {
             origin: origin ?? undefined,
           },
           dispatchId: `event:${delivery.id}`,
-          assistantId: target.assistantId,
+          ...(prComment && commentThread ? { target: { sessionId: commentThread.sessionId, threadId: commentThread.threadId } } : {}),
+          ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
+          ...(inbound ? { inbound } : {}),
+          ...(author ? { author } : {}),
         });
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The
         // threadKey is `{channelType}:{channelId}:{threadTs}`.
-        if (target.follow && origin) {
+        // Message subscriptions already deliver later replies. A second follow
+        // binding would submit each reply twice and outlive the subscription.
+        if (target.follow && origin && event.eventKey === "slack.app_mention") {
           const parts = origin.threadKey.split(":");
           if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
             const key = {
@@ -325,9 +422,6 @@ export class EventDispatcher {
               // rule id is what it needs.
               ...(teamMention ? { subscriptionId: sub.id } : {}),
               preserveBinding,
-              // Whichever assistant just answered keeps the thread, so a later
-              // overheard message does not fall back to the owner's default.
-              assistantId: target.assistantId,
               // The mention itself is the last message the assistant has seen,
               // so the follow-router's gap re-hydration starts right after it.
               lastSeenTs: origin.messageTs,
@@ -364,6 +458,8 @@ export class EventDispatcher {
     deliveryId: string,
     event: typeof events.$inferSelect,
     refs: Record<string, string>,
+    /** Creator attribution applies only to personal workflows. */
+    createdBy: string,
   ): Promise<void> {
     // Mirrors routes/workflows.ts POST /:id/runs: same run-id scheme, same
     // definitionVersionId, owner resolved from the definition row. The org
@@ -406,6 +502,7 @@ export class EventDispatcher {
     await this.deps.workflowRunHost.start(runId, params, def.definition, {
       ownerType: def.ownerType,
       ownerId: def.ownerId,
+      actorUserId: def.ownerType === "user" ? createdBy : `${def.ownerType}:${def.ownerId}`,
     });
   }
 

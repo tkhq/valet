@@ -54,6 +54,18 @@ describe("fetchThreadTranscript", () => {
     expect(await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0", selfUserId: "UBOT" })).toBeNull();
   });
 
+  it("treats a post under a team's custom name, which carries only bot_id, as the bot's own", async () => {
+    const api = fakeApi([
+      { user: "U1", text: "<@UBOT> brainstorm with me", ts: "1.0" },
+      { bot_id: "BBOT", username: "XORS Eng Team", text: "Here is a plan", ts: "1.5" },
+      { user: "U1", text: "where would sharing come in?", ts: "1.8" },
+    ], { U1: "Xiangan" });
+    // The gap window drops it, so a follow-up does not look like a third participant.
+    expect(await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0", selfUserId: "UBOT", selfBotId: "BBOT", afterTs: "1.0", beforeTs: "1.8" })).toBeNull();
+    // The first-turn context names it "You".
+    expect(await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0", selfUserId: "UBOT", selfBotId: "BBOT" })).toContain("You: Here is a plan");
+  });
+
   it("windowed: keeps only messages strictly between afterTs and beforeTs, minus the bot's own", async () => {
     const api = fakeApi(
       [

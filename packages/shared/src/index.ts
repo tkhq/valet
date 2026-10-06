@@ -15,3 +15,4 @@ export * from './upload-limits.js';
 
 export * from "./browser.js";
 export * from './browser-policy.js';
+export * from './event-match.js';

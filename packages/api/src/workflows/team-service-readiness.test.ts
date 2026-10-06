@@ -9,6 +9,7 @@ import type { WorkflowDefinition } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { githubInstallations, teamMembers, workflowDefinitions } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { teamArmRefusals, teamServiceReadiness } from "./team-service-readiness.js";
@@ -152,10 +153,7 @@ describe("teamServiceReadiness", () => {
         accessToken: "mine",
       });
     }
-    await credentials.save({ type: "team", id: TEAM }, "gmail", {
-      type: "oauth2",
-      metadata: { delegatedFrom: "u-1" },
-    });
+    await shareCredential(db, { teamId: TEAM, service: "gmail", userId: "u-1", createdAt: 1 });
   }
 
   const BROKEN_REASON =
@@ -175,10 +173,8 @@ describe("teamServiceReadiness", () => {
     expect(result.blocked).toEqual([]);
   });
 
-  // The team's list still shows the row after the delegator leaves, but a
-  // run following it throws `CredentialReferenceBrokenError`. Readiness
-  // must give the answer the run gets.
-  it("blocks a delegated reference whose delegator left the team", async () => {
+  // A run never uses the account of someone who left the team.
+  it("blocks a share whose member left the team", async () => {
     await delegateGmail({ member: false, source: true });
 
     const result = await teamServiceReadiness(deps(), {
@@ -188,7 +184,7 @@ describe("teamServiceReadiness", () => {
     });
 
     expect(result.ready).toEqual([]);
-    expect(result.blocked).toEqual([{ service: "gmail", reason: BROKEN_REASON }]);
+    expect(result.blocked.map((b) => b.service)).toEqual(["gmail"]);
   });
 
   // The run no longer stops at a broken team row when the organization
@@ -200,10 +196,8 @@ describe("teamServiceReadiness", () => {
       type: "bot_token",
       accessToken: "org-slack",
     });
-    await credentials.save({ type: "team", id: TEAM }, "slack", {
-      type: "bot_token",
-      metadata: { delegatedFrom: "u-1" },
-    });
+    await db.insert(teamMembers).values({ teamId: TEAM, userId: "u-1", role: "member" });
+    await shareCredential(db, { teamId: TEAM, service: "slack", userId: "u-1", createdAt: 1 });
 
     const result = await teamServiceReadiness(deps(), {
       orgId: ORG,

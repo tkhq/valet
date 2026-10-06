@@ -54,25 +54,20 @@ import type { AppEnv } from "../env.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { agentSessions } from "../schema/index.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { isSessionDirectOwner } from "../services/session-access.js";
+import { canAccessSessionResources } from "../services/session-access.js";
 
 type SessionRow = typeof agentSessions.$inferSelect;
 
-/** Direct-owner session lookup (`isSessionDirectOwner`): the gateway is a
- * shell into the sandbox, so it stays narrower than `canViewSession`'s
- * membership rule. The principal, not `c.var.user`, decides — a team key
- * owns its team's sessions and never the creating admin's. Takes
- * `db`/`sessionId`/`caller` directly rather than a `Context` so both the
- * HTTP handler (which has one) and the WS `onOpen` closure (which doesn't)
- * can share it. */
+/** A gateway opens the whole working directory. Require the execution audience,
+ * and deny mixed legacy runtimes. Shared by the HTTP and WebSocket handlers. */
 async function loadOwnedSession(
-  db: AppEnv["Variables"]["providers"]["db"],
+  providers: AppEnv["Variables"]["providers"],
   sessionId: string,
   caller: RequestPrincipal,
 ): Promise<SessionRow | null> {
-  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  const rows = await providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
   const row = rows[0];
-  if (!row || !(await isSessionDirectOwner(db, row, caller))) return null;
+  if (!row || !(await canAccessSessionResources(providers, row, caller))) return null;
   return row;
 }
 
@@ -212,7 +207,7 @@ function asContentfulStatusCode(status: number): ContentfulStatusCode {
 type ProxyRequestInit = RequestInit & { duplex?: "half" };
 
 async function proxyHttp(c: Context<AppEnv>): Promise<Response> {
-  const row = await loadOwnedSession(c.var.providers.db, c.req.param("id"), c.var.principal);
+  const row = await loadOwnedSession(c.var.providers, c.req.param("id"), c.var.principal);
   if (!row) return c.json({ error: "not found" }, 404);
 
   const sessionId = row.id;
@@ -360,7 +355,7 @@ export function registerGatewayWsProxy(app: Hono<AppEnv>, upgradeWebSocket: Upgr
       return {
         async onOpen(_evt, ws: WSContext) {
           try {
-            const row = await loadOwnedSession(providers.db, sessionId, caller);
+            const row = await loadOwnedSession(providers, sessionId, caller);
             if (!row) {
               ws.close(4040, "session not found");
               return;

@@ -137,6 +137,7 @@ class MemoryPass implements CollectorPass {
         and(
           eq(memoryFiles.ownerType, source.ownerType),
           eq(memoryFiles.ownerId, source.ownerId),
+          eq(memoryFiles.namespace, ""),
           eq(memoryFiles.sourceId, source.id),
           // Scoped twice, as every mirror delete in this rail is: the source
           // AND the mounted namespace. A row outside `lib/` was written in
@@ -173,6 +174,7 @@ class MemoryPass implements CollectorPass {
           and(
             eq(memoryFiles.ownerType, source.ownerType),
             eq(memoryFiles.ownerId, source.ownerId),
+          eq(memoryFiles.namespace, ""),
             eq(memoryFiles.path, path),
           ),
         );
@@ -225,6 +227,7 @@ class MemoryPass implements CollectorPass {
           and(
             eq(memoryFiles.ownerType, source.ownerType),
             eq(memoryFiles.ownerId, source.ownerId),
+          eq(memoryFiles.namespace, ""),
             eq(memoryFiles.path, row.path),
           ),
         );
@@ -243,6 +246,7 @@ class MemoryPass implements CollectorPass {
           and(
             eq(memoryFiles.ownerType, source.ownerType),
             eq(memoryFiles.ownerId, source.ownerId),
+          eq(memoryFiles.namespace, ""),
             eq(memoryFiles.path, row.path),
             eq(memoryFiles.sourceId, source.id),
             like(memoryFiles.path, `${MOUNT_PREFIX}%`),

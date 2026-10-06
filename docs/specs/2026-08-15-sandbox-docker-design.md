@@ -347,6 +347,12 @@ Mitigations shipped:
   (empirically starts on masked-proc clusters) and probes storage drivers
   in order overlay2 → fuse-overlayfs → vfs. The daemon now starts
   everywhere; inner containers still need an unmasked /proc.
+- The fuse-overlayfs probe mounts a layer and executes a copied binary
+  inside the rootless user namespace. An open `/dev/fuse` does not prove
+  that executable layers work. Docker Desktop LinuxKit 6.10.14 can reject
+  execution with `EINVAL` after a successful mount. The probe selects vfs
+  if execution fails. It unmounts the probe before removing its files.
+  `scripts/e2e/docker-storage.test.ts` checks driver selection with stubbed mount and privilege boundaries, including successful mounts with failed execution.
 - The manifest sets `hostUsers: false` on docker pods. Kubernetes >= 1.31
   validation requires it for `procMount: Unmasked` and REJECTS the pod
   without it once the ProcMountType gate is on (default from 1.33). On
@@ -403,3 +409,5 @@ Kubernetes lists private PVC owners after CR deletion so failed state deletion r
 The provider checks the saved browser owner before it changes credentials or the Sandbox CR.
 It uses the node Localhost profile and waits for the browser preflight marker.
 Missing retained state fails closed. See `deploy/browser.md` for node installation and image requirements.
+
+Retained execution paths containing colons use CSV-escaped `--mount` bind arguments during creation and restoration. Existing directories remain in place.

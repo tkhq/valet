@@ -6,6 +6,7 @@
  * countdown, and "Retries in 8 minutes" is the sentence that stops someone
  * escalating. `now` is injectable so the wording is testable without clocks.
  */
+import { eventKeyMatches } from "@valet/shared";
 import type { EventDeliveryWire, EventSubscriptionWire } from "@valet/api/wire";
 
 const MINUTE = 60_000;
@@ -34,6 +35,7 @@ export function retryPhrase(ms: number): string {
  * dead delivery names Redeliver, because that is the only way back.
  */
 export function deliveryStatusLine(delivery: EventDeliveryWire, now: number): string {
+  if (delivery.status === "skipped") return delivery.lastError ?? "Skipped by delivery preferences";
   const attempts = `${delivery.attempts} ${plural(delivery.attempts, "attempt", "attempts")}`;
   switch (delivery.status) {
     case "delivered":
@@ -77,9 +79,7 @@ export function subscriptionsMatchingKey(
   return subscriptions.filter(
     (sub) =>
       sub.enabled &&
-      sub.eventKeys.some((pattern) =>
-        pattern.endsWith(".*") ? eventKey.startsWith(pattern.slice(0, -1)) : pattern === eventKey,
-      ),
+      eventKeyMatches(eventKey, sub.eventKeys),
   );
 }
 

@@ -1,7 +1,11 @@
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import {
+  DOCX_DOCUMENT_MIME,
+  extractDownloadedDocx,
   extractDownloadedPdf,
+  isDocxDocument,
+  isDocxDocumentMime,
   isPdfDocument,
   isTextDocumentMime,
   MAX_PDF_DOCUMENT_BYTES,
@@ -42,6 +46,21 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+const senderParameters = {
+  sender_name: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 80,
+    pattern: '\\S',
+    description: 'Custom Slack message display name, such as Hestia · People. Overrides the workspace name for this message. This does not change the bot account or DM conversation.',
+  })),
+  sender_avatar_url: Type.Optional(Type.String({
+    pattern: '^https://[^\\s]+$',
+    description: 'Public HTTPS image URL for this message’s profile picture. Slack must be able to fetch it. Omit to use the default avatar.',
+  })),
+};
+
+type SenderParams = { sender_name?: string; sender_avatar_url?: string };
+
 type SlackPostData = { ok: boolean; error?: string; ts?: string; channel?: string };
 
 async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: string; iconUrl?: string }> {
@@ -63,8 +82,12 @@ async function postActionMessage(
   token: string,
   body: Record<string, unknown>,
   ctx: PluginActionContext,
+  sender: SenderParams = {},
 ): Promise<{ res: Response; data: SlackPostData }> {
-  const override = await actionIdentity(ctx);
+  const override = {
+    ...await actionIdentity(ctx),
+    ...slackIdentityOverride({ displayName: sender.sender_name, avatarUrl: sender.sender_avatar_url }),
+  };
   const post = async (postBody: Record<string, unknown>) => {
     const res = await slackFetch('chat.postMessage', token, postBody);
     try {
@@ -114,8 +137,8 @@ interface ChannelGuard {
 }
 
 /** Guard that checks private channel membership. */
-async function guardPrivateChannel(token: string, channelId: string, ownerId: string | undefined): Promise<ChannelGuard> {
-  const result = await checkPrivateChannelAccess(token, channelId, ownerId);
+async function guardPrivateChannel(token: string, channelId: string, ownerId: string | undefined, ownerType?: "user" | "team" | "org"): Promise<ChannelGuard> {
+  const result = await checkPrivateChannelAccess(token, channelId, ownerId, { ownerType });
   if (!result.allowed) {
     return { denied: { success: false, error: result.error || 'Access denied' } };
   }
@@ -316,6 +339,7 @@ async function openAndSendDM(
   userId: string,
   text: string,
   ctx: PluginActionContext,
+  sender: SenderParams,
 ): Promise<PluginActionResult> {
   const openRes = await slackFetch('conversations.open', token, { users: userId });
   if (!openRes.ok) return slackError(openRes);
@@ -333,7 +357,7 @@ async function openAndSendDM(
     body.text = formattedText.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
 
-  const { res, data } = await postActionMessage(token, body, ctx);
+  const { res, data } = await postActionMessage(token, body, ctx, sender);
   if (!res.ok) return slackError(res);
   if (!data.ok) return slackError(res, data);
 
@@ -343,37 +367,42 @@ async function openAndSendDM(
 // ─── Action Definitions ──────────────────────────────────────────────────────
 
 const dmOwner = action(Type.Object({
+    ...senderParameters,
     text: Type.String({ description: 'Message text' }),
   }))({
   id: 'slack.dm_owner',
   name: 'DM Owner',
-  description: 'Send a direct message to the session owner on Slack. No user lookup needed.',
+  description: 'Send a direct message to a personal session or workflow owner with a linked Slack identity. For team or organization owners, use dm_user with an explicit recipient.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
+    if (ctx.owner && ctx.owner.type !== "user") {
+      return { success: false, error: "This run has no personal Slack recipient. Use slack.dm_user with the intended recipient’s Slack user ID." };
+    }
     const ownerSlackId = ownerSlackUserId(cred);
-    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.' };
-    return openAndSendDM(token, ownerSlackId, p.text, ctx);
+    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link Slack in Settings → Connected accounts.' };
+    return openAndSendDM(token, ownerSlackId, p.text, ctx, p);
   },
 });
 
 const dmUser = action(Type.Object({
+    ...senderParameters,
     user: Type.String({ description: 'User ID (U...)' }),
     text: Type.String({ description: 'Message text' }),
   }))({
   id: 'slack.dm_user',
   name: 'DM User',
-  description: 'Send a direct message to a Slack user by their user ID (U...). Use list_users to find IDs.',
+  description: 'Send a direct message to a Slack user by their user ID (U...). Use list_users to find IDs. This uses the bot token and does not require a personal Slack identity.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    return openAndSendDM(token, p.user, p.text, ctx);
+    return openAndSendDM(token, p.user, p.text, ctx, p);
   },
 });
 
@@ -430,7 +459,7 @@ const addReaction = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
     const res = await slackFetch('reactions.add', token, {
       channel: p.channel,
@@ -453,7 +482,7 @@ const listChannels = action(Type.Object({
   }))({
   id: 'slack.list_channels',
   name: 'List Channels',
-  description: 'List Slack channels. By default lists only channels the bot has joined. Set scope to "all" to discover all public channels in the workspace. Use prefix to filter by channel name prefix (e.g. "eng-" or "team-").',
+  description: 'List Slack channels available to this run. "joined" lists bot member channels; "all" lists public channels only. Team and organization runs can access private channels where the connected bot is a member. Personal runs require a linked Slack identity and channel membership for private access. Read access_note before suggesting another invitation. Use prefix to filter channel names.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -494,24 +523,34 @@ const listChannels = action(Type.Object({
 
     // Filter out private channels the owner doesn't have access to
     const ownerSlackId = ownerSlackUserId(cred);
-    if (ownerSlackId) {
+    const sharedOwner = ctx.owner?.type === 'team' || ctx.owner?.type === 'org';
+    if (!sharedOwner && ownerSlackId) {
       const privateChannels = channels.filter((ch) => ch.is_private === true);
       if (privateChannels.length > 0) {
         const accessChecks = await Promise.all(
           privateChannels.map(async (ch) => {
-            const result = await checkPrivateChannelAccess(token, ch.id as string, ownerSlackId);
+            if (typeof ch.id !== 'string') return { id: ch.id, allowed: false };
+            const result = await checkPrivateChannelAccess(token, ch.id, ownerSlackId, { ownerType: ctx.owner?.type });
             return { id: ch.id, allowed: result.allowed };
           }),
         );
         const deniedIds = new Set(accessChecks.filter((c) => !c.allowed).map((c) => c.id));
         channels = channels.filter((ch) => !deniedIds.has(ch.id));
       }
-    } else {
-      // No linked identity — filter out all private channels
+    } else if (!sharedOwner) {
+      // Personal runs need a linked member identity.
       channels = channels.filter((ch) => ch.is_private !== true);
     }
 
-    return { success: true, data: { channels, total: channels.length } };
+    const visibility = wantAll || (!sharedOwner && !ownerSlackId) ? 'public_only' : 'public_and_authorized_private';
+    const accessNote = sharedOwner
+      ? wantAll ? 'scope="all" lists public channels only. Use scope="joined" for private channels where the bot is a member.' : 'Private channels are included where the connected bot is a member. Team and organization runs use bot membership, not a person’s private access. Direct messages remain restricted.'
+      : !ownerSlackId
+        ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Settings → Connected accounts. Then use scope="joined".'
+        : wantAll
+          ? 'scope="all" lists public channels only. Use scope="joined" to find private channels where both the bot and personal owner are members.'
+          : 'Private channels are included only when the linked personal owner is a member. An absent channel is not proof that the bot needs an invitation.';
+    return { success: true, data: { channels, total: channels.length, scope: wantAll ? 'all' : 'joined', visibility, access_note: accessNote } };
   },
 });
 
@@ -536,7 +575,7 @@ const readHistory = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
     const query: Record<string, unknown> = {
       channel: p.channel,
@@ -605,7 +644,7 @@ const readThread = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
     const query: Record<string, unknown> = {
       channel: p.channel,
@@ -670,9 +709,12 @@ const fetchFile = action(Type.Object({
   }))({
   id: 'slack.fetch_file',
   name: 'Fetch File',
-  description: 'Download a file from Slack. For images, the content is returned visually so you can see it. For text files and PDFs, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
+  description: 'Download a file from Slack in a personal run. Team and organization runs cannot download private Slack file URLs. For images, the content is returned visually so you can see it. For text files, PDFs, and DOCX files, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
+    if (ctx.owner?.type === 'team' || ctx.owner?.type === 'org') {
+      return { success: false, error: 'Shared runs cannot verify access to this Slack file. Use an authorized personal assistant or a team Google Drive connection.' };
+    }
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
@@ -734,6 +776,20 @@ const fetchFile = action(Type.Object({
       return { success: true, data: { content: downloaded.text, mimetype: contentType } };
     }
 
+    const documentFilename = parsedUrl.pathname.split('/').pop() || 'document';
+    if (isDocxDocumentMime(contentType, documentFilename)) {
+      const downloaded = await readResponseBytes(res, MAX_PDF_FETCH, ctx.signal);
+      if (!downloaded.ok) {
+        return { success: false, error: 'DOCX file exceeds the 25 MB limit. Upload a smaller file.' };
+      }
+      if (!isDocxDocument(downloaded.data)) {
+        return { success: false, error: 'This file is not a valid DOCX document. Upload a DOCX file exported from Word.' };
+      }
+      const read = await extractDownloadedDocx({ data: downloaded.data, name: documentFilename, extractDocument: ctx.extractDocument, signal: ctx.signal });
+      if (!read.ok) return { success: false, error: read.error };
+      return { success: true, data: { content: read.content, mimetype: DOCX_DOCUMENT_MIME, filename: documentFilename } };
+    }
+
     if (contentType === 'application/pdf' || contentType === 'application/octet-stream') {
       const filename = parsedUrl.pathname.split('/').pop() || 'document.pdf';
       let data: Uint8Array | undefined;
@@ -762,7 +818,7 @@ const fetchFile = action(Type.Object({
       success: true,
       data: {
         mimetype: contentType,
-        note: 'This file type cannot be read here. Images, text files and PDFs can be fetched.',
+        note: 'This file type cannot be read here. Images, text files, PDFs, and DOCX files can be fetched.',
       },
     };
   },
@@ -780,7 +836,7 @@ const getPins = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
 
     const res = await slackGet('pins.list', token, { channel: p.channel });
@@ -837,7 +893,7 @@ const getChannelInfo = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
 
     const res = await slackGet('conversations.info', token, { channel: p.channel, include_num_members: true });
@@ -911,7 +967,7 @@ const getReactions = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, p.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
 
     const res = await slackGet('reactions.get', token, {
@@ -966,6 +1022,7 @@ const getReactions = action(Type.Object({
 });
 
 const sendMessage = action(Type.Object({
+    ...senderParameters,
     channel: Type.String({ description: 'Channel ID (C...) or channel name with # prefix (e.g. #proj-valet). Use list_channels to find IDs.' }),
     text: Type.String({ description: 'Message body in CommonMark. Valet converts it to Slack mrkdwn. Use **bold**, *italic*, ~~strike~~, [text](url), and backticks for code.' }),
     thread_ts: Type.Optional(Type.String({ description: 'Post as a threaded reply under an existing message. Use the ts value returned by a previous send_message call (e.g. "1780887543.189519").' })),
@@ -1008,7 +1065,7 @@ const sendMessage = action(Type.Object({
       if (!found) return { success: false, error: `Channel "${p.channel}" not found or bot is not a member. Use list_channels to find available channels.` };
     }
 
-    const guard = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
 
     const formattedText = markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true });
@@ -1054,7 +1111,7 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
-    const { res, data } = await postActionMessage(token, body, ctx);
+    const { res, data } = await postActionMessage(token, body, ctx, p);
     if (!res.ok || !data.ok) {
       return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
     }
@@ -1093,6 +1150,7 @@ async function resolveSlackOrigin(
 }
 
 const replyToOrigin = action(Type.Object({
+    ...senderParameters,
     text: Type.String({ description: 'Reply text in CommonMark. Valet converts it to Slack mrkdwn.' }),
   }))({
   id: 'slack.reply_to_origin',
@@ -1108,7 +1166,7 @@ const replyToOrigin = action(Type.Object({
       thread_ts: o.threadTs,
       text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
-    }, ctx);
+    }, ctx, args);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
     return { success: true, data: { channel: o.channelId, ts: data.ts } };
@@ -1195,7 +1253,7 @@ const updateMessage = action(Type.Object({
     const token = cred?.accessToken;
     if (!token) return { success: false, error: 'Missing bot_token' };
 
-    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
 
     // chat.update defaults to parse:'client' (unlike chat.postMessage's 'none'),
@@ -1247,7 +1305,7 @@ const deleteMessage = action(Type.Object({
     const token = cred?.accessToken;
     if (!token) return { success: false, error: 'Missing bot_token' };
 
-    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
+    const guard = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
 
     const res = await slackFetch('chat.delete', token, { channel: args.channel, ts: args.ts });

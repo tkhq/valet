@@ -81,7 +81,7 @@ const TEAM_KEY_SCOPE_ERROR =
   "This team API key can only create and read this team's sessions and workflows. Sign in for other settings.";
 
 /** After the ladder: a team principal stays on sessions, workflows, GET
- * /api/me, and its own team's orchestrator. */
+ * /api/me, and its own team's workspace runtime. */
 export function refuseTeamKeyOutsideScope(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const principal = requirePrincipal(c);

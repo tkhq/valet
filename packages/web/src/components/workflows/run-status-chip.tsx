@@ -1,6 +1,5 @@
 import type { WorkflowRunOutcome, WorkflowRunStatus } from "@valet/api/wire";
-import { Badge } from "~/components/primitives";
-import { cn } from "~/lib/cn";
+import { Badge, StatusDot } from "~/components/primitives";
 
 /**
  * Maps a settled run's outcome to the Badge variant.
@@ -29,7 +28,7 @@ export function RunStatusChip({ status, outcome, needsApproval }: RunStatusChipP
   if (needsApproval) {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[11px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300">
-        <span className={cn("h-2 w-2 rounded-full bg-amber-500 shrink-0")} aria-hidden="true" />
+        <StatusDot tone="warning" />
         Needs approval
       </span>
     );

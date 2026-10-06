@@ -29,7 +29,7 @@
 import { eq } from "drizzle-orm";
 import { recordSandboxDestroyed, recordSandboxFlagged, type SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 
@@ -160,6 +160,11 @@ export class SandboxReconcileSweep {
       .from(agentSessions)
       .where(eq(agentSessions.id, sessionId))
       .limit(1);
+    // Singleton cutover archives duplicate identities, not their retained working directories.
+    // Operators release these resources after recovery; age alone is not permission to erase them.
+    const [retired] = await this.deps.db.select({ ownerId: assistants.ownerId, id: assistants.id })
+      .from(assistants).where(eq(assistants.sessionId, sessionId)).limit(1);
+    if (retired?.ownerId.endsWith(`:retired:${retired.id}`)) return false;
     if (appRows[0]?.status === "deleted") return true;
     if (this.deps.engineHost.liveSession(sessionId) != null) return false;
     const sessionRow = await this.deps.engineStore.getSession(sessionId);

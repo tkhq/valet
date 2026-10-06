@@ -366,6 +366,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         next.messages = replaceAt(slice.messages, idx, {
           ...slice.messages[idx],
           completed: ev.reason === "end_turn",
+          stopReason: ev.reason === "tool_use" ? undefined : ev.reason,
         });
       }
       // On abort/error, sweep parts still in `streaming` status: their tool
@@ -519,6 +520,8 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "error": {
+      // Older servers recorded intentional interruption as a provider error.
+      if (ev.code === "aborted") return next;
       // Engine-originated errors name their thread; store the banner and
       // flip the badge for that thread only. A session-level error (no
       // threadId, e.g. `ws_open_failed`) lands in `sessionError` and shows

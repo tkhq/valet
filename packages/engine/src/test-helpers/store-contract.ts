@@ -164,6 +164,20 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(loaded[1]).toMatchObject({ id: "e-2", type: "message", role: "assistant" });
     });
 
+    it("filters submission logs before taking the ordered tail", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.appendEntries("sess-1", "th-1", [
+        { ...msg("e-1", "user", "step input", 10), queueItemId: "q-step" },
+        { ...msg("e-2", "assistant", "step output", 20), queueItemId: "q-step" },
+        { ...msg("e-3", "user", "unrelated input", 30), queueItemId: "q-other" },
+        { ...msg("e-4", "assistant", "unrelated output", 40), queueItemId: "q-other" },
+      ]);
+      const loaded = await store.getEntries("sess-1", "th-1", { queueItemId: "q-step", limit: 1 });
+      expect(loaded.map((e) => e.id)).toEqual(["e-2"]);
+      expect(await store.getEntries("sess-1", "th-1", { queueItemId: "missing" })).toEqual([]);
+    });
+
     it("getEntries breaks a same-millisecond tie by insertion order (TKAI-303)", async () => {
       // Two entries in one turn are frequently written inside the same
       // millisecond (a tool result and the assistant reply that follows it).

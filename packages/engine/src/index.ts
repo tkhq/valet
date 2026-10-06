@@ -136,6 +136,7 @@ export {
   editTool,
   bashTool,
   threadReadTool,
+  threadReference,
   JOB_MODE_THRESHOLD_MS,
   JOB_POLL_INTERVAL_MS,
   BASH_DEFAULT_TIMEOUT_S,
@@ -183,6 +184,7 @@ export {
   type TokenInterpretation,
   type IdentityLinkDeclaration,
   type TriggerDef,
+  type TriggerRejection,
   type VerifiedEvent,
   type NormalizedEvent,
   type EventCatalogEntry,
@@ -286,6 +288,11 @@ export {
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 export {
+  DOCX_DOCUMENT_MIME,
+  isDocxDocumentMime,
+  isDocxDocument,
+  extractDownloadedDocx,
+  type DocumentExtractor,
   MAX_PDF_DOCUMENT_BYTES,
   normalizeDocumentMime,
   isTextDocumentMime,

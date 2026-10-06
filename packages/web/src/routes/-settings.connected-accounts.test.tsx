@@ -57,8 +57,7 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
-// importOriginal: see -new-session-dialog.test.tsx for why a bare
-// replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
@@ -109,8 +108,7 @@ vi.mock("~/api/integrations", () => ({
   }),
 }));
 
-// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
-// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {

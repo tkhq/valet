@@ -8,16 +8,18 @@
  * go through here, so the org check and delivery shape can never drift between
  * them.
  *
- * `assistantId` picks ONE of the owner's assistants; without it the owner's
- * default answers, which is what every rule written before the field did.
+ * The workspace owner determines the assistant.
  */
-import type { ChannelOrigin, Principal, SignalContent } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
+import { isDeepStrictEqual } from "node:util";
+import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent } from "@valet/engine";
+import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
-import type { Session } from "@valet/engine";
-import { ensureAssistantSession, ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
-import type { AssistantRow } from "../schema/index.js";
+import { and, eq, sql } from "drizzle-orm";
+import { agentSessions } from "../schema/index.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
 
 /**
  * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
@@ -47,26 +49,41 @@ export interface AssistantDeliveryArgs {
   owner: Principal;
   actorUserId: string;
   threadKey: string;
+  target?: { sessionId: string; threadId: string };
   signal: SignalContent;
   dispatchId: string;
-  /** Which of the owner's assistants answers. Absent → the owner's default. */
-  assistantId?: string;
   /** Drop-log reason if the resolved assistant belongs to another org. */
   mismatchReason: string;
+  /** The channel message this delivery carries, recorded once it lands. */
+  inbound?: InboundChannelMessage;
+  /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
+  author?: PromptAuthor;
 }
 
 export async function deliverToAssistantThread(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
 ): Promise<void> {
-  // Resolve BEFORE keying. The chain must be keyed on the SESSION, not on the
-  // requested assistant id: an id that names the owner's default and an absent
-  // id mean the same session, and keying on the raw value would put them on
-  // separate chains and let them race the seed window this chain exists to
-  // close. One Slack mention on a followed thread produces exactly that pair
-  // (the dispatcher passes the rule's id, the follow-router passes the row's,
-  // which is null on a follow bound before the column).
-  const session = await resolveDeliverySession(deps, args);
+  // A delivery can outlive a routing upgrade. The admitted dispatch belongs
+  // to its original runtime, even if today's route selects another one.
+  if (args.dispatchId.startsWith("event:") && await recoverAdmittedEvent(deps, args)) return;
+  // Serialize by runtime session and thread so delivery paths share one queue.
+  let session: Session;
+  if (args.target) {
+    const assistant = await loadAssistantBySessionId(deps.db, args.target.sessionId);
+    if (!assistant || assistant.archivedAt !== null || assistant.orgId !== args.orgId
+      || assistant.ownerType !== args.owner.type || assistant.ownerId !== args.owner.id) {
+      throw new Error("The original conversation is unavailable. Restore its owner before retrying delivery.");
+    }
+    const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, args.target.sessionId),
+      eq(agentSessions.orgId, args.orgId), eq(agentSessions.ownerType, args.owner.type), eq(agentSessions.ownerId, args.owner.id))).limit(1);
+    if (!row || row.status === "deleted") throw new Error("The original session is unavailable. Start a new conversation.");
+    session = await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
+  } else {
+    ({ session } = await ensureAssistantExecution(deps, args.owner, {
+      actorUserId: args.actorUserId, orgId: args.orgId,
+    }, args.threadKey));
+  }
   const key = `${session.id}:${args.threadKey}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
   const run = prior.then(() => deliverToAssistantThreadInner(deps, args, session));
@@ -82,61 +99,44 @@ export async function deliverToAssistantThread(
   return run;
 }
 
-/**
- * Whether this assistant may take the delivery. A discriminated result rather
- * than a nullable message, so the good arm carries the narrowed row and the
- * caller needs no cast to use it.
- */
-function checkDeliveryAssistant(
-  row: AssistantRow | undefined,
-  orgId: string,
-  owner: Principal,
-): { ok: true; row: AssistantRow } | { ok: false; why: string } {
-  if (row === undefined) return { ok: false, why: "no such assistant" };
-  if (row.orgId !== orgId) return { ok: false, why: `assistant belongs to org ${row.orgId}` };
-  if (row.ownerType !== owner.type || row.ownerId !== owner.id) {
-    return { ok: false, why: `assistant is owned by ${row.ownerType}:${row.ownerId}` };
+/** Recover an existing admission without resubmitting or replaying its tools. */
+async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: AssistantDeliveryArgs): Promise<boolean> {
+  const result = await deps.db.execute(sql`
+    SELECT q.id, q.session_id, q.thread_id, q.content, q.status, s.owner_type, s.owner_id
+    FROM engine_queue_items q JOIN agent_sessions s ON s.id = q.session_id
+    WHERE q.dispatch_id = ${args.dispatchId} AND s.org_id = ${args.orgId}
+    LIMIT 2`) as { rows: Array<{ id: string; session_id: string; thread_id: string; content: unknown; status: string; owner_type: string; owner_id: string }> };
+  if (result.rows.length === 0) return false;
+  if (result.rows.length !== 1) throw new Error("This event has multiple admitted submissions. Inspect the original submissions before retrying delivery.");
+  const prior = result.rows[0]!;
+  if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
+    throw new Error("The original event owner differs from this delivery. Inspect its subscription before retrying delivery.");
   }
-  if (row.archivedAt !== null) return { ok: false, why: "assistant is archived" };
-  return { ok: true, row };
-}
-
-/**
- * The session the signal lands on: the named assistant's, or the owner's
- * default when the rule named none.
- *
- * A named assistant is re-checked against the rule's owner at DELIVERY time,
- * not only at write time. The two can drift — an assistant is archived, or the
- * rule outlives it — and a stale id must never reach an assistant the rule's
- * owner does not own. A drop-logged throw sends the delivery down the
- * dispatcher's retry/dead-letter path, which is the same outcome the org
- * mismatch below produces.
- */
-async function resolveDeliverySession(
-  deps: { db: AppDb; engineHost: EngineHost },
-  args: { orgId: string; owner: Principal; actorUserId: string; assistantId?: string; dispatchId: string },
-): Promise<Session> {
-  const meta = { actorUserId: args.actorUserId, orgId: args.orgId };
-  if (args.assistantId === undefined) {
-    const { session } = await ensureDefaultAssistantSession(deps, args.owner, meta);
-    return session;
+  const content: unknown = typeof prior.content === "string" ? JSON.parse(prior.content) : prior.content;
+  if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") {
+    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
   }
-
-  const checked = checkDeliveryAssistant(await loadAssistant(deps.db, args.assistantId), args.orgId, args.owner);
-  if (!checked.ok) {
-    await writeDropLog(deps.db, {
-      orgId: args.orgId,
-      reason: "event_target_assistant_invalid",
-      conversationKey: args.dispatchId,
-      detail:
-        `subscription names assistant ${args.assistantId} for owner ` +
-        `${args.owner.type}:${args.owner.id}, but ${checked.why}`,
-    });
-    throw new Error(`delivery refused: ${checked.why} (${args.assistantId})`);
+  // First channel admissions include fetched history. Compare the original
+  // signal beneath that known wrapper without fetching mutable history again.
+  const body = content.body === args.signal.body ? content.body
+    : content.body.startsWith("Conversation so far in this thread:\n") && content.body.endsWith(`\n\n---\n\n${args.signal.body}`)
+      ? args.signal.body : content.body;
+  const expected: unknown = JSON.parse(JSON.stringify({ ...args.signal, tagName: args.signal.tagName ?? "signal" }));
+  const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
+  if (!isDeepStrictEqual({ ...content, body, tagName }, expected)) {
+    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
   }
-
-  const { session } = await ensureAssistantSession(deps, checked.row, meta);
-  return session;
+  if (prior.status !== "settled") {
+    const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, prior.session_id), eq(agentSessions.orgId, args.orgId))).limit(1);
+    if (!row || row.status === "deleted") throw new Error("The original event session was deleted. Inspect its submission before retrying delivery.");
+    // Session recovery already owns queued, interrupted, and approval-blocked
+    // work. Restoring it never requires another prompt admission here.
+    await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
+  }
+  if (args.inbound) await recordChannelMessage(deps.db, {
+    ...args.inbound, orgId: args.orgId, sessionId: prior.session_id, threadId: prior.thread_id, direction: "in",
+  });
+  return true;
 }
 
 async function deliverToAssistantThreadInner(
@@ -154,11 +154,12 @@ async function deliverToAssistantThreadInner(
     });
     throw new Error(`delivery refused: assistant org mismatch (${data.orgId} != ${args.orgId})`);
   }
-  const thread = await deps.engineHost.ensureFreshThread(session, args.threadKey, {
+  const thread = args.target ? session.threadById(args.target.threadId) : await deps.engineHost.ensureFreshThread(session, args.threadKey, {
     userId: data.userId,
     orgId: data.orgId,
     workspace: data.workspace,
   }, args.actorUserId);
+  if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
   let signal = args.signal;
   // On the assistant's FIRST turn in a channel thread, prepend the thread's
   // earlier messages so it participates in the group conversation with full
@@ -182,8 +183,28 @@ async function deliverToAssistantThreadInner(
       }
     }
   }
+  if (args.target) {
+    const result = await deps.db.execute(sql`
+      SELECT s.id FROM agent_sessions s
+      JOIN engine_threads t ON t.session_id = s.id AND t.id = ${args.target.threadId}
+      LEFT JOIN session_threads m ON m.session_id = s.id AND m.id = t.id
+      LEFT JOIN assistant_executions x ON x.session_id = s.id
+      LEFT JOIN assistants a ON a.id = x.assistant_id
+      LEFT JOIN engine_threads g ON g.session_id = a.session_id AND g.id = x.governing_thread_id
+      LEFT JOIN session_threads gm ON gm.session_id = a.session_id AND gm.id = g.id
+      WHERE s.id = ${args.target.sessionId} AND s.org_id = ${args.orgId} AND s.status <> 'deleted'
+        AND s.owner_type = ${args.owner.type} AND s.owner_id = ${args.owner.id} AND m.archived_at IS NULL
+        AND (x.session_id IS NULL OR (a.archived_at IS NULL AND g.id IS NOT NULL AND gm.archived_at IS NULL))
+      LIMIT 1`) as { rows: Array<{ id: string }> };
+    if (!result.rows.length) throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
+  }
   await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
-    author: { id: args.actorUserId },
+    author: args.author ?? { id: args.actorUserId },
   });
+  if (args.inbound) {
+    await recordChannelMessage(deps.db, {
+      ...args.inbound, orgId: args.orgId, sessionId: session.id, threadId: thread.id, direction: "in",
+    });
+  }
 }

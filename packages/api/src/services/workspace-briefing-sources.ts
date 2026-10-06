@@ -1,0 +1,204 @@
+import type { Principal } from "@valet/engine";
+import { sql, type SQL } from "drizzle-orm";
+import type { AppDb } from "../lib/drizzle.js";
+import type { WorkspaceBriefingSource } from "../wire/types.js";
+import { sharedThreadKey } from "./thread-read-state.js";
+import { governingThreadKeySql, sharedWithWholeTeamSql } from "./thread-access.js";
+import { listWorkspaceOutcomes } from "./workspace-outcomes.js";
+import { sharedBriefingOrigin, sharedBriefingRun } from "./workspace-briefing-visibility.js";
+import { slackThreadUrl } from "./channel-messages.js";
+
+export interface BriefingEvidence {
+  source: WorkspaceBriefingSource;
+  content: string;
+  state: "needs_attention" | "in_progress" | "updated";
+}
+interface ThreadRow {
+  session_id: string; thread_id: string; thread_key: string | null; title: string; updated_at: number | string;
+  role: string; text: string; message_at: number | string;
+  needs_attention: boolean; in_progress: boolean;
+}
+interface RunRow {
+  id: string; title: string; updated_at: number | string; status: string;
+  origin_session_id: string | null; origin_thread_id: string | null;
+  event_key: string | null; event_channel: string | null; event_ts: string | null;
+  needs_attention: boolean; prompt: string | null; output: string | null; wait_description: string | null;
+}
+interface ArtifactRow {
+  id: string; token: string; title: string; updated_at: number | string; content: string;
+  session_id: string | null; thread_id: string | null;
+}
+
+/**
+ * Every read is owner-scoped before its limit. Only narrative text enters model
+ * context. A team's briefing is cached once for every member, so it reads only
+ * what the whole team shares (`services/thread-access.ts`).
+ */
+export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, owner: Principal): Promise<BriefingEvidence[]> {
+  const teamShared = owner.type === "team" ? (key: SQL) => sharedWithWholeTeamSql(orgId, key) : undefined;
+  const threadKey = governingThreadKeySql;
+  // The channel a Slack event names, whatever its shape: ingest copies it to
+  // `refs.channel` (`plugin-slack/src/triggers.ts`), and a reaction keeps it at
+  // `item.channel`. A run stored before refs falls back to the payload.
+  const data = sql`r.params->'input'->'data'`;
+  const slackChannel = sql`COALESCE(${data}->'refs'->>'channel',${data}->'payload'->'item'->>'channel',
+    ${data}->'payload'->>'channel_id',${data}->'payload'->'channel'->>'id',${data}->'payload'->>'channel')`;
+  const scopedSession = sql`s.status<>'deleted' AND s.org_id=${orgId} AND s.owner_type=${owner.type}
+    AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id}`;
+  const hasNarrative = sql`(NULLIF(e.content,'') IS NOT NULL OR EXISTS(
+    SELECT 1 FROM jsonb_array_elements(COALESCE(replace(e.parts,chr(92)||'u0000',chr(92)||'uFFFD')::jsonb,'[]'::jsonb)) p
+    WHERE p->>'type'='text' AND NULLIF(p->>'text','') IS NOT NULL))`;
+  const [threadResult, runResult, artifactResult, outcomes] = await Promise.all([
+    db.execute(sql`WITH recent_threads AS MATERIALIZED (
+      SELECT s.id AS session_id,t.id AS thread_id,COALESCE(NULLIF(t.title,''),NULLIF(s.title,''),'Conversation') AS title,
+        (SELECT et.key FROM engine_threads et WHERE et.session_id=s.id AND et.id=t.id) AS thread_key,
+        latest.created_at AS updated_at
+      FROM session_threads t JOIN agent_sessions s ON s.id=t.session_id
+      JOIN LATERAL (SELECT e.created_at FROM engine_entries e
+        WHERE e.session_id=s.id AND e.thread_id=t.id AND e.entry_type='message' AND e.role IN ('user','assistant') AND ${hasNarrative}
+        ORDER BY e.created_at DESC,e.id DESC LIMIT 1) latest ON true
+      WHERE ${scopedSession} AND t.archived_at IS NULL
+        AND ${teamShared ? sharedBriefingOrigin(orgId, owner.id, sql`s.id`, sql`t.id`) : sharedThreadKey(threadKey(sql`s.id`, sql`t.id`))}
+      ORDER BY latest.created_at DESC,t.id DESC LIMIT 30
+    ) SELECT t.*,m.role,m.text,m.created_at AS message_at,
+      EXISTS(SELECT 1 FROM engine_queue_items q WHERE q.session_id=t.session_id AND q.thread_id=t.thread_id
+        AND (q.status='blocked_on_decision_gate' OR (q.status<>'settled' AND q.outcome='failed'))) AS needs_attention,
+      EXISTS(SELECT 1 FROM engine_queue_items q WHERE q.session_id=t.session_id AND q.thread_id=t.thread_id
+        AND q.status IN ('collecting','queued','running')) AS in_progress
+    FROM recent_threads t JOIN LATERAL (
+      WITH selected AS (
+        (SELECT e.* FROM engine_entries e WHERE e.session_id=t.session_id AND e.thread_id=t.thread_id
+          AND e.entry_type='message' AND e.role IN ('user','assistant') AND ${hasNarrative}
+          ORDER BY e.created_at DESC,e.id DESC LIMIT 5)
+        UNION
+        (SELECT e.* FROM engine_entries e WHERE e.session_id=t.session_id AND e.thread_id=t.thread_id
+          AND e.entry_type='message' AND e.role='user' AND ${hasNarrative}
+          ORDER BY e.created_at ASC,e.id ASC LIMIT 1)
+      )
+      SELECT e.role,e.created_at,e.id,left(COALESCE(NULLIF(e.content,''),
+        (SELECT string_agg(p->>'text',E'\n') FROM jsonb_array_elements(
+          COALESCE(replace(e.parts,chr(92)||'u0000',chr(92)||'uFFFD')::jsonb,'[]'::jsonb)) p
+          WHERE p->>'type'='text'),'') ,2000) AS text
+      FROM selected e
+    ) m ON true ORDER BY t.updated_at DESC,t.thread_id DESC,m.created_at ASC,m.id ASC`) as Promise<{ rows: ThreadRow[] }>,
+    db.execute(sql`WITH recent_runs AS MATERIALIZED (
+      SELECT r.id,d.name AS title,r.updated_at,r.status,r.outcome,r.waiting_on,r.definition,r.params
+      FROM workflow_runs r JOIN workflow_definitions d ON d.id=r.workflow_id
+      WHERE d.org_id=${orgId} AND r.owner_type=${owner.type} AND r.owner_id=${owner.id}
+        AND d.owner_type=r.owner_type AND d.owner_id=r.owner_id
+        AND NOT EXISTS (SELECT 1 FROM workflow_runs newer
+          WHERE newer.workflow_id=r.workflow_id AND newer.owner_type=r.owner_type AND newer.owner_id=r.owner_id
+            AND (newer.created_at,newer.id) > (r.created_at,r.id))
+        -- A run a private conversation or channel started reports what it read there.
+        AND ${owner.type === "team" ? sharedBriefingRun(orgId, owner.id, sql`r.params`) : sql`true`}
+      ORDER BY r.updated_at DESC,r.id DESC LIMIT 12
+    ) SELECT r.id,r.title,r.updated_at,r.status,
+      -- Only a thread in this same workspace: a team run started from a
+      -- personal chat must not link team members to that personal thread.
+      o.session_id AS origin_session_id,o.thread_id AS origin_thread_id,
+      r.params->'input'->'data'->>'key' AS event_key,${slackChannel} AS event_channel,
+      COALESCE(r.params->'input'->'data'->'payload'->>'thread_ts',r.params->'input'->'data'->'payload'->>'ts') AS event_ts,
+      CASE WHEN r.status='parked' THEN left((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+        'kind',w->>'kind','node',w->>'nodeId','signal',w->>'signalType','wakeAt',w->'wakeAt')))::text
+        FROM (SELECT value AS w FROM jsonb_array_elements(r.waiting_on) LIMIT 6) waits),1000) END AS wait_description,
+      (r.outcome='failed' OR (r.status='parked' AND EXISTS(SELECT 1 FROM jsonb_array_elements(r.waiting_on) w
+        WHERE w->>'kind'='signal' AND w->>'signalType' LIKE 'approval:%'))) AS needs_attention,
+      left((SELECT string_agg(n->>'prompt',E'\n') FROM jsonb_path_query(r.definition,'$.** ? (@.type == "approval")') n
+        WHERE r.status='parked' AND EXISTS(SELECT 1 FROM jsonb_array_elements(r.waiting_on) w WHERE w->>'nodeId'=n->>'id')),2000) AS prompt,
+      (SELECT string_agg(c.output,E'\n') FROM (
+        SELECT left(COALESCE(cp.error,cp.result->>'response',cp.result->>'text',cp.result->>'message',cp.result->>'output',''),3000) AS output
+        FROM workflow_checkpoints cp WHERE cp.run_id=r.id AND cp.status IN ('completed','failed')
+          AND (cp.status='failed' OR EXISTS(SELECT 1 FROM jsonb_path_query(r.definition,'$.** ? (exists (@.id))') n
+            WHERE n->>'id'=cp.node_id AND n->>'type' IN ('stop','session','orchestrator','llm')))
+        ORDER BY cp.created_at DESC,cp.node_id DESC LIMIT 3
+      ) c) AS output FROM recent_runs r
+      LEFT JOIN LATERAL (SELECT s.id AS session_id,t.id AS thread_id FROM agent_sessions s
+        JOIN session_threads t ON t.session_id=s.id AND t.id=r.params->'origin'->>'threadId'
+        WHERE s.id=r.params->'origin'->>'assistantSessionId' AND ${scopedSession} LIMIT 1) o ON true
+      ORDER BY r.updated_at DESC,r.id DESC`) as Promise<{ rows: RunRow[] }>,
+    db.execute(sql`SELECT a.id,a.token,a.title,a.updated_at,left(a.content,2000) AS content,s.id AS session_id,t.id AS thread_id
+      FROM artifacts a
+      LEFT JOIN agent_sessions s ON s.id=a.source_session_id AND ${scopedSession}
+      LEFT JOIN session_threads t ON t.session_id=s.id AND t.id=a.source_thread_id
+      WHERE a.org_id=${orgId} AND a.owner_type=${owner.type} AND a.owner_id=${owner.id} AND a.revoked_at IS NULL
+        ${teamShared ? sql`AND (a.source_session_id IS NULL OR (a.source_thread_id IS NOT NULL
+          AND ${sharedBriefingOrigin(orgId, owner.id, sql`a.source_session_id`, sql`a.source_thread_id`)}))` : sql``}
+      ORDER BY a.updated_at DESC,a.id DESC LIMIT 10`) as Promise<{ rows: ArtifactRow[] }>,
+    listWorkspaceOutcomes(db,orgId,owner,15,undefined,teamShared),
+  ]);
+  const threads = new Map<string, BriefingEvidence>();
+  for (const row of threadResult.rows) {
+    if (!row.text.trim()) continue;
+    const id = `thread:${row.session_id}:${row.thread_id}`;
+    let evidence = threads.get(id);
+    if (!evidence) {
+      const originUrl = slackThreadUrl(row.thread_key);
+      evidence = { source: { id, kind: "thread", title: row.title, updatedAt: Number(row.updated_at), sessionId: row.session_id, threadId: row.thread_id,
+        ...(originUrl ? { originUrl } : {}) },
+        content: "", state: row.needs_attention ? "needs_attention" : row.in_progress ? "in_progress" : "updated" };
+      threads.set(id,evidence);
+    }
+    evidence.content += `${row.role}: ${briefingExcerpt(row.text,evidence.content ? 250 : 500)}\n`;
+  }
+  const candidates: BriefingEvidence[] = [...threads.values()];
+  for (const row of runResult.rows) {
+    const content = [row.prompt ? `Pending approval: ${row.prompt}` : "", row.output || "", row.wait_description ? `Pending workflow wait: ${row.wait_description}` : ""].filter(Boolean).join("\n");
+    if (!content.trim()) continue;
+    // A run started from a conversation reports into it; a run a Slack
+    // event started links back to that Slack thread.
+    const originUrl = row.event_key?.startsWith("slack.") && row.event_channel && row.event_ts
+      ? slackThreadUrl(`slack:${row.event_channel}:${row.event_ts}`) : undefined;
+    candidates.push({ source: { id: `workflow:${row.id}`, kind: "workflow", title: row.title, updatedAt: Number(row.updated_at), runId: row.id,
+      ...(row.origin_session_id && row.origin_thread_id ? { sessionId: row.origin_session_id, threadId: row.origin_thread_id } : {}),
+      ...(originUrl ? { originUrl } : {}) },
+      content, state: row.needs_attention ? "needs_attention" : ["pending","running","parked","terminalizing"].includes(row.status) ? "in_progress" : "updated" });
+  }
+  for (const row of artifactResult.rows) candidates.push({
+    source: { id: `artifact:${row.id}`, kind: "artifact", title: row.title, updatedAt: Number(row.updated_at), token: row.token,
+      ...(row.session_id ? { sessionId: row.session_id } : {}), ...(row.thread_id ? { threadId: row.thread_id } : {}) },
+    content: row.content, state: "updated",
+  });
+  // A Slack message joins the thread that sent it: one source per thread, so a
+  // briefing never lists the same conversation twice.
+  const messageThreads = new Set<string>();
+  for (const outcome of outcomes.items) {
+    const threadSource = outcome.kind === "message" && outcome.sessionId && outcome.threadId ? `thread:${outcome.sessionId}:${outcome.threadId}` : null;
+    if (threadSource) {
+      const thread = threads.get(threadSource);
+      if (thread) { thread.content += `Confirmed effect: sent a Slack message\n`; continue; }
+      if (messageThreads.has(threadSource)) continue;
+      messageThreads.add(threadSource);
+    }
+    candidates.push({
+      source: { id: outcome.id, kind: outcome.kind, title: outcome.title, updatedAt: outcome.occurredAt,
+        ...(outcome.sessionId ? { sessionId: outcome.sessionId } : {}), ...(outcome.threadId ? { threadId: outcome.threadId } : {}),
+        ...(outcome.workflowRunId ? { runId: outcome.workflowRunId } : {}), ...(outcome.url ? { url: outcome.url } : {}) },
+      content: `Confirmed effect: ${outcome.title}`, state: "updated",
+    });
+  }
+  return budgetBriefingEvidence(candidates);
+}
+
+function briefingExcerpt(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const head = Math.floor(limit/3);
+  return `${text.slice(0,head)}\n[…]\n${text.slice(-(limit-head-5))}`;
+}
+
+/** Reserve context and confirmed effects even when recent conversations fill the budget. */
+export function budgetBriefingEvidence(candidates: readonly BriefingEvidence[]): BriefingEvidence[] {
+  const sorted = [...candidates].filter(item => item.content.trim()).sort((a,b) =>
+    b.source.updatedAt-a.source.updatedAt || a.source.id.localeCompare(b.source.id));
+  const threads = sorted.filter(item => item.source.kind === "thread");
+  const context = sorted.filter(item => item.source.kind === "workflow" || item.source.kind === "artifact");
+  const effects = sorted.filter(item => !["thread","workflow","artifact"].includes(item.source.kind));
+  const demand = (items: BriefingEvidence[]) => items.reduce((sum,item) => sum+Math.min(1800,item.content.length),0);
+  const contextBudget = Math.min(3000,demand(context));
+  const effectBudget = Math.min(3000,demand(effects));
+  const allocate = (items: BriefingEvidence[], budget: number) => {
+    if (demand(items) <= budget) return items.map(item => ({ ...item, content: briefingExcerpt(item.content,1800) }));
+    const allowance = Math.min(1800,Math.floor(budget/Math.max(1,items.length)));
+    return allowance < 6 ? [] : items.map(item => ({ ...item, content: briefingExcerpt(item.content,allowance) }));
+  };
+  return [...allocate(threads,24_000-contextBudget-effectBudget),...allocate(context,contextBudget),...allocate(effects,effectBudget)];
+}

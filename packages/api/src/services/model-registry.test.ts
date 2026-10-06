@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import { bundledModels } from "@valet/engine/model-catalog";
 import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -174,7 +175,7 @@ describe("ModelRegistry", () => {
 
   it("serves the bundled catalog before any refresh", async () => {
     const registry = new ModelRegistry(db);
-    const bundled = getBuiltinModels("anthropic");
+    const bundled = bundledModels("anthropic");
     expect(registry.listModels("anthropic").map((m) => m.id).sort()).toEqual(
       bundled.map((m) => m.id).sort(),
     );
@@ -193,24 +194,24 @@ describe("ModelRegistry", () => {
     expect(registry.getModel("anthropic", "claude-brand-new")?.name).toBe("Claude Brand New");
   });
 
-  it("lets the runtime catalog override supplemental Astra metadata", async () => {
+  it("lets the runtime catalog override supplemental Sol metadata", async () => {
     const registry = new ModelRegistry(db);
-    const bundled = registry.getModel("openai", "gpt-6-astra");
-    if (!bundled) throw new Error("The bundled catalog must include Astra.");
-    expect(bundled.contextWindow).toBe(272_000);
-    const fetched = { ...bundled, name: "Refreshed Astra", contextWindow: 400_000 };
+    const bundled = registry.getModel("openai", "gpt-6.1-sol");
+    if (!bundled) throw new Error("The bundled catalog must include Sol.");
+    expect(bundled.contextWindow).toBe(1_050_000);
+    const fetched = { ...bundled, name: "Refreshed Sol", contextWindow: 400_000 };
     fetchMock.mockImplementation(async (url: string) => jsonResponse(
       url.endsWith("/openai.json") ? { "openai-responses": { [fetched.id]: fetched } } : {},
     ));
 
     await registry.refresh();
-    expect(registry.getModel("openai", "gpt-6-astra")).toEqual(fetched);
+    expect(registry.getModel("openai", "gpt-6.1-sol")).toEqual(fetched);
     expect(registry.listModels("openai").filter((model) => model.id === fetched.id)).toEqual([fetched]);
   });
 
-  it("keeps supplemental Astra when the runtime catalog omits it", async () => {
+  it("keeps supplemental Sol when the runtime catalog omits it", async () => {
     const registry = new ModelRegistry(db);
-    const bundled = registry.getModel("openai", "gpt-6-astra");
+    const bundled = registry.getModel("openai", "gpt-6.1-sol");
     const fetched = validModel({
       id: "synthetic-openai-model", provider: "openai", api: "openai-responses",
       baseUrl: "https://api.openai.com/v1",
@@ -220,7 +221,7 @@ describe("ModelRegistry", () => {
     ));
 
     await registry.refresh();
-    expect(registry.getModel("openai", "gpt-6-astra")).toEqual(bundled);
+    expect(registry.getModel("openai", "gpt-6.1-sol")).toEqual(bundled);
     expect(registry.getModel("openai", fetched.id)).toEqual(fetched);
   });
 
@@ -303,7 +304,7 @@ describe("ModelRegistry", () => {
 
       const ids = registry.listModels("anthropic").map((m) => m.id);
       expect(ids.length).toBeGreaterThan(0);
-      expect(ids.sort()).toEqual(getBuiltinModels("anthropic").map((m) => m.id).sort());
+      expect(ids.sort()).toEqual(bundledModels("anthropic").map((m) => m.id).sort());
     });
 
     it("reports the failure in the status surface instead of hiding it", async () => {
@@ -346,7 +347,7 @@ describe("ModelRegistry", () => {
     it("falls back to the bundled catalog when no registry is installed", () => {
       setModelRegistry(null);
       expect(registryModels("anthropic").map((m) => m.id).sort()).toEqual(
-        getBuiltinModels("anthropic").map((m) => m.id).sort(),
+        bundledModels("anthropic").map((m) => m.id).sort(),
       );
       expect(registryModelById("anthropic", "does-not-exist")).toBeUndefined();
     });
@@ -377,19 +378,21 @@ describe("ModelRegistry", () => {
       expect(model?.maxTokens).toBe(128_000);
     });
 
-    it("serves GPT-6 Astra with exact upstream metadata", () => {
-      setModelRegistry(null);
-      const model = registryModelById("openai", "gpt-6-astra");
-      expect(registryModels("openai").filter((entry) => entry.id === "gpt-6-astra")).toHaveLength(1);
-      expect(model).toMatchObject({
-        name: "GPT-6 Astra", api: "openai-responses", provider: "openai",
-        contextWindow: 272_000, maxTokens: 128_000,
-        cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5,
-          tiers: [{ inputTokensAbove: 272_000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }] },
-        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
-        compat: { supportsStrictMode: true, supportsOpenAIGrammarTools: true, supportsAdditionalTools: true,
-          supportsToolSearch: true, supportsExplicitPromptCacheMode: true },
-      });
+    it("never serves Astra from fetched or persisted catalogs", async () => {
+      const disabled = validModel({ id: "gpt-6-astra", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" });
+      await new PgModelsStore(db).write("openai", { models: [disabled], checkedAt: Date.now() });
+      const registry = new ModelRegistry(db);
+      vi.stubEnv("VALET_MODEL_REGISTRY_URL", "");
+      await registry.start();
+      vi.stubEnv("VALET_MODEL_REGISTRY_URL", REGISTRY_URL);
+      try {
+        expect(registry.getModel("openai", disabled.id)).toBeUndefined();
+        expect(registry.listModels("openai").some((model) => model.id === disabled.id)).toBe(false);
+        fetchMock.mockImplementation(async () => jsonResponse({ "openai-responses": { [disabled.id]: disabled } }));
+        await registry.refresh();
+        expect(registry.getModel("openai", disabled.id)).toBeUndefined();
+        expect(registry.listModels("openai").some((model) => model.id === disabled.id)).toBe(false);
+      } finally { registry.stop(); }
     });
 
   });

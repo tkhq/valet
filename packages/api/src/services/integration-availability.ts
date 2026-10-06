@@ -19,7 +19,7 @@
  *      design) resolves "manual" — the team token is the integration for
  *      that team alone, and no other owner reads it. That row is read
  *      BEFORE the org row, because a team run reads it in that order; a
- *      row that throws `CredentialReferenceBrokenError` reads as absent.
+ *      row that does not resolve reads as absent.
  *   5. `requires.orgCredential` met       → "org". The org credential IS the
  *      integration; sessions resolve it by owner escalation. There is
  *      nothing for a user to connect, so the UI offers no token entry —
@@ -44,7 +44,6 @@ import type {
   CredentialStore,
   ValetPlugin,
 } from "@valet/engine";
-import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { authCodeEnvReady, findOAuthDeclaration } from "./integration-oauth.js";
 
 export type ConnectMode = "oauth" | "manual" | "org" | "unconfigured";
@@ -91,15 +90,8 @@ export async function connectModeFor(
     // that holds its own token acts as that token, so the catalog must not
     // name the org bot for it.
     if (params.owner?.type === "team") {
-      try {
-        const teamCredential = await params.credentials.get(params.owner, params.service);
-        if (teamCredential !== null) return "manual";
-      } catch (err) {
-        // A broken delegated row is not a usable team credential. Read it as
-        // an absent row: the org bot behind it still serves the team, and a
-        // member's own credential never does.
-        if (!(err instanceof CredentialReferenceBrokenError)) throw err;
-      }
+      const teamCredential = await params.credentials.get(params.owner, params.service);
+      if (teamCredential !== null) return "manual";
     }
     const orgCredential = await params.credentials.get(
       { type: "org", id: params.orgId },

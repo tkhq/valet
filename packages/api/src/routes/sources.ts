@@ -4,10 +4,7 @@
  * `routes/image-catalog.ts` (kind='external') and `routes/prebuilds.ts`
  * (kind='repo') route files.
  *
- * All routes require `requireOrgAdmin` except `GET /api/sources/for-repo`,
- * which is mounted on a separate public router at `/api/sources` — any authed
- * org member can hit it. Response is deliberately narrow (no `imageRef`,
- * `error`, `logTail`) to avoid leaking build internals.
+ * All routes require `requireOrgAdmin`.
  *
  * kind='repo' rows are auto-created when a session binds a repo (Task 15).
  * POST rejects kind='repo' with 400; kind='base' is limited to one per org
@@ -429,45 +426,4 @@ sourcesRouter.get("/:id/bakes", async (c) => {
     .where(eq(bakes.sourceId, id))
     .orderBy(desc(bakes.createdAt));
   return c.json({ bakes: rows });
-});
-
-// ── Public member router (/api/sources) ───────────────────────────────────────
-//
-// No requireOrgAdmin gate. Any authed org member can hit GET /for-repo.
-// Response is deliberately narrow (only commitSha + finishedAt) to avoid
-// leaking build internals to non-admin members.
-
-export const sourcesPublicRouter = new Hono<AppEnv>();
-
-sourcesPublicRouter.get("/for-repo", async (c) => {
-  const fullName = c.req.query("fullName");
-  if (!fullName || fullName.trim() === "") {
-    return c.json({ error: "fullName is required" }, 400);
-  }
-
-  const { db } = c.var.providers;
-  const sourceRows = await db
-    .select({ id: imageSources.id })
-    .from(imageSources)
-    .where(
-      and(
-        eq(imageSources.orgId, c.var.user.orgId),
-        eq(imageSources.kind, "repo"),
-        eq(imageSources.repoFullName, fullName),
-      ),
-    )
-    .limit(1);
-  const source = sourceRows[0];
-  if (!source) return c.json({ prebuild: null });
-
-  const buildRows = await db
-    .select({ commitSha: bakes.commitSha, finishedAt: bakes.finishedAt })
-    .from(bakes)
-    .where(and(eq(bakes.sourceId, source.id), eq(bakes.status, "pushed")))
-    .orderBy(desc(bakes.finishedAt))
-    .limit(1);
-  const build = buildRows[0];
-  if (!build || build.finishedAt === null) return c.json({ prebuild: null });
-
-  return c.json({ prebuild: { commitSha: build.commitSha, finishedAt: build.finishedAt } });
 });

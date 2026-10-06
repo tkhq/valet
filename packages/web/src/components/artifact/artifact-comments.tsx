@@ -11,9 +11,10 @@ import { useState } from "react";
 import { MessageSquare, Send, X } from "lucide-react";
 import type { ArtifactCommentWire } from "@valet/api/wire";
 import type { ArtifactAnchorRect } from "@valet/shared";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Spinner, cardClass } from "~/components/primitives";
 import { relativeTime } from "~/lib/relative-time";
 import type { ArtifactPick } from "./artifact-frame";
+import { cn } from "~/lib/cn";
 
 export interface ThreadView {
   root: ArtifactCommentWire;
@@ -109,7 +110,7 @@ export function CommentComposer({
 
   return (
     <div
-      className="absolute z-20 w-[340px] rounded-lg border border-line bg-paper p-3 shadow-xl"
+      className={cn(cardClass, "absolute z-20 w-[340px] p-3 shadow-xl")}
       style={{ top, left }}
     >
       <div className="mb-2 flex items-center justify-between">
@@ -155,7 +156,7 @@ export function CommentComposer({
       </div>
       {canSendToSession && (
         <p className="mt-2 text-[11px] leading-snug text-muted">
-          “Send to agent” also delivers this comment into the session that published the page.
+          “Send to agent” also delivers this comment to the agent that published the page.
         </p>
       )}
     </div>
@@ -238,7 +239,7 @@ export function ArtifactThreadPanel({
               </div>
               <p className="whitespace-pre-wrap text-sm text-ink">{thread.root.body}</p>
               {thread.root.sentToSession && (
-                <p className="mt-1 text-[11px] text-muted">Sent to the publishing session.</p>
+                <p className="mt-1 text-[11px] text-muted">Sent to the publishing agent.</p>
               )}
               {thread.replies.map((reply) => (
                 <div key={reply.id} className="mt-2 border-l-2 border-line pl-2">

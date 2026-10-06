@@ -210,7 +210,7 @@ describe("engine: single-thread happy path", () => {
       const receipt = await session.prompt("record", { author: actor ? { id: actor } : undefined });
       await waitForStatus(events, receipt.threadId, "idle");
     }
-    expect(actors).toEqual(["member-b", "member-c", "credential-owner"]);
+    expect(actors).toEqual(["member-b", "member-c", ownerType === "team" ? "team:credential-owner" : "credential-owner"]);
     expect(credentialOwners).toEqual(Array.from({ length: 3 }, () => ({ type: ownerType, id: "credential-owner" })));
     expect(session.options.userId).toBe("credential-owner");
     faux.unregister();

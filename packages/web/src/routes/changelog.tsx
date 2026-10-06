@@ -5,7 +5,7 @@ import type { ChangelogCategory } from "@valet/api/wire";
 import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
 import { Pager } from "~/components/pager";
-import { Badge, Spinner } from "~/components/primitives";
+import { Badge, Spinner, pageClass } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import {
   CHANGELOG_CATEGORIES,
@@ -151,7 +151,7 @@ export function ChangelogPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <h1 className="font-display text-2xl text-ink">Changelog</h1>
         <p className="mt-2 text-sm text-muted">Changes in rolling builds and released versions.</p>
         {runningSha && (

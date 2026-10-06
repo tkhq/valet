@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
-import { Spinner } from "~/components/primitives";
+import { Spinner, pageClass } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
 import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
@@ -10,6 +10,8 @@ import { matchesNeedle } from "~/lib/text-match";
 import { textParam } from "~/lib/search-params";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { TeamIntegrations } from "~/components/integrations/team-integrations";
+import { IntegrationLimitNotice } from "~/components/integrations/integration-limit-notice";
+import { useListOwner } from "~/lib/use-list-owner";
 
 /**
  * `/integrations` — the services a person can connect, in the settings
@@ -99,7 +101,7 @@ export function IntegrationsPage() {
   if (teamId) {
     const notice = connectResult?.teamId === teamId
       ? connectResult.kind === "connected"
-        ? `Connected ${connectResult.value}.`
+        ? `Connected ${connectResult.value === "linear" ? "Linear via MCP" : connectResult.value}.`
         : connectResult.detail ?? ERROR_MESSAGES[connectResult.value] ?? "Connection failed. Select Connect to try again."
       : undefined;
     return <TeamIntegrations key={teamId} teamId={teamId} notice={notice} />;
@@ -109,6 +111,7 @@ export function IntegrationsPage() {
 
 function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectResult }) {
   const { data, isLoading, error } = usePlugins();
+  const owner = useListOwner();
   const plugins = data?.plugins ?? [];
 
   // The top-level hooks, not `Route.useSearch()`: the route suite mocks
@@ -133,8 +136,9 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <h1 className="font-display text-2xl text-ink">Integrations</h1>
+        {owner && <IntegrationLimitNotice owner={owner} canClear />}
 
         {/* The live region is on the page from the first paint, and stays
             empty until the connect result arrives. A screen reader ignores a
@@ -142,7 +146,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
         <div role="status">
           {connectResult?.kind === "connected" && (
             <div className="mt-4 rounded border border-line bg-moss-wash px-3 py-2 text-sm text-ink">
-              Connected {connectResult.value}.
+              Connected {connectResult.value === "linear" ? "Linear via MCP" : connectResult.value}.
             </div>
           )}
           {connectResult?.kind === "error" && (

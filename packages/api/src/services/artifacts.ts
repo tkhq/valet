@@ -19,6 +19,7 @@
  * logged-in member of the artifact's org; personal `public` pages need the
  * org opt-in. Team ownership always requires live membership.
  */
+import { isLegacyAssistantRuntime } from "./legacy-runtime.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, exists, isNull, lt, ne, or } from "drizzle-orm";
 import { marked } from "marked";
@@ -34,14 +35,33 @@ import {
 import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { normalizePath } from "../lib/okf.js";
-import { artifactComments, artifactVersions, artifacts, orgMembers, orgs, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, assistants, legacyArtifactPublications, artifactComments, artifactVersions, artifacts, orgMembers, orgs, teamMembers, teams } from "../schema/index.js";
 import { getTeamInOrg, lockTeamForOwnership } from "./teams.js";
 import { readFile, type MemoryScope } from "./memory.js";
 
 export type ArtifactRow = typeof artifacts.$inferSelect;
-export type ArtifactVersionRow = typeof artifactVersions.$inferSelect;
 export type ArtifactCommentRow = typeof artifactComments.$inferSelect;
 export type ArtifactVisibility = "org" | "public";
+
+/** Match the original publication, not every future artifact from its runtime. */
+export async function hasRetainedArtifactSource(
+  db: AppDb,
+  artifact: Pick<ArtifactRow, "id" | "orgId" | "ownerType" | "ownerId"> & { sourceSessionId: string | null },
+): Promise<boolean> {
+  if (!artifact.sourceSessionId) return false;
+  const [deleted] = await db.select({ id: agentSessions.id }).from(agentSessions)
+    .where(and(eq(agentSessions.id, artifact.sourceSessionId), eq(agentSessions.status, "deleted"))).limit(1);
+  if (deleted) return false;
+  const [snapshot] = await db.select({ id: legacyArtifactPublications.artifactId }).from(legacyArtifactPublications)
+    .where(and(eq(legacyArtifactPublications.artifactId, artifact.id), eq(legacyArtifactPublications.orgId, artifact.orgId),
+      eq(legacyArtifactPublications.ownerType, artifact.ownerType), eq(legacyArtifactPublications.ownerId, artifact.ownerId),
+      eq(legacyArtifactPublications.sourceSessionId, artifact.sourceSessionId))).limit(1);
+  if (!snapshot) return false;
+  const [assistant] = await db.select({ id: assistants.id }).from(assistants)
+    .where(eq(assistants.sessionId, artifact.sourceSessionId)).limit(1);
+  return !assistant || isLegacyAssistantRuntime(db, artifact.sourceSessionId, artifact.orgId);
+}
+
 
 export interface ArtifactScope extends MemoryScope {
   /** Verified caller. Internal tools use their authenticated owner principal. */
@@ -103,6 +123,7 @@ export interface ShareArtifactOpts {
   orgId: string;
   /** Session that ran the tool, when the publish came from a tool call. */
   sourceSessionId?: string;
+  sourceThreadId?: string;
 }
 
 export interface PublishArtifactOpts {
@@ -114,6 +135,7 @@ export interface PublishArtifactOpts {
   icon?: string;
   orgId: string;
   sourceSessionId?: string;
+  sourceThreadId?: string;
 }
 
 /** What every publish path hands the upsert, after its own validation. */
@@ -126,6 +148,7 @@ interface PublishInput {
   icon: string;
   orgId: string;
   sourceSessionId?: string;
+  sourceThreadId?: string;
 }
 
 /**
@@ -155,6 +178,7 @@ export async function shareArtifact(db: AppDb, scope: ArtifactScope, opts: Share
     icon: "",
     orgId: opts.orgId,
     sourceSessionId: opts.sourceSessionId,
+    sourceThreadId: opts.sourceThreadId,
   });
 }
 
@@ -190,6 +214,7 @@ export async function publishArtifact(db: AppDb, scope: ArtifactScope, opts: Pub
     icon: normalizeArtifactIcon(opts.icon),
     orgId: opts.orgId,
     sourceSessionId: opts.sourceSessionId,
+    sourceThreadId: opts.sourceThreadId,
   });
 }
 
@@ -262,6 +287,11 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
   const existing = existingRows[0];
 
   if (existing) {
+    // Only retained runtimes may reuse a publication without source-thread metadata.
+    if (existing.ownerType === "team" && existing.sourceSessionId && !existing.sourceThreadId
+      && !(await hasRetainedArtifactSource(db, existing))) {
+      throw new NotFoundError("artifact", existing.id);
+    }
     const reactivating = existing.revokedAt !== null;
     const nextVersion = existing.version + 1;
     const [row] = await db
@@ -279,6 +309,7 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
         version: nextVersion,
         actorUserId: scope.actorUserId,
         sourceSessionId: input.sourceSessionId ?? existing.sourceSessionId,
+        sourceThreadId: input.sourceSessionId ? input.sourceThreadId ?? null : existing.sourceThreadId,
         updatedAt: now,
         revokedAt: null,
         ...(reactivating
@@ -302,6 +333,7 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
       orgId: input.orgId,
       actorUserId: scope.actorUserId,
       sourceSessionId: input.sourceSessionId ?? "",
+      sourceThreadId: input.sourceThreadId ?? null,
       sourceMemoryPath: input.key,
       title: input.title,
       content: input.content,
@@ -463,6 +495,10 @@ export async function setArtifactSharedVersion(
  * `content`: a list of shares must not drag every snapshot body out of
  * the database. */
 export interface ArtifactSummaryRow {
+  orgId: string;
+  ownerId: string;
+  sourceSessionId: string | null;
+  sourceThreadId: string | null;
   ownerType: string;
   id: string;
   token: string;
@@ -480,6 +516,10 @@ export interface ArtifactSummaryRow {
 }
 
 const summaryColumns = {
+  orgId: artifacts.orgId,
+  ownerId: artifacts.ownerId,
+  sourceSessionId: artifacts.sourceSessionId,
+  sourceThreadId: artifacts.sourceThreadId,
   ownerType: artifacts.ownerType,
   id: artifacts.id,
   token: artifacts.token,
@@ -526,7 +566,7 @@ export async function listArtifactsForOwner(
   db: AppDb,
   orgId: string,
   owner: { type: string; id: string },
-  page?: { limit: number; cursor?: { updatedAt: number; id: string } },
+  page?: { limit: number; cursor?: { updatedAt: number; id: string }; sourceSessionId?: string; sourceThreadId?: string },
 ): Promise<ArtifactSummaryRow[]> {
   const query = db
     .select(summaryColumns)
@@ -536,6 +576,8 @@ export async function listArtifactsForOwner(
         eq(artifacts.orgId, orgId),
         eq(artifacts.ownerType, owner.type),
         eq(artifacts.ownerId, owner.id),
+        page?.sourceSessionId ? eq(artifacts.sourceSessionId, page.sourceSessionId) : undefined,
+        page?.sourceThreadId ? eq(artifacts.sourceThreadId, page.sourceThreadId) : undefined,
         // The paged gallery omits revoked links before selecting a page.
         page ? isNull(artifacts.revokedAt) : undefined,
         page?.cursor ? or(

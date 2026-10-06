@@ -14,7 +14,7 @@ import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
 import { workspaceForRepo } from "~/components/repo-combobox";
 import { useStreamStore } from "~/stores/stream";
-import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner, StatusDot } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { StepsPanel } from "./steps-panel";
@@ -465,11 +465,7 @@ function MobileTab({
     >
       {label}
       {dot && (
-        <span
-          data-testid="pending-gate-dot"
-          aria-label="A decision gate is pending"
-          className="h-1.5 w-1.5 rounded-full bg-amber-500"
-        />
+        <StatusDot data-testid="pending-gate-dot" label="A decision gate is pending" tone="warning" size="sm" />
       )}
     </button>
   );

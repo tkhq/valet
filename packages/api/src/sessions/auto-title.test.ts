@@ -87,7 +87,7 @@ describe("autoTitle", () => {
   it("titles a session it does not directly own — authorization is the route's job", async () => {
     // The ownership filter used to live in this query, which made a
     // team-owned session titleable only by whichever member opened it
-    // first. `POST /:id/auto-title` now applies `canViewSession` instead.
+    // first. Callers authorize before they name a session.
     await seedSession(null, "s1", "someone-else");
     const result = await autoTitle(
       {

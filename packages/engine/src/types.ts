@@ -13,6 +13,10 @@ export interface PromptAuthor {
   name?: string;
   avatarUrl?: string;
   externalId?: string;
+  /** A channel sender with no Valet account wrote this. `id` is the person
+   * the turn runs as; `name` is the sender. Tools the sender may not use on
+   * their own refuse such a turn (`ToolContext.externalSender`). */
+  externalSender?: boolean;
 }
 
 export interface ChannelTarget {
@@ -528,6 +532,8 @@ export type SessionEntry =
   | CommandResultEntry;
 
 export interface MessageQuery {
+  /** Exact submission filter, applied before the tail limit. */
+  queueItemId?: string;
   limit?: number;
   cursor?: string;
   afterEntryId?: string;
@@ -621,6 +627,11 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
   name: string;
   description: string;
   parameters: TParams;
+  /** The tool runs a plugin action through the host's policy check
+   * (`invokeAction`). A turn from a channel sender with no Valet account may
+   * run such a tool, because the policy refuses what needs approval; other
+   * tools act as the workspace and refuse that turn (`Thread.buildTools`). */
+  policyChecked?: boolean;
   riskLevel?: RiskLevel;
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */
@@ -642,7 +653,7 @@ export interface ToolResult {
   text: string;
   attachments?: ToolAttachment[];
   /** Confirmed side effect from a successful, recognized terminal command. */
-  outcome?: { kind: "pull_request_created" | "review_submitted"; url?: string };
+  outcome?: { kind: "pull_request_created" | "review_submitted" | "pull_request_comment"; url?: string };
   /**
    * Action-level outcome, set by action-backed tools (`call_tool`): `false`
    * when the action reported failure without throwing. An action failure is
@@ -673,6 +684,12 @@ export interface ToolContext {
   threadId: string;
   sessionPurpose?: SessionPurpose;
   actor?: { id: string; name?: string; email?: string };
+  /** Authenticated author of a direct interactive prompt, never a signal creator
+   * or delegated workflow/child actor. Does not confer any resource role. */
+  interactiveActor?: { id: string };
+  /** This turn came from a channel sender with no Valet account, running as
+   * `userId` (`PromptAuthor.externalSender`). */
+  externalSender?: boolean;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;
@@ -739,9 +756,8 @@ export interface ToolContext {
   pluginStoreFactory?: (pluginName: string) => PluginStore;
   /**
    * Host-provided text extraction for a document the model cannot read on
-   * its own. A PDF is the case that matters: no sandbox image carries a PDF
-   * text tool, and the extractor ships as a native binary beside the host,
-   * so a plugin action cannot do this itself.
+   * its own. The API supports PDF and DOCX. The host owns format parsers
+   * and resource limits, so plugins do not need parser dependencies.
    *
    * Returns `null` when the document holds no extractable text (a scanned
    * page), and throws when extraction is unavailable. Absent on hosts that
@@ -752,6 +768,7 @@ export interface ToolContext {
     data: Uint8Array;
     mimeType: string;
     name?: string;
+    signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /**
@@ -835,6 +852,17 @@ export interface CredentialProvider {
 export interface CredentialOwner {
   type: "user" | "team" | "org" | "session";
   id: string;
+}
+
+/** Who a credential read acts for: the turn's author and thread. A team host
+ * uses the acting member's own account first. A turn from a channel sender
+ * with no Valet account carries no `actorId`. */
+export interface CredentialUse {
+  actorId?: string;
+  threadId?: string;
+  /** The turn came from a channel sender with no Valet account: no
+   * teammate's approval to lend an account covers it. */
+  externalSender?: boolean;
 }
 
 export interface StoredCredential {
@@ -960,6 +988,8 @@ export interface DecisionGateRequest {
 }
 
 export interface DecisionResolution {
+  /** Inline images supplied with a question answer; persisted for restart replay. */
+  attachments?: Array<{ url: string; mimeType: string; name?: string }>;
   actionId?: string;
   value?: string;
   resolvedBy: string;
@@ -1016,6 +1046,10 @@ export interface PolicyResolveInput {
   sessionId: string;
   threadId: string;
   appliesIn: "session" | "workflow";
+  /** The turn came from a channel sender with no Valet account
+   * (`ToolContext.externalSender`). A session-wide grant a teammate gave does
+   * not cover them. */
+  externalSender?: boolean;
 }
 
 /**
@@ -1031,10 +1065,13 @@ export type PolicyProvenanceSource =
   | "org_policy"
   | "team_policy"
   | "runtime_grant"
+  | "workflow_grant"
   | "override"
   | "plugin_default"
   | "risk_default"
-  | "resolver_error";
+  | "resolver_error"
+  /** The action would use another member's shared account (`PolicyDecision.approver`). */
+  | "shared_account";
 
 /**
  * The host's decision for one action invocation. `mode` drives `call_tool`:
@@ -1058,6 +1095,13 @@ export interface PolicyDecision {
    * so denial stickiness classifies host rejection actions the same way.
    */
   extraGateActions?: (DecisionAction & { approves: boolean })[];
+  /**
+   * The one person who may answer this gate: the member whose shared account
+   * the action would use. The gate offers approve and deny only, and carries
+   * the approver in its `context.approver` so the host routes and authorizes
+   * it to them alone.
+   */
+  approver?: { userId: string; name?: string; shareGeneration?: string };
 }
 
 /**
@@ -1629,7 +1673,7 @@ export type EngineEvent =
       reason: "end_turn" | "tool_use" | "error" | "abort";
     }
   | { type: "tool_start"; threadId: string; tool: string; callId?: string; args: Record<string, unknown> }
-  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean }
+  | { type: "tool_end"; threadId: string; tool: string; callId?: string; result: string; resultData?: unknown; isError: boolean; outcome?: ToolResult["outcome"] }
   | {
       type: "turn_end";
       threadId: string;
@@ -2286,7 +2330,16 @@ export interface ResolvedModel {
   canonicalId?: string;
 }
 
+export type ThreadAccessCheck = (req: {
+  owner: Principal;
+  orgId: string;
+  reader: { id: string; key: string };
+  target: { id: string; key: string };
+}) => Promise<boolean>;
+
 export interface CreateSessionOptions {
+  /** Retain history without admitting or resuming execution. */
+  readOnlyReason?: string;
   sandboxLifecycle?: SandboxLifecycle;
   /** Persist cleanup before settlement. An absent sandbox must not cause a compute wake. */
   onTurnComplete?: (context: { sessionId: string; submissionId: string; threadId: string; actorId: string; owner: Principal; sandbox?: Sandbox }) => Promise<void>;
@@ -2300,6 +2353,13 @@ export interface CreateSessionOptions {
   parentThreadId?: string;
   /** A channel-originated ancestor makes every child turn's transcript shared. */
   sharedTranscript?: boolean;
+  /**
+   * Whether one thread may read another thread of this session through
+   * `thread_read`, `list_threads`, or a slash command. Absent, every thread
+   * reads every other. A host narrows it where threads have different
+   * audiences, such as a team runtime's private threads.
+   */
+  threadAccess?: ThreadAccessCheck;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
   /**
@@ -2355,6 +2415,18 @@ export interface CreateSessionOptions {
    */
   resolveModel?: (spec: string) => Promise<ResolvedModel | null>;
   /**
+   * Select a configured, credentialed model on another approved provider.
+   * The engine calls this after a transient provider or billing/quota failure,
+   * including interactive turns. Return null when no candidate is available.
+   * Each recovery loop tries at most three distinct providers. The selection
+   * and key apply only to this turn; the user's model selection is unchanged.
+   */
+  resolveFallbackModel?: (request: {
+    requestedSpec: string;
+    failedModel: ResolvedModel;
+    attemptedProviderIds: readonly string[];
+  }) => Promise<ResolvedModel | null>;
+  /**
    * Optional host-provided spec factory. Absent === no prep — existing paths
    * unchanged. When present, it is called once per (sandbox, epoch) after a
    * freshly cold-booted sandbox reports ready and BEFORE any `ensureReady`
@@ -2371,14 +2443,14 @@ export interface CreateSessionOptions {
    * existing paths unchanged (the session-scoped `CredentialProvider`
    * `Session.credentialProvider()` returns reads `providers.credentials`
    * directly, byte-identical to before). When present it REPLACES that read:
-   * `Session.credentialProvider()` calls it with `(owner, service)` and uses
+   * `Session.credentialProvider()` calls it with `(owner, service, use)` and uses
    * its return value directly — a `null` return yields `null` with NO store
    * fallback. The host implementation is the single decision point (e.g. the
    * api resolves `github` through the token service and delegates every other
    * service to the raw store itself), so the engine never re-reads the store
    * behind a resolver it was given.
    */
-  credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
+  credentialResolver?: (owner: CredentialOwner, service: string, use: CredentialUse) => Promise<StoredCredential | null>;
   /** Resolve the assistant identity used by provider-specific outbound actions. */
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */
@@ -2416,6 +2488,7 @@ export interface CreateSessionOptions {
     data: Uint8Array;
     mimeType: string;
     name?: string;
+    signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
@@ -2496,6 +2569,8 @@ export interface CreateSessionOptions {
    * ordering; do not "fix" it back.
    */
   systemContext?: Array<{ name: string; content: string; order?: number }>;
+  /** Host context for one thread, assembled with the session system context. */
+  threadSystemContext?: (thread: { id: string; key: string }) => string | undefined;
   /**
    * Host-supplied, session-scoped config surfaced verbatim as
    * `ToolContext.config` inside every tool execution (Phase 4 decision 7).
@@ -2723,7 +2798,9 @@ export type ChildSpawner = (
  */
 export type ChildReader = (
   req: { childSessionId: string; limit?: number },
-  ctx: { parentSessionId: string },
+  /** `readerThreadId` is the parent thread asking, so a host can keep a
+   * child of a private thread to the people that thread belongs to. */
+  ctx: { parentSessionId: string; readerThreadId?: string },
 ) => Promise<SessionEntry[] | null>;
 
 /**
@@ -2740,7 +2817,8 @@ export type ChildReader = (
  */
 export type ChildStatusReader = (
   req: { childSessionId: string },
-  ctx: { parentSessionId: string },
+  /** `readerThreadId`: the parent thread asking (`ChildReader`). */
+  ctx: { parentSessionId: string; readerThreadId?: string },
 ) => Promise<{ settled: boolean; lastActivityAt: number | null } | null>;
 
 /**

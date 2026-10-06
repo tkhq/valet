@@ -6,44 +6,44 @@
  * elsewhere) so these tests assert on the routes' own logic — request
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
 import type { RunHost, WorkflowDefinition } from "@valet/workflow";
-import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { addMember, createTeam } from "../services/teams.js";
-import { createLlmProvider } from "../services/llm-providers.js";
-import { setApprovedModels } from "../services/approved-models.js";
+import { eq } from "drizzle-orm";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveDefaultAssistant } from "../assistants/service.js";
-import { resolveWorkflowApproval, cancelWorkflowRun } from "../workflows/service.js";
+import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import {
   actionInvocations,
-  assistants,
   actionPolicies,
+  assistants,
   orgs,
   runtimeGrants,
+  workflowActionGrants,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
   workflowVersions,
 } from "../schema/index.js";
-import {
-  getWorkflowRunDetail,
-  listWorkflowRuns,
-} from "../workflows/service.js";
+import { setApprovedModels } from "../services/approved-models.js";
+import { createLlmProvider } from "../services/llm-providers.js";
+import { addMember, createTeam } from "../services/teams.js";
 import type {
   CreateWorkflowResponse,
   CreateWorkflowScheduleResponse,
-  ListWorkflowSchedulesResponse,
   DeleteWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
+  ListWorkflowSchedulesResponse,
   ListWorkflowsResponse,
   RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   WorkflowWebhookResponse,
 } from "../wire/types.js";
+import {
+  cancelWorkflowRun, getWorkflowRunDetail,
+  listWorkflowRuns, resolveWorkflowApproval
+} from "../workflows/service.js";
 
 let api: TestApi | undefined;
 
@@ -599,6 +599,24 @@ describe("PATCH /api/workflows/:id/model", () => {
     expect(models).toEqual([["draft", "l"], ["review", "m"]]);
   });
 
+  it("updates a definition an older pod stored with assistantId", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    const created = await createModelWorkflow(api.baseUrl);
+    // A dev-v2 pod can still write this shape during a rolling deploy.
+    await api.providers.db.update(workflowDefinitions)
+      .set({ definition: { ...MODEL_DEFINITION, assistantId: "asst_old" } })
+      .where(eq(workflowDefinitions.id, created.id));
+    const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "l", nodeIds: ["draft"] }),
+    });
+    expect(res.status).toBe(200);
+    const [row] = await api.providers.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, created.id));
+    expect(row?.definition).not.toHaveProperty("assistantId");
+  });
+
   it("round-trips an active custom catalog model through creation, editing, and focused updates", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();
@@ -729,7 +747,7 @@ describe("model validation on full workflow saves", () => {
   it("keeps a bare OpenAI id saveable while OpenAI is active", async () => {
     vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
     api = await bootTestApi();
-    expect((await save(api.baseUrl, "gpt-6-astra")).status).toBe(201);
+    expect((await save(api.baseUrl, "gpt-6.1-sol")).status).toBe(201);
   });
 });
 
@@ -992,9 +1010,8 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     await api.providers.workflowStore.settleRun(staleRunId, "failed");
     await api.providers.db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, assistant.id));
     const staleRetry = await fetch(`${api.baseUrl}/api/workflows/runs/${staleRunId}/retry`, { method: "POST" });
-    expect(staleRetry.status).toBe(201);
-    const { runId: staleRetryId } = await staleRetry.json() as RetryWorkflowRunResponse;
-    expect(stub.started.find((item) => item.runId === staleRetryId)?.params).not.toHaveProperty("origin");
+    expect(staleRetry.status).toBe(400);
+    expect(stub.started).toHaveLength(1);
 
     // A completed run is not retryable.
     const completedId = "wfrun_completed";
@@ -1333,25 +1350,45 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     expect(grants[0]).toMatchObject({ workflowExecutionId: runId, policyKey: "widgets.nuke" });
   });
 
-  it("policy gate + scope=always + admin → writes org policy + 200", async () => {
+  it("refuses a workflow-wide grant from a run whose steps changed since it started", async () => {
     const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
     api = localApi;
-    await localApi.providers.workflowStore.parkRun(runId, 1, [
-      { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
-    ]);
+    await localApi.providers.workflowStore.parkRun(runId, 1, [{ kind: "signal", signalType: "approval:gate", nodeId: "gate" }]);
+    const run = await localApi.providers.workflowStore.getRun(runId);
+    const workflowId = run!.params.workflowId;
+    // Someone changes the steps after the run parked on its approval card.
+    const [row] = await localApi.providers.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
+    await localApi.providers.db.update(workflowDefinitions)
+      .set({ definition: { ...(row!.definition as Record<string, unknown>), description: "changed steps" } })
+      .where(eq(workflowDefinitions.id, workflowId));
     const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approved: true, scope: "always" }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved: true, scope: "workflow" }),
+    });
+    expect(res.status).toBe(409);
+    expect(await localApi.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+  });
+
+  it("legacy always scope cannot create an org-wide grant for an undiscoverable action", async () => {
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [{ kind: "signal", signalType: "approval:gate", nodeId: "gate" }]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved: true, scope: "always" }),
+    });
+    expect(res.status).toBe(403);
+    expect(await localApi.providers.db.select().from(actionPolicies)).toHaveLength(0);
+    expect(await localApi.providers.db.select().from(runtimeGrants)).toHaveLength(0);
+  });
+
+  it("a human approval sent with the legacy always scope approves, as before", async () => {
+    const { localApi, runId } = await setupRun();
+    api = localApi;
+    await localApi.providers.workflowStore.parkRun(runId, 1, [{ kind: "signal", signalType: "approval:gate", nodeId: "gate" }]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved: true, scope: "always" }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
-    // Assert action_policies row written with the deterministic id
-    const policies = await localApi.providers.db.select().from(actionPolicies);
-    expect(policies.some((p) => p.id === "pol:approval:local-org:widgets.nuke")).toBe(true);
-    // Assert runtime_grants row also written (scope=always implies scope=run grant too)
-    const grants = await localApi.providers.db.select().from(runtimeGrants);
-    expect(grants.some((g) => g.workflowExecutionId === runId && g.policyKey === "widgets.nuke")).toBe(true);
+    expect(await localApi.providers.db.select().from(runtimeGrants)).toHaveLength(0);
   });
 
   it("policy gate + scope=always + non-admin → 403", async () => {
@@ -1390,7 +1427,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       body: JSON.stringify({ approved: true, scope: "always" }),
     });
     expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ error: expect.stringContaining("Ask an org admin") });
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("workflow permission cannot be saved") });
     // No policy row, no grant, no signal written on failure
     const signals = await localApi.providers.workflowStore.listSignals(memberRunId);
     expect(signals).toHaveLength(0);
@@ -1736,7 +1773,7 @@ describe("GET /api/workflows/action-required", () => {
   // A run executes the definition it started with. Re-pinning the workflow
   // while a run waits for approval must not change the assistant the
   // approval screen names: that badge is beside a permission decision.
-  it("reports the assistant from the run's snapshot, not the current definition", async () => {
+  it("reports workspace-owned approvals without assistant selection", async () => {
     api = await bootTestApi({ workflowRunHost: new StubRunHost() });
     const { db, workflowStore } = api.providers;
     const now = Date.now();
@@ -1769,14 +1806,12 @@ describe("GET /api/workflows/action-required", () => {
     const res = await fetch(`${api.baseUrl}/api/workflows/action-required`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListWorkflowActionRequiredResponse;
-    expect(body.items.find((item) => item.runId === "wfrun_pinned")?.assistantId).toBe(
-      "asst_snapshot",
-    );
+    expect(body.items.find((item) => item.runId === "wfrun_pinned")).not.toHaveProperty("assistantId");
     // A snapshot with an unusable id reports none, and the row still lists:
     // its approval is the only way that run ever settles.
     const brokenItem = body.items.find((item) => item.runId === "wfrun_broken");
     expect(brokenItem).toBeDefined();
-    expect(brokenItem?.assistantId).toBeUndefined();
+    expect(brokenItem).not.toHaveProperty("assistantId");
   });
 
   it("lists both gate classes and hides another user's gate", async () => {

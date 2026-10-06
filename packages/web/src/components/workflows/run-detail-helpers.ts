@@ -126,7 +126,6 @@ import type { WorkflowPendingGate } from "@valet/api/wire";
  * without a second import path.
  */
 export type { WorkflowPendingGate };
-export type PendingGateLike = WorkflowPendingGate;
 
 /**
  * Returns true only when the run is parked AND at least one pending gate
@@ -137,19 +136,6 @@ export function runNeedsApproval(
   pendingGates: WorkflowPendingGate[] | undefined,
 ): boolean {
   return run.status === "parked" && Array.isArray(pendingGates) && pendingGates.length > 0;
-}
-
-/** Truncated JSON preview for a checkpoint's `result`, mono-block friendly. */
-export function jsonPreview(value: unknown, max = 400): string {
-  if (value === undefined) return "";
-  let text: string;
-  try {
-    text = JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}…`;
 }
 
 // ─── settled-run result ──────────────────────────────────────────────────────
@@ -425,4 +411,35 @@ export function formatRunDuration(startedAt: number, endedAt: number): string | 
   const hours = Math.floor(ms / HOUR_MS);
   const minutes = Math.floor((ms % HOUR_MS) / MINUTE_MS);
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+}
+
+/**
+ * A readable name for a run in lists and headings. A run id is an opaque
+ * machine id, so the label says what started the run and when; callers keep
+ * the id available as a tooltip. The summary carries no trigger type, so a
+ * run with no acting user is "Automatic" (schedule, event, or webhook).
+ */
+export function runLabel(run: { createdAt: number; actorUserId?: string; parentRunId?: string; parentIteration?: number }): string {
+  const when = new Date(run.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const kind = run.parentRunId !== undefined
+    ? `Batch run${run.parentIteration !== undefined ? ` ${run.parentIteration + 1}` : ""}`
+    : run.actorUserId !== undefined ? "Manual run" : "Automatic run";
+  return `${kind} · ${when}`;
+}
+
+/** Surface summaries already recorded by agents; never infer success from raw data. */
+export function runOutputSummaries(output: unknown): { label: string; text: string }[] {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) return [];
+  const summaries: { label: string; text: string }[] = [];
+  if ("summary" in output && typeof output.summary === "string" && output.summary.trim()) {
+    summaries.push({ label: "Summary", text: output.summary });
+  }
+  for (const [label, value] of Object.entries(output)) {
+    if (summaries.length >= 8) break;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    if ("summary" in value && typeof value.summary === "string" && value.summary.trim()) {
+      summaries.push({ label, text: value.summary });
+    }
+  }
+  return summaries;
 }

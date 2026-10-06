@@ -8,8 +8,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { actionPolicies, actionPolicyOverrides, workflowDefinitions, workflowVersions } from "../schema/index.js";
-import { createTeam } from "../services/teams.js";
+import { actionPolicies, actionPolicyOverrides, workflowActionGrants, workflowRuns, workflowDefinitions, workflowVersions } from "../schema/index.js";
+import { addMember, createTeam } from "../services/teams.js";
 import { resolveActionPolicy } from "../policies/service.js";
 import { isRiskLevel } from "../policies/admin.js";
 import type {
@@ -81,7 +81,7 @@ const DEFINITION = {
 
 async function insertWorkflow(
   localApi: TestApi,
-  opts: { ownerId?: string; ownerType?: "user" | "team" } = {},
+  opts: { ownerId?: string; ownerType?: "user" | "team"; definition?: unknown } = {},
 ): Promise<string> {
   const now = Date.now();
   const id = `wf_perm_${now}_${Math.random().toString(36).slice(2, 8)}`;
@@ -89,7 +89,7 @@ async function insertWorkflow(
     id,
     orgId: "local-org",
     name: "perm-test-wf",
-    definition: DEFINITION,
+    definition: opts.definition ?? DEFINITION,
     ownerType: opts.ownerType ?? "user",
     ownerId: opts.ownerId ?? "local-user",
     createdAt: now,
@@ -100,7 +100,7 @@ async function insertWorkflow(
     workflowId: id,
     version: 1,
     name: "perm-test-wf",
-    definition: DEFINITION,
+    definition: opts.definition ?? DEFINITION,
     createdAt: now,
   });
   return id;
@@ -216,36 +216,64 @@ describe("team workflow permissions", () => {
     expect(byNodeId(personal).get("ship")).toMatchObject({ mode: "allow", provenance: "override" });
   });
 
-  it("rejects team bulk approval without creating or changing personal overrides", async () => {
+  it("team admins grant only this workflow without changing personal overrides", async () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
-    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "No personal writes", creatorUserId: "local-user" });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Team", creatorUserId: "local-user" });
     const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id });
-    await api.providers.db.insert(actionPolicyOverrides).values({
-      id: "keep-personal", orgId: "local-org", userId: "local-user", actionId: "widgets.deploy",
-      mode: "require_approval", paramMatchers: [], createdAt: 1, updatedAt: 1,
+    const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(await api.providers.db.select().from(actionPolicyOverrides)).toHaveLength(0);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(2);
+    const outsider = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST", headers: { "x-valet-test-user-id": "test-member" } });
+    expect(outsider.status).toBe(404);
+  });
+});
+
+describe("workflow grants after a definition change", () => {
+  it("survive an approver's edit and are revoked by a member's edit", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Grant team", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    // Each edit adds one more step that uses the approved action.
+    const ships = (count: number) => {
+      const ids = Array.from({ length: count }, (_, index) => `ship${index}`);
+      return { version: "dag/v1",
+        nodes: [{ id: "trigger", type: "trigger" }, ...ids.map((id) => ({ id, type: "tool", service: "widgets", action: "deploy", params: {} })), { id: "stop", type: "stop" }],
+        edges: ["trigger", ...ids, "stop"].slice(1).map((to, index) => ({ from: ["trigger", ...ids][index]!, to })) };
+    };
+    const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id, definition: ships(1) });
+    expect((await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
+    const edit = (count: number, headers: Record<string, string> = {}) => fetch(`${api!.baseUrl}/api/workflows/${wfId}`, {
+      method: "PUT", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ definition: ships(count) }),
     });
-    const before = await api.providers.db.select().from(actionPolicyOverrides);
-    for (const body of [undefined, { actionIds: ["widgets.deploy"] }, { actionIds: [] }]) {
-      const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      expect(response.status).toBe(400);
-      expect(await response.json()).toEqual({
-        error: "Personal pre-approval does not apply to team workflows. Ask a team admin to select this team's workspace and open Settings → Policies.",
-      });
-      expect(await api.providers.db.select().from(actionPolicyOverrides)).toEqual(before);
-    }
-    for (const endpoint of ["permissions", "permissions/allow"]) {
-      const response = await fetch(`${api.baseUrl}/api/workflows/${wfId}/${endpoint}`, {
-        method: endpoint.endsWith("allow") ? "POST" : "GET", headers: { "x-valet-test-user-id": "test-member" },
-      });
-      expect(response.status).toBe(404);
-    }
+    // The admin who granted it edits the steps: the approval stands.
+    expect((await edit(2)).status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
+    // A member only moves a step on the map: the steps are the same, so the approval stands.
+    const moved = await fetch(`${api.baseUrl}/api/workflows/${wfId}`, {
+      method: "PUT", headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ definition: { ...ships(2), ui: { nodes: { ship0: { position: { x: 512, y: 96 } } } } } }),
+    });
+    expect(moved.status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
+    // A member adds another use of the approved action: the grants go, so an approver must look again.
+    expect((await edit(3, { "x-valet-test-user-id": "test-member" })).status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+  });
+
+  it("are removed with the workflow", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const wfId = await insertWorkflow(api);
+    expect((await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    expect((await api.providers.db.select().from(workflowActionGrants)).length).toBeGreaterThan(0);
+    expect((await fetch(`${api.baseUrl}/api/workflows/${wfId}`, { method: "DELETE" })).ok).toBe(true);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
   });
 });
 
 describe("POST /api/workflows/:id/permissions/allow", () => {
-  it("writes one allow override per gating action; the next preview allows", async () => {
+  it("writes one workflow grant per gating action; the next preview allows", async () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const wfId = await insertWorkflow(api);
 
@@ -254,18 +282,18 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
     const body = (await res.json()) as AllowWorkflowPermissionsResponse;
     expect(body).toEqual({ allowed: ["widgets.deploy", "widgets.purge"], blocked: [] });
 
-    const rows = await api.providers.db.select().from(actionPolicyOverrides);
+    const rows = await api.providers.db.select().from(workflowActionGrants);
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.actionId).sort()).toEqual(["widgets.deploy", "widgets.purge"]);
-    expect(rows.every((r) => r.userId === "local-user" && r.mode === "allow")).toBe(true);
+    expect(rows.every((r) => r.ownerId === "local-user" && r.workflowId === wfId)).toBe(true);
 
     const preview = await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`);
     const previewBody = (await preview.json()) as GetWorkflowPermissionsResponse;
-    expect(byNodeId(previewBody).get("ship")).toMatchObject({ mode: "allow", provenance: "override" });
-    expect(byNodeId(previewBody).get("fanout")).toMatchObject({ mode: "allow", provenance: "override" });
+    expect(byNodeId(previewBody).get("ship")).toMatchObject({ mode: "allow", provenance: "workflow_grant" });
+    expect(byNodeId(previewBody).get("fanout")).toMatchObject({ mode: "allow", provenance: "workflow_grant" });
   });
 
-  it("is idempotent — a second call updates the same override row", async () => {
+  it("is idempotent — a second call updates the same workflow grant row", async () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const wfId = await insertWorkflow(api);
 
@@ -277,7 +305,7 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
     expect(second.status).toBe(200);
     expect((await second.json()) as AllowWorkflowPermissionsResponse).toEqual({ allowed: [], blocked: [] });
 
-    const rows = await api.providers.db.select().from(actionPolicyOverrides);
+    const rows = await api.providers.db.select().from(workflowActionGrants);
     expect(rows).toHaveLength(2);
   });
 
@@ -292,7 +320,7 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("not a gating action") });
-    const rows = await api.providers.db.select().from(actionPolicyOverrides);
+    const rows = await api.providers.db.select().from(workflowActionGrants);
     expect(rows).toHaveLength(0);
   });
 
@@ -313,7 +341,7 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
     expect(body.allowed).toEqual(["widgets.purge"]);
     expect(body.blocked).toHaveLength(1);
     expect(body.blocked[0].actionId).toBe("widgets.deploy");
-    const rows = await api.providers.db.select().from(actionPolicyOverrides);
+    const rows = await api.providers.db.select().from(workflowActionGrants);
     expect(rows).toHaveLength(1);
     expect(rows[0].actionId).toBe("widgets.purge");
   });
@@ -331,7 +359,7 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ error: expect.stringContaining("JSON object") });
     }
-    const rows = await api.providers.db.select().from(actionPolicyOverrides);
+    const rows = await api.providers.db.select().from(workflowActionGrants);
     expect(rows).toHaveLength(0);
   });
 
@@ -339,5 +367,25 @@ describe("POST /api/workflows/:id/permissions/allow", () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const res = await fetch(`${api.baseUrl}/api/workflows/wf_nope/permissions/allow`, { method: "POST" });
     expect(res.status).toBe(404);
+  });
+});
+
+
+describe("workflow grant isolation", () => {
+  it("applies across runs of one workflow, never other workflows or chats, and revokes", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const first = await insertWorkflow(api);
+    const second = await insertWorkflow(api);
+    expect((await fetch(`${api.baseUrl}/api/workflows/${first}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    for (const [runId, workflowId, expected] of [["run-a", first, "allow"], ["run-b", first, "allow"], ["run-c", second, "require_approval"]] as const) {
+      await api.providers.db.insert(workflowRuns).values({ id: runId, workflowId, definitionVersionId: `wfv_${workflowId}`, definition: DEFINITION, params: {}, createdAt: 1, updatedAt: 1 });
+      const result = await resolveActionPolicy(api.providers.db, { orgId: "local-org", userId: "local-user", service: "widgets", actionId: "widgets.deploy", riskLevel: "high", params: {}, appliesIn: "workflow", workflowExecutionId: runId, pluginDefault: undefined, now: Date.now() });
+      expect(result.mode).toBe(expected);
+    }
+    const chat = await resolveActionPolicy(api.providers.db, { orgId: "local-org", userId: "local-user", service: "widgets", actionId: "widgets.deploy", riskLevel: "high", params: {}, appliesIn: "session", sessionId: "chat", pluginDefault: undefined, now: Date.now() });
+    expect(chat.mode).toBe("require_approval");
+    expect((await fetch(`${api.baseUrl}/api/workflows/${first}/permissions/allow`, { method: "DELETE" })).status).toBe(200);
+    const preview = await fetch(`${api.baseUrl}/api/workflows/${first}/permissions`);
+    expect(await preview.json()).toMatchObject({ nodes: expect.arrayContaining([expect.objectContaining({ nodeId: "ship", mode: "require_approval" })]) });
   });
 });

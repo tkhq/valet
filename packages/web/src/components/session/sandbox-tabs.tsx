@@ -34,8 +34,7 @@ export interface SandboxTabsProps {
   activeTab: SandboxTabId;
   onTabChange: (tab: SandboxTabId) => void;
   sandbox?: { state: string; epoch: number };
-  onWatchBrowser?: () => void;
-  browserPreviewOpen?: boolean;
+  notice?: string;
 }
 
 export function SandboxTabs({
@@ -44,8 +43,7 @@ export function SandboxTabs({
   activeTab,
   onTabChange,
   sandbox,
-  onWatchBrowser,
-  browserPreviewOpen,
+  notice,
 }: SandboxTabsProps) {
   // Chat renders its body in a sibling. Keep this wrapper at the tab strip's
   // height so MessageList can use the remaining space.
@@ -54,7 +52,7 @@ export function SandboxTabs({
   return (
     <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
       <div className="flex shrink-0 items-center border-b border-line px-3 sm:px-4">
-        <div role="tablist" aria-label="Session view" className="flex min-w-0 items-center gap-1 overflow-x-auto">
+        <div role="tablist" aria-label="Thread view" className="flex min-w-0 items-center gap-1 overflow-x-auto">
           {tabs.map((t) => (
             <button
               key={t.id}
@@ -73,18 +71,8 @@ export function SandboxTabs({
             </button>
           ))}
         </div>
-        {activeTab === "chat" && onWatchBrowser && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto shrink-0 text-muted"
-            aria-label="Watch browser"
-            aria-pressed={browserPreviewOpen}
-            onClick={onWatchBrowser}
-          >
-            Watch browser
-          </Button>
-        )}
+        {notice && <span role="status" title={notice} className="ml-auto min-w-0 truncate pl-3 text-xs text-muted">{notice}</span>}
+
       </div>
       {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} />}
       {(activeTab === "terminal" || activeTab === "vscode") && (

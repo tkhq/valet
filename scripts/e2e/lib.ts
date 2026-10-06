@@ -81,6 +81,7 @@ const MIN = 60_000;
 const INTEGRATION_CORE_FILES = [
   "src/integration/artifacts.test.ts",
   "src/integration/assistants.test.ts",
+  "src/integration/workspace-assistant.test.ts",
   "src/integration/auth.e2e.test.ts",
   "src/integration/auto-title.test.ts",
   "src/integration/memory-routes.test.ts",
@@ -96,8 +97,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/lazy-session-history.test.ts",
   "src/integration/thread-rename.test.ts",
   "src/integration/thread-create-settings.test.ts",
-  "src/integration/child-dismiss.test.ts",
-  "src/integration/orchestrator-children-scope.test.ts",
+  "src/integration/child-gate-report.test.ts",
   "src/integration/command-route.test.ts",
   "src/integration/policies.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
@@ -105,6 +105,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/usage-summary.test.ts",
   "src/integration/plugin-entitlements.test.ts",
   "src/integration/profile-pictures.test.ts",
+  "src/integration/workflow-avatar.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
   "src/integration/security-settlement.test.ts",
@@ -156,7 +157,7 @@ export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INT
  * `vitest run` script with no config/tests, which explodes resolving the
  * ROOT workspace config from the wrong cwd — enumerate instead of globbing.
  * A new plugin gaining tests must be added here (guarded by lib.test.ts). */
-const TESTED_PLUGINS = [
+export const TESTED_PLUGINS = [
   "@valet/plugin-browser",
   "@valet/plugin-github",
   "@valet/plugin-gmail",
@@ -189,7 +190,7 @@ export const STEPS: StepDef[] = [
   // Advisory STE prose lint over maintained docs (CLAUDE.md "Writing").
   // Soft-skips when python3 is absent rather than failing the scorecard.
   { id: "docs-lint", group: "static", title: "STE prose lint (maintained docs)", command: ["bash", "-c", "command -v python3 >/dev/null || { echo 'python3 not found - skipping'; exit 0; }; python3 scripts/docs/docs_lint.py"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 5 * MIN },
-  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
+  { id: "unit", group: "static", title: "root unit sweep (shared, sdk, api, web)", command: ["pnpm", "test", "--project", "unit", "--project", "integration", "--project", "@valet/shared", "--project", "@valet/sdk", "--project", "@valet/web", "--project", "scripts"], env: { VALET_E2E_DEDICATED_CORE: "1" }, needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 15 * MIN },
   { id: "engine-unit", group: "static", title: "engine unit suite", command: ["pnpm", "--filter", "@valet/engine", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "browser-runtime", group: "static", title: "browser runtime, cells, journal and page fixtures", command: ["pnpm", "--filter", "@valet/browser-runtime", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
   { id: "workflow-unit", group: "static", title: "workflow interpreter suite", command: ["pnpm", "--filter", "@valet/workflow", "test"], needs: [], scrubKeys: true, parallelSafe: true, timeoutMs: 10 * MIN },
@@ -215,9 +216,9 @@ export const STEPS: StepDef[] = [
 
   // ── docker / cluster gated ───────────────────────────────────────────────
   { id: "browser-docker", group: "docker", title: "managed browser isolation, persistence, approvals and HTTP flow", command: ["pnpm", "exec", "tsx", "scripts/e2e/browser.ts"], needs: ["docker"], timeoutMs: 20 * MIN },
-  { id: "sandbox-docker", group: "docker", title: "sandbox-docker suite", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test"], needs: ["docker"], timeoutMs: 15 * MIN },
+  { id: "sandbox-docker", group: "docker", title: "sandbox-docker suite", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "--exclude", "test/run-args.test.ts", "--exclude", "test/browser-companion.test.ts", "--exclude", "test/browser-companion-lifecycle.test.ts", "--exclude", "test/dind.e2e.test.ts"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "sandbox-dind", group: "docker", title: "rootless docker-in-sandbox", command: ["pnpm", "--filter", "@valet/sandbox-docker", "test", "test/dind.e2e.test.ts"], needs: ["docker"], timeoutMs: 15 * MIN },
-  { id: "sandbox-k8s", group: "docker", title: "sandbox-kubernetes cluster suite", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test"], needs: ["k8sContext"], timeoutMs: 20 * MIN },
+  { id: "sandbox-k8s", group: "docker", title: "sandbox-kubernetes cluster suite", command: ["pnpm", "--filter", "@valet/sandbox-kubernetes", "test", ".cluster.test.ts"], needs: ["k8sContext"], timeoutMs: 20 * MIN },
   { id: "store-postgres", group: "docker", title: "real-Postgres conformance", command: ["make", "test-pg"], needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "workspace-prep-docker", group: "docker", title: "workspace prep against real sandbox", command: apiTest("src/engine/workspace-prep.docker.test.ts", "src/engine/workspace-prep-prebuilt.docker.test.ts"), needs: ["docker"], timeoutMs: 15 * MIN },
   { id: "prebuilds-docker", group: "docker", title: "image prebuild pipeline", command: apiTest("src/integration/prebuilds.e2e.test.ts"), needs: ["docker"], timeoutMs: 20 * MIN },
@@ -230,7 +231,7 @@ export const STEPS: StepDef[] = [
 
   // ── live external ────────────────────────────────────────────────────────
   { id: "telegram", group: "live", title: "live Telegram outbound", command: apiTest("src/integration/telegram.e2e.test.ts"), needs: ["telegram"], timeoutMs: 10 * MIN },
-  { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts"), needs: ["githubLive"], timeoutMs: 10 * MIN },
+  { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts", "-t", "live App JWT check"), needs: ["githubLive"], timeoutMs: 10 * MIN },
   { id: "openai", group: "live", title: "OpenAI provider path", command: apiTest("src/integration/llm-providers.e2e.test.ts"), needs: ["openai"], timeoutMs: 10 * MIN },
   {
     id: "onepassword",

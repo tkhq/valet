@@ -1,7 +1,7 @@
 import type { ForeachBodyNode, ForeachNode } from "@valet/workflow";
 import { LabeledInput, NumberField, SelectField } from "../fields";
 import { LlmForm } from "./llm-form";
-import { OrchestratorForm } from "./orchestrator-form";
+import { ThreadForm } from "./thread-form";
 import { SessionForm } from "./session-form";
 import { SetForm } from "./set-form";
 import { ToolForm } from "./tool-form";
@@ -137,7 +137,7 @@ function BodyNodeForm({
     case "set":
       return <SetForm node={node} onChange={onChange} />;
     case "orchestrator":
-      return <OrchestratorForm node={node} onChange={onChange} />;
+      return <ThreadForm node={node} onChange={onChange} />;
     case "session":
       return <SessionForm node={node} onChange={onChange} />;
     case "workflow":

@@ -269,6 +269,42 @@ describe("overheard digest: queue coalescing", () => {
     faux.unregister();
   });
 
+  it.each([true, false])("keeps sender authority separate when the first sender is external=%s", async (externalFirst) => {
+    const faux = registerFauxProvider({ provider: `digest-authority-${externalFirst}` });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      // An unlinked channel sender runs under the creator's ID, but must
+      // never acquire the creator's authority when their messages merge.
+      const external = { id: "creator", externalSender: true };
+      const teammate = { id: "creator" };
+      const authors = externalFirst ? [external, teammate] : [teammate, external];
+      const first = await thread.submitPrompt(overheardSignal({ body: "first" }), { author: authors[0] });
+      const second = await thread.submitPrompt(overheardSignal({ body: "second" }), { author: authors[1] });
+      expect((await store.getQueueItem(session.id, first.queueItemId))?.status).toBe("queued");
+      expect((await store.getQueueItem(session.id, second.queueItemId))?.status).toBe("queued");
+
+      // Each authority class still coalesces and remains separate after
+      // the recovery sweep has repaired its constituent settlements.
+      await thread.submitPrompt(overheardSignal({ body: "first again" }), { author: authors[0] });
+      await thread.submitPrompt(overheardSignal({ body: "second again" }), { author: authors[1] });
+      await session.sweepOnce();
+      const queued = await store.listUnsettledSubmissions(session.id);
+      expect(queued).toHaveLength(2);
+      for (const [index, body] of ["first", "second"].entries()) {
+        const digest = queued.find(item => Boolean(item.author?.externalSender) === Boolean(authors[index].externalSender));
+        expect(digest?.author).toEqual(authors[index]);
+        const content = digest?.content;
+        if (typeof content !== "object" || content === null || !("kind" in content)) throw new Error("Expected a digest signal");
+        expect(content.body.split("\n").sort()).toEqual([OVERHEARD_DIGEST_HEADER, body, `${body} again`].sort());
+      }
+    } finally {
+      faux.unregister();
+    }
+  });
+
   it("keeps multiple settlements independent next to coalesced overheard chatter", async () => {
     const faux = registerFauxProvider({ provider: "settlement-no-merge" });
     faux.setResponses([]);

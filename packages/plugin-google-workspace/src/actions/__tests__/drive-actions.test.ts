@@ -465,7 +465,7 @@ describe('drive actions', () => {
     expect(body.locked).toBe(false);
     expect(result).toEqual({
       success: false,
-      error: 'Cannot download binary file (image/png). Only text, PDF, and Google Workspace files are supported.',
+      error: 'Cannot download binary file (image/png). Only text, PDF, DOCX, and Google Workspace files are supported.',
     });
   });
 
@@ -728,5 +728,30 @@ describe('drive actions', () => {
       success: true,
       data: { id: 'new1', name: 'Contract', url: 'url1' },
     });
+  });
+});
+
+
+describe('DOCX downloads', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => { fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+  it.each([
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'contract.docx'],
+    ['application/octet-stream', 'contract.DOCX'],
+    ['application/zip', 'contract.docx'],
+  ])('extracts %s Word downloads', async (mime, name) => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'f1', name, mimeType: mime }), { status: 200 }));
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([80, 75, 3, 4, 0]), { status: 200, headers: { 'Content-Type': mime } }));
+    const extractDocument = vi.fn(async () => ({ markdown: 'Contract text' }));
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx({ extractDocument }));
+    expect(result).toMatchObject({ success: true, data: { content: 'Contract text' } });
+    expect(extractDocument).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+  });
+  it('rejects a binary Google Drawing export before downloading bytes', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'f1', name: 'drawing', mimeType: 'application/vnd.google-apps.drawing' }), { status: 200 }));
+    const result = await action('drive.download_file').execute({ fileId: 'f1' }, pluginCtx());
+    expect(result.success).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

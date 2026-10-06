@@ -28,6 +28,7 @@ import { busEventToWire, queueStateToWire, type WireEventDraft } from "../engine
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
+import { requestViewer, threadVisibility } from "../services/thread-access.js";
 import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
 
@@ -69,6 +70,10 @@ export function createWsConnectionLifecycle() {
   };
 }
 
+/** How long one connection trusts a thread access answer before asking again,
+ * so a person removed from a private channel stops receiving it. */
+const THREAD_ACCESS_RECHECK_MS = 5 * 60_000;
+
 export function registerWsRoutes(
   app: Hono<AppEnv>,
   upgradeWebSocket: UpgradeWebSocket,
@@ -90,6 +95,24 @@ export function registerWsRoutes(
       // Track the most recent assistant messageId per thread so text_delta
       // events can be tagged with a real id (engine emits deltas without one).
       const activeMessageByThread = new Map<string, string>();
+
+      // A team runtime's private threads (`services/thread-access.ts`) stream
+      // only to the people who may see them. Frames pass through one chain so
+      // a thread awaiting its access check cannot reorder the stream.
+      let threadShown: ((threadId: string) => Promise<boolean>) | undefined;
+      let chain: Promise<void> = Promise.resolve();
+      const deliver = (ws: { send: (data: string) => void }, draftEvent: WireEventDraft) => {
+        const threadId = "threadId" in draftEvent && typeof draftEvent.threadId === "string" ? draftEvent.threadId : undefined;
+        const shown = threadShown;
+        if (!shown) {
+          send(ws, draftEvent);
+          return;
+        }
+        chain = chain.then(async () => {
+          if (threadId && !(await shown(threadId).catch(() => false))) return;
+          if (!lifecycle.closed) send(ws, draftEvent);
+        });
+      };
 
       const send = (ws: { send: (data: string) => void }, draftEvent: WireEventDraft) => {
         const ev = { ...draftEvent, seq: ++seq, ts: Date.now() } as WireEvent;
@@ -121,7 +144,9 @@ export function registerWsRoutes(
               ws.close(4040, "session not found");
               return;
             }
-            const canView = await canViewSession(providers.db, row, caller);
+            const canView = await canViewSession(providers.db, row, caller)
+              // A child started from a private thread is that thread's audience's.
+              && (row.ownerType !== "team" || await threadVisibility(providers, row, requestViewer(row.orgId, caller, c.var.user.id))(null));
             if (lifecycle.closed) return;
             if (!canView) {
               ws.close(4040, "session not found");
@@ -146,6 +171,22 @@ export function registerWsRoutes(
             if (lifecycle.closed) return;
             await engineSession.ensureDefaultThread();
             if (lifecycle.closed) return;
+
+            if (row.ownerType === "team") {
+              const visible = threadVisibility(providers, row, requestViewer(row.orgId, caller, c.var.user.id));
+              const checked = new Map<string, { shown: Promise<boolean>; at: number }>();
+              threadShown = async (threadId) => {
+                const hit = checked.get(threadId);
+                if (hit && Date.now() - hit.at < THREAD_ACCESS_RECHECK_MS) return hit.shown;
+                const key = engineSession.threadById(threadId)?.key
+                  ?? (await providers.engineStore.getThread(sessionId, threadId))?.key;
+                // An unresolved thread has no audience yet. Recheck the next frame.
+                if (key === undefined) return false;
+                const shown = visible(key);
+                checked.set(threadId, { shown, at: Date.now() });
+                return shown;
+              };
+            }
 
             // Run state at handshake time, from the same derivation the REST
             // routes use (`sessions/run-state.ts`). Later changes arrive as
@@ -190,10 +231,10 @@ export function registerWsRoutes(
             for (const thread of engineSession.listThreads()) {
               const queueState = await thread.currentQueueState();
               if (lifecycle.closed) return;
-              send(ws, queueStateToWire(sessionId, thread.id, queueState));
+              deliver(ws, queueStateToWire(sessionId, thread.id, queueState));
               const agentStatus = thread.currentAgentStatus;
               if (agentStatus !== "idle") {
-                send(ws, { type: "status", threadId: thread.id, status: agentStatus });
+                deliver(ws, { type: "status", threadId: thread.id, status: agentStatus });
               }
             }
 
@@ -211,7 +252,7 @@ export function registerWsRoutes(
                   if (filled) draft.messageId = filled;
                 }
                 if (busEvent.offset !== undefined) draft.offset = busEvent.offset;
-                send(ws, draft);
+                deliver(ws, draft);
               }
             };
 
@@ -266,7 +307,7 @@ export function registerWsRoutes(
 
             // A fresh connection has no sandbox event to replay. Seed after
             // subscription and replay so gateway panes see the current state.
-            send(ws, {
+            deliver(ws, {
               type: "sandbox.status",
               state: engineSession.attachment.state,
               epoch: engineSession.attachment.currentEpoch(),
@@ -280,7 +321,7 @@ export function registerWsRoutes(
             for (const thread of engineSession.listThreads()) {
               const modelState = await thread.currentModelState();
               if (lifecycle.closed) return;
-              send(ws, modelState
+              deliver(ws, modelState
                 ? {
                     type: "model.state",
                     threadId: thread.id,
@@ -297,7 +338,7 @@ export function registerWsRoutes(
 
             // Periodic keepalive.
             lifecycle.startKeepalive(() => {
-              send(ws, { type: "ping" });
+              deliver(ws, { type: "ping" });
             });
           } catch (err) {
             // Engine setup failed (e.g. workspace doesn't exist, Docker

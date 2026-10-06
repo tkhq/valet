@@ -9,6 +9,7 @@ export async function verifySlackSignature(
   rawHeaders: Record<string, string>,
   rawBody: string,
   signingSecret: string,
+  receivedAt = Date.now(),
 ): Promise<boolean> {
   const timestamp = rawHeaders["x-slack-request-timestamp"];
   const signature = rawHeaders["x-slack-signature"];
@@ -20,8 +21,8 @@ export async function verifySlackSignature(
   // NaN is false, so a non-numeric timestamp would slip past a bare `> 300`
   // with no window applied at all.
   const sent = Number(timestamp);
-  const now = Math.floor(Date.now() / 1000);
-  if (!Number.isFinite(sent) || Math.abs(now - sent) > 300) return false;
+  const now = Math.floor(receivedAt / 1000);
+  if (!Number.isFinite(sent) || !Number.isFinite(now) || Math.abs(now - sent) > 300) return false;
 
   // Compute HMAC-SHA256
   const baseString = `v0:${timestamp}:${rawBody}`;
@@ -82,7 +83,7 @@ export function verifySlackSignatureSync(
   // against every bound, which would leave the replay window unenforced.
   const sent = Number(timestamp);
   const now = Math.floor(Date.now() / 1000);
-  if (!Number.isFinite(sent) || Math.abs(now - sent) > 300) return false;
+  if (!Number.isFinite(sent) || !Number.isFinite(now) || Math.abs(now - sent) > 300) return false;
 
   const digest = createHmac("sha256", signingSecret).update(`v0:${timestamp}:${rawBody}`).digest("hex");
   const expected = `v0=${digest}`;

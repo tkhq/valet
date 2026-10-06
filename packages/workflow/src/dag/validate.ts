@@ -113,7 +113,7 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   approval: ['id', 'type', 'prompt', 'summary', 'details', 'timeout', 'onDeny'],
   session: ['id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait'],
   stop: ['id', 'type', 'outcome', 'output', 'message'],
-  llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'onError'],
+  llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'reasoning', 'onError'],
   orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
   // A tool node carries BOTH policies, and they answer different questions.
   // `onError` decides what a node FAILURE does to the rest of the run;
@@ -176,6 +176,9 @@ const INPUT_DEFINITION_KEYS: readonly string[] = [
 const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
 
 /** Node types that carry `onError` (batch-fanout design decision 3). */
+/** The reasoning levels an llm node may name (the engine's `REASONING_LEVELS`). */
+const LLM_REASONING_LEVELS: readonly string[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
 const ERROR_POLICY_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>(['llm', 'tool', 'workflow']);
 
 /** Same reason as `TOOL_CREDENTIAL_MODES`: reject what `NodeErrorPolicy` cannot hold. */
@@ -545,6 +548,9 @@ function validateNodeFields(
       }
       if (node.maxOutputTokens !== undefined && !isPositiveInteger(node.maxOutputTokens)) {
         errors.push(`${label}: llm.maxOutputTokens must be a positive integer`);
+      }
+      if (node.reasoning !== undefined && !LLM_REASONING_LEVELS.includes(node.reasoning)) {
+        errors.push(`${label}: llm.reasoning must be one of ${LLM_REASONING_LEVELS.join(', ')}, or omitted for the owner's default`);
       }
       checkErrorPolicy(label, 'llm', node.onError, errors);
       break;

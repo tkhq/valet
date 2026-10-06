@@ -8,7 +8,7 @@
  * cares that navigation was requested, not that the router resolved it.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type {
   GetReposResponse,
@@ -110,13 +110,6 @@ vi.mock("~/api/repos", () => ({
 
 // The workspace scope provider reads the assistants list to let an open
 // assistant win over the stored key; no assistant is open here.
-vi.mock("~/api/assistants", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/assistants")>();
-  return {
-    ...actual,
-    useAssistants: () => ({ data: { assistants: [] }, isLoading: false, error: null }),
-  };
-});
 
 // `useListOwner` reads the caller's own id; `WorkspaceClause` reads teams +
 // org features (none here, so the clause renders nothing).

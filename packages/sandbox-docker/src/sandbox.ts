@@ -311,11 +311,19 @@ export interface BuildDockerRunArgsOpts {
  * already-resolved values — image/network defaults, workspace realpath,
  * etc. are `create()`'s job).
  */
+function bindMount(source: string, target: string, readonly = false): string[] {
+  if (!source.includes(":")) return ["-v", `${source}:${target}${readonly ? ":ro" : ""}`];
+  // Docker's --mount CSV parser keeps colons in retained execution paths.
+  const src = `src=${source}`;
+  const field = /[,"\n\r]/.test(src) ? `"${src.replaceAll('"', '""')}"` : src;
+  return ["--mount", `type=bind,${field},dst=${target}${readonly ? ",readonly" : ""}`];
+}
+
 export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
   const runArgs: string[] = ["run", "-d", "--name", opts.containerName];
   runArgs.push("--workdir", CONTAINER_WORKSPACE);
-  runArgs.push("-v", `${opts.workspaceHostPath}:${CONTAINER_WORKSPACE}`);
-  if (opts.runtimeStateDir) runArgs.push("-v", `${opts.runtimeStateDir}:/var/lib/valet`);
+  runArgs.push(...bindMount(opts.workspaceHostPath, CONTAINER_WORKSPACE));
+  if (opts.runtimeStateDir) runArgs.push(...bindMount(opts.runtimeStateDir, "/var/lib/valet"));
   for (const [key, value] of Object.entries(opts.labels ?? {})) runArgs.push("--label", `${key}=${value}`);
   if (opts.browser?.enabled) {
     if (!opts.browserSeccompProfile) throw new Error("Browser seccomp profile is missing. Configure the reviewed browser profile before starting this sandbox.");
@@ -325,7 +333,7 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     runArgs.push("--env", `VALET_BROWSER_DEV_PORTS=${opts.env?.VALET_BROWSER_DEV_PORTS ?? "5173,3000,8080"}`);
     if (opts.browser.viewer) runArgs.push("--env", "VALET_BROWSER_VIEWER=1");
   }
-  if (opts.credsHostDir) runArgs.push("-v", `${opts.credsHostDir}:/etc/valet/creds:ro`);
+  if (opts.credsHostDir) runArgs.push(...bindMount(opts.credsHostDir, "/etc/valet/creds", true));
   if (opts.docker) {
     runArgs.push("--security-opt", "seccomp=unconfined");
     runArgs.push("--security-opt", "apparmor=unconfined");
@@ -568,7 +576,7 @@ export class DockerSandbox implements Sandbox {
       if (typeof value !== "object" || value === null || !("isFile" in value) || typeof value.isFile !== "boolean" || !("isDirectory" in value) || typeof value.isDirectory !== "boolean" || !("size" in value) || typeof value.size !== "number") throw new Error("Invalid file metadata response. Inspect the sandbox runtime.");
       return { isFile: value.isFile, isDirectory: value.isDirectory, size: value.size };
     }
-    const output = await this.containerFile(path, quoted => `if [ -d ${quoted} ]; then printf 'd 0'; elif [ -f ${quoted} ]; then printf 'f '; wc -c < ${quoted}; elif [ -e ${quoted} ]; then printf 'o 0'; else exit 2; fi`);
+    const output = await this.containerFile(path, quoted => `if [ -d ${quoted} ]; then printf 'd 0'; elif [ -f ${quoted} ]; then printf 'f '; wc -c < ${quoted}; elif [ -e ${quoted} ]; then printf 'o 0'; else exit 2; fi`, undefined, 2);
     const match = /^([dfo])\s+(\d+)$/.exec(output.trim());
     if (!match) throw new Error("Invalid file metadata response. Inspect the sandbox runtime.");
     return { isFile: match[1] === "f", isDirectory: match[1] === "d", size: Number(match[2]) };
@@ -585,9 +593,15 @@ export class DockerSandbox implements Sandbox {
   }
 
   /** Generic file operations resolve symlinks only within this container's mount view. */
-  private async containerFile(path: string, command: (quotedPath: string) => string, stdin?: string): Promise<string> {
+  /** `notFoundExit` is the exit code the command uses for a missing path. It
+   * becomes an `ENOENT` error, the code callers test to tell absence from a
+   * failed operation (the upload route writes only after stat says absent). */
+  private async containerFile(path: string, command: (quotedPath: string) => string, stdin?: string, notFoundExit?: number): Promise<string> {
     this.resolveHostPath(path);
     const result = await this.exec(command(shQuote(this.resolveContainerPath(path))), { stdin, maxOutputBytes: 150 * 1024 * 1024 });
+    if (notFoundExit !== undefined && result.exitCode === notFoundExit) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, ${path}`), { code: "ENOENT" });
+    }
     if (result.exitCode !== 0 || result.truncated) throw new Error(`${result.stderr.trim() || "The sandbox file operation failed"}. Use an accessible file in the session working directory.`);
     return result.stdout;
   }
@@ -1194,7 +1208,7 @@ export class DockerSandboxProvider implements SandboxProvider {
       const identity = `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
       const args = workload.running
         ? ["exec", "--user", "0", workload.id, "chown", "-Rh", identity, "/workspace"]
-        : ["run", "--rm", "--network", "none", "--user", "0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--entrypoint", "chown", "-v", `${value.workspace}:/workspace`, value.imageId ?? value.image, "-Rh", identity, "/workspace"];
+        : ["run", "--rm", "--network", "none", "--user", "0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--entrypoint", "chown", ...bindMount(value.workspace, "/workspace"), value.imageId ?? value.image, "-Rh", identity, "/workspace"];
       const restored = await execProcess("docker", args, {});
       if (restored.exitCode !== 0) throw new Error(`Cannot restore working-directory ownership. Restore Docker connectivity before deleting this sandbox. ${restored.stderr.trim()}`);
     }
@@ -1243,7 +1257,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     await fs.access(value.runtimeStateDir);
     try { await fs.access(join(value.runtimeStateDir, "browser/journal.sqlite")); }
     catch (error) { if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return { entries: [], total: 0 }; throw error; }
-    const result = await execProcess("docker", ["run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", `${process.getuid?.() || 1501}:${process.getgid?.() || 1501}`, "--env", "NODE_OPTIONS=", "--entrypoint", "/usr/bin/flock", "-v", `${value.runtimeStateDir}:/var/lib/valet:ro`, owner?.imageId ?? value.browserCompanion?.imageId ?? value.browserCompanion?.image ?? value.imageId ?? value.image, "--shared", "--nonblock", "/var/lib/valet/browser/owner.lock", "/usr/local/bin/node", "-e", READ_RETAINED_BROWSER_AUDIT], { timeout: 30_000, maxOutputBytes: 8 * 1024 * 1024 });
+    const result = await execProcess("docker", ["run", "--rm", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", `${process.getuid?.() || 1501}:${process.getgid?.() || 1501}`, "--env", "NODE_OPTIONS=", "--entrypoint", "/usr/bin/flock", ...bindMount(value.runtimeStateDir, "/var/lib/valet", true), owner?.imageId ?? value.browserCompanion?.imageId ?? value.browserCompanion?.image ?? value.imageId ?? value.image, "--shared", "--nonblock", "/var/lib/valet/browser/owner.lock", "/usr/local/bin/node", "-e", READ_RETAINED_BROWSER_AUDIT], { timeout: 30_000, maxOutputBytes: 8 * 1024 * 1024 });
     if (result.exitCode !== 0 || result.truncated) throw new Error(`Cannot read the retained browser audit. Restore the runtime image and private state before deleting this session. ${result.stderr.trim()}`);
     return parseRetainedBrowserAudit(JSON.parse(result.stdout), value.sessionId);
   }

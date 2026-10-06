@@ -8,7 +8,7 @@
  * `Session.credentialProvider()` — the same seam a plugin action's
  * `ctx.credentials.get()` hits.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InMemoryEventStream,
   InMemorySessionStore,
@@ -23,8 +23,11 @@ import {
   type OnePasswordCtx,
   type OnePasswordService,
 } from "../services/onepassword.js";
+import { eq } from "drizzle-orm";
+import { shareGeneration, writeBorrowGrant } from "../services/credential-borrow.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgs } from "../schema/index.js";
+import { orgs, teamMembers, teams } from "../schema/index.js";
 import { EngineHost, type EngineHostOpts } from "./host.js";
 
 const orgId = "op-org";
@@ -56,6 +59,7 @@ describe("EngineHost session 1Password credential resolution", () => {
   afterEach(() => {
     host?.evictAll();
     host = undefined;
+    vi.unstubAllEnvs();
   });
 
   function makeHost(
@@ -77,6 +81,39 @@ describe("EngineHost session 1Password credential resolution", () => {
     host = h;
     return h;
   }
+
+  it.each(["linear", "openai"])("limits %s borrow approvals to current teammates, never outsiders or authorless turns", async (service) => {
+    vi.stubEnv("OPENAI_API_KEY", "");
+    const { appDb } = await freshTestPgDb();
+    const teamId = "borrow-team";
+    await appDb.insert(teams).values({ id: teamId, orgId, name: "Borrow", createdAt: 1 });
+    await appDb.insert(teamMembers).values([
+      { teamId, userId, role: "member" },
+      { teamId, userId: "borrower", role: "member" },
+    ]);
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, service, { type: "api_key", apiKey: "shared-key" });
+    await shareCredential(appDb, { teamId, userId, service: service, createdAt: 1 });
+    const h = makeHost(credentials, { db: appDb, onePassword: fakeOnePassword(async (row) => row) });
+    const session = await h.sessionFor("borrow-session", {
+      userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: teamId,
+    });
+    const discover = (actorId: string, externalSender = false) =>
+      session.credentialProvider({ actorId, externalSender, threadId: "thread" }).get(service);
+    expect((await discover(userId))?.accessToken).toBe("shared-key");
+    expect(await discover("borrower")).toBeNull();
+    await writeBorrowGrant(appDb, orgId, { teamId, shareGeneration: (await shareGeneration(appDb, teamId, service, userId))!, sessionId: session.id, threadId: "thread", service: service, memberId: userId });
+    expect((await discover("borrower"))?.accessToken).toBe("shared-key");
+    expect(await discover("borrower", true)).toBeNull();
+    expect(await discover(userId, true)).toBeNull();
+    expect(await discover("outsider")).toBeNull();
+    const read = (actorId?: string) => session.credentialProvider({ actorId, threadId: "thread" }).get(service);
+    expect((await read("borrower"))?.accessToken).toBe("shared-key");
+    expect(await read("outsider")).toBeNull();
+    expect(await read()).toBeNull();
+    await appDb.delete(teamMembers).where(eq(teamMembers.userId, "borrower"));
+    expect(await read("borrower")).toBeNull();
+  });
 
   it("1Password-backed row resolves through the service with the secret filled", async () => {
     // `Session.credentialProvider()` always reads through owner
@@ -108,6 +145,21 @@ describe("EngineHost session 1Password credential resolution", () => {
     // The exact object `credentials.get()` returned was handed to
     // `resolveCredential` (no clone before the call).
     expect(sawRow).toBe(stored);
+  });
+
+  it("never reads a member's own credential on a newcomer's turn in a team session that acts as its member", async () => {
+    const { appDb } = await freshTestPgDb();
+    await appDb.insert(teamMembers).values({ teamId: "team-actor", userId, role: "member" });
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "acme-service", { type: "api_key", apiKey: "member-key" });
+    const h = makeHost(credentials, { db: appDb, onePassword: fakeOnePassword(async (row) => row) });
+    const session = await h.sessionFor("sess-actor-newcomer", {
+      userId, orgId, workspace: "/tmp", ownerType: "team", ownerTeamId: "team-actor", credentialOwnerMode: "actor",
+    });
+    expect((await session.credentialProvider({ actorId: userId }).get("acme-service"))?.accessToken).toBe("member-key");
+    expect(await session.credentialProvider().get("acme-service")).toBeNull();
+    expect(await session.credentialProvider({ externalSender: true }).get("acme-service")).toBeNull();
+    expect(await session.credentialProvider({ actorId: "team:team-actor" }).get("acme-service")).toBeNull();
   });
 
   it("non-1Password row passes through byte-identical (the exact object the store returned, unmodified)", async () => {

@@ -80,3 +80,20 @@ Boot: `buildNodeProviders` constructs ONE connection source (Pool or PGlite), ru
 - Data migration from existing sqlite dev DBs (pre-1.0: discard).
 - pgvector / semantic memory search (tsvector only this pass).
 - Read replicas, PgBouncer. (Pool size and acquire timeout ARE tunable — `VALET_PG_POOL_MAX` / `VALET_PG_POOL_CONNECT_TIMEOUT_MS`, see Boot above — but no adaptive tuning beyond that.)
+
+### Workflow deletion concurrency regression
+
+The Remote Postgres CI job runs `service.delete-race.postgres.test.ts` against PostgreSQL.
+The suite checks both commit orders for run insertion versus definition deletion and repository stale-file cleanup.
+It pauses the leading transaction before commit and observes the other connection with `pg_blocking_pids`.
+A committed run prevents definition deletion; repository cleanup disarms its triggers and retains the definition.
+A committed deletion makes run insertion fail without creating an orphan.
+
+For a local run, set `TEST_DATABASE_URL` to a disposable PostgreSQL database and run:
+
+```sh
+pnpm --filter @valet/api test service.delete-race.postgres.test.ts
+```
+
+The suite creates and removes its own schema. Without `TEST_DATABASE_URL`, it skips.
+It never reads `DATABASE_URL`. PGlite cannot verify these locks because it serializes transactions.

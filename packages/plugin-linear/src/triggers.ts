@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } from "@valet/engine";
+import type { EventCatalogEntry, NormalizedEvent, TriggerDef, TriggerRejection, VerifiedEvent } from "@valet/engine";
 
 const LINEAR_TYPES = ["Issue", "Comment", "Project", "Cycle", "IssueLabel", "Reaction"] as const;
 const ACTIONS = ["create", "update", "remove"] as const;
@@ -25,34 +25,83 @@ function verifySignature(headers: Record<string, string>, rawBody: Uint8Array, s
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+type Inspection =
+  | { ok: true; type: string; action: string; deliveryId: string; payload: Record<string, unknown> }
+  | { ok: false; rejection: TriggerRejection };
+
+/** An identifier from the request, kept only if it looks like one. The body
+ * is unverified when the signature fails, so nothing else from it is logged. */
+function safeId(v: unknown): string | undefined {
+  return typeof v === "string" && /^[\w-]{1,64}$/.test(v) ? v : undefined;
+}
+
+function parseObject(rawBody: Uint8Array): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Checks one delivery in the order Linear documents: signature over the raw
+ * body, then freshness, then the delivery header. The type and action are
+ * left to the caller, which knows what it handles. */
+function inspect(req: { headers: Record<string, string>; rawBody: Uint8Array }, secret: string | undefined): Inspection {
+  const signed = !!secret && verifySignature(req.headers, req.rawBody, secret);
+  // Parsed after the signature check. An unsigned body contributes only its
+  // webhook ID, which tells an admin which Linear webhook sent it.
+  const payload = parseObject(req.rawBody);
+  const webhookId = safeId(payload?.webhookId);
+  const from = webhookId ? ` from webhook ${webhookId}` : "";
+  if (!signed) {
+    return { ok: false, rejection: { reason: "bad_signature", detail: `The Linear signature${from} does not match the saved webhook signing secret. If Linear has another webhook for this URL, delete it. Otherwise copy the app's current signing secret into Organization settings > Linear.` } };
+  }
+  if (!payload) return { ok: false, rejection: { reason: "malformed_callback", detail: "A signed Linear delivery was not a JSON object." } };
+  const type = safeId(payload.type) ?? "unknown";
+  const action = safeId(payload.action) ?? "unknown";
+  const rawTs = payload.webhookTimestamp;
+  const tsNum = typeof rawTs === "string" ? Number(rawTs) : rawTs;
+  if (typeof tsNum !== "number" || !Number.isFinite(tsNum)) {
+    return { ok: false, rejection: { reason: "stale_delivery", detail: `A signed Linear ${type} ${action} delivery${from} had no webhookTimestamp, so its age is unknown.` } };
+  }
+  // Tolerate shape drift: some SDKs stringify large ints, and a
+  // seconds-encoded timestamp (magnitude < ~1e12) would otherwise always
+  // look ancient in ms terms. Coerce before the freshness check so a
+  // legitimate delivery is never dropped over encoding.
+  const ts = tsNum < 1e12 ? tsNum * 1000 : tsNum;
+  const ageMs = Date.now() - ts;
+  if (Math.abs(ageMs) > TIMESTAMP_TOLERANCE_MS) {
+    return { ok: false, rejection: { reason: "stale_delivery", detail: `A signed Linear ${type} ${action} delivery${from} was ${Math.round(ageMs / 1000)}s old. Valet accepts deliveries up to ${TIMESTAMP_TOLERANCE_MS / 1000}s old. If this repeats, check the server clock.` } };
+  }
+  const deliveryId = lookupHeader(req.headers, "linear-delivery");
+  if (!deliveryId) return { ok: false, rejection: { reason: "malformed_callback", detail: `A signed Linear ${type} ${action} delivery${from} had no Linear-Delivery header.` } };
+  return { ok: true, type, action, deliveryId, payload };
+}
+
 function makeVerify(family: (typeof LINEAR_TYPES)[number]): TriggerDef["verify"] {
   return (req, secrets) => {
-    const secret = secrets.webhookSecret;
-    if (!secret) return null;
-    if (!verifySignature(req.headers, req.rawBody, secret)) return null;
-
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(new TextDecoder().decode(req.rawBody)) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-    if (payload.type !== family) return null;
-    if (payload.action !== "create" && payload.action !== "update" && payload.action !== "remove") return null;
-    // Tolerate shape drift: some SDKs stringify large ints, and a
-    // seconds-encoded timestamp (magnitude < ~1e12) would otherwise always
-    // look ancient in ms terms. Coerce before the freshness check so a
-    // legitimate delivery is never dropped over encoding.
-    const rawTs = payload.webhookTimestamp;
-    const tsNum = typeof rawTs === "string" ? Number(rawTs) : rawTs;
-    if (typeof tsNum !== "number" || !Number.isFinite(tsNum)) return null;
-    const ts = tsNum < 1e12 ? tsNum * 1000 : tsNum;
-    if (Math.abs(Date.now() - ts) > TIMESTAMP_TOLERANCE_MS) return null;
-    const deliveryId = lookupHeader(req.headers, "linear-delivery");
-    if (!deliveryId) return null;
-    return { eventType: family, deliveryId, payload };
+    const result = inspect(req, secrets.webhookSecret);
+    if (!result.ok || result.type !== family || !isAction(result.action)) return null;
+    return { eventType: family, deliveryId: result.deliveryId, payload: result.payload };
   };
 }
+
+function isAction(action: string): action is (typeof ACTIONS)[number] {
+  return (ACTIONS as readonly string[]).includes(action);
+}
+
+/** Runs only after every family's `verify` declined the request. */
+const explainRejection: NonNullable<TriggerDef["explainRejection"]> = (req, secrets) => {
+  const result = inspect(req, secrets.webhookSecret);
+  if (!result.ok) return result.rejection;
+  const webhookId = safeId(result.payload.webhookId);
+  const from = webhookId ? ` from webhook ${webhookId}` : "";
+  if (result.type === "OAuthApp" && result.action === "revoked") {
+    return { reason: "unsupported_event", detail: `Linear revoked the Valet app${from}. Events stop until an admin reconnects Linear in Organization settings > Linear.` };
+  }
+  return { reason: "unsupported_event", detail: `Linear sent ${result.type} ${result.action}${from}, which Valet does not handle. To stop these deliveries, clear that resource type on the Linear app's webhook.` };
+};
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -111,10 +160,11 @@ export const linearTriggerDefs: TriggerDef[] = LINEAR_TYPES.map((type) => ({
   service: "linear",
   description: `Linear webhook event: ${type}`,
   verify: makeVerify(type),
+  explainRejection,
   toEvent,
   catalog: ACTIONS.map((action) => ({
     key: `linear.${type.toLowerCase()}.${action}`,
-    description: `Linear ${type} ${action}`,
+    description: `${type.replace(/([a-z])([A-Z])/g, "$1 $2")} ${{ create: "created", update: "updated", remove: "removed" }[action]} in Linear`,
     filters: FILTERS[type] ?? [],
   })),
 }));

@@ -1,11 +1,18 @@
-import { useMemo, useState } from "react";
-import { MoreHorizontal, Plus } from "lucide-react";
+import { useWorkspaceAssistant } from "~/components/layout/workspace-assistant";
 import type {
-  AssistantSummary,
   EventSubscriptionTargetWire,
-  EventSubscriptionWire,
-  WorkflowDefinitionSummary,
+  EventSubscriptionWire
 } from "@valet/api/wire";
+import { MoreHorizontal, Plus } from "lucide-react";
+import { useMemo, useState } from "react";
+import {
+  useDeleteEventSubscription,
+  useEventSubscriptions,
+  usePatchEventSubscription,
+} from "~/api/events";
+import { useMe, useOrg, useTeams } from "~/api/settings";
+import { useWorkflows } from "~/api/workflows";
+import { OwnerBadge } from "~/components/owner-badge";
 import {
   Badge,
   Button,
@@ -20,20 +27,10 @@ import {
   Switch,
   Tooltip,
 } from "~/components/primitives";
-import {
-  useDeleteEventSubscription,
-  useEventSubscriptions,
-  usePatchEventSubscription,
-} from "~/api/events";
-import { useMe, useOrg, useTeams } from "~/api/settings";
-import { defaultAssistantFor, useAssistants } from "~/api/assistants";
-import { useWorkflows } from "~/api/workflows";
+import { eligibleTeams } from "~/components/session/assistant-rail";
 import { errorText } from "~/lib/error-text";
 import { selectsSlackMention } from "~/lib/slack-mention";
 import { useListOwner } from "~/lib/use-list-owner";
-import { workflowAssistantId } from "~/lib/workflow-assistant";
-import { AssistantBadge, badgeAssistant } from "~/components/assistant-badge";
-import { eligibleTeams } from "~/components/session/assistant-rail";
 import { AutomationWizard } from "./automation-wizard";
 import { EditSubscriptionDialog } from "./edit-subscription-dialog";
 
@@ -104,62 +101,6 @@ function describeTarget(
 }
 
 /**
- * The assistant that answers a matching event, resolved from lists this
- * panel already holds. A target that names an assistant wins; otherwise the
- * target's owner answers through its default assistant, which is what every
- * rule written before assistants had personas does.
- *
- * Undefined when nothing in those lists resolves: an unlisted workflow, an
- * org whose id has not arrived, or a team target with no team. The badge
- * then keeps the row's own ownership label.
- */
-export function subscriptionAssistantId(
-  sub: EventSubscriptionWire,
-  workflows: Map<string, WorkflowDefinitionSummary>,
-  assistants: AssistantSummary[] | undefined,
-  orgId: string | undefined,
-): string | undefined {
-  if (sub.target.kind === "workflow") {
-    const workflow = workflows.get(sub.target.workflowId);
-    if (workflow === undefined) return undefined;
-    return (
-      workflowAssistantId(workflow.definition) ??
-      defaultAssistantFor(assistants, workflow.ownerType, workflow.ownerId)?.id
-    );
-  }
-  if (sub.target.assistantId !== undefined) return sub.target.assistantId;
-  const orchestrator = sub.target.orchestrator ?? "user";
-  if (orchestrator === "team") {
-    const teamId = sub.target.teamId;
-    return teamId === undefined ? undefined : defaultAssistantFor(assistants, "team", teamId)?.id;
-  }
-  if (orchestrator === "org") {
-    return orgId === undefined ? undefined : defaultAssistantFor(assistants, "org", orgId)?.id;
-  }
-  return defaultAssistantFor(assistants, "user", sub.ownerId)?.id;
-}
-
-/**
- * What the row hands `AssistantBadge`, plus whether that badge will name an
- * assistant. The row prints "Org" itself for an org-owned rule, and the
- * badge would print the same word once the assistants list carries org
- * assistants. One of the two speaks, never both.
- */
-function assistantBadgeProps(
-  sub: EventSubscriptionWire,
-  workflows: Map<string, WorkflowDefinitionSummary>,
-  assistants: AssistantSummary[] | undefined,
-  orgId: string | undefined,
-): { assistantId: string | undefined; assistantNamed: boolean } {
-  const assistantId = subscriptionAssistantId(sub, workflows, assistants, orgId);
-  return {
-    assistantId,
-    assistantNamed:
-      badgeAssistant(assistants, sub.ownerType, sub.ownerId, assistantId) !== undefined,
-  };
-}
-
-/**
  * Event subscriptions: the rules that turn an ingested event into action —
  * a workflow run or an orchestrator prompt. List with enable/disable,
  * edit (`EditSubscriptionDialog`), and delete; create via
@@ -170,7 +111,8 @@ function assistantBadgeProps(
  * all of them — otherwise the create dialog's "Notify the org assistant"
  * option writes a row this page can never disable.
  */
-export function SubscriptionsPanel() {
+export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: string; onReviewClose?: () => void } = {}) {
+  const assistant = useWorkspaceAssistant();
   const owner = useListOwner();
   const meQ = useMe();
   // `useListOwner` also answers undefined when identity FAILS, and that
@@ -179,21 +121,22 @@ export function SubscriptionsPanel() {
   // An owner-less request lists every subscription in the org, so hold the
   // query until the owner resolves. Same gate the feed uses.
   const subsQ = useEventSubscriptions(owner, {
+    refetchInterval: 5_000,
     enabled: owner !== undefined,
   });
   const workflowsQ = useWorkflows();
   const teamsQ = useTeams();
   const [creating, setCreating] = useState(false);
+  const [organizationScope, setOrganizationScope] = useState<string>();
+  const scopeKey = owner ? `${owner.ownerType}:${owner.ownerId}` : undefined;
+  const showOrganization = scopeKey !== undefined && organizationScope === scopeKey;
+  const subscriptions = (subsQ.data?.subscriptions ?? []).filter((sub) => showOrganization
+    ? sub.ownerType === "org"
+    : sub.ownerType === owner?.ownerType && sub.ownerId === owner?.ownerId);
 
-  const assistantsQ = useAssistants();
+
   const workflowNames = useMemo(
     () => new Map((workflowsQ.data?.workflows ?? []).map((w) => [w.id, w.name])),
-    [workflowsQ.data],
-  );
-  // The badge resolves a workflow target's assistant through its definition,
-  // which the name map drops.
-  const workflowsById = useMemo(
-    () => new Map((workflowsQ.data?.workflows ?? []).map((w) => [w.id, w])),
     [workflowsQ.data],
   );
   const orgQ = useOrg();
@@ -212,18 +155,28 @@ export function SubscriptionsPanel() {
     [teamsQ.data, orgQ.data],
   );
 
+  const proposed = subscriptions.find(sub => sub.id === reviewId);
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted">
-          A subscription runs a workflow or prompts an orchestrator when a matching event arrives.
+          A subscription runs a workflow or prompts the workspace assistant when a matching event arrives.
         </p>
-        <Button type="button" size="sm" className="shrink-0 gap-1.5" onClick={() => setCreating(true)}>
+        <div className="flex items-center gap-2"><Button size="sm" onClick={() => assistant.open("Help me configure an event subscription in this workspace. Ask which event should trigger it, what should happen, and where replies should go. Use propose_subscription to save a paused proposal for me to review before enabling it.")}>Create with Valet</Button>
+        <Button variant="ghost" type="button" size="sm" className="shrink-0 gap-1.5" onClick={() => setCreating(true)}>
           <Plus className="h-3.5 w-3.5" aria-hidden />
-          New automation
-        </Button>
+          Manual setup
+        </Button></div>
       </div>
 
+      <label className="flex items-center gap-2 text-sm text-muted">Show
+        <select aria-label="Subscription scope" value={showOrganization ? "organization" : "workspace"} onChange={(event) => setOrganizationScope(event.target.value === "organization" ? scopeKey : undefined)} className="rounded border border-line bg-paper px-3 py-2 text-ink">
+          <option value="workspace">This workspace</option>
+          <option value="organization">Organization rules</option>
+        </select>
+      </label>
+      {showOrganization && <p className="text-xs text-muted">These rules belong to the organization. Creation above uses the selected workspace.</p>}
       {/* `isPending`, not `isLoading`: a held query still counts as
           loading. */}
       {subsQ.isPending && !ownerFailed && <LoadingRow label="Loading subscriptions…" />}
@@ -235,19 +188,18 @@ export function SubscriptionsPanel() {
         </ErrorRow>
       )}
 
-      {subsQ.data && subsQ.data.subscriptions.length === 0 && (
+      {subsQ.data && subscriptions.length === 0 && (
         <EmptyRow>No subscriptions yet. Create one above.</EmptyRow>
       )}
 
-      {subsQ.data && subsQ.data.subscriptions.length > 0 && (
+      {subsQ.data && subscriptions.length > 0 && (
         <div className="divide-y divide-line border-t border-line">
-          {subsQ.data.subscriptions.map((sub) => (
+          {subscriptions.map((sub) => (
             <SubscriptionRow
               key={sub.id}
               sub={sub}
               workflowNames={workflowNames}
               teamNames={teamNames}
-              {...assistantBadgeProps(sub, workflowsById, assistantsQ.data?.assistants, orgQ.data?.id)}
               viewerId={meQ.data?.id}
               mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
             />
@@ -260,6 +212,10 @@ export function SubscriptionsPanel() {
           Also keeps its catalog/workflow queries off the tab's initial
           load. */}
       {creating && <AutomationWizard open onOpenChange={setCreating} />}
+      {reviewId && subsQ.data && !proposed && <ErrorRow>This proposal is not in the selected workspace. Switch to its workspace and reopen the review link.</ErrorRow>}
+      {proposed && canMutate(proposed, meQ.data?.id, memberTeamIds) && <EditSubscriptionDialog key={proposed.id} open review sub={proposed}
+        targetLabel={describeTarget(proposed.target, workflowNames, teamNames)} onOpenChange={(open) => { if (!open) onReviewClose?.(); }} />}
+
     </div>
   );
 }
@@ -268,19 +224,12 @@ function SubscriptionRow({
   sub,
   workflowNames,
   teamNames,
-  assistantId,
-  assistantNamed,
   viewerId,
   mutable,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
   teamNames: Map<string, string>;
-  /** The assistant this rule's target runs as, when one resolves. */
-  assistantId: string | undefined;
-  /** Whether `AssistantBadge` names an assistant for this row. False leaves
-   * the row's own ownership label to speak. */
-  assistantNamed: boolean;
   /** The caller's user id; undefined while `useMe` loads. */
   viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
@@ -299,23 +248,15 @@ function SubscriptionRow({
       <div className="min-w-0 basis-full sm:basis-auto sm:flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="break-words text-sm font-medium text-ink">{sub.name}</span>
-          {/* Ownership varies row to row, so it is badged: "Org", or
-              "Personal" for a COLLEAGUE's. The scoped list returns no
-              colleague's row, so "Personal" marks one the server should not
-              have sent. `AssistantBadge` adds the assistant that answers the
-              event, and stays quiet on a personal rule the reader's own
-              default assistant answers. An org rule whose assistant resolves
-              reads that assistant, which already names the org, so the plain
-              word steps aside rather than printing it twice. */}
-          {sub.ownerType === "org" && !assistantNamed && (
+          {/* Show the workspace owner, independent of its runtime identity. */}
+          {sub.ownerType === "org" && (
             <Badge variant="accent" className="shrink-0">
               Org
             </Badge>
           )}
-          <AssistantBadge
+          <OwnerBadge
             ownerType={sub.ownerType}
             ownerId={sub.ownerId}
-            assistantId={assistantId}
           />
           {sub.ownerType === "user" && viewerId !== undefined && sub.ownerId !== viewerId && (
             <Tooltip content="A colleague's personal subscription. Only they can change it.">
@@ -333,6 +274,7 @@ function SubscriptionRow({
           ))}
           <span className="text-xs text-muted">
             → {describeTarget(sub.target, workflowNames, teamNames)}
+            {!sub.enabled && sub.target.kind === "orchestrator" && sub.target.overlapPausedAt && <span role="status" className="mt-2 block text-warning-600">Paused because a team subscription matched an event. Review delivery preferences, then turn this subscription back on.</span>}
           </span>
           {channelScope && <span className="text-xs text-muted">· {channelScope}</span>}
           {audienceScope && <span className="text-xs text-muted">· {audienceScope}</span>}
@@ -345,11 +287,13 @@ function SubscriptionRow({
         {toggleError && <p className="mt-1 text-xs text-danger-500">{toggleError}</p>}
       </div>
 
+      {!sub.enabled && mutable && <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>Review</Button>}
       <Switch
         checked={sub.enabled}
         disabled={patch.isPending || !mutable}
         aria-label={sub.enabled ? `Disable ${sub.name}` : `Enable ${sub.name}`}
         onCheckedChange={(enabled) => {
+          if (enabled) { setEditing(true); return; }
           setToggleError(null);
           patch.mutate(
             { id: sub.id, body: { enabled } },
@@ -383,6 +327,7 @@ function SubscriptionRow({
           open
           onOpenChange={setEditing}
           sub={sub}
+          review={!sub.enabled}
           targetLabel={describeTarget(sub.target, workflowNames, teamNames)}
         />
       )}

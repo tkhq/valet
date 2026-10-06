@@ -82,9 +82,9 @@ export function WorkspaceClause() {
     if (!ws.hasTeams) return null;
     return (
       <Tooltip content="Your personal workspace. Only you can see these.">
-        <span className="inline-flex items-center gap-1 text-sm font-normal text-muted">
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-normal text-muted">
           <User className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          Personal
+          <span className="truncate">Personal</span>
         </span>
       </Tooltip>
     );
@@ -92,9 +92,9 @@ export function WorkspaceClause() {
   const count = ws.team.memberCount;
   return (
     <Tooltip content={`Shared with ${count} ${count === 1 ? "person" : "people"} on ${ws.team.name}.`}>
-      <span className="inline-flex items-center gap-1 text-sm font-normal text-muted">
+      <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-sm font-normal text-muted">
         <Users className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        {ws.team.name}
+        <span className="truncate">{ws.team.name}</span>
       </span>
     </Tooltip>
   );

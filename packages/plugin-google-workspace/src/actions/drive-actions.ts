@@ -2,6 +2,10 @@ import { Type } from 'typebox';
 import type { Static, TSchema } from 'typebox';
 import {
   discardResponseBody,
+  extractDownloadedDocx,
+  DOCX_DOCUMENT_MIME,
+  isDocxDocumentMime,
+  isDocxDocument,
   extractDownloadedPdf,
   isPdfDocument,
   isTextDocumentMime,
@@ -909,14 +913,14 @@ const deleteFileAction = action(
 const downloadFile = action(
   Type.Object({
     fileId: Type.String({ description: 'File ID' }),
-    maxSizeBytes: Type.Optional(Type.Integer({ minimum: 1, description: 'Max bytes to download. Must be at least 1. Default: 1MB for text, 25MB for a PDF.' })),
+    maxSizeBytes: Type.Optional(Type.Integer({ minimum: 1, description: 'Max bytes to download. Must be at least 1. Default: 1MB for text, 25MB for PDF or DOCX.' })),
   }),
 )({
   id: 'drive.download_file',
   name: 'Download File',
   description:
     'Downloads text content of a file. Exports Google Workspace files to text format. ' +
-    'Reads a PDF through the shared document reader. Rejects other binary files.',
+    'Reads PDF and DOCX through the shared document reader. Rejects other binary files.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const token = await getAccessToken(ctx);
@@ -941,10 +945,10 @@ const downloadFile = action(
       // the export endpoint instead of media download.
       if (isGoogleWorkspaceMimeType(meta.mimeType)) {
         const exportMime = getExportMimeType(meta.mimeType);
-        if (!exportMime) {
+        if (!exportMime || !isTextDocumentMime(exportMime)) {
           return {
             success: false,
-            error: `Cannot export Google Workspace type: ${meta.mimeType ?? 'unknown'}.`,
+            error: `Cannot read Google Workspace type: ${meta.mimeType ?? 'unknown'}. Export the file as PDF and download the exported file.`,
           };
         }
         const maxBytes = maxSizeBytes ?? 1_048_576;
@@ -975,16 +979,17 @@ const downloadFile = action(
       const mediaMime = normalizeDocumentMime(dlRes.headers.get('content-type') ?? undefined);
       const generic = mediaMime === '' || mediaMime === 'application/octet-stream';
       const pdf = mediaMime === 'application/pdf';
-      const requestedMaxBytes = maxSizeBytes ?? (pdf || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
-      const maxBytes = pdf || generic
+      const docx = isDocxDocumentMime(mediaMime, meta.name) || (generic && isDocxDocumentMime(metadataMime));
+      const requestedMaxBytes = maxSizeBytes ?? (pdf || docx || generic ? MAX_PDF_DOCUMENT_BYTES : 1_048_576);
+      const maxBytes = pdf || docx || generic
         ? Math.min(requestedMaxBytes, MAX_PDF_DOCUMENT_BYTES)
         : requestedMaxBytes;
       const displayMime = mediaMime || metadataMime || 'unknown';
-      const binaryError = `Cannot download binary file (${displayMime}). Only text, PDF, and Google Workspace files are supported.`;
+      const binaryError = `Cannot download binary file (${displayMime}). Only text, PDF, DOCX, and Google Workspace files are supported.`;
 
-      if (pdf || generic) {
+      if (pdf || docx || generic) {
         let data: Uint8Array | undefined;
-        if (generic) {
+        if (generic && !docx) {
           const candidate = await readPdfCandidateResponse(dlRes, maxBytes, ctx.signal);
           if (candidate.kind === 'oversize') {
             return {
@@ -1003,10 +1008,10 @@ const downloadFile = action(
           }
           data = downloaded.data;
         }
-        if (!data || !isPdfDocument(data)) {
+        if (!data || !(docx ? isDocxDocument(data) : isPdfDocument(data))) {
           return { success: false, error: binaryError };
         }
-        const read = await extractDownloadedPdf({
+        const read = await (docx ? extractDownloadedDocx : extractDownloadedPdf)({
           data,
           name: meta.name,
           extractDocument: ctx.extractDocument,
@@ -1015,7 +1020,7 @@ const downloadFile = action(
         if (!read.ok) return { success: false, error: read.error };
         return {
           success: true,
-          data: { name: meta.name, mimeType: mediaMime || meta.mimeType, content: read.content },
+          data: { name: meta.name, mimeType: docx ? DOCX_DOCUMENT_MIME : mediaMime || meta.mimeType, content: read.content },
         };
       }
 

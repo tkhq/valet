@@ -1,14 +1,14 @@
 import { Agent } from "@earendil-works/pi-agent-core";
-import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import { uid } from "./ids.js";
+import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
-// utils and is only re-exported from the package root. It carries the
-// provider-maintained retryable/permanent taxonomy (incl. the quota
-// blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
+// utils and is only re-exported from the package root. Provider fallback
+// adds billing/quota and network failures to this transient taxonomy.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
-import { bundledModel } from "./model-catalog.js";
+import { assertModelEnabled, bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
@@ -79,6 +79,7 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
+  estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
   estimateSummaryEntryTokens,
@@ -133,6 +134,7 @@ import type {
   ThreadData,
   ToolContext,
   ToolDef,
+  ToolResult,
   WriteFence,
 } from "./types.js";
 
@@ -175,7 +177,7 @@ const AUTO_CONTINUE_PROMPT =
  * instruction does not claim to provide it. */
 const SLACK_OVERHEARD_REPLY_GUIDANCE = `## Slack overheard delivery
 
-This Slack turn has manual delivery. Manual delivery prevents automatic posting. It does not by itself mean the message is unaddressed. Default to silence for overheard content. Never reply merely because the content is relevant, general, or solicits an update. Reply only to an explicit @mention, a direct request, or a follow-up from the only other participant in the thread. When the conversation context shows you are the only other participant, treat that person's follow-up as addressed and use reply_to_origin. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
+This Slack turn has manual delivery. Manual delivery prevents automatic posting. Decide whether the message is meant for you: a follow-up without an @mention often is. Reply with reply_to_origin when it asks you something, asks you to do something, names you, or follows up on your last reply. Stay silent when people are talking to each other, when it needs nothing from you, or when someone already answered it. Do not reply only because the content is relevant to you. If someone explicitly tells you to stop, remain silent in this thread until a fresh explicit request.`;
 
 /** Proactive compaction stops retrying after this many consecutive failures (TKAI-306). */
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
@@ -337,10 +339,6 @@ export function formatTransientRetryMessage(args: {
   return primary + detail;
 }
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
 function delay(ms: number): Promise<void> {
@@ -564,6 +562,9 @@ export class Thread {
   private agentModelSwitch?: string;
   /** Snapshot at turn resolution: a user can change the next turn's pin while this one runs. */
   private assignedModelSpec?: string;
+  private fallbackModelSpec?: string;
+  /** Last conversational request model; a switch must recheck the live context. */
+  private lastRequestModel: PiModel;
   /** Set only after a role model resolves and is applied. Never persisted. */
   private roleModelSpec?: string;
   /**
@@ -596,6 +597,7 @@ export class Thread {
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
     this.activeLeafEntryId = data.activeLeafEntryId;
+    this.lastRequestModel = session.options.model;
     this.agent = this.buildAgent();
   }
 
@@ -669,6 +671,7 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
     if (opts.promoteItemId) {
       throw new ValidationError(
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
@@ -744,7 +747,7 @@ export class Thread {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey, item.author?.id),
+          this.coalesceQueuedOverheard(coalesceKey, item.author),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
@@ -775,7 +778,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string, actorId?: string): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -785,7 +788,9 @@ export class Thread {
           i.status === "queued" &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
-          i.author?.id === actorId &&
+          i.author?.id === author?.id &&
+          // Unlinked senders can share the creator's ID, but not their authority.
+          Boolean(i.author?.externalSender) === Boolean(author?.externalSender) &&
           overheardCoalesceKey(i.content) === coalesceKey,
       )
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -1305,7 +1310,7 @@ export class Thread {
   }
 
   /** Cancel one submission without aborting other work on this thread. */
-  async abortSubmission(queueItemId: string): Promise<void> {
+  async abortSubmission(queueItemId: string, withdrawReason: DecisionWithdrawReason = "abort"): Promise<void> {
     const store = this.session.providers.store;
     // Mark the live item before I/O so a stale store read cannot start it.
     if (this.runningItem?.id === queueItemId) this.runningItem.abortRequestedAt ??= Date.now();
@@ -1316,7 +1321,7 @@ export class Thread {
       this.agent.abort();
     }
     for (const gate of this.pendingDecisionGates()) {
-      if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, "abort");
+      if (gate.queueItemId === queueItemId) this.withdrawDecision(gate.id, withdrawReason);
     }
     const settled = await store.settleUnclaimed(this.session.id, this.id, queueItemId, { outcome: "aborted" });
     if (settled) await this.emitSettled(queueItemId, { outcome: "aborted" });
@@ -1481,12 +1486,24 @@ export class Thread {
       // before the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(this.runningItem ?? undefined);
       const runningItem = this.runningItem;
+      if (runningItem && this.fence) {
+        const store = this.session.providers.store;
+        const current = await store.getQueueItem(this.session.id, runningItem.id);
+        const fence = this.fence;
+        if (current?.status === "blocked_on_decision_gate") {
+          await this.fencedWrite(() =>
+            store.setSubmissionBlocked(this.session.id, this.id, runningItem.id, false, fence),
+          );
+        }
+      }
       if (
         runningItem &&
-        await this.publishActiveModelState(runningItem.id, this.agent.state.model)
+        await this.publishActiveModelState(runningItem.id, this.agent.state.model) &&
+        await this.canRunCurrentSubmission()
       ) {
         await this.agent.continue();
         await this.agent.waitForIdle();
+        await this.retryTransientTurnError();
       }
     } catch (err) {
       continueError = err;
@@ -1496,6 +1513,7 @@ export class Thread {
       );
     } finally {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
@@ -2180,7 +2198,7 @@ export class Thread {
     // everywhere else (see `turnModelSpec`). Leaving it out let a real
     // retarget report "model unchanged" and emit no event.
     const before = isAgentSwitch
-      ? (this.agentModelSwitch ??
+      ? (this.fallbackModelSpec ?? this.agentModelSwitch ??
         this.runningItem?.model ??
         this.modelOverride ??
         sessionDefault)
@@ -2191,6 +2209,7 @@ export class Thread {
       } else {
         const priorLiveModel = this.agent.state.model;
         const priorAgentModelSwitch = this.agentModelSwitch;
+        const priorFallbackModelSpec = this.fallbackModelSpec;
         const priorTurnApiKey = this.turnApiKey;
         // Validate before assigning so an unknown id is rejected and the
         // turn keeps its previous model. The resolution is handed straight
@@ -2205,12 +2224,14 @@ export class Thread {
           // prompt rules mean by "switch_model ... in this turn, then continue".
           await this.applyModelToRunningTurn(modelId, resolved);
           this.agentModelSwitch = modelId;
+          this.fallbackModelSpec = undefined;
           if (
             this.runningItem &&
             !(await this.publishActiveModelState(this.runningItem.id, this.agent.state.model))
           ) {
             this.agent.state.model = priorLiveModel;
             this.agentModelSwitch = priorAgentModelSwitch;
+            this.fallbackModelSpec = priorFallbackModelSpec;
             this.turnApiKey = priorTurnApiKey;
           }
         } catch (err) {
@@ -2219,6 +2240,7 @@ export class Thread {
           // and any continuation stays on the previously disclosed model.
           this.agent.state.model = priorLiveModel;
           this.agentModelSwitch = priorAgentModelSwitch;
+          this.fallbackModelSpec = priorFallbackModelSpec;
           this.turnApiKey = priorTurnApiKey;
           throw err;
         }
@@ -2234,7 +2256,7 @@ export class Thread {
       await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
     }
     const after = isAgentSwitch
-      ? (this.agentModelSwitch ??
+      ? (this.fallbackModelSpec ?? this.agentModelSwitch ??
         this.runningItem?.model ??
         this.modelOverride ??
         sessionDefault)
@@ -2293,6 +2315,7 @@ export class Thread {
    * runs. Throws `ValidationError` on an unknown spec.
    */
   private async validateModelSpec(spec: string): Promise<ResolvedModel | null> {
+    assertModelEnabled(spec);
     const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
     // Valid by construction, and deliberately NOT resolved: null tells the
     // caller "accepted without a lookup", which `applyModelToRunningTurn`
@@ -2448,6 +2471,7 @@ export class Thread {
    * model and credentials the user never chose.
    */
   private async resolveTurnModelForTurn(item?: QueueItem): Promise<PiModel> {
+    assertModelEnabled(this.turnModelSpec(item));
     this.assignedModelSpec = this.turnModelSpec(item);
     const resolver = this.session.options.resolveModel;
     if (!resolver) return this.resolveTurnModel(item);
@@ -2620,6 +2644,7 @@ export class Thread {
   }
 
   private async kickLoop(): Promise<void> {
+    if (this.session.options.readOnlyReason) return;
     const store = this.session.providers.store;
     while (true) {
       if (this.paused) return;
@@ -3448,6 +3473,7 @@ export class Thread {
           await this.canRunCurrentSubmission()) {
         await this.agent.continue();
         await this.agent.waitForIdle();
+        await this.retryTransientTurnError();
       }
     } catch (err) {
       turnFailed = true;
@@ -3455,6 +3481,7 @@ export class Thread {
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
     } finally {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
     }
 
@@ -3797,7 +3824,7 @@ export class Thread {
     try {
       turnModel = await this.resolveTurnModelForTurn(item);
     } catch (err) {
-      if (err instanceof NoCredentialsError) {
+      if (err instanceof NoCredentialsError && !this.isUserPrompt()) {
         this.credentialError = err;
         return;
       }
@@ -3828,12 +3855,14 @@ export class Thread {
       modelStatePublished = await this.publishActiveModelState(item.id, this.agent.state.model);
     } catch (err) {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
       await this.appendUserEntry(item);
       throw err;
     }
     if (!modelStatePublished) {
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       this.turnApiKey = undefined;
       return;
     }
@@ -3911,7 +3940,7 @@ export class Thread {
       // Proactive compaction: if this turn pushed us past usable, run a
       // compaction pass before yielding back to the queue. Reactive
       // compaction (overflow retry) is handled inline in runAgent.
-      if (this.shouldCompactProactive()) {
+      if (this.shouldCompactProactive() && await this.canRunCurrentSubmission()) {
         await this.runProactiveCompaction();
       }
     } finally {
@@ -3923,6 +3952,7 @@ export class Thread {
       // mutation we made via setModel. We compute the override fresh on
       // each turn anyway, but keeping state tidy avoids surprises.
       this.agent.state.model = baselineModel;
+      this.fallbackModelSpec = undefined;
       // Per-turn key is turn-scoped only — clear it so the next turn re-resolves
       // (rotation applies next turn; a resolver-less session never set it).
       this.turnApiKey = undefined;
@@ -4140,72 +4170,99 @@ export class Thread {
           this.bumpCompactionFailureBreaker();
           return;
         }
-        // Drop the failed assistant message from the agent transcript and retry.
+        if (!(await this.canRunCurrentSubmission())) return;
+        // The rebuilt transcript already contains the user prompt and any tool
+        // results. Continue it instead of appending that prompt a second time.
         this.agent.state.messages = this.agent.state.messages.slice(0, -1);
-        await this.agent.prompt({
-          role: "user",
-          content,
-          timestamp: Date.now(),
-        });
+        await this.agent.continue();
         await this.agent.waitForIdle();
       } finally {
         this.overflowRetryInProgress = false;
       }
+      await this.retryTransientTurnError();
       return;
     }
 
     await this.retryTransientTurnError();
   }
 
-  /**
-   * Turn-level retry for transient provider errors (TKAI-319). Engages only
-   * when the turn settled with a classified-transient error AND the session
-   * is unattended (or `turnRetry` is configured explicitly) — an interactive
-   * user sees the error and decides. Each retry drops the failed assistant
-   * message and calls `agent.continue()`, pi-agent-core's native re-run for
-   * a transcript ending on a user/tool-result message — re-prompting would
-   * append a SECOND copy of the user content and the model could act on it
-   * twice. The transport layer already retried underneath; this catches the
-   * failures that exhausted it (long rate-limit windows, capacity events).
-   */
+  private isUserPrompt(): boolean {
+    const purpose = this.session.options.purpose;
+    return !!this.runningItem?.author && !isSignalContent(this.runningItem.content)
+      && purpose !== "workflow" && purpose !== "child";
+  }
+
+  /** Continue the current transcript after a bounded provider recovery attempt. */
   private async retryTransientTurnError(): Promise<void> {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
-    const unattended = purpose === "orchestrator" || purpose === "workflow" || purpose === "child";
+    const unattended = !this.isUserPrompt() && (purpose === "orchestrator" || purpose === "workflow" || purpose === "child");
     const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
-    if (maxAttempts <= 0) return;
-    // An explicitly configured empty backoff list means "no wait", not
-    // "crash on index" — but an absent/empty list falls back to defaults.
     const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+    const resolveFallback = this.session.options.resolveFallbackModel;
+    const attemptedProviderIds = new Set([this.agent.state.model.provider]);
+    let sameProviderAttempts = 0;
+    let fallbackExhausted = false;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (;;) {
       const last = this.agent.state.messages[this.agent.state.messages.length - 1];
-      if (
-        !last ||
-        last.role !== "assistant" ||
-        last.stopReason !== "error" ||
-        !isRetryableAssistantError(last)
-      ) {
-        return;
+      if (!last || last.role !== "assistant" || last.stopReason !== "error") return;
+      const error = last.errorMessage ?? "";
+      // Provider capacity cannot override authentication, input, policy, or
+      // application budget failures, even when their text also mentions 429.
+      if (/authentication|unauthorized|forbidden|invalid[_ -]?(?:api[_ -]?key|request|input|argument)|permission[_ -]denied|\b(?:40[013]|422)\b|content[_ -]?(?:policy|filter)|policy[_ -]?(?:violation|denied)|\bbudget\b|context[_ -]?(?:length|window)|aborted|cancelled/i.test(error)) return;
+      const quota = /\bquota\b|insufficient_quota|payment_required|\b402\b|billing[_ -](?:error|limit|hard_limit)|credit balance.*(?:low|insufficient|exhausted)|(?:insufficient|exhausted)[_ -]credits|(?:monthly|spend(?:ing)?)[_ -]limit|quota[_ -](?:exceeded|exhausted)/i.test(error);
+      const transient = !quota && (isRetryableAssistantError(last) || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|fetch failed|network error/i.test(error));
+      if (!quota && !transient) return;
+      if (!(await this.canRunCurrentSubmission())) return;
+      attemptedProviderIds.add(this.agent.state.model.provider);
+
+      let fallback: ResolvedModel | null = null;
+      if (resolveFallback && !fallbackExhausted && attemptedProviderIds.size < 3) {
+        fallback = await resolveFallback({
+          requestedSpec: this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined),
+          failedModel: {
+            model: this.agent.state.model,
+            apiKey: this.turnApiKey,
+            canonicalId: this.fallbackModelSpec ?? this.agentModelSwitch ?? this.roleModelSpec ?? this.assignedModelSpec,
+          },
+          attemptedProviderIds: [...attemptedProviderIds],
+        });
+        if (!(await this.canRunCurrentSubmission())) return;
+        // A broken host resolver must not cycle between providers or reuse a
+        // failed provider under another model name.
+        if (fallback && attemptedProviderIds.has(fallback.model.provider)) fallback = null;
+        if (!fallback) fallbackExhausted = true;
       }
-      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
-      this.emitError(
-        "turn_transient_retry",
-        formatTransientRetryMessage({
+      if (fallback) {
+        assertModelEnabled(fallback.canonicalId ?? fallback.model.id);
+        const previousProvider = this.agent.state.model.provider;
+        attemptedProviderIds.add(fallback.model.provider);
+        this.turnApiKey = fallback.apiKey;
+        this.agent.state.model = fallback.model;
+        this.fallbackModelSpec = fallback.canonicalId ?? fallback.model.id;
+        if (this.runningItem && !(await this.publishActiveModelState(this.runningItem.id, fallback.model))) return;
+        this.emitError(
+          "turn_provider_fallback",
+          `${previousProvider} is unavailable. Continuing this turn with ${fallback.model.provider}.`,
+        );
+      } else {
+        if (!transient || sameProviderAttempts >= maxAttempts) return;
+        sameProviderAttempts++;
+        const waitMs = backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0;
+        this.emitError("turn_transient_retry", formatTransientRetryMessage({
           provider: this.agent.state.model.provider,
           errorMessage: last.errorMessage,
           waitMs,
-          attempt,
+          attempt: sameProviderAttempts,
           maxAttempts,
-        }),
-      );
-      if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
-      // Drop the failed assistant message; the transcript now ends on the
-      // user/tool-result message, which is exactly Agent.continue()'s
-      // contract for re-running the turn without duplicating the prompt.
+        }));
+        if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
+      }
+      if (!(await this.canRunCurrentSubmission())) return;
+      // Keep completed tools and the original user message. Only remove the
+      // failed assistant response before continuing the same queue item.
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
-      // The retry rewinds the transcript, so the next response's cache reads
-      // are expected to differ — do not count that as a break (TKAI-320).
       this.prevCacheSnapshot = undefined;
       await this.agent.continue();
       await this.agent.waitForIdle();
@@ -4382,6 +4439,62 @@ export class Thread {
     return estimated >= usable;
   }
 
+  /** Model changes can shrink the window while the thread or tool loop stays hot. */
+  private async fitContextAfterModelChange(
+    context: AgentContext,
+    model: PiModel,
+    signal?: AbortSignal,
+  ): Promise<AgentContext | undefined> {
+    if (model === this.lastRequestModel) return undefined;
+    const cfg = this.session.options.compaction;
+    const budget = usableTokens(model, cfg);
+    if (budget === 0) return undefined;
+    const messages = context.messages.filter(
+      (message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+    );
+    const prompt = () => this.modelSystemPrompt(this.agent.state.systemPrompt, model);
+    const toolTokens = estimateTokens(JSON.stringify((context.tools ?? []).map((tool) => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
+    const freshEstimate = (current: readonly Message[]) => estimateContextTokens(prompt(), current) + toolTokens;
+    // Prior usage cannot account for new role instructions or tool definitions.
+    let tokens = Math.max(estimateLiveContextTokens(prompt(), messages), freshEstimate(messages));
+    if (tokens < budget) return undefined;
+
+    // Each checkpoint covers only the history it actually inspected. A bounded
+    // sequence can cover deferred head entries without losing older history.
+    if (cfg?.enabled !== false && this.consecutiveCompactionFailures < MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+      for (let pass = 0; pass < MAX_CONSECUTIVE_COMPACTION_FAILURES; pass++) {
+        if (signal?.aborted || !(await this.canRunCurrentSubmission())) {
+          throw new Error("Turn cancelled before context preparation completed.");
+        }
+        let outcome: CompactionOutcome;
+        try {
+          outcome = await this.compactThread({ mode: "proactive", autoContinue: false, signal });
+        } catch (error) {
+          if (signal?.aborted || !(await this.canRunCurrentSubmission())) throw error;
+          this.turnCompactionBlocked = true;
+          this.bumpCompactionFailureBreaker();
+          throw new Error("Could not prepare context for the selected model. Run /compact or choose a model with a larger context.", { cause: error });
+        }
+        if (signal?.aborted || !(await this.canRunCurrentSubmission())) {
+          throw new Error("Turn cancelled before context preparation completed.");
+        }
+        const rebuilt = this.agent.state.messages.filter(
+          (message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+        );
+        // Pruning invalidates the old usage anchor. Measure the rebuilt payload.
+        const nextTokens = freshEstimate(rebuilt);
+        if (nextTokens < budget) return { ...context, messages: this.agent.state.messages.slice() };
+        if (outcome === "noop" || outcome === "insufficient" || outcome === "coverage_gap" || nextTokens >= tokens) break;
+        tokens = nextTokens;
+      }
+    }
+    this.turnCompactionBlocked = true;
+    this.bumpCompactionFailureBreaker();
+    throw new Error("The conversation does not fit the selected model. Run /compact, shorten the message, or choose a larger context.");
+  }
+
   /**
    * Run a compaction pass: prune cheap stale tool outputs, then if the
    * result still doesn't fit, summarize older messages into a
@@ -4392,6 +4505,7 @@ export class Thread {
     mode: "proactive" | "reactive" | "manual";
     /** Free-text steer for the summarizer (manual `/compact <text>`). */
     instructions?: string;
+    signal?: AbortSignal;
     /**
      * Force-suppress the proactive auto-continue follow-up. Set by the
      * pre-turn rehydration pass — its turn is about to run anyway, so a
@@ -4421,6 +4535,7 @@ export class Thread {
     opts: {
       mode: "proactive" | "reactive" | "manual";
       instructions?: string;
+      signal?: AbortSignal;
       autoContinue?: false;
     },
     span?: Span,
@@ -4640,6 +4755,7 @@ export class Thread {
             attributeAuthors: this.attributeAuthors,
             previousSummary,
             instructions: opts.instructions,
+            signal: opts.signal,
             // Reactive compaction fires WITHIN a claimed turn (and proactive
             // just after runAgent, still before the turn's finally clears it),
             // so `turnApiKey` is live here. Without this, a BYO-key session
@@ -4800,10 +4916,12 @@ export class Thread {
     const assignedSelection = this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined);
     return appendRuntimeModelContext(prompt, {
       assignedSelection,
-      activeSelection: this.agentModelSwitch ?? this.roleModelSpec ?? assignedSelection,
+      activeSelection: this.fallbackModelSpec ?? this.agentModelSwitch ?? this.roleModelSpec ?? assignedSelection,
       provider: model.provider,
       modelId: model.id,
-      temporaryOverride: this.agentModelSwitch !== undefined
+      temporaryOverride: this.fallbackModelSpec !== undefined
+        ? "provider fallback"
+        : this.agentModelSwitch !== undefined
         ? "switch_model"
         : this.roleModelSpec !== undefined
           ? "role model"
@@ -4815,7 +4933,7 @@ export class Thread {
     // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
     // is constructed with the exact same options as before the seam existed, so
     // pi-ai's env-var fallback stamps StreamOptions.apiKey (byte-identical pin).
-    const hasResolver = this.session.options.resolveModel !== undefined;
+    const hasResolver = this.session.options.resolveModel !== undefined || this.session.options.resolveFallbackModel !== undefined;
     const agent = new Agent({
       initialState: {
         model: this.session.options.model,
@@ -4830,6 +4948,8 @@ export class Thread {
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
       streamFn: async (model, context, options) => {
+        assertModelEnabled(model.id);
+        this.lastRequestModel = model;
         await this.persistSkillContextAttributions();
         const runtimeModelContext = this.modelSystemPrompt(undefined, model);
         const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
@@ -4902,6 +5022,10 @@ export class Thread {
       // streaming against the model it started on. Returning the live state
       // here is what makes "takes effect on the next LLM call" true.
       prepareNextTurn: () => ({ model: this.agent.state.model }),
+      prepareRequest: async ({ context, model }, signal) => {
+        const fitted = await this.fitContextAfterModelChange(context, model, signal);
+        return fitted ? { context: fitted } : undefined;
+      },
       // A stale fenced publication means a successor owns this submission.
       // abort() is best-effort while a tool is executing, so also end at the
       // turn boundary before the loop can start another provider request.
@@ -4926,7 +5050,8 @@ export class Thread {
    * overlays" ordering; do not "fix" it.
    */
   private buildBaseSystemPrompt(): string {
-    const base = this.session.options.systemPrompt ?? "";
+    const threadContext = this.session.options.threadSystemContext?.({ id: this.id, key: this.key });
+    const base = [this.session.options.systemPrompt, threadContext].filter(Boolean).join("\n\n");
     const fragments = this.session.options.systemContext ?? [];
     if (fragments.length === 0) return base;
     const sorted = [...fragments].sort((a, b) => {
@@ -4940,7 +5065,7 @@ export class Thread {
   }
 
   private buildTools(): AgentTool[] {
-    const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])];
+    const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
     return all.map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
@@ -4957,18 +5082,32 @@ export class Thread {
     const { signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
+    const actorId = this.runningItem?.author?.id
+      ?? (session.owner.type === "team" && session.options.purpose !== "workflow" && session.options.purpose !== "child"
+        ? `team:${session.owner.id}` : session.options.userId);
     const origin =
       runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
     return {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
-      userId: this.runningItem?.author?.id ?? session.options.userId,
+      userId: actorId,
+      ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
+        runningContent !== undefined && !isSignalContent(runningContent) &&
+        session.options.purpose !== "workflow" && session.options.purpose !== "child"
+        ? { interactiveActor: { id: this.runningItem.author.id } } : {}),
+      ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,
       threadId: this.id,
       sessionPurpose: session.options.purpose,
       cwd: session.options.workspace,
-      credentials: session.credentialProvider(),
+      // The turn's author picks whose account a team read uses first. A
+      // channel sender with no Valet account acts for nobody.
+      credentials: session.credentialProvider({
+        ...(!this.runningItem?.author?.externalSender ? { actorId } : {}),
+        ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
+        threadId: this.id,
+      }),
       sandbox: session.sandbox,
       recordSkillInvocation: (skill, path, injectedText) =>
         this.recordModelToolSkillInvocation(skill, path, injectedText, toolCallId),
@@ -4992,6 +5131,12 @@ export class Thread {
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        // A channel sender with no Valet account may not put an approval or a
+        // question in front of a teammate: the request is refused here, before
+        // any gate opens, so a newcomer cannot flood the team with requests.
+        if (this.runningItem?.author?.externalSender) {
+          return { actionId: "deny", resolvedBy: "external-sender", resolvedAt: Date.now() };
+        }
         if (!req.resumeKey) {
           throw new Error(
             "DecisionGateRequest.resumeKey is required for restart-safe gates.",
@@ -5033,15 +5178,13 @@ export class Thread {
           releaseCycle();
         }
       },
-      threadRead: async (key, opts) => {
-        const sibling = await this.session.threadByKey(key);
-        if (!sibling) return [];
-        return sibling.readEntries(opts);
-      },
+      // The same lookup slash commands use: a key, or a thread id (a pasted
+      // link reaches here as its id).
+      threadRead: (key, opts) => this.session.readEntries(key, opts, this),
       listThreads: async () => {
         // Pull from the store so paused/archived threads not currently
         // hydrated in memory still surface.
-        const datas = await session.providers.store.listThreads(session.id);
+        const datas = await session.readableThreads(this);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
@@ -5291,6 +5434,7 @@ export class Thread {
             result: resultText,
             ...(toolResultImages(event.result).length > 0 ? { resultData: part?.type === "tool_call" ? part.result : event.result } : {}),
             isError: event.isError,
+            ...(event.isError ? {} : toolOutcome(event.result)),
           },
           { queueItemId: this.runningItem?.id },
         );
@@ -5407,7 +5551,7 @@ export class Thread {
             }
           }
         }
-        if (errorMessage) {
+        if (errorMessage && stopReason !== "aborted") {
           // Same stdout mirror as `emitError`: the event is best-effort (a
           // dead WS drops it), and this is the path provider failures take
           // (bad key, exhausted credits, 4xx/5xx) — without a log line the
@@ -6250,4 +6394,36 @@ export function entriesToAgentMessages(
     }
   }
   return out;
+}
+
+/** The confirmed side effect a tool reported in its result details, if any. */
+const TOOL_OUTCOME_KINDS: ReadonlyArray<NonNullable<ToolResult["outcome"]>["kind"]> = ["pull_request_created", "review_submitted", "pull_request_comment"];
+
+/** The outcome a tool's result reports, for `tool_end`. Exported for tests. */
+export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] } {
+  if (typeof result !== "object" || result === null || !("details" in result)) return {};
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("outcome" in details)) return {};
+  const outcome = details.outcome;
+  if (typeof outcome !== "object" || outcome === null || !("kind" in outcome)) return {};
+  const kind = TOOL_OUTCOME_KINDS.find((known) => known === outcome.kind);
+  if (!kind) return {};
+  const url = "url" in outcome && typeof outcome.url === "string" ? outcome.url : undefined;
+  return { outcome: { kind, ...(url ? { url } : {}) } };
+}
+
+/** The tools a turn from a channel sender with no Valet account may run
+ * beyond policy-checked plugin actions: listing actions, and reading the
+ * threads its conversation may read (`threadAccess`). Sandbox, file, memory,
+ * artifact, and child tools act as the workspace, so they refuse that turn. */
+const EXTERNAL_SENDER_READS = new Set(["list_tools", "list_threads", "thread_read"]);
+
+function refuseExternalSender(def: ToolDef): ToolDef {
+  if (def.policyChecked || EXTERNAL_SENDER_READS.has(def.name)) return def;
+  return {
+    ...def,
+    execute: (args, ctx) => ctx.externalSender
+      ? Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` })
+      : def.execute(args, ctx),
+  };
 }

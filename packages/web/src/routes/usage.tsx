@@ -28,6 +28,8 @@ import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { FilterChips, pageClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -85,7 +87,7 @@ function StatCard({
 }
 
 const USE_CASE_LABELS: Record<UsageUseCase, string> = {
-  orchestrator: "Orchestrator",
+  orchestrator: "Assistant",
   session: "Sessions",
   workflow: "Workflows",
   proxy: "Proxy (external tools)",
@@ -146,8 +148,9 @@ function ItemList({
   return (
     <div className="border-t border-line divide-y divide-line">
       {items.map((item) => {
-        const isOrchId = item.sessionId?.startsWith("orchestrator:") ?? false;
-        const canLink = item.sessionId !== null && !isOrchId;
+        // A workspace runtime has no session page; its threads open from chat.
+        const isRuntimeId = /^(orchestrator|assistant):/.test(item.sessionId ?? "");
+        const canLink = item.sessionId !== null && !isRuntimeId;
         const labelEl = canLink ? (
           <Link
             to="/sessions/$sessionId"
@@ -354,7 +357,7 @@ export function UsagePage() {
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-10 space-y-10">
+      <div className={cn(pageClass, "space-y-10")}>
         {/* Header — the workspace clause names the active scope, same as the
             other scoped list pages. */}
         <div>
@@ -385,20 +388,12 @@ export function UsagePage() {
 
         {/* Window selector + scope toggle + CSV export */}
         <div className="flex items-center gap-2 flex-wrap">
-          {WINDOWS.map((w) => (
-            <button
-              key={w}
-              type="button"
-              onClick={() => handleWindowChange(w)}
-              className={`min-h-11 rounded px-3 py-2 text-sm border sm:min-h-0 sm:py-1 ${
-                period.kind === "lookback" && period.window === w
-                  ? "border-moss text-moss bg-moss-wash font-medium"
-                  : "border-line text-muted hover:text-ink hover:border-ink"
-              }`}
-            >
-              {w}
-            </button>
-          ))}
+          <FilterChips<string>
+            label="Period"
+            value={period.kind === "lookback" ? period.window : ""}
+            onChange={(w) => { const window = WINDOWS.find((candidate) => candidate === w); if (window) handleWindowChange(window); }}
+            options={WINDOWS.map((w) => ({ value: w, label: w }))}
+          />
           <label className="flex items-center gap-2 text-sm text-muted">
             <span>Month</span>
             <input
@@ -455,32 +450,13 @@ export function UsagePage() {
             Apply dates
           </button>
           {personalWorkspace && isOrgAdmin && (
-            <div className="flex items-center gap-1 sm:ml-4 rounded border border-line overflow-hidden text-sm">
-              <button
-                type="button"
-                onClick={() => setPersonalScope("me")}
-                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
-                  scope === "me"
-                    ? "bg-moss-wash text-moss font-medium"
-                    : "text-muted hover:text-ink"
-                }`}
-                aria-pressed={scope === "me"}
-              >
-                My usage
-              </button>
-              <button
-                type="button"
-                onClick={() => setPersonalScope("org")}
-                className={`min-h-11 px-3 py-2 sm:min-h-0 sm:py-1 ${
-                  scope === "org"
-                    ? "bg-moss-wash text-moss font-medium"
-                    : "text-muted hover:text-ink"
-                }`}
-                aria-pressed={scope === "org"}
-              >
-                Organization
-              </button>
-            </div>
+            <FilterChips
+              label="Whose usage"
+              className="sm:ml-4"
+              value={personalScope}
+              onChange={setPersonalScope}
+              options={[{ value: "me", label: "My usage" }, { value: "org", label: "Organization" }]}
+            />
           )}
           {scopeKnown && (
             <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
@@ -604,7 +580,7 @@ export function UsagePage() {
             <div>
               <h2 className="text-sm font-medium text-ink mb-2">Outcomes</h2>
               <p className="text-xs text-muted mb-3">
-                Confirmed GitHub actions and Slack deliveries. Model spend is allocated evenly across outcomes in each session or workflow run during this period.
+                Confirmed GitHub actions and Slack deliveries. Model spend is allocated evenly across outcomes in each runtime or workflow run during this period.
               </p>
               {outcomesQ.isLoading ? (
                 <p className="text-xs text-muted">Loading outcomes…</p>
@@ -803,9 +779,9 @@ export function UsagePage() {
                     <details>
                       <summary className="min-h-11 cursor-pointer py-3 sm:min-h-0 sm:py-0">How active agents are counted</summary>
                       <p className="mt-2">
-                        Each session with recorded token usage counts once per member per UTC day.
+                        Each runtime with recorded token usage counts once per member per UTC day.
                         {" "}Averages cover {dailyAgentWindow.days} UTC calendar {dailyAgentWindow.days === 1 ? "day" : "days"}, including zero-activity days and today so far.
-                        {" "}Activity uses the prompt author, then the child’s spawning member; older ordinary sessions use the session user.
+                        {" "}Activity uses the prompt author, then the child’s spawning member; older ordinary runtimes use the runtime owner.
                         {" "}Unattributed activity appears under Team / shared. An agent used by multiple members counts for each.
                         {" "}Spend uses billing attribution and the rolling time range.
                       </p>

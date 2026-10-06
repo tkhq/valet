@@ -1,39 +1,21 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useRef, useState } from "react";
+import type { Message, SessionDetail } from "@valet/api/wire";
 import {
   Check,
   ClipboardCopy,
   FolderInput,
-  MoreHorizontal,
   Moon,
+  MoreHorizontal,
   RefreshCw,
   SquareTerminal,
   Trash2,
-  ThumbsUp,
-  ThumbsDown,
 } from "lucide-react";
-import type { Message, SessionDetail } from "@valet/api/wire";
-import {
-  Badge,
-  Button,
-  ConfirmDialog,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuCheckboxItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-  Input,
-  Spinner,
-  Tooltip,
-} from "~/components/primitives";
+import { useRef, useState, type ReactNode } from "react";
+import { ApiError } from "~/api/client";
 import {
   useDeleteSession,
   usePauseSession,
-  useRateSession,
   useRenameSession,
-  useSessionRatings,
   useReplaceSandbox,
   useSetSessionModel,
   useSetSessionProfile,
@@ -43,27 +25,37 @@ import {
   useThreads,
 } from "~/api/queries";
 import { useMe, useOrg, useTeams } from "~/api/settings";
-import { useAssistants } from "~/api/assistants";
-import { useOrchestratorInfo } from "~/api/orchestrator";
-import { ApiError } from "~/api/client";
+import {
+  Badge,
+  Button,
+  ConfirmDialog,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+  Input,
+  Spinner,
+  Tooltip,
+} from "~/components/primitives";
+import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
+import { cn } from "~/lib/cn";
+import { sameModelSpec } from "~/lib/models";
+import { useCopyToClipboard } from "~/lib/use-copy";
 import {
   queueBusy,
   useActiveModelForThread,
+  usePendingGateForThread,
   useQueueStateForThread,
   type AgentStatus,
   type ConnectionStatus,
 } from "~/stores/stream";
-import { assistantLabel } from "./assistant-rail";
-import { orchestratorName } from "~/lib/assistant-name";
 import { ModelPicker } from "./model-picker";
-import { RatingButtons } from "./rating-buttons";
 import { MoveSessionDialog } from "./move-session-dialog";
+import { ThreadStatusIcon } from "./thread-status-icon";
 import { buildTranscript } from "./transcript";
-import { cn } from "~/lib/cn";
-import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
-import { sameModelSpec } from "~/lib/models";
-import { useCopyToClipboard } from "~/lib/use-copy";
-import { formatElapsed, useElapsedSeconds } from "~/lib/use-elapsed";
+import { ThreadChannelChip } from "~/components/channels/thread-channel-chip";
 
 /** Collapse a workspace path down to a header-friendly badge: any
  * multi-segment path shows only its LAST segment ("ws-19",
@@ -95,20 +87,19 @@ function extractActionError(err: unknown, fallback: string): string {
 export function SessionHeader({
   session,
   agentStatus,
-  turnStartedAt,
   conn,
   sandbox,
   threadId,
   messages,
+  summaryControl,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
-  /** Wire timestamp the current turn began; undefined while idle. */
-  turnStartedAt?: number;
   conn: ConnectionStatus;
   sandbox?: { state: string; epoch: number };
   threadId?: string;
   messages?: Message[];
+  summaryControl?: ReactNode;
 }) {
   const navigate = useNavigate();
   const sessionMenu = useResponsiveOverlay("sm");
@@ -130,7 +121,17 @@ export function SessionHeader({
   const activeThread = threads.data?.threads.find((t) => t.id === threadId);
   const threadScoped = threadId !== undefined;
   const modelConfigurationResolved = !threadScoped || activeThread !== undefined;
-  const configuredModel = activeThread ? (activeThread.model ?? session.model) : session.model;
+  const modelSaving = threadScoped
+    ? setThreadModel.isPending && setThreadModel.variables?.threadId === threadId
+    : setModel.isPending;
+  const pendingModel = threadScoped ? setThreadModel.variables?.model : setModel.variables;
+  const savedModel = activeThread ? (activeThread.model ?? session.model) : session.model;
+  // Mutation variables give immediate feedback without claiming the pin
+  // was saved. A rejected write leaves the query cache unchanged.
+  const configuredModel = modelSaving ? (pendingModel ?? session.model) : savedModel;
+  const modelSaveError = threadScoped
+    ? (setThreadModel.variables?.threadId === threadId ? setThreadModel.error : null)
+    : setModel.error;
   const configuredReasoning = activeThread
     ? (activeThread.reasoning ?? session.reasoning)
     : session.reasoning;
@@ -141,14 +142,10 @@ export function SessionHeader({
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
   const rename = useRenameSession(session.id);
-  const ratings = useSessionRatings(session.id);
-  const rateSession = useRateSession(session.id);
   const setProfile = useSetSessionProfile(session.id);
   const me = useMe();
   const org = useOrg();
-  const orchInfo = useOrchestratorInfo();
   const teams = useTeams();
-  const assistants = useAssistants();
   // One error slot for the header actions that fire straight from their
   // control: pause, replace, and rename. Delete and the Terminal/VS Code
   // switch confirm first, and their modal covers this row, so each reports
@@ -166,6 +163,7 @@ export function SessionHeader({
   // Durable busy fallback for the status badge — same signal the composer's
   // Stop/Escape affordance uses. Without it, a page that connects mid-turn
   // shows "idle" next to a visible Stop button until the next status event.
+  const pendingGate = usePendingGateForThread(session.id, threadId);
   const threadBusy = queueBusy(useQueueStateForThread(session.id, threadId));
   const { copied, copy: copyToClipboard } = useCopyToClipboard();
   const [editingTitle, setEditingTitle] = useState(false);
@@ -195,7 +193,7 @@ export function SessionHeader({
     try {
       await pause.mutateAsync();
     } catch (err) {
-      setActionError(extractActionError(err, "Failed to pause session."));
+      setActionError(extractActionError(err, "Failed to pause the sandbox. Try again."));
     }
   }
 
@@ -221,7 +219,7 @@ export function SessionHeader({
       setConfirmServices(false);
     } catch (err) {
       setServicesError(
-        extractActionError(err, "Failed to change the session's services. Try again."),
+        extractActionError(err, "Failed to change the sandbox services. Try again."),
       );
     }
   }
@@ -277,46 +275,11 @@ export function SessionHeader({
     if (!ok) console.error("copy transcript failed");
   }
 
-  // Single-row masthead. The workspace path lives in a hover tooltip on
-  // the title — for orchestrator sessions it's a long internal filesystem
-  // path (`/root/.valet/orchestrator/user-…`) that shouted at users from
-  // the subtitle before. Real sessions have friendlier workspace names,
-  // but hiding both keeps the visual language consistent and lets the
-  // action cluster on the right breathe.
-  //
-  // The orchestrator's title card carries the orchestrator's chosen name
-  // (e.g. "Aurora") — the top-nav logo stays "Valet", so this is where
-  // the assistant's identity lives.
-  // The owning team comes from the assistants list rather than from the
-  // session id: the id used to be parsed for it, which worked only while a
-  // team had exactly one assistant. Narrowing still matters — `orchInfo` is
-  // the viewer's OWN assistant, so a bare `startsWith("orchestrator:")` test
-  // titled every team assistant with the viewer's personal assistant name.
-  const assistant = assistants.data?.assistants.find((a) => a.sessionId === session.id);
-  // The row's own `owner` covers standalone sessions, which have no
-  // assistant entry: a team-owned standalone session must badge its team
-  // and gate its admin controls exactly like a team assistant does.
-  const owner = assistant?.owner ?? session.owner;
+  const owner = session.owner;
   const teamId = owner.type === "team" ? owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
-  // Your own assistant is recognised without waiting on the list:
-  // `GET /orchestrator/info` answers with the very session id it names.
-  const isOwnOrchestrator =
-    assistant?.owner.type === "user" || orchInfo.data?.sessionId === session.id;
-  const isAssistantSession = assistant !== undefined || isOwnOrchestrator;
-  // `assistantLabel` is the SAME function the rail uses, so the row you
-  // clicked and the header you land on cannot disagree. They did: an
-  // assistant nobody has named showed as "Default assistant" in the rail and
-  // as the owning TEAM's name here, which read as two different things.
-  //
-  // The team name is no longer a fallback for a nameless assistant. It named
-  // the wrong entity — a team owns assistants, it is not one — and the badge
-  // beside this title already says which team the conversation belongs to.
-  const title =
-    (assistant ? assistantLabel(assistant) : undefined) ||
-    (isOwnOrchestrator ? orchestratorName(orchInfo.data?.name) : undefined) ||
-    session.title ||
-    "Untitled session";
+  const isWorkspaceRuntime = session.isWorkspaceRuntime === true;
+  const title = activeThread?.title || (isWorkspaceRuntime ? "New thread" : session.title || "Untitled thread");
 
   // Lifecycle controls (model, pause, delete) act on a session the whole
   // team shares, so they are a team-admin power — the API enforces the
@@ -326,8 +289,8 @@ export function SessionHeader({
     teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
   const modelScopeHint = threadScoped
-    ? "Model for this thread (pinned at creation). New threads start on the session default."
-    : "Session-default model. New threads pin it at creation.";
+    ? "Model for this thread (pinned at creation). New threads use the workspace default."
+    : "Runtime-default model. New threads pin it at creation.";
   const modelHint =
     modelConfigurationResolved &&
     activeModel &&
@@ -335,41 +298,12 @@ export function SessionHeader({
     !sameModelSpec(activeModel, configuredModel)
       ? `${modelScopeHint} Currently using ${activeModel} for this submission. Configured as ${configuredModel}.`
       : modelScopeHint;
-  // Renaming writes `session.title`, so it is offered only where the header
-  // actually shows that field. An assistant's header shows the assistant's
-  // own name instead, which is renamed on the assistants surface — an edit
-  // box here would store a string nobody ever sees.
-  const canRename = canAdminister && !isAssistantSession;
-  // A team's assistant is the one assistant kind this header may delete —
-  // one name for the predicate the gate, the item label, and destroy()'s
-  // prompt all share.
-  const isTeamAssistant = isAssistantSession && teamId !== null;
-  // Three descriptions for three losses. A team ASSISTANT is a shared
-  // conversation, so the copy names what the team loses. A team-owned
-  // STANDALONE session (reachable since "Move to workspace…") is still a
-  // session — it keeps the sandbox/child-session warning and adds who else
-  // loses it. A personal session keeps the original warning. The user's own
-  // assistant never reaches here: `canDelete` hides the menu item
-  // (TKAI-253).
-  const teamNote = `Everyone on ${team?.name ?? "the team"} loses`;
-  const deleteTitle = isTeamAssistant ? `Delete ${title}?` : "Delete this session permanently?";
-  const deleteDescription = isTeamAssistant
-    ? `${teamNote} this conversation and its threads.`
-    : teamId !== null
-      ? `${teamNote} it. This deletes all threads, history, and child sessions, and tears down the sandbox.`
-      : "This deletes all threads, history, and child sessions, and tears down the sandbox.";
-  // Delete never renders on the user's own assistant page (TKAI-253): the
-  // v1 holdover deleted the orchestrator and every thread with it, and
-  // Replace sandbox covers the reset. Fail closed while the assistants
-  // list or the orchestrator probe is still loading — in that window every
-  // session looks like a plain session, and the one destructive action
-  // here must not flash on an assistant page. The API refuses these
-  // deletes too; hiding the item keeps the menu honest.
-  const canDelete =
-    canAdminister &&
-    assistants.data !== undefined &&
-    orchInfo.data !== undefined &&
-    (!isAssistantSession || isTeamAssistant);
+  // Runtime titles belong to threads. Standalone titles belong to the session.
+  const canRename = canAdminister && session.isWorkspaceRuntime === false;
+  const deleteTitle = "Delete this session permanently?";
+  const deleteDescription = `${teamId !== null ? `Everyone on ${team?.name ?? "the team"} loses it. ` : ""}This deletes all threads, history, and child sessions, and tears down the sandbox.`;
+  // Fail closed until the detail response identifies the runtime boundary.
+  const canDelete = canAdminister && session.isWorkspaceRuntime === false;
 
   // The edit box replaces the title cluster. The right-hand side keeps the
   // read-only signals — sandbox, connection, agent status — and the error
@@ -406,9 +340,7 @@ export function SessionHeader({
         </span>
         <div className="ml-auto hidden max-w-full flex-wrap items-center gap-1.5 sm:flex">
           {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
-          <SandboxChip sandbox={sandbox} />
-          <ConnectionBadge conn={conn} />
-          <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
+          <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
         </div>
       </header>
     );
@@ -432,17 +364,7 @@ export function SessionHeader({
               {title}
             </span>
           )}
-          {/* Names the owning team, now that the title does not.
-
-              This badge used to read the bare word "Team", because the title
-              was the team's name and "Platform [Platform]" says one thing
-              twice. The title is the assistant's own label now — the same
-              label the rail shows — so the team name would otherwise appear
-              nowhere in this row, and "Team" alone cannot answer WHICH team
-              a person with several is reading.
-
-              Still not `OwnerBadge`: that one links to the team's assistant,
-              which is the page you are already on. */}
+          {/* The owner badge names the workspace beside the thread title. */}
           {teamId !== null && (
             // The test hook lets a test assert THIS element rather than the
             // team's name appearing anywhere in the header, which a title
@@ -451,32 +373,28 @@ export function SessionHeader({
               {team?.name ?? "Team"}
             </Badge>
           )}
-          {/* An orchestrator's workspace is a synthetic internal directory
-              (`~/.valet/orchestrator/{type}-{principalId}`), not a place
-              anyone chose or can act on. On a team assistant it rendered as
-              `team-team_99235d43-…` — the doubled prefix is the principal
-              type joined to an id that already carries it — which is an
-              internal identifier shown to a user for no reason. The file's
-              own note above says these paths "shouted at users from the
-              subtitle"; this is that intent, finally applied to the chip.
-
-              No `uppercase` on the chip when it does render — real
-              workspace names are case-sensitive paths, and shouting them in
-              caps misrepresents them. */}
-          {session.workspace && !isAssistantSession && (
+          {/* Runtime workspace paths are internal; standalone paths describe the work. */}
+          {session.workspace && !isWorkspaceRuntime && (
             <span className="hidden sm:inline text-[10px] font-mono tracking-wide text-muted truncate">
               {shortenWorkspace(session.workspace)}
             </span>
           )}
         </div>
       </Tooltip>
+      {activeThread?.channel && (
+        <ThreadChannelChip
+          channel={activeThread.channel}
+          {...(session.owner.type === "user" || session.owner.type === "team"
+            ? { owner: { ownerType: session.owner.type, ownerId: session.owner.id } } : {})}
+        />
+      )}
       <div className="ml-auto flex min-w-0 max-w-56 shrink-0 items-center gap-1 sm:max-w-full sm:flex-wrap sm:gap-1.5">
         {canAdminister && (
           <Tooltip content={modelHint}>
             <span className="min-w-0">
               <ModelPicker
                 currentId={configuredModel}
-                displayId={activeModel ?? configuredModel}
+                displayId={modelSaving ? configuredModel : (activeModel ?? configuredModel)}
                 ariaDescription={modelHint}
                 onSelect={(id) => {
                   if (threadScoped) {
@@ -506,17 +424,12 @@ export function SessionHeader({
             </span>
           </Tooltip>
         )}
+        {modelSaving && (
+          <span role="status" className="text-xs text-neutral-500">Saving model…</span>
+        )}
         <div className="hidden sm:contents">
-          <SandboxChip sandbox={sandbox} />
-          <ConnectionBadge conn={conn} />
-          <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
-          <RatingButtons
-            subject="session"
-            value={ratings.data?.session ?? null}
-            disabled={rateSession.isPending}
-            onRate={(rating) => rateSession.mutate(rating)}
-          />
-          <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
+          <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
+          <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (runtime/thread + raw tool calls + env)"}>
             <Button
               variant="ghost"
               size="sm"
@@ -531,23 +444,9 @@ export function SessionHeader({
             </Button>
           </Tooltip>
         </div>
-        {canAdminister && (
-          <Tooltip content="Pause session — sandbox sleeps until the next message">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={pauseSession}
-              disabled={sandbox?.state !== "ready" || pause.isPending}
-              className="hidden sm:inline-flex"
-              aria-label="Pause session"
-            >
-              {pause.isPending ? <Spinner size={14} /> : <Moon className="h-4 w-4" />}
-            </Button>
-          </Tooltip>
-        )}
         <DropdownMenu open={sessionMenu.open} onOpenChange={sessionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "sm:hidden")} aria-label="Session menu">
+            <Button variant="ghost" size="sm" className={cn("shrink-0", !canAdminister && "sm:hidden")} aria-label="Thread menu">
               {del.isPending || replace.isPending || setProfile.isPending ? (
                 <Spinner size={14} />
               ) : (
@@ -561,24 +460,8 @@ export function SessionHeader({
                 {title}{teamId !== null ? ` · ${team?.name ?? "Team"}` : ""}
               </DropdownMenuLabel>
               <div className="flex max-w-64 flex-wrap items-center gap-2 px-2 py-1.5">
-                <SandboxChip sandbox={sandbox} />
-                <ConnectionBadge conn={conn} />
-                <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
+                <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
               </div>
-              <DropdownMenuCheckboxItem
-                checked={ratings.data?.session === "positive"}
-                disabled={rateSession.isPending}
-                onCheckedChange={(checked) => rateSession.mutate(checked ? "positive" : null)}
-              >
-                <ThumbsUp className="h-4 w-4" aria-hidden />Good session
-              </DropdownMenuCheckboxItem>
-              <DropdownMenuCheckboxItem
-                checked={ratings.data?.session === "negative"}
-                disabled={rateSession.isPending}
-                onCheckedChange={(checked) => rateSession.mutate(checked ? "negative" : null)}
-              >
-                <ThumbsDown className="h-4 w-4" aria-hidden />Bad session
-              </DropdownMenuCheckboxItem>
               <DropdownMenuItem
                 onSelect={(event) => {
                   event.preventDefault();
@@ -587,19 +470,19 @@ export function SessionHeader({
               >
                 <ClipboardCopy className="h-4 w-4" aria-hidden />{copied ? "Transcript copied" : "Copy transcript"}
               </DropdownMenuItem>
-              {canAdminister && (
+              <DropdownMenuSeparator />
+            </div>
+            {canAdminister && (
+              <>
+                {/* Sleeps the sandbox until the next message. A menu item with a
+                    label, not a header icon nobody could read. */}
                 <DropdownMenuItem
                   disabled={sandbox?.state !== "ready" || pause.isPending}
                   onSelect={() => void pauseSession()}
                 >
                   <Moon className="h-4 w-4" aria-hidden />
-                  {pause.isPending ? "Pausing…" : "Pause session"}
+                  {pause.isPending ? "Pausing…" : "Pause sandbox until the next message"}
                 </DropdownMenuItem>
-              )}
-              <DropdownMenuSeparator />
-            </div>
-            {canAdminister && (
-              <>
                 <DropdownMenuItem
                   disabled={setProfile.isPending}
                   onSelect={() => setConfirmServices(true)}
@@ -616,23 +499,14 @@ export function SessionHeader({
                   <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />
                   Replace sandbox
                 </DropdownMenuItem>
-                {/* Standalone sessions only: an assistant's session is
-                    addressed by its owner, so its owner is structural (the
-                    API refuses too). Gated on the assistants list having
-                    RESOLVED — while it loads, `isAssistantSession` is false
-                    for every session, and the item would flash on assistant
-                    pages. */}
-                {!isAssistantSession && assistants.data !== undefined && (
+                {/* Workspace runtime ownership is structural, and a child
+                    session follows its parent, so the API refuses both. */}
+                {session.isWorkspaceRuntime === false && session.parentWork === undefined && (
                   <DropdownMenuItem onSelect={() => setMoving(true)}>
                     <FolderInput className="h-3.5 w-3.5 mr-2" aria-hidden />
                     Move to workspace…
                   </DropdownMenuItem>
                 )}
-                {/* Never on the user's own assistant page — see `canDelete`.
-                    A team admin keeps delete for the team's assistant. Note
-                    the item deletes the assistant's SESSION (threads and
-                    history); the assistant row itself is archived on the
-                    assistants surface. */}
                 {canDelete && (
                   <DropdownMenuItem
                     className="text-danger-500"
@@ -640,17 +514,20 @@ export function SessionHeader({
                     onSelect={() => setConfirmDelete(true)}
                   >
                     <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
-                    {/* Only an assistant session IS the team's assistant. A
-                        team-owned standalone session is a session; calling it
-                        the assistant would threaten the wrong thing. */}
-                    {isTeamAssistant ? "Delete this team's assistant…" : "Delete session…"}
+                    Delete session…
                   </DropdownMenuItem>
                 )}
               </>
             )}
           </DropdownMenuContent>
         </DropdownMenu>
+        {summaryControl}
       </div>
+      {modelSaveError && (
+        <p role="alert" className="basis-full min-w-0 break-words text-xs text-danger-500">
+          {extractActionError(modelSaveError, "Could not save the model. Choose a model and try again.")}
+        </p>
+      )}
       {actionError && <p role="alert" className="basis-full min-w-0 break-words text-xs text-danger-500">{actionError}</p>}
       {moving && (
         <MoveSessionDialog
@@ -687,7 +564,7 @@ export function SessionHeader({
         }}
         title={deleteTitle}
         description={deleteDescription}
-        confirmLabel={isTeamAssistant ? "Delete assistant" : "Delete session"}
+        confirmLabel="Delete session"
         pendingLabel="Deleting…"
         pending={del.isPending}
         error={deleteError ?? undefined}
@@ -695,18 +572,6 @@ export function SessionHeader({
       />
     </header>
   );
-}
-
-function ConnectionBadge({ conn }: { conn: ConnectionStatus }) {
-  const map: Record<ConnectionStatus, { label: string; variant: "neutral" | "success" | "danger" }> = {
-    idle: { label: "idle", variant: "neutral" },
-    connecting: { label: "connecting", variant: "neutral" },
-    open: { label: "live", variant: "success" },
-    closed: { label: "offline", variant: "neutral" },
-    error: { label: "error", variant: "danger" },
-  };
-  const { label, variant } = map[conn];
-  return <Badge variant={variant}>{label}</Badge>;
 }
 
 /**
@@ -734,48 +599,5 @@ export function SandboxChip({ sandbox }: { sandbox?: { state: string; epoch: num
         <span className={cn("h-1.5 w-1.5 rounded-full", entry.dot)} />
       </span>
     </Tooltip>
-  );
-}
-
-function AgentStatusBadge({
-  status,
-  turnStartedAt,
-  queueBusy = false,
-}: {
-  status: AgentStatus;
-  turnStartedAt?: number;
-  /**
-   * Durable fallback: the thread's queue holds an abortable submission. When
-   * the live `status` still reads idle (mid-turn connect before the seed
-   * frame, or a dropped event), the badge shows a generic "working" instead
-   * of a false "idle".
-   */
-  queueBusy?: boolean;
-}) {
-  const busy = status !== "idle" || queueBusy;
-  const elapsed = useElapsedSeconds(busy ? turnStartedAt : undefined);
-  if (!busy) return <Badge variant="neutral">idle</Badge>;
-  // replaceAll, not replace: "blocked_on_decision_gate" has four segments
-  // and a single replace rendered "blocked on_decision_gate".
-  const label = status === "idle" ? "working" : status.replaceAll("_", " ");
-  // "queued" and "blocked_on_decision_gate" stay neutral on purpose (the
-  // pre-fallback behavior): nothing is executing while queued, and a
-  // gate-blocked turn already renders the prominent DecisionGateCard — an
-  // accent badge would signal the same thing twice. "idle" here is the
-  // queue-busy fallback (`busy` gate above), so it reads as active work.
-  const variant =
-    status === "error"
-      ? "danger"
-      : status === "thinking" || status === "tool_calling" || status === "idle"
-        ? "accent"
-        : "neutral";
-  return (
-    <Badge variant={variant} className={cn("inline-flex items-center gap-1.5 tabular-nums")}>
-      {status !== "queued" && (
-        <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse motion-reduce:animate-none" />
-      )}
-      {label}
-      {elapsed !== undefined && <span className="text-current/70">{formatElapsed(elapsed)}</span>}
-    </Badge>
   );
 }

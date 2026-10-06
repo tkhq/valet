@@ -394,7 +394,7 @@ describe("ChannelHost.handleUpdate", () => {
     };
     await host.handleUpdate(
       "fake",
-      inbound({ media: [{ kind: "document", fileId: "f2", fileName: "report.pdf" }] }),
+      inbound({ dispatchId: "attachment-replay", media: [{ kind: "document", fileId: "f2", fileName: "report.pdf" }] }),
     );
 
     const session = await defaultAssistantSessionFor(
@@ -432,6 +432,16 @@ describe("ChannelHost.handleUpdate", () => {
       "attachment skipped",
     );
     expect(entries.some((candidate) => candidate.type === "message" && candidate.role === "assistant")).toBe(true);
+    const fetchAgain = vi.spyOn(fakeTransport, "fetchMedia");
+    const replayHost = new ChannelHost({ db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: () => fakeTransport }] }],
+      resolveOrgId: async () => ORG_ID });
+    await replayHost.start();
+    try {
+      await replayHost.handleUpdate("fake", inbound({ dispatchId: "attachment-replay", media: [{ kind: "document", fileId: "f2", fileName: "report.pdf" }] }), true);
+      expect(fetchAgain).not.toHaveBeenCalled();
+    } finally { await replayHost.stop(); }
+
   });
 
   it("falls back to a skipped note when a channel file cannot be stored", async () => {

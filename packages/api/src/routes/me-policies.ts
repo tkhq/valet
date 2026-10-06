@@ -56,6 +56,7 @@ function toOverrideWire(row: ActionPolicyOverrideRow): ActionPolicyOverrideWire 
     actionId: row.actionId,
     riskLevel: row.riskLevel,
     mode: row.mode,
+    ...(row.legacyUnscoped ? { legacyUnscoped: true } : {}),
     paramMatchers: row.paramMatchers,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,

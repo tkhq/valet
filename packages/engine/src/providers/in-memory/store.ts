@@ -212,7 +212,7 @@ export class InMemorySessionStore implements SessionStore {
     opts?: MessageQuery,
   ): Promise<SessionEntry[]> {
     const all = this.row(sessionId).entriesByThread.get(threadId) ?? [];
-    let result = all;
+    let result = opts?.queueItemId === undefined ? all : all.filter((e) => e.queueItemId === opts.queueItemId);
     if (opts?.includeCompacted === false) {
       result = result.filter((e) => e.type !== "compaction");
     }

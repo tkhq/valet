@@ -51,12 +51,15 @@ import {
  * services reads its row RAW, so a 1Password reference stored under one would
  * verify at save time and then be read as an empty credential forever. */
 export function isDeniedCredentialService(service: string): boolean {
-  return service === ONEPASSWORD_SERVICE || service === "github_app" || service.startsWith("llm:");
+  return service === ONEPASSWORD_SERVICE || service === "github_app" || service === "linear_app" || service.startsWith("llm:");
 }
 
 export interface CredentialReadDeps {
   credentials: CredentialStore;
   onePassword?: OnePasswordService;
+  /** The members sharing their own account for a service with a team, oldest
+   * first (`credential-shares.ts#membersSharing`). Absent reads no shares. */
+  shares?: (teamId: string, service: string) => Promise<string[]>;
 }
 
 export interface CredentialReadCtx {
@@ -254,65 +257,92 @@ export async function resolveOrgCredentialRead(
   return resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, "resolve");
 }
 
+/** Who a team read acts for, and which members it may borrow an account
+ * from. `userId` is the acting member: their own share is used first. A
+ * share of anyone else is used only when `mayBorrow` says that member
+ * approved (`credential-borrow.ts`). */
+export interface TeamReadCtx {
+  orgId: string;
+  teamId: string;
+  userId?: string;
+  scopes?: readonly OnePasswordScope[];
+  mayBorrow?: (memberId: string) => Promise<boolean>;
+}
+
 /**
- * Team-row-only read, plus 1Password resolution on that row. A team run
- * never borrows a member's personal credential. The org row is consulted
- * only when `orgFallback` is `"org-provided"` — a plugin declared the
- * service as the org bot. `"reference-only"` stops at the team row;
- * `"none"` stops there and skips the vaults too, the same escalation line
- * the user read draws.
+ * The credential a team action uses, in this order:
  *
- * When no row answers, a configured team token is authoritative for discovery.
- * An absent token preserves org discovery. Plain org rows remain restricted
- * to the existing org-provided policy.
+ * 1. The acting member's own share. Using your own account needs no approval.
+ * 2. The team's own connection, plus 1Password resolution on that row. It is
+ *    meant for the team, so it needs no approval either.
+ * 3. The org row, only when `orgFallback` is `"org-provided"` (a plugin
+ *    declared the service as the org bot), then the team's 1Password vaults.
+ *    `"none"` skips both, the same escalation line the user read draws.
+ * 4. Another member's share, oldest first, when `mayBorrow` allows it.
  *
- * `ctx.teamId` is the team principal. `ctx.userId` is unused for the team
- * row itself; a personal-tokenScope 1Password pointer on a team row fails
- * closed through `resolveRow` (`excluded: "resolve"`).
- *
- * A team row that throws `CredentialReferenceBrokenError` — a delegation
- * whose delegator left the team, or whose source row no longer resolves —
- * does not end the read. The fallback behind it is a credential the team is
- * entitled to in its own right, and the catalog already reports the service
- * as connected on that credential, so a broken delegation must not fail
- * every team run. The error is raised again when nothing else answers, so
- * the message that names the corrective action still reaches the user.
+ * When nothing up to step 3 answers and another member's share would,
+ * `approvalFrom` names that member: the action needs their approval first.
+ * A personal-tokenScope 1Password pointer on a team row fails closed through
+ * `resolveRow` (`excluded: "resolve"`).
  */
+export async function readTeamCredential(
+  deps: CredentialReadDeps,
+  ctx: TeamReadCtx,
+  service: string,
+  orgFallback: OrgFallback,
+): Promise<{ credential: StoredCredential | null; approvalFrom?: string }> {
+  if (isDeniedCredentialService(service)) return { credential: null };
+  const scopes = (ctx.scopes ?? onePasswordScopesFor("team", ctx.teamId)).filter((scope) => scope !== "personal");
+  const readCtx = { orgId: ctx.orgId, teamId: ctx.teamId, userId: ctx.userId ?? "", scopes };
+  const sharers = deps.shares ? await deps.shares(ctx.teamId, service) : [];
+  let brokenShare = false;
+  const fromShare = async (memberId: string) => {
+    const row = await deps.credentials.get({ type: "user", id: memberId }, service);
+    const credential = await resolveRow(deps, row, { ...readCtx, userId: memberId }, "resolve");
+    if (!credential) brokenShare = true;
+    return credential;
+  };
+
+  if (ctx.userId && sharers.includes(ctx.userId)) {
+    const own = await fromShare(ctx.userId);
+    if (own) return { credential: own };
+  }
+  const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
+  const fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
+  if (fromTeam) return { credential: fromTeam };
+  if (orgFallback !== "none") {
+    if (orgFallback === "org-provided") {
+      const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
+      const fromOrg = await resolveRow(deps, orgRow, readCtx, "resolve");
+      if (fromOrg) return { credential: fromOrg };
+    }
+    const fromVault = await lookupInOnePassword(deps, readCtx, service);
+    if (fromVault) return { credential: fromVault };
+  }
+  // A member who already approved comes before asking anyone new, so an
+  // approval holds even when an older sharer is listed first.
+  const others = sharers.filter((memberId) => memberId !== ctx.userId);
+  const approved = await Promise.all(others.map(async (memberId) => (await ctx.mayBorrow?.(memberId)) === true));
+  for (const [i, memberId] of others.entries()) {
+    if (!approved[i]) continue;
+    const borrowed = await fromShare(memberId);
+    if (borrowed) return { credential: borrowed };
+  }
+  for (const [i, memberId] of others.entries()) {
+    // Only an account that would actually answer is worth an approval.
+    if (!approved[i] && await fromShare(memberId)) return { credential: null, approvalFrom: memberId };
+  }
+  // A share whose member left their account unusable: name the fix.
+  if (brokenShare) throw new CredentialReferenceBrokenError(service);
+  return { credential: null };
+}
+
+/** `readTeamCredential`'s credential: a team action's read. */
 export async function resolveTeamCredentialRead(
   deps: CredentialReadDeps,
-  ctx: { orgId: string; teamId: string; userId?: string; scopes?: readonly OnePasswordScope[] },
+  ctx: TeamReadCtx,
   service: string,
   orgFallback: OrgFallback,
 ): Promise<StoredCredential | null> {
-  if (isDeniedCredentialService(service)) return null;
-  const scopes = (ctx.scopes ?? onePasswordScopesFor("team", ctx.teamId)).filter((scope) => scope !== "personal");
-  const readCtx = { orgId: ctx.orgId, teamId: ctx.teamId, userId: ctx.userId ?? "", scopes };
-  let fromTeam: StoredCredential | null = null;
-  let broken: CredentialReferenceBrokenError | null = null;
-  try {
-    const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
-    fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
-  } catch (err) {
-    if (!(err instanceof CredentialReferenceBrokenError)) throw err;
-    // A delegation to a departed member, or to a source row that no longer
-    // resolves. The credential behind the fallback is a different one the
-    // team is entitled to, so the read continues. The error is held for the
-    // case where nothing else answers: the user still needs the message
-    // that names the corrective action.
-    broken = err;
-  }
-  if (fromTeam) return fromTeam;
-  if (orgFallback === "none") {
-    if (broken) throw broken;
-    return null;
-  }
-  if (orgFallback === "org-provided") {
-    const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-    const fromOrg = await resolveRow(deps, orgRow, readCtx, "resolve");
-    if (fromOrg) return fromOrg;
-  }
-  const fromVault = await lookupInOnePassword(deps, readCtx, service);
-  if (fromVault) return fromVault;
-  if (broken) throw broken;
-  return null;
+  return (await readTeamCredential(deps, ctx, service, orgFallback)).credential;
 }

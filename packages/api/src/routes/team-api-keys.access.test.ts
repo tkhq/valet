@@ -6,17 +6,18 @@
  * session-scoped surface is pinned here against one personal and one team
  * session minted by the same admin.
  */
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { teamMembers } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { assistantExecutions, assistants, teamMembers } from "../schema/index.js";
 import type {
   CreateTeamApiKeyResponse,
   CreateTeamResponse,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
   SessionDetail,
 } from "../wire/types.js";
 
@@ -126,6 +127,33 @@ function openWs(
 }
 
 describe("team API key reach", () => {
+  it("stamps key prompts as the team rather than the minting admin", async () => {
+    const f = await bootFixture();
+    const store = api!.providers.engineStore;
+    const save = vi.spyOn(store, "admitSubmission");
+    const response = await fetch(`${f.baseUrl}/api/sessions/${f.teamSessionId}/messages`, {
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": f.teamKey },
+      body: JSON.stringify({ text: "Inspect this workspace" }),
+    });
+    expect(response.status).toBe(202);
+    expect(save.mock.calls[0]?.[2].author).toEqual({ id: `team:${f.teamId}`, name: "Team API key" });
+  });
+
+  it("starts workflows as the team without inheriting the key creator", async () => {
+    const f = await bootFixture();
+    const headers = { "content-type": "application/json", "x-api-key": f.teamKey };
+    const created = await fetch(`${f.baseUrl}/api/workflows`, { method: "POST", headers,
+      body: JSON.stringify({ name: "Key workflow", definition: { version: "dag/v1", nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop" }], edges: [{ from: "start", to: "done" }] } }) });
+    expect(created.status).toBe(201);
+    const workflow = await created.json();
+    if (!workflow || typeof workflow !== "object" || !("id" in workflow) || typeof workflow.id !== "string") throw new Error("Missing workflow id");
+    const start = vi.spyOn(api!.providers.workflowRunHost, "start").mockResolvedValue(undefined);
+    const response = await fetch(`${f.baseUrl}/api/workflows/${workflow.id}/runs`, { method: "POST", headers, body: "{}" });
+    expect(response.status).toBe(201);
+    expect(start).toHaveBeenCalledWith(expect.any(String), expect.any(Object), expect.any(Object),
+      { ownerType: "team", ownerId: f.teamId, actorUserId: `team:${f.teamId}` });
+  });
+
   it("reads its team's session and 404s the admin's personal session", async () => {
     const f = await bootFixture();
     const headers = { "x-api-key": f.teamKey };
@@ -191,26 +219,34 @@ describe("team API key reach", () => {
     expect(team).toEqual({ kind: "frame", type: "init" });
   });
 
-  it("reaches its own team's default assistant and no other orchestrator surface", async () => {
+  it("reaches its own workspace runtime and refuses other workspace runtimes", async () => {
     const f = await bootFixture();
     const headers = { "x-api-key": f.teamKey };
 
     // The key survives the admin leaving: membership is not re-checked.
     await api!.providers.db.delete(teamMembers);
-    const own = await fetch(`${f.baseUrl}/api/teams/${f.teamId}/orchestrator`, { method: "POST", headers });
+    const own = await fetch(`${f.baseUrl}/api/workspaces/${f.teamId}/runtime`, { method: "POST", headers });
     expect(own.status).toBe(200);
-    const { sessionId } = (await own.json()) as EnsureOrchestratorResponse;
+    const { sessionId } = (await own.json()) as EnsureWorkspaceRuntimeResponse;
     const detail = await fetch(`${f.baseUrl}/api/sessions/${sessionId}`, { headers });
     expect(detail.status).toBe(200);
     expect(((await detail.json()) as SessionDetail).owner).toEqual({ type: "team", id: f.teamId });
 
     const otherTeamId = await createTeam(f.baseUrl, f.cookie, "Other");
-    const other = await fetch(`${f.baseUrl}/api/teams/${otherTeamId}/orchestrator`, { method: "POST", headers });
+    const other = await fetch(`${f.baseUrl}/api/workspaces/${otherTeamId}/runtime`, { method: "POST", headers });
     expect(other.status).toBe(403);
-    const personal = await fetch(`${f.baseUrl}/api/orchestrator`, { method: "POST", headers });
+    const personal = await fetch(`${f.baseUrl}/api/workspaces/user/runtime`, { method: "POST", headers });
     expect(personal.status).toBe(403);
-    const probe = await fetch(`${f.baseUrl}/api/teams/${f.teamId}/orchestrator`, { headers });
-    expect(probe.status).toBe(403);
+    const info = await fetch(`${f.baseUrl}/api/workspaces/${f.teamId}/runtime/info`, { headers });
+    expect(info.status).toBe(200);
+    const [mapping] = await api!.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, sessionId));
+    expect(mapping.conversationKey).toBe("web:default");
+    expect(api!.providers.engineHost.liveSession(sessionId)?.options.readOnlyReason).toBeUndefined();
+    const [root] = await api!.providers.db.select().from(assistants).where(eq(assistants.id, mapping.assistantId));
+    expect(await info.json()).toMatchObject({ sessionId: root.sessionId });
+    for (const workspace of ["user", otherTeamId]) {
+      expect((await fetch(`${f.baseUrl}/api/workspaces/${workspace}/runtime/info`, { headers })).status).toBe(403);
+    }
   });
 
   // The always-allow check used to read the creating admin's user id, so a

@@ -10,6 +10,8 @@ import {
   type DecisionGate,
   type SessionEntry,
   type ToolDef,
+  type PromptContent,
+  type ToolContext,
   type WriteFence,
 } from "../src/index.js";
 import { findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
@@ -134,6 +136,124 @@ describe("decision gates: pending -> resolved", () => {
     const resolved = events.find((e) => e.event.type === "decision_gate_resolved");
     expect(resolved).toBeTruthy();
 
+    faux.unregister();
+  });
+});
+
+describe("decision gates: user cancellation", () => {
+  it.each(["approval", "question"] as const)("dismisses a %s without another model turn and accepts a fresh prompt", async (type) => {
+    const faux = registerFauxProvider({ provider: `gate-cancel-${type}` });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("wait_for_person", {}, { id: "wait-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("must not continue after cancellation"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const tool: ToolDef = {
+      name: "wait_for_person", description: "Wait for a decision", parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        await ctx.requestDecision({ type, title: "Continue?", resumeKey: "wait-1" });
+        return { text: "answered" };
+      },
+    };
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool] });
+    try {
+      const receipt = await session.prompt("ask me");
+      await waitFor(() => gatesFrom(events).length === 1);
+      const gate = gatesFrom(events)[0];
+      if (!gate) throw new Error("missing gate");
+      await session.withdrawDecision(gate.id, "cancel");
+      await waitForAsync(async () => (await store.getQueueItem(session.id, receipt.queueItemId))?.status === "settled");
+      expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome).toEqual({ outcome: "aborted" });
+      expect((await store.getDecisionGate(session.id, gate.id))?.status).toBe("withdrawn");
+      expect(events.some((e) => e.event.type === "decision_gate_withdrawn" && e.event.gateId === gate.id && e.event.reason === "cancel")).toBe(true);
+      expect(await store.getSuspendedTurn(session.id, gate.threadId)).toBeFalsy();
+      expect(JSON.stringify(await session.readEntries("web:default"))).not.toContain("must not continue after cancellation");
+      faux.setResponses([fauxAssistantMessage("fresh prompt accepted")]);
+      const next = await session.prompt("continue now");
+      await waitForAsync(async () => (await store.getQueueItem(session.id, next.queueItemId))?.status === "settled");
+      expect((await store.getQueueItem(session.id, next.queueItemId))?.outcome).toEqual({ outcome: "completed" });
+      expect(JSON.stringify(await session.readEntries("web:default"))).toContain("fresh prompt accepted");
+    } finally { faux.unregister(); }
+  });
+});
+
+describe("decision gates: sender with no Valet account", () => {
+  it("refuses the request without opening a gate", async () => {
+    const faux = registerFauxProvider({ provider: "gate-external-sender" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tc1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("could not"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [approvalTool()] });
+
+    await session.prompt("please do thing", { author: { id: "u1", name: "Slack member", externalSender: true } });
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+
+    expect(gatesFrom(events)).toEqual([]);
+    const entries = await session.readEntries("web:default");
+    // The tool acts as the workspace, so the turn refuses it before it can ask.
+    expect(JSON.stringify(entries)).toContain("[not_available] do_thing");
+    expect(JSON.stringify(entries)).not.toContain("did the thing");
+    faux.unregister();
+  });
+});
+
+describe("tool actor identity", () => {
+  it.each(["orchestrator", "workflow", "child"] as const)("aligns policy and credentials for an authorless %s turn", async (purpose) => {
+    const faux = registerFauxProvider({ provider: `actor-${purpose}` });
+    const actors: string[] = [];
+    const credentialActors: (string | undefined)[] = [];
+    const tool: ToolDef = {
+      name: "inspect_actor", description: "Inspect the acting identity.", parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        actors.push(ctx.userId);
+        await ctx.credentials.get("linear");
+        return { text: "checked" };
+      },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("inspect_actor", {}, { id: "actor-check" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "runtime-creator", orgId: "o1", owner: { type: "team", id: "t1" }, purpose,
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+      credentialResolver: async (_owner, _service, use) => { credentialActors.push(use.actorId); return null; },
+    });
+    await session.prompt("inspect", {});
+    await waitFor(() => events.some((e) => e.event.type === "status" && e.event.status === "idle"));
+    const expected = purpose === "orchestrator" ? "team:t1" : "runtime-creator";
+    expect(actors).toEqual([expected]);
+    expect(credentialActors).toEqual([expected]);
+    faux.unregister();
+  });
+});
+
+describe("tools on a turn from a sender with no Valet account", () => {
+  it("refuses a tool that acts as the workspace, and runs it for a member", async () => {
+    const faux = registerFauxProvider({ provider: "external-sender-tools" });
+    let ran = 0;
+    const writeTool: ToolDef = {
+      name: "write_note", description: "Write a note into the workspace.", parameters: Type.Object({}),
+      execute: async () => { ran += 1; return { text: "written" }; },
+    };
+    const turn = () => [
+      fauxAssistantMessage([fauxToolCall("write_note", {}, { id: `tc${ran}` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ];
+    faux.setResponses([...turn(), ...turn()]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [writeTool] });
+
+    await session.prompt("write it", { author: { id: "u1", name: "Slack member", externalSender: true } });
+    await waitFor(() => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length >= 1);
+    expect(ran).toBe(0);
+    expect(JSON.stringify(await session.readEntries("web:default"))).toContain("[not_available] write_note");
+
+    await session.prompt("write it", { author: { id: "u1" } });
+    await waitFor(() => ran === 1);
     faux.unregister();
   });
 });
@@ -1340,5 +1460,32 @@ describe("decision gates: durable expiry sweep", () => {
     expect((await store.getQueueItem(SID, itemId))?.status).toBe("settled");
 
     faux2.unregister();
+  });
+});
+
+
+describe("interactive actor provenance", () => {
+  it.each(["direct", "authorless", "external", "signal", "workflow", "child"] as const)("marks only a direct authenticated prompt (%s)", async (kind) => {
+    const faux = registerFauxProvider({ provider: `interactive-author-${kind}` });
+    const seen: Array<ToolContext["interactiveActor"]> = [];
+    const tool: ToolDef = {
+      name: "inspect_interactive_actor", description: "Inspect test context", parameters: Type.Object({}), policyChecked: true,
+      execute: async (_args, ctx) => { seen.push(ctx.interactiveActor); return { text: "checked" }; },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("inspect_interactive_actor", {}, { id: "inspect-author" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "admin-creator", orgId: "o1", owner: { type: "team", id: "t1" },
+      purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator",
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+    });
+    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" } : "inspect";
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author: { id: "admin", ...(kind === "external" ? { externalSender: true } : {}) } });
+    await session.thread().awaitResult(receipt.queueItemId);
+    expect(seen).toEqual([kind === "direct" ? { id: "admin" } : undefined]);
+    faux.unregister();
   });
 });

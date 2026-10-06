@@ -1,10 +1,13 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { DecisionGate } from "@valet/engine";
 import type { NodeCheckpoint, RunSettledInfo } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable, type AppDb } from "../lib/drizzle.js";
-import { notifications, sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { assistantExecutions, notifications, sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
+import { createTeam } from "../services/teams.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
 import {
   buildRunSettledAttention,
@@ -73,6 +76,8 @@ describe("buildRunSettledAttention", () => {
     getCheckpoints: async (): Promise<NodeCheckpoint[]> => [
       checkpoint({ nodeId: "call-api", status: "failed", error: "HTTP 500" }),
     ],
+    // No thread started these runs, so attention goes to the run's owner.
+    getRun: async () => null,
   };
 
   beforeAll(async () => {
@@ -158,6 +163,7 @@ describe("buildRunSettledAttention", () => {
       getCheckpoints: async (): Promise<NodeCheckpoint[]> => {
         throw new Error("store unreachable");
       },
+      getRun: async () => null,
     };
 
     await expect(buildRunSettledAttention({ db, store: brokenStore })(settled())).resolves.toBeUndefined();
@@ -234,6 +240,42 @@ describe("buildRunThreadArchive", () => {
     expect(rows.find((r) => r.id === live.threadId)).toBeUndefined();
   });
 
+  it("evicts only an idle archived report execution and retains its durable history", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore } = api.providers;
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Run cache", creatorUserId: LOCAL_USER.id });
+    const owner = { type: "team", id: team.id } as const;
+    const meta = { orgId: LOCAL_ORG.id, actorUserId: LOCAL_USER.id };
+    await db.insert(workflowDefinitions).values({ id: "wf_cache", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Run cache", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 1, updatedAt: 1 });
+    await workflowStore.createRun("run_cache", { workflowId: "wf_cache", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id });
+    const execution = await ensureAssistantExecution(api.providers, owner, meta, "signal:workflow:run_cache");
+    const origin = await ensureAssistantExecution(api.providers, owner, meta, "app-assistant:local-user");
+    const thread = execution.session.thread("signal:workflow:run_cache");
+    await thread.pause();
+    const receipt = await thread.submitPrompt("report", {});
+    await recordDispatch(api, "run_cache", { sessionId: execution.sessionId, threadId: thread.id, queueItemId: receipt.queueItemId });
+    const archive = buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost });
+    await archive(settledRun("run_cache", "wf_cache"));
+    expect(engineHost.liveSession(execution.sessionId)).toBe(execution.session);
+    await engineStore.forceSettle(execution.sessionId, receipt.queueItemId, "aborted");
+    const gate: DecisionGate = { id: "retained-gate", sessionId: execution.sessionId, threadId: thread.id,
+      queueItemId: receipt.queueItemId, resumeKey: "retained-gate", ordinal: 0, type: "approval", title: "Pending decision", actions: [],
+      status: "pending", createdAt: 1, updatedAt: 1 };
+    await engineStore.saveDecisionGate(execution.sessionId, thread.id, gate);
+    await archive(settledRun("run_cache", "wf_cache"));
+    expect(engineHost.liveSession(execution.sessionId)).toBe(execution.session);
+    await engineStore.saveDecisionGate(execution.sessionId, thread.id, { ...gate, status: "withdrawn" });
+    await archive(settledRun("run_cache", "wf_cache"));
+    expect(engineHost.liveSession(execution.sessionId)).toBeNull();
+    expect(engineHost.liveSession(origin.sessionId)).toBe(origin.session);
+    expect(await engineStore.getSession(execution.sessionId)).not.toBeNull();
+    expect(await engineStore.getQueueItem(execution.sessionId, receipt.queueItemId)).toMatchObject({ status: "settled" });
+    expect(await db.select().from(assistantExecutions)).toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: execution.sessionId })]));
+    expect(await db.select().from(sessionThreads)).toEqual(expect.arrayContaining([expect.objectContaining({ id: thread.id, archivedAt: 5_000 })]));
+  });
+
   it("keeps the thread of a run that settled while its assistant turn is unsettled", async () => {
     // An orchestrator node with `wait: { mode: "none" }` completes its
     // checkpoint at dispatch, so the run can settle while the prompt is
@@ -300,9 +342,9 @@ describe("buildRunThreadArchive", () => {
 });
 
 describe("workflowApprovalHref", () => {
-  it("deep-links to the action-required tab and encodes the gate target", () => {
+  it("deep-links to the run and encodes the gate target", () => {
     expect(workflowApprovalHref("run/1", "approve me")).toBe(
-      "/workflows?tab=action-required&run=run%2F1&gate=approve%20me",
+      "/workflows/runs/run%2F1?gate=approve%20me",
     );
   });
 });

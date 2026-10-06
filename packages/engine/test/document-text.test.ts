@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractDownloadedDocx,
+  DOCX_DOCUMENT_MIME,
+  isDocxDocumentMime,
+  isDocxDocument,
   extractDownloadedPdf,
   isPdfDocument,
   normalizeDocumentMime,
@@ -174,5 +178,30 @@ describe("document text helpers", () => {
     const result = await extractDownloadedPdf({ data: pdfBytes, name: "nda.pdf" });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("PDF text extraction is not available");
+  });
+});
+
+
+describe("DOCX text helpers", () => {
+  it("requires a Word MIME or a generic MIME with a DOCX name", () => {
+    expect(isDocxDocumentMime(DOCX_DOCUMENT_MIME + "; charset=binary")).toBe(true);
+    expect(isDocxDocumentMime("application/octet-stream", "Contract.DOCX")).toBe(true);
+    expect(isDocxDocumentMime("image/png", "contract.docx")).toBe(false);
+    expect(isDocxDocumentMime("application/zip", "archive.zip")).toBe(false);
+    expect(isDocxDocument(new Uint8Array([80, 75, 3, 4]))).toBe(true);
+    expect(isDocxDocument(pdfBytes)).toBe(false);
+  });
+  it("reports unavailable extraction and blank documents", async () => {
+    expect(await extractDownloadedDocx({ data: new Uint8Array() })).toMatchObject({ ok: false, error: expect.stringContaining("not available") });
+    expect(await extractDownloadedDocx({ data: new Uint8Array(), extractDocument: async () => ({ markdown: " " }) })).toMatchObject({ ok: false, error: expect.stringContaining("no extractable text") });
+  });
+  it("passes cancellation to the host and bounds the complete output", async () => {
+    const signal = new AbortController().signal;
+    const result = await extractDownloadedDocx({ data: new Uint8Array(), signal, extractDocument: async (doc) => {
+      expect(doc.signal).toBe(signal);
+      expect(doc.mimeType).toBe(DOCX_DOCUMENT_MIME);
+      return { markdown: "a".repeat(1_000_001) };
+    } });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("limit") });
   });
 });

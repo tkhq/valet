@@ -12,6 +12,8 @@ export interface AuthConfig {
   baseUrl: string;
   trustedOrigins: string[];
   allowedEmailDomains: string[];
+  /** Explicit deployment opt-in: admit new users without invitations. */
+  allowSignup?: boolean;
   oidc?: {
     issuer: string;
     clientId: string;
@@ -228,6 +230,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv): AuthConfig | null {
     baseUrl,
     trustedOrigins,
     allowedEmailDomains,
+    ...(env.AUTH_ALLOW_SIGNUP === "1" ? { allowSignup: true } : {}),
     oidc,
     social: {
       ...(googleConfig && { google: googleConfig }),

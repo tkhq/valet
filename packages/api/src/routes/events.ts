@@ -1,3 +1,4 @@
+import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-ingress.js";
 /**
  * Event feed, catalog, and subscriptions CRUD (event-system plan, Task 7).
  *
@@ -12,29 +13,25 @@
  * written — the ingest matcher (`events/ingest.ts`) trusts the
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
-import { Hono } from "hono";
-import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
-import { OnePasswordAuthError } from "../services/onepassword.js";
-import type { StoredCredential } from "@valet/engine";
-import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
+import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
+import { and, desc, eq, or, type SQL } from "drizzle-orm";
+import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, exists, gt, gte, ilike, lt, ne, or, sql, type SQL } from "drizzle-orm";
-import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import type { AppDb } from "../lib/drizzle.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
-import { readOwnerFilter } from "./_owner-filter.js";
-import { isOrgAdminUser } from "./_org-admin.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
-import { armableDefinitionRow } from "../workflows/service.js";
-import { checkAssistantForOwner } from "../assistants/service.js";
+import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
+import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError } from "../services/onepassword.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
+  EventLogResponse,
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
   EventSubscriptionCollisionErrorWire,
@@ -46,13 +43,17 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
-  ListEventDropsResponse,
-  ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "../wire/types.js";
+import { armableDefinitionRow } from "../workflows/service.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { channelsVisibleTo } from "./_thread-access.js";
+import { slackEventChannel } from "../services/thread-access.js";
+import { readOwnerFilter } from "./_owner-filter.js";
+import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -79,18 +80,6 @@ async function canMutateSubscription(
 const FEED_DEFAULT_LIMIT = 50;
 const FEED_MAX_LIMIT = 100;
 
-/**
- * How far back the OWNER-FILTERED feed looks. No index can pre-select the
- * owner, so without this bound a workspace that matched nothing walks the
- * org's whole event history for one empty page. A lower bound on
- * `received_at` joins the `(org_id, received_at)` index condition, so it is
- * the cheapest bound available. The unfiltered feed keeps no window.
- *
- * `components/events/feed.tsx` prints this window to the reader and must
- * hold the same number. `feed-window.test.ts` reads this declaration and
- * fails when only one of them moves.
- */
-const OWNER_FEED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** The jsonb columns come back `unknown`; their shapes are owned by
  * `validateSubscriptionWrite` (`events/subscription-write.ts`), the one gate
@@ -196,11 +185,12 @@ function collisionBlockMessage(report: CollisionReport<NarrowedSubscriptionRow>)
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
 
-eventsRouter.get("/events/catalog", (c) => {
-  const { plugins } = c.var.providers;
+eventsRouter.get("/events/catalog", async (c) => {
+  const { plugins, db, engineCredentials } = c.var.providers;
   const services = [...new Set(plugins.flatMap((p) => p.triggers ?? []).map((t) => t.service))];
+  const linear = services.includes("linear") ? await getLinearIngressStatus(db,engineCredentials,c.var.user.orgId) : undefined;
   const resp: GetEventCatalogResponse = {
-    services: services.map((service) => ({ service, entries: catalogForService(plugins, service) })),
+    services: services.map((service) => ({ service, entries: catalogForService(plugins, service), ...(service === "linear" && linear ? { readiness: { ready: linear.ready, ...(linear.reason ? { reason: linear.reason } : {}) } } : {}) })),
   };
   return c.json(resp);
 });
@@ -325,162 +315,53 @@ eventsRouter.get("/events/filter-options", async (c) => {
   return c.json(resp);
 });
 
-// ── Feed ────────────────────────────────────────────────────────────────────
-
 /**
- * The org's feed, with an optional owner filter. The `events` table has no
- * owner column: ownership is read one join away, through the deliveries the
- * dispatcher wrote. An event with no deliveries matches no owner, because
- * no subscription acted on it.
- *
- * The owner predicate must stay the SAME union the subscriptions list uses
- * — the named owner's rows, or the org's own. Drop the org branch here and
- * a workspace lists an org-owned subscription whose events its feed hides.
+ * `GET /api/events/log` — a workspace's stored events and the organization's
+ * recorded problems in one timeline. `problems=1` keeps failed events and
+ * problems only. Registered before `/events/:id` so the literal path wins.
  */
-eventsRouter.get("/events", async (c) => {
-  const { db } = c.var.providers;
-  const user = c.var.user;
-
-  const service = c.req.query("service");
-  const key = c.req.query("key");
-  const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
-  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, FEED_MAX_LIMIT) : FEED_DEFAULT_LIMIT;
-
-  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
-  if (filter.error) return c.json({ error: filter.error }, 400);
-
-  const conditions = [eq(events.orgId, user.orgId)];
-  if (service) conditions.push(eq(events.service, service));
-  if (key) conditions.push(eq(events.eventKey, key));
-  if (filter.owner) {
-    const owner = filter.owner;
-    conditions.push(gte(events.receivedAt, Date.now() - OWNER_FEED_WINDOW_MS));
-    conditions.push(
-      exists(
-        db
-          .select({ present: sql<number>`1` })
-          .from(eventDeliveries)
-          .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
-          .where(
-            and(
-              eq(eventDeliveries.eventId, events.id),
-              // Repeats the outer scope, so the join cannot reach another
-              // org's subscription even if a delivery ever crossed one.
-              eq(eventSubscriptions.orgId, user.orgId),
-              or(
-                and(
-                  eq(eventSubscriptions.ownerType, owner.type),
-                  eq(eventSubscriptions.ownerId, owner.id),
-                ),
-                // Org-owned subscriptions belong to every workspace.
-                eq(eventSubscriptions.ownerType, "org"),
-              ),
-            ),
-          ),
-      ),
-    );
-  }
-
-  const rows = await db
-    .select()
-    .from(events)
-    .where(and(...conditions))
-    .orderBy(desc(events.receivedAt))
-    .limit(limit);
-
-  const resp: ListEventsResponse = { events: rows.map(rowToEventSummary) };
-  return c.json(resp);
-});
-
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
-}
-
-/**
- * `GET /api/events/drops` — recent reasons an event arrived but did not become
- * a feed row: a bad signature, the wrong workspace, a missing credential, or
- * (the common one) it matched no subscription. Answers "my trigger didn't
- * fire" when the feed is empty. Registered before `/events/:id` so the literal
- * path wins over the id param. No payload is exposed — the drop-log holds none.
- */
-eventsRouter.get("/events/drops", async (c) => {
+eventsRouter.get("/events/log", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
   const limit = readLimit(c.req.query("limit"), FEED_DEFAULT_LIMIT, FEED_MAX_LIMIT);
   if (limit === undefined) return c.json({ error: "limit must be a whole number of 1 or more" }, 400);
-  const query = c.req.query("q")?.trim() ?? "";
-  if (query.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
-  const rawDirection = c.req.query("direction");
-  if (rawDirection !== undefined && rawDirection !== "previous") return c.json({ error: "direction must be previous" }, 400);
-  const direction = rawDirection === "previous" ? "previous" : "next";
+  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error || !filter.owner) return c.json({ error: filter.error ?? "Send ownerType and ownerId for the workspace whose Log to read." }, 400);
+  const owner = filter.owner;
+  const problemsOnly = c.req.query("problems") === "1";
+  const q = c.req.query("q")?.trim() || undefined;
+  if (q && q.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
+  const scopeKey = JSON.stringify([owner, problemsOnly, q ?? null]);
   const rawCursor = c.req.query("cursor");
   const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
-  const cursor = decoded && typeof decoded.orgId === "string" && decoded.orgId === user.orgId &&
-    typeof decoded.q === "string" && decoded.q === query &&
-    typeof decoded.createdAt === "number" && Number.isFinite(decoded.createdAt) &&
-    typeof decoded.id === "string"
-    ? { createdAt: decoded.createdAt, id: decoded.id }
-    : undefined;
-  if (rawCursor !== undefined && !cursor) return c.json({ error: "cursor is invalid" }, 400);
+  const before = decoded && decoded.orgId === user.orgId && decoded.scope === scopeKey &&
+    typeof decoded.at === "number" && Number.isFinite(decoded.at) && typeof decoded.id === "string"
+    ? { at: decoded.at, id: decoded.id } : undefined;
+  if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor no longer matches these filters. Load the Log again from the top." }, 400);
 
   const admin = await isOrgAdminUser(c);
-  const dropConditions: SQL[] = [eq(eventDropLog.orgId, user.orgId)];
-  // Slack interaction diagnostics identify form activity. They are the one
-  // new sensitive diagnostic class, so members keep the established drop feed
-  // without seeing those rows.
-  if (!admin) dropConditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"));
-  const visibleDropConditions = [...dropConditions];
-  if (query) {
-    const escapedQuery = escapeLike(query);
-    const search = or(
-      sql`${eventDropLog.reason} ILIKE ${`%${escapedQuery}%`} ESCAPE '\\'`,
-      sql`${eventDropLog.detail} ILIKE ${`%${escapedQuery}%`} ESCAPE '\\'`,
-    );
-    if (search) dropConditions.push(search);
-  }
-  if (cursor) {
-    const boundary = direction === "previous"
-      ? or(gt(eventDropLog.createdAt, cursor.createdAt), and(eq(eventDropLog.createdAt, cursor.createdAt), gt(eventDropLog.id, cursor.id)))
-      : or(lt(eventDropLog.createdAt, cursor.createdAt), and(eq(eventDropLog.createdAt, cursor.createdAt), lt(eventDropLog.id, cursor.id)));
-    if (boundary) dropConditions.push(boundary);
-  }
-  const rows = await db.select().from(eventDropLog).where(and(...dropConditions))
-    .orderBy(...(direction === "previous" ? [eventDropLog.createdAt, eventDropLog.id] : [desc(eventDropLog.createdAt), desc(eventDropLog.id)])).limit(limit + 1);
-  const page = direction === "previous" ? rows.slice(0, limit).reverse() : rows.slice(0, limit);
-  const first = page[0];
-  const last = page.at(-1);
-  const makeCursor = (row: typeof eventDropLog.$inferSelect) => encodePageCursor({ orgId: user.orgId, q: query, createdAt: row.createdAt, id: row.id });
-  const nextCursor = last && (direction === "previous" ? cursor !== undefined : rows.length > limit) ? makeCursor(last) : null;
-  const previousCursor = first && (direction === "previous" ? rows.length > limit : cursor !== undefined) ? makeCursor(first) : null;
-
-  // "Last event received" = the most recent time ANY event reached ingest,
-  // matched (an events row) or not (a visible drop-log row). This remains
-  // global to the org, not the current search or cursor page.
-  const [lastDropRow] = await db
-    .select({ at: eventDropLog.createdAt })
-    .from(eventDropLog)
-    .where(and(...visibleDropConditions))
-    .orderBy(desc(eventDropLog.createdAt), desc(eventDropLog.id))
-    .limit(1);
-  const lastEventRow = await db
-    .select({ at: events.receivedAt })
-    .from(events)
-    .where(eq(events.orgId, user.orgId))
-    .orderBy(desc(events.receivedAt))
-    .limit(1);
-  const candidates = [lastDropRow?.at, lastEventRow[0]?.at].filter(
-    (v): v is number => typeof v === "number",
-  );
-  const lastEventAt = candidates.length > 0 ? Math.max(...candidates) : null;
-
-  const resp: ListEventDropsResponse = {
-    drops: page.map((r) => ({ id: r.id, reason: r.reason, detail: r.detail, createdAt: r.createdAt })),
-    nextCursor,
-    previousCursor,
-    lastEventAt,
+  const { items, hasMore } = await listEventLog(db, {
+    orgId: user.orgId, owner, admin, limit, problemsOnly, ...(q ? { q } : {}), ...(before ? { before } : {}),
+    channelVisible: channelsVisibleTo(c),
+  });
+  const last = items.at(-1);
+  const resp: EventLogResponse = {
+    items,
+    nextCursor: hasMore && last ? encodePageCursor({ orgId: user.orgId, scope: scopeKey, at: last.at, id: last.id }) : null,
+    lastEventAt: await lastEventLogActivity(db, user.orgId, admin),
+    windowDays: EVENT_LOG_WINDOW_MS / (24 * 60 * 60 * 1000),
   };
   return c.json(resp);
 });
+
+/** Whether this request may see an event. A Slack event from a private
+ * channel shows only to the channel's members (`services/thread-access.ts`),
+ * because its payload carries the message. Anyone else gets the same 404 as
+ * a missing event. */
+async function eventVisibleTo(c: Context<AppEnv>, row: { service: string; refs: unknown; payload: unknown }): Promise<boolean> {
+  const channel = slackEventChannel(row);
+  return channel === undefined || channelsVisibleTo(c)(`slack:${channel}`);
+}
 
 eventsRouter.get("/events/:id", async (c) => {
   const { db } = c.var.providers;
@@ -493,7 +374,7 @@ eventsRouter.get("/events/:id", async (c) => {
     .where(and(eq(events.id, id), eq(events.orgId, user.orgId)))
     .limit(1);
   const row = rows[0];
-  if (!row) return c.json({ error: "event not found" }, 404);
+  if (!row || !(await eventVisibleTo(c, row))) return c.json({ error: "event not found" }, 404);
   // The join carries the subscription NAME onto each delivery, so a row can
   // say what it was trying to reach. It also does the org scoping the
   // previous `subscriptionId IN (org subscriptions)` subquery did, over the
@@ -577,7 +458,7 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
     .where(and(eq(events.id, id), eq(events.orgId, user.orgId)))
     .limit(1);
   const event = rows[0];
-  if (!event) return c.json({ error: "event not found" }, 404);
+  if (!event || !(await eventVisibleTo(c, event))) return c.json({ error: "event not found" }, 404);
   const subs = await db
     .select()
     .from(eventSubscriptions)
@@ -674,19 +555,15 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     }
   }
 
-  // A named assistant must belong to the owner this target just resolved to.
-  // Checked here, not in `validateSubscription`, because the owner is only
-  // known once the workflow/team resolution above has run.
-  if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
-    const bad = await checkAssistantForOwner(db, user.orgId, { type: ownerType, id: ownerId }, body.target.assistantId);
-    if (bad) return c.json({ error: bad }, 400);
-  }
-
   // Collision gate (TKAI-294). Checked over the FINAL filters (after the
   // mention gate's injected user filter), so two users' mention rules
   // compare as the disjoint rules they are. A disabled create skips the
   // check — the row cannot fire, and enabling it later re-runs it.
   const enabled = body.enabled ?? true;
+  if (enabled) {
+    const ingressBlocked = await linearEventArmBlock(db,c.var.providers.engineCredentials,user.orgId,body.eventKeys);
+    if (ingressBlocked) return c.json({ error: ingressBlocked },400);
+  }
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (enabled) {
     const report = await collisionsForWrite(db, plugins, user.orgId, {
@@ -757,19 +634,6 @@ eventsRouter.post("/event-subscriptions", async (c) => {
               ),
             );
           if (!targetWorkflow) return [];
-        }
-        // Mirrors the pre-lock check above (schedule-service.ts:255-257):
-        // `deleteTeam` archives a team's assistants under this same lock, so
-        // a named assistant needs the same in-lock recheck as the workflow
-        // target does.
-        if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
-          const bad = await checkAssistantForOwner(
-            tx,
-            user.orgId,
-            { type: ownerType, id: ownerId },
-            body.target.assistantId,
-          );
-          if (bad) return [];
         }
         return tx.insert(eventSubscriptions).values(values).returning();
       },
@@ -860,31 +724,28 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     return c.json({ error: "enabled must be a boolean" }, 400);
   }
 
-  // `assistantId` is the one part of `target` a patch may rewrite, and only
-  // within the row's existing owner — see PatchEventSubscriptionRequest.
-  const storedTarget = row.target as EventSubscriptionTargetWire;
-  let patchedTarget = storedTarget;
-  if (body.assistantId !== undefined) {
-    if (storedTarget.kind !== "orchestrator") {
-      return c.json({ error: "assistantId is only valid on an orchestrator target" }, 400);
-    }
-    if (body.assistantId === null) {
-      const { assistantId: _dropped, ...rest } = storedTarget;
-      patchedTarget = rest;
-    } else {
-      if (typeof body.assistantId !== "string" || body.assistantId.length === 0) {
-        return c.json({ error: "assistantId must be a non-empty string" }, 400);
-      }
-      const bad = await checkAssistantForOwner(
-        db,
-        user.orgId,
-        { type: row.ownerType, id: row.ownerId },
-        body.assistantId,
-      );
-      if (bad) return c.json({ error: bad }, 400);
-      patchedTarget = { ...storedTarget, assistantId: body.assistantId };
-    }
+  // `assistantId: null` clears a retired selection; a value selects one,
+  // which a single-assistant workspace does not support.
+  if ("assistantId" in body && (body as { assistantId?: unknown }).assistantId !== null) {
+    return c.json({ error: "Assistant selection is not supported. Choose the subscription workspace instead." }, 400);
   }
+  // Drop a retired selection from a row the boot repair has not reached yet,
+  // so the merged row below validates.
+  // Validated jsonb narrows to the wire union, as before; old rows may also carry `assistantId`.
+  const { assistantId: _retired, ...storedTarget } = row.target as EventSubscriptionTargetWire & { assistantId?: unknown };
+  let patchedTarget: EventSubscriptionTargetWire = storedTarget;
+  if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
+    if (row.ownerType !== "user" || patchedTarget.kind !== "orchestrator") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
+    patchedTarget = { ...patchedTarget,
+      ...(body.deliveryPolicy !== undefined ? { deliveryPolicy: body.deliveryPolicy } : {}),
+      ...(body.pauseOnOverlap !== undefined ? { pauseOnOverlap: body.pauseOnOverlap } : {}),
+    };
+  }
+  if (body.enabled === true && patchedTarget.kind === "orchestrator") {
+    const { overlapPausedAt: _pause, ...rest } = patchedTarget;
+    patchedTarget = rest;
+  }
+
 
   // The prompt templates are the other part of `target` a patch may rewrite,
   // and only on an orchestrator target. `null` clears the field, so the rule
@@ -944,11 +805,10 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const willBeEnabled = body.enabled ?? row.enabled;
   const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
   const arming = body.enabled === true && !row.enabled;
-  // Re-pointing the assistant changes who the rule races: moving OFF a distinct
-  // assistant onto the owner's default can create a clobber that did not exist.
-  const repointed = body.assistantId !== undefined;
   let collisions: EventSubscriptionCollisionsWire | undefined;
-  if (willBeEnabled && (matchChanged || arming || repointed)) {
+  if (willBeEnabled && (matchChanged || arming)) {
+    const ingressBlocked = await linearEventArmBlock(db,c.var.providers.engineCredentials,user.orgId,merged.eventKeys as string[]);
+    if (ingressBlocked) return c.json({ error: ingressBlocked },400);
     const report = await collisionsForWrite(
       db,
       plugins,
@@ -991,10 +851,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       target: patchedTarget,
       audience,
       enabled: willBeEnabled,
-      updatedAt: Date.now(),
+      updatedAt: Math.max(Date.now(), row.updatedAt + 1),
     })
-    .where(eq(eventSubscriptions.id, id))
+    .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.updatedAt, row.updatedAt)))
     .returning();
+
+  if (!updated[0]) return c.json({ error: "This subscription changed while you were editing it. Refresh and try again." }, 409);
 
   const resp: PatchEventSubscriptionResponse = {
     ...rowToSubscription(updated[0]),
@@ -1018,6 +880,6 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
     return c.json({ error: "subscription not found" }, 404);
   }
 
-  await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, id));
+  await db.delete(eventSubscriptions).where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)));
   return c.body(null, 204);
 });

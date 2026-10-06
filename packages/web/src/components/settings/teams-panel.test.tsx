@@ -5,11 +5,11 @@
  * admin. The API enforces the same gate (`canMutateTeam`); this suite pins
  * that the UI stops offering controls that would 404.
  */
-import type { ReactNode } from "react";
-import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** Renders a real anchor so `getByRole("link")` and href assertions work
  * without mounting a router. */
@@ -163,6 +163,7 @@ let teamCredentials: Array<{
 }> = [];
 
 /** Shared across renders so the disconnect tests can assert on the call. */
+const revokeMutate = vi.fn();
 const disconnectMutate = vi.fn();
 let disconnectPending = false;
 let disconnectError: Error | null = null;
@@ -176,6 +177,7 @@ vi.mock("~/api/integrations", () => ({
     isLoading: false,
     error: null,
   }),
+  useRevokeDelegation: () => ({ mutate: revokeMutate, isPending: false, error: null, reset: vi.fn() }),
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
     isPending: disconnectPending,
@@ -253,7 +255,7 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
     // The hint reaches members too — they are the ones whose sessions the
     // setting shapes, and whose personal default wins.
-    expect(screen.getByText(/personal\s+default wins/)).toBeTruthy();
+    expect(screen.getByText(/personal default/)).toBeTruthy();
   });
 
   it("plain member sees the catalog name for a non-curated model, not the raw id", () => {
@@ -419,20 +421,12 @@ describe("TeamsPanel — deleting a team", () => {
 });
 
 describe("TeamsPanel — 1Password connection", () => {
-  it("removes reference preferences and shows team token controls", () => {
+  it("leaves the team token to the team's Integrations page", () => {
     callerRole = "admin";
     orgRole = "member";
     openTeam();
-    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
-    expect(screen.queryByText("1Password references")).toBeNull();
-    expect(screen.getByLabelText("1Password service account token for Platform")).toBeTruthy();
-  });
-  it("does not expose token controls to a member", () => {
-    callerRole = "member";
-    orgRole = "member";
-    openTeam();
+    expect(screen.queryByText("1Password")).toBeNull();
     expect(screen.queryByRole("button", { name: "Connect token" })).toBeNull();
-    expect(screen.getByText("No team token connected. Team sessions use the organization token when available.")).toBeTruthy();
   });
 });
 
@@ -628,10 +622,10 @@ describe("TeamsPanel — team credentials", () => {
       },
     ];
     openTeam();
-    expect(screen.getByText("Linear")).toBeTruthy();
-    expect(screen.getByText("Shared by Two · broken")).toBeTruthy();
+    expect(screen.getByText("Linear MCP")).toBeTruthy();
+    expect(screen.getByText("Shared by Two")).toBeTruthy();
     expect(screen.getByText("Broken")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Stop sharing Linear with Platform" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop sharing Two's Linear with Platform" })).toBeTruthy();
   });
 
   it("hides the removal control from a plain member", () => {
@@ -640,7 +634,7 @@ describe("TeamsPanel — team credentials", () => {
       { service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z" },
     ];
     openTeam();
-    expect(screen.getByText("Stored on the team")).toBeTruthy();
+    expect(screen.getByText("Team connection")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Disconnect Linear from Platform" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Stop sharing/ })).toBeNull();
   });
@@ -656,7 +650,7 @@ describe("TeamsPanel — team credentials", () => {
 describe("TeamsPanel — removing a team credential", () => {
   /** linear is stored on the team. slack is shared by Two. */
   const DIRECT = "Disconnect Linear from Platform";
-  const SHARED = "Stop sharing Slack with Platform";
+  const SHARED = "Stop sharing Two's Slack with Platform";
 
   beforeEach(() => {
     callerRole = "admin";
@@ -709,7 +703,7 @@ describe("TeamsPanel — removing a team credential", () => {
     openTeam();
     const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByText("Disconnect Linear from Platform?")).toBeTruthy();
-    expect(within(dialog).getByText(/lose access to Linear\./)).toBeTruthy();
+    expect(within(dialog).getByText(/lose the team's own Linear connection/)).toBeTruthy();
     expect(within(dialog).queryByText(/linear/)).toBeNull();
   });
 
@@ -718,7 +712,7 @@ describe("TeamsPanel — removing a team credential", () => {
     // state. A single boolean would name whichever row rendered first.
     openTeam();
     const dialog = await clickRemove(SHARED);
-    expect(within(dialog).getByText("Stop sharing Slack with Platform?")).toBeTruthy();
+    expect(within(dialog).getByText("Stop sharing Two's Slack with Platform?")).toBeTruthy();
     expect(within(dialog).queryByText("Disconnect Linear from Platform?")).toBeNull();
   });
 
@@ -733,8 +727,12 @@ describe("TeamsPanel — removing a team credential", () => {
     const dialog = await clickRemove(SHARED);
     expect(within(dialog).getByRole("button", { name: "Stop sharing" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Disconnect" })).toBeNull();
-    expect(within(dialog).getByText(/removes the team's link only/)).toBeTruthy();
-    expect(within(dialog).getByText(/Two keeps their own Slack connection/)).toBeTruthy();
+    expect(within(dialog).getByText(/Team actions stop using Two's Slack account/)).toBeTruthy();
+    expect(within(dialog).getByText(/keep their own Slack connection/)).toBeTruthy();
+    // Ending a share ends that member's share, never the team's own connection.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stop sharing" }));
+    expect(revokeMutate.mock.calls[0]?.[0]).toEqual({ service: "slack", teamId: "team_1", userId: "u2" });
+    expect(disconnectMutate).not.toHaveBeenCalled();
   });
 
   it("keeps Disconnect for the team's own credential, and says how to get it back", async () => {
@@ -744,7 +742,7 @@ describe("TeamsPanel — removing a team credential", () => {
     const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByRole("button", { name: "Disconnect" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Stop sharing" })).toBeNull();
-    expect(within(dialog).getByText(/deletes the credential stored on the team/)).toBeTruthy();
+    expect(within(dialog).getByText(/Members' shared accounts stay/)).toBeTruthy();
     expect(within(dialog).getByText(/Connect Linear again from Integrations/)).toBeTruthy();
   });
 
@@ -818,13 +816,13 @@ describe("TeamsPanel — team assistant link", () => {
 
   it("shows the Assistant link to a plain member in the active team", () => {
     render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
-    expect(screen.getByRole("link", { name: /Assistant/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Threads/ })).toBeTruthy();
   });
 
   it("opens the active team's assistants list", () => {
     render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
-    const link = screen.getByRole("link", { name: /Assistant/ });
-    expect(link.getAttribute("href")).toBe("/assistants");
+    const link = screen.getByRole("link", { name: /Threads/ });
+    expect(link.getAttribute("href")).toBe("/chat?workspace=team_1");
   });
 });
 

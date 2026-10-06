@@ -38,8 +38,7 @@ function queueState(mode: WireQueueState["mode"]): WireQueueState {
   };
 }
 
-// importOriginal: see -new-session-dialog.test.tsx for why a bare
-// replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
@@ -106,11 +105,11 @@ function renderComposer(
   queuedItemCount = queuedMessages.length,
 ) {
   const queryClient = new QueryClient();
-  const tree = (status: "idle" | "streaming") => (
+  const tree = (status: "idle" | "streaming", threadId = "thread-1") => (
     <QueryClientProvider client={queryClient}>
       <Composer
         sessionId="orchestrator:user-1"
-        threadId="thread-1"
+        threadId={threadId}
         agentStatus={status}
         queuedMessages={queuedMessages}
         queuedItemCount={queuedItemCount}
@@ -119,7 +118,7 @@ function renderComposer(
   );
   const view = render(tree(agentStatus));
   return Object.assign(view, {
-    rerenderComposer: (status: "idle" | "streaming" = agentStatus) => view.rerender(tree(status)),
+    rerenderComposer: (status: "idle" | "streaming" = agentStatus, threadId = "thread-1") => view.rerender(tree(status, threadId)),
   });
 }
 
@@ -330,6 +329,16 @@ describe("Composer — stop button", () => {
     expect(abortMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", targetItemId: "q-0" });
   });
 
+  it("shows a failed Stop request and allows retry", async () => {
+    queueStateRef.current = queueState("followup");
+    abortMutateAsync.mockRejectedValueOnce(new Error("connection lost"));
+    renderComposer("streaming");
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    expect((await screen.findByRole("alert")).textContent).toContain("connection lost");
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
   // The reload-mid-tool case: the live `status` events were missed (the
   // client connected after they fired), so `agentStatus` still reads idle,
   // but the durable queue state says a submission is running. The Stop
@@ -431,6 +440,26 @@ describe("Composer — Escape interrupts the running turn", () => {
     expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1", targetItemId: "q-0" });
   });
 
+  it("shows a failed Escape interrupt", () => {
+    queueStateRef.current = queueState("followup");
+    renderComposer("streaming");
+    fireEvent.keyDown(window, { key: "Escape" });
+    act(() => abortMutate.mock.calls[0][1].onError(new Error("connection lost")));
+    expect(screen.getByRole("alert").textContent).toContain("connection lost");
+  });
+
+  it("keeps a delayed interrupt failure with its original thread", () => {
+    queueStateRef.current = queueState("followup");
+    const view = renderComposer("streaming");
+    fireEvent.keyDown(window, { key: "Escape" });
+    const reject = abortMutate.mock.calls[0][1].onError;
+    view.rerenderComposer("idle", "thread-2");
+    act(() => reject(new Error("Thread one connection lost")));
+    expect(screen.queryByRole("alert")).toBeNull();
+    view.rerenderComposer("streaming", "thread-1");
+    expect(screen.getByRole("alert").textContent).toContain("Thread one connection lost");
+  });
+
   it("does nothing on Escape while idle", () => {
     renderComposer("idle");
     fireEvent.keyDown(window, { key: "Escape" });
@@ -487,10 +516,9 @@ describe("Composer — mid-turn submit affordance", () => {
     await userEvent.type(textarea, text);
   }
 
-  it("labels the button Send and shows no queue hint while the agent is idle", () => {
+  it("labels the button Send while the agent is idle", () => {
     renderComposer("idle");
     expect(screen.getByRole("button", { name: /^send$/i })).toBeDefined();
-    expect(screen.queryByText(/current turn/i)).toBeNull();
   });
 
   it("labels the button Queue while the agent works and nothing is self-queued", () => {
@@ -498,7 +526,6 @@ describe("Composer — mid-turn submit affordance", () => {
     renderComposer("streaming");
 
     expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
-    expect(screen.getByText(/completes the current turn/i)).toBeDefined();
     expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
   });
 
@@ -507,7 +534,6 @@ describe("Composer — mid-turn submit affordance", () => {
     renderComposer("streaming");
 
     expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
-    expect(screen.getByText(/completes the current turn/i)).toBeDefined();
     expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
   });
 

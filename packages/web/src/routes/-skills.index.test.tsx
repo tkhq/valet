@@ -67,6 +67,7 @@ let sourcesData: ListSkillSourcesResponse = { sources: [], nextCursor: null };
 let searchParams: Record<string, string> = {};
 const navigate = vi.fn();
 const skillsQuery = vi.fn();
+const sourcesQuery = vi.fn();
 const addSource = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
@@ -86,7 +87,7 @@ vi.mock("~/api/skills", () => ({
 }));
 
 vi.mock("~/api/skill-sources", () => ({
-  useSkillSources: () => ({ data: sourcesData, isLoading: false, error: null }),
+  useSkillSources: (query: unknown) => { sourcesQuery(query); return { data: sourcesData, isLoading: false, error: null }; },
   useAddSkillSource: () => ({ mutate: addSource, isPending: false, error: null }),
   useSyncSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
   useRemoveSkillSource: () => ({ mutate: vi.fn(), isPending: false }),
@@ -154,6 +155,12 @@ describe("SkillsIndexPage", () => {
     // Router `Link`s render `to`, not `href`, so they carry no link role.
     // Counted inside the grid: the header carries links of its own.
     expect(container.querySelectorAll(".grid a").length).toBe(5);
+  });
+
+  it("lists the repositories of the workspace in view, as the skills below do", () => {
+    sourcesQuery.mockClear();
+    render(<SkillsIndexPage />);
+    expect(sourcesQuery).toHaveBeenLastCalledWith(expect.objectContaining({ ownerType: "user", ownerId: "u-1" }));
   });
 
   it("offers a New skill action", () => {
@@ -267,7 +274,7 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
 
   it("writes the Prompts chip to the URL as the kind it means", () => {
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
 
     expect(lastNavigationSearch()).toMatchObject({ filter: "prompts" });
   });
@@ -277,12 +284,12 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
     render(<SkillsIndexPage />);
 
     expect(lastSkillsQuery()).toEqual({ kind: "prompt" });
-    expect(screen.getByRole("tab", { name: "Prompts" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("button", { name: "Prompts" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("sends the search box on as a catalog-wide query, once typing settles", async () => {
-    // Fake timers drive the debounce by hand; see use-live-query.test.tsx for
-    // why waitFor and vitest's clock do not mix.
+    // Fake timers drive the debounce by hand. Testing Library's waitFor polls
+    // on a clock that only vi.advanceTimersByTimeAsync moves, so it is not used.
     vi.useFakeTimers();
     try {
       render(<SkillsIndexPage />);
@@ -315,7 +322,7 @@ describe("SkillsIndexPage — the filters go to the URL and to the server", () =
   it("returns to the first page when a filter changes", () => {
     searchParams = { page: "cursor_1" };
     render(<SkillsIndexPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prompts" }));
 
     // A different question has a different first page, so the old cursor
     // names a row that the new question may not even list.

@@ -35,24 +35,8 @@ import { allCatalogEntries } from "./ingest.js";
 import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
 
-export const SLACK_MENTION_KEY = "slack.app_mention";
-
-/** Whether the eventKeys patterns select `slack.app_mention` — exact key or a
- * trailing wildcard ("slack.*"), so the raw API cannot widen around the gate. */
-export function selectsSlackMention(eventKeys: string[]): boolean {
-  return eventKeyMatches(SLACK_MENTION_KEY, eventKeys);
-}
-
-/** True when the filter constrains the channel to a non-empty fixed set.
- * `prefix`, `contains` and `regex` do not count: "starts with C" is the whole
- * Slack workspace. An empty `in` list does not count either — it matches
- * nothing,
- * which is not a channel selection. */
-function isChannelScopeFilter(f: SubscriptionFilter): boolean {
-  if (f.field !== "channel") return false;
-  if (f.op === "eq") return true;
-  return f.op === "in" && Array.isArray(f.value) && f.value.length > 0;
-}
+import { SLACK_APP_MENTION as SLACK_MENTION_KEY, hasChannelScopeFilter, selectsSlackMention } from "@valet/shared";
+export { SLACK_APP_MENTION as SLACK_MENTION_KEY, selectsSlackMention, storedAnyChannel as storedAnyChannelState } from "@valet/shared";
 
 function isCreatorUserFilter(f: SubscriptionFilter, slackUserId: string): boolean {
   if (f.field !== "user") return false;
@@ -64,18 +48,6 @@ function isCreatorUserFilter(f: SubscriptionFilter, slackUserId: string): boolea
 /** Catalog entries the eventKeys patterns select, across every plugin. */
 function selectedEntries(plugins: ValetPlugin[], eventKeys: string[]) {
   return allCatalogEntries(plugins).filter((e) => eventKeyMatches(e.key, eventKeys));
-}
-
-/**
- * Whether a STORED mention subscription is in the any-channel state: it
- * selects `slack.app_mention` and carries no channel-scope filter. The
- * `anyChannel` request flag is deliberately not persisted, so this derivation
- * is the stored state. The PATCH paths feed it back as `storedAnyChannel` so
- * an edit that does not touch channel scope is not refused for lacking a flag
- * the server never stored.
- */
-export function storedAnyChannelState(eventKeys: string[], filters: SubscriptionFilter[]): boolean {
-  return selectsSlackMention(eventKeys) && !filters.some(isChannelScopeFilter);
 }
 
 export type MentionAudienceResult =
@@ -183,7 +155,7 @@ export async function enforceMentionScope(
     };
   }
 
-  const hasChannelScope = args.filters.some(isChannelScopeFilter);
+  const hasChannelScope = hasChannelScopeFilter(args.filters);
   if (args.anyChannel && hasChannelScope) {
     return {
       ok: false,
