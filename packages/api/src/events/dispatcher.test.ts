@@ -23,6 +23,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowSignals,
+  agentSessions,
   assistants,
   threadPullRequests,
 } from "../schema/index.js";
@@ -266,10 +267,11 @@ describe("EventDispatcher", () => {
     expect(row.status).toBe("delivered");
   });
 
-  it("holds a fresh pull request comment until Valet's own write is recorded, then keeps it off the thread that posted it", async () => {
+  it("holds a fresh pull request comment until Valet's own write is recorded, then suppresses it even if its source is unavailable", async () => {
     const db = tdb.appDb;
     const url = "https://github.com/acme/app/pull/12";
     await db.insert(assistants).values({ id: "asst-1", orgId: ORG, ownerType: "user", ownerId: "user-1", sessionId: "sess-1", createdAt: 1 });
+    await db.insert(agentSessions).values({ id: "sess-1", orgId: ORG, userId: "user-1", ownerType: "user", ownerId: "user-1", workspace: "/workspace", createdAt: 1, updatedAt: 1 });
     await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
       VALUES ('thr-1', 'sess-1', 'web:pr-thread', 'idle', 'steer', 1, 1)`);
     await db.insert(threadPullRequests).values({
@@ -285,21 +287,22 @@ describe("EventDispatcher", () => {
       db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver,
     });
 
-    // The webhook beat the write record: the delivery waits, uncounted.
+    await db.delete(threadPullRequests).where(eq(threadPullRequests.url, url));
+    // The webhook beat the write record and has no source: it still waits.
     await dispatcher.pollOnce();
     expect(deliver).not.toHaveBeenCalled();
     const held = await getDelivery(deliveryId);
     expect(held).toMatchObject({ status: "pending", attempts: 0, nextAttemptAt: postedAt + OWN_WRITE_SETTLE_MS });
 
-    // The record lands, so the comment is Valet's own and stays on the events thread.
+    // The record lands; its missing source must not route the write to shared events.
     await recordChannelMessage(db, {
       orgId: ORG, sessionId: "sess-1", threadId: "thr-1", channelKey: "github:acme/app#12", conversationKey: "github:acme/app#12",
       providerMessageId: "501", direction: "out", text: "Done.",
     });
     await db.update(eventDeliveries).set({ nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
     await dispatcher.pollOnce();
-    expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver.mock.calls[0]![0]).not.toHaveProperty("threadKey");
+    expect(deliver).not.toHaveBeenCalled();
+    expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped" });
   });
 
   it("keeps a Slack event with no thread to reply into on its channel's events thread", async () => {

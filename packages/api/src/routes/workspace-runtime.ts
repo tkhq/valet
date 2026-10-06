@@ -1,13 +1,13 @@
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import type { Principal } from "@valet/engine";
-import { and, count, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant, workspaceSessionIds } from "../assistants/service.js";
 import { canViewAssistantOwner } from "../assistants/access.js";
 import { threadVisibility } from "../services/thread-access.js";
 import { viewerOf } from "./_thread-access.js";
-import { assistants, childWatches } from "../schema/index.js";
+import { agentSessions, assistantExecutions, assistants, childWatches } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
 import { clearIntegrationLimit, loadIntegrationLimit } from "../assistants/integration-limit.js";
 import type { WorkspaceRuntimeInfoResponse, EnsureWorkspaceRuntimeResponse, WorkspaceIntegrationLimitResponse } from "../wire/types.js";
@@ -26,12 +26,13 @@ export async function authorizedWorkspaceOwner(c: Context<AppEnv>, workspace = c
 async function ensureWorkspaceRuntime(c: Context<AppEnv>, workspace = c.req.param("workspace")) {
   const owner = await authorizedWorkspaceOwner(c, workspace);
   if (!owner) return c.json({ error: "Workspace not found. Select an accessible workspace." }, 404);
-  const { sessionId } = await ensureDefaultAssistantSession(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId });
-  if (owner.type === "team") {
-    const execution = await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, "web:default");
-    await execution.session.ensureDefaultThread();
-  }
-  const body: EnsureWorkspaceRuntimeResponse = { sessionId };
+  const meta = { actorUserId: c.var.user.id, orgId: c.var.user.orgId };
+  const runtime = owner.type === "team"
+    ? await ensureAssistantExecution(c.var.providers, owner, meta,
+      c.var.principal.type === "user" ? `app-assistant:${c.var.principal.id}` : "web:default")
+    : await ensureDefaultAssistantSession(c.var.providers, owner, meta);
+  await runtime.session.ensureDefaultThread();
+  const body: EnsureWorkspaceRuntimeResponse = { sessionId: runtime.sessionId };
   return c.json(body);
 }
 
@@ -83,9 +84,16 @@ workspaceRuntimeRouter.get("/:workspace/runtime/info", async (c) => {
   const { db, engineHost } = c.var.providers;
   // Resolve the identity only: presence reads never start the runtime or a sandbox.
   const row = await resolveDefaultAssistant(db, c.var.user.orgId, owner);
-  const ids = await workspaceSessionIds(db, row.orgId, row.sessionId);
+  const runningIds = engineHost.sessionsWithActiveRuns();
+  const busy = (id: typeof agentSessions.id) => or(
+    runningIds.length ? inArray(id, runningIds) : sql`false`,
+    sql`EXISTS (SELECT 1 FROM child_watches w WHERE w.parent_session_id = ${id} AND w.settled = false)`);
+  const candidates = await db.select({ id: agentSessions.id }).from(agentSessions)
+    .leftJoin(assistantExecutions, eq(assistantExecutions.sessionId, agentSessions.id))
+    .where(and(eq(agentSessions.orgId, row.orgId), sql`${agentSessions.status} <> 'deleted'`,
+      or(eq(agentSessions.id, row.sessionId), eq(assistantExecutions.assistantId, row.id)), busy(agentSessions.id)));
   const visibleIds = [];
-  for (const id of ids) {
+  for (const id of new Set([row.sessionId, ...candidates.map(candidate => candidate.id)])) {
     if (await threadVisibility(c.var.providers, { ownerType: owner.type, id }, viewerOf(c))(null)) visibleIds.push(id);
   }
   const [children] = await db.select({ n: count() }).from(childWatches)

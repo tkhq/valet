@@ -122,6 +122,9 @@ interface ReadableOwner {
 
 async function resolveReadableOwners(db: AppDb, scope: MemoryScope): Promise<ReadableOwner[]> {
   const owners: ReadableOwner[] = [{ ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", prefix: "" }];
+  if (scope.owner.type === "team" && scope.namespace) {
+    owners.push({ ownerType: "team", ownerId: scope.owner.id, namespace: "", prefix: `team:${scope.owner.id}/` });
+  }
   if (scope.owner.type === "user") {
     const teams = await listTeamsForUser(db, scope.owner.id);
     for (const team of teams) {
@@ -157,8 +160,11 @@ async function resolveReadTarget(
   if (!m) {
     return { ownerType: scope.owner.type, ownerId: scope.owner.id, namespace: scope.namespace ?? "", realPath: path };
   }
-  if (scope.owner.type !== "user") return null;
   const [, teamId, rest] = m;
+  if (scope.owner.type === "team" && scope.namespace && scope.owner.id === teamId) {
+    return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
+  }
+  if (scope.owner.type !== "user") return null;
   const member = await isTeamMember(db, teamId, scope.owner.id);
   if (!member) return null;
   return { ownerType: "team", ownerId: teamId, namespace: "", realPath: rest };
@@ -1005,6 +1011,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     type: string;
     ownerType: string;
     ownerId: string;
+    namespace: string;
     rank: number;
     snippet: string;
   }>;
@@ -1017,6 +1024,7 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
         type: memoryFiles.type,
         ownerType: memoryFiles.ownerType,
         ownerId: memoryFiles.ownerId,
+        namespace: memoryFiles.namespace,
         rank: rankExpr,
         snippet: snippetExpr,
       })
@@ -1043,10 +1051,10 @@ export async function searchFiles(db: AppDb, scope: MemoryScope, params: SearchF
     throw err;
   }
 
-  const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}`, o.prefix]));
+  const prefixByOwner = new Map(owners.map((o) => [`${o.ownerType}:${o.ownerId}:${o.namespace}`, o.prefix]));
 
   return rows.map((r) => ({
-    path: `${prefixByOwner.get(`${r.ownerType}:${r.ownerId}`) ?? ""}${r.path}`,
+    path: `${prefixByOwner.get(`${r.ownerType}:${r.ownerId}:${r.namespace}`) ?? ""}${r.path}`,
     title: r.title,
     description: r.description,
     type: r.type,

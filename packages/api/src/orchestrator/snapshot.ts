@@ -62,7 +62,7 @@ export async function assembleMemorySnapshot(
   // Real stored paths never contain a colon (normalizePath rejects it) —
   // `listFiles`' `team:{id}/…` virtual-prefix entries are the only ones
   // that do, so this filter is an exact own-scope check, not a heuristic.
-  const own = summaries.filter((f) => !f.path.includes(":"));
+  const own = summaries.filter((f) => scope.owner.type === "team" || !f.path.includes(":"));
 
   const pinnedSummaries = own.filter((f) => f.pinned).sort((a, b) => a.path.localeCompare(b.path));
   // "Most recent" journal files means most recent *calendar date*, not

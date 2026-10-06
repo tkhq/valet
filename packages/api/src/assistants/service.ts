@@ -5,6 +5,7 @@
 import { assistantSessionId, type Principal, type Session } from "@valet/engine";
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { lockTeamForOwnership } from "../services/teams.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, assistantExecutions, assistants, orgs, teams, users, type AssistantRow } from "../schema/index.js";
@@ -166,19 +167,21 @@ export async function ensureAssistantExecution(
 ): Promise<{ assistant: AssistantRow; sessionId: string; session: Session }> {
   if (principal.type !== "team") return ensureDefaultAssistantSession(deps, principal, meta);
   const root = await ensureDefaultAssistantSession(deps, principal, meta);
-  const [existing] = await deps.db.select().from(assistantExecutions)
-    .where(and(eq(assistantExecutions.assistantId, root.assistant.id), eq(assistantExecutions.conversationKey, conversationKey))).limit(1);
-  let execution = existing;
-  if (!execution) {
-    const data = await root.session.toData();
-    const governing = await deps.engineHost.ensureFreshThread(root.session, conversationKey,
-      { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, meta.actorUserId);
+  const data = await root.session.toData();
+  const governing = await deps.engineHost.ensureFreshThread(root.session, conversationKey,
+    { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, meta.actorUserId);
+  const execution = await deps.db.transaction(async tx => {
+    await lockTeamForOwnership(tx, principal.id);
+    if (!await ownerExists(tx, meta.orgId, principal)) throw new ArchivedAssistantError();
     const candidate = { sessionId: `execution:${randomUUID()}`, assistantId: root.assistant.id,
       conversationKey, governingThreadId: governing.id, createdAt: Date.now() };
-    await deps.db.insert(assistantExecutions).values(candidate).onConflictDoNothing();
-    [execution] = await deps.db.select().from(assistantExecutions)
+    await tx.insert(assistantExecutions).values(candidate).onConflictDoNothing();
+    const [row] = await tx.select().from(assistantExecutions)
       .where(and(eq(assistantExecutions.assistantId, root.assistant.id), eq(assistantExecutions.conversationKey, conversationKey))).limit(1);
-  }
+    const [app] = row ? await tx.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, row.sessionId)).limit(1) : [];
+    if (app?.status === "deleted") throw new ArchivedAssistantError();
+    return row;
+  });
   if (!execution) throw new Error("The conversation could not be created. Try opening it again.");
   return ensureAssistantSession(deps, { ...root.assistant, sessionId: execution.sessionId }, meta);
 }
@@ -209,6 +212,10 @@ async function ensureAssistantSession(
     .from(agentSessions)
     .where(eq(agentSessions.id, sessionId))
     .limit(1);
+  if (existingRows[0]?.status === "deleted" && sessionId.startsWith("execution:")) {
+    deps.engineHost.evictCache(sessionId);
+    throw new ArchivedAssistantError();
+  }
   if (existingRows[0]?.status === "deleted") {
     // A live assistant's session is never deleted by this version. During a
     // rolling deploy an older pod can still mark it deleted; the boot sweep

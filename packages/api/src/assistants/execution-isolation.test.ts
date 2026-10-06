@@ -130,3 +130,22 @@ it("settles durable legacy team submissions as aborted at read-only restoration"
       outcome: { outcome: "aborted", error: expect.stringContaining("read-only") } });
   }
 });
+
+it("deletes a team execution individually and tears down every runtime when deleting its team", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Execution teardown", creatorUserId: "local-user" });
+  const owner = { type: "team", id: team.id } as const;
+  const meta = { orgId: "local-org", actorUserId: "local-user" };
+  const first = await ensureAssistantExecution(p, owner, meta, "app-assistant:local-user");
+  const second = await ensureAssistantExecution(p, owner, meta, "web:default");
+  await second.session.sandbox.writeFile("/workspace/secret.txt", "teardown marker");
+  expect((await fetch(`${api.baseUrl}/api/sessions/${first.sessionId}`, { method: "DELETE" })).status).toBe(200);
+  await expect(ensureAssistantExecution(p, owner, meta, "app-assistant:local-user")).rejects.toThrow();
+  expect((await fetch(`${api.baseUrl}/api/teams/${team.id}`, { method: "DELETE" })).status).toBe(200);
+  const rows = await p.db.select().from(agentSessions).where(eq(agentSessions.ownerId, team.id));
+  expect(rows.every(row => row.status === "deleted")).toBe(true);
+  expect(p.engineHost.liveSession(second.sessionId)).toBeNull();
+  expect(await p.engineStore.getSession(second.sessionId)).toBeNull();
+  await expect(ensureAssistantExecution(p, owner, meta, "web:default")).rejects.toThrow();
+});

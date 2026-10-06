@@ -815,7 +815,8 @@ export class EngineHost {
    * against `max(latestActivityAt ?? createdAt, gatewayTouch ?? 0)` — see
    * `touchGatewayActivity`'s doc comment for why the gateway side is
    * needed — AND the attachment is currently `ready` (never touches
-   * `detached`/`provisioning`/`suspended`/`error`/`released` attachments).
+   * `provisioning`/`error`/`released` attachments). Idle execution caches
+   * may also be evicted while detached or suspended; their stored history remains.
    *
    * Race rule: `listUnsettledSubmissions` is checked once here, then
    * RE-CHECKED immediately before calling `suspend()` — a submission
@@ -829,7 +830,8 @@ export class EngineHost {
     now: number,
     idleMs: number,
   ): Promise<void> {
-    if (session.attachment.state !== "ready") return;
+    const execution = sessionId.startsWith("execution:");
+    if (session.attachment.state !== "ready" && !(execution && ["detached", "suspended"].includes(session.attachment.state))) return;
 
     const unsettled = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
     if (unsettled.length > 0) return;
@@ -850,11 +852,20 @@ export class EngineHost {
 
     // Re-check immediately before suspending — a submission admitted since
     // the check above wins.
+    if ((await this.opts.engineStore.listDecisionGates(sessionId, undefined, "pending")).length > 0) return;
     const recheck = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
-    if (recheck.length > 0) return;
-    if (session.attachment.state !== "ready") return;
+    if (recheck.length > 0 || session.hasOtherActiveRuns("") || session.pendingJobCount() > 0) return;
+    if (this.cache.get(sessionId)?.session !== session) return;
+    if (session.attachment.state !== "ready") {
+      if (execution && ["detached", "suspended"].includes(session.attachment.state)) this.evictCache(sessionId);
+      return;
+    }
 
     await session.attachment.suspend();
+    if (execution && !(await this.opts.engineStore.listDecisionGates(sessionId, undefined, "pending")).length
+      && !(await this.opts.engineStore.listUnsettledSubmissions(sessionId)).length
+      && !session.hasOtherActiveRuns("") && session.pendingJobCount() === 0
+      && this.cache.get(sessionId)?.session === session) this.evictCache(sessionId);
 
     if (this.opts.onHibernate) {
       Promise.resolve(this.opts.onHibernate(sessionId, session.attachment.sandboxId)).catch((err) =>
@@ -939,6 +950,11 @@ export class EngineHost {
       return this.assistantSessionFor(assistantId, { actorUserId: meta.userId, orgId: meta.orgId });
     }
 
+    if (sessionId.startsWith("execution:") && this.opts.db) {
+      const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      if (!assistant) throw new ArchivedAssistantError();
+      return this.assistantSessionFor(assistant.id, { actorUserId: meta.userId, orgId: meta.orgId }, { sessionId });
+    }
     const cached = this.cache.get(sessionId);
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
@@ -2538,7 +2554,16 @@ export class EngineHost {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
     this.assertSessionBuildAllowed(sessionId);
     const cached = this.cache.get(sessionId);
-    if (cached) return cached.session;
+    if (cached) {
+      const assistant = this.opts.db ? await loadAssistant(this.opts.db, assistantId) : undefined;
+      const [app] = this.opts.db ? await this.opts.db.select({ status: agentSessions.status }).from(agentSessions)
+        .where(eq(agentSessions.id, sessionId)).limit(1) : [];
+      if (!assistant || assistant.archivedAt !== null || (sessionId.startsWith("execution:") && app?.status === "deleted")) {
+        this.evictCache(sessionId);
+        throw new ArchivedAssistantError();
+      }
+      return cached.session;
+    }
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
 
@@ -2787,6 +2812,13 @@ export class EngineHost {
       session.suspendTimers();
       return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1, overrideId);
     }
+    const currentAssistant = await loadAssistant(db, assistantId);
+    const [currentApp] = await db.select({ status: agentSessions.status }).from(agentSessions)
+      .where(eq(agentSessions.id, sessionId)).limit(1);
+    if (!currentAssistant || currentAssistant.archivedAt !== null || (execution && currentApp?.status === "deleted")) {
+      session.suspendTimers();
+      throw new ArchivedAssistantError();
+    }
     builtSession = session;
 
     this.cache.set(sessionId, { engine, session });
@@ -2807,9 +2839,10 @@ export class EngineHost {
     return session;
   }
 
-  /** Only the owner's memory supplies persona text; team read unions do not apply. */
+  /** Use private persona text first, then the same team's explicitly shared persona. */
   private async resolvePersonaPrefix(db: AppDb, scope: MemoryScope): Promise<string> {
-    const row = await readOwnFile(db, scope, "assistant/personality.md");
+    const row = await readOwnFile(db, scope, "assistant/personality.md")
+      ?? (scope.owner.type === "team" && scope.namespace ? await readOwnFile(db, { ...scope, namespace: "" }, "assistant/personality.md") : null);
     return personaPrefixText(row?.content ?? "");
   }
 
@@ -3054,6 +3087,10 @@ export class EngineHost {
    * session's in-process state (GateManager waiters, running items) that only
    * exists while the session is live.
    */
+  sessionsWithActiveRuns(): string[] {
+    return [...this.cache].filter(([, entry]) => entry.session.listThreads().some(thread => thread.hasActiveRun)).map(([id]) => id);
+  }
+
   liveSession(sessionId: string): Session | null {
     return this.cache.get(sessionId)?.session ?? null;
   }

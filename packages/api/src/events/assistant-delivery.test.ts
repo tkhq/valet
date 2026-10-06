@@ -8,9 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EngineHost } from "../engine/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
-import { assistants, teams, users } from "../schema/index.js";
+import { assistants, sessionThreads, teams, users } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 
 const ORG = "org-1";
@@ -125,6 +126,45 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect((await restored.threadByKey("slack:C1:next"))?.modelId()).toBe("s");
     expect((await restored.threadByKey("slack:C1:next"))?.toThreadData().reasoning).toBe("off");
     expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
+  });
+
+  it("restores the exact private PR thread and refuses deliveries archived while queued", async () => {
+    const owner = { type: "team", id: "pr-team" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "PR team", createdAt: 1 });
+    const deps = { db: testDb.appDb, engineHost };
+    const key = `app-assistant:${USER}`;
+    const { session } = await ensureAssistantExecution(deps, owner, { actorUserId: USER, orgId: ORG }, key);
+    const thread = await session.createThread("web:original-pr");
+    await thread.pause();
+    engineHost.evictCache(session.id);
+    const args = { orgId: ORG, owner, actorUserId: USER, threadKey: key,
+      target: { sessionId: session.id, threadId: thread.id }, signal: channelSignal("Review feedback"),
+      dispatchId: "cold-pr-reply", mismatchReason: "test" };
+    await deliverToAssistantThread(deps, args);
+    const restored = engineHost.liveSession(session.id)!;
+    expect(restored).not.toBe(session);
+    expect(await restored.providers.store.listUnsettledSubmissions(session.id)).toEqual([
+      expect.objectContaining({ threadId: thread.id }),
+    ]);
+
+    const empty = await restored.createThread("web:queued-pr");
+    await empty.pause();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const fetchThreadContext = async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); return "Earlier review"; };
+    const target = { sessionId: session.id, threadId: empty.id };
+    const first = deliverToAssistantThread({ ...deps, fetchThreadContext }, { ...args, target, dispatchId: "queued-first" });
+    await waiting;
+    const second = deliverToAssistantThread(deps, { ...args, target, dispatchId: "queued-second" });
+    const results = Promise.allSettled([first, second]);
+    await testDb.appDb.insert(sessionThreads).values({ id: empty.id, sessionId: session.id, createdAt: 1, archivedAt: Date.now() });
+    release();
+    expect(await results).toEqual([
+      { status: "rejected", reason: expect.objectContaining({ message: expect.stringContaining("archived or deleted") }) },
+      { status: "rejected", reason: expect.objectContaining({ message: expect.stringContaining("archived or deleted") }) },
+    ]);
+    expect((await restored.providers.store.listUnsettledSubmissions(session.id)).some(item => item.threadId === empty.id)).toBe(false);
   });
 
   it("prepends the fetched thread transcript on the first turn in a channel thread", async () => {

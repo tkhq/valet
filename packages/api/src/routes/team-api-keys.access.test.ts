@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { teamMembers } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { assistantExecutions, assistants, teamMembers } from "../schema/index.js";
 import type {
   CreateTeamApiKeyResponse,
   CreateTeamResponse,
@@ -238,7 +239,11 @@ describe("team API key reach", () => {
     expect(personal.status).toBe(403);
     const info = await fetch(`${f.baseUrl}/api/workspaces/${f.teamId}/runtime/info`, { headers });
     expect(info.status).toBe(200);
-    expect(await info.json()).toMatchObject({ sessionId });
+    const [mapping] = await api!.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, sessionId));
+    expect(mapping.conversationKey).toBe("web:default");
+    expect(api!.providers.engineHost.liveSession(sessionId)?.options.readOnlyReason).toBeUndefined();
+    const [root] = await api!.providers.db.select().from(assistants).where(eq(assistants.id, mapping.assistantId));
+    expect(await info.json()).toMatchObject({ sessionId: root.sessionId });
     for (const workspace of ["user", otherTeamId]) {
       expect((await fetch(`${f.baseUrl}/api/workspaces/${workspace}/runtime/info`, { headers })).status).toBe(403);
     }

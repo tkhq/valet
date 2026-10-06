@@ -793,11 +793,9 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
       .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, opts.teamId)));
     for (const assistant of teamAssistants) {
       await retireAssistant(tx, assistant.id);
-      await tx
-        .update(agentSessions)
-        .set({ status: "deleted", updatedAt: Date.now() })
-        .where(eq(agentSessions.id, assistant.sessionId));
     }
+    await tx.update(agentSessions).set({ status: "deleted", updatedAt: Date.now() })
+      .where(and(eq(agentSessions.orgId, team.orgId), eq(agentSessions.ownerType, "team"), eq(agentSessions.ownerId, opts.teamId)));
     // Machine-driven delivery targets go too. A surviving team-owned event
     // subscription, channel binding, or followed thread keeps dispatching
     // to the team principal, and `resolveDefaultAssistant` would then MINT

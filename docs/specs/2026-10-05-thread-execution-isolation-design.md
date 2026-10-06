@@ -1,146 +1,62 @@
 # Thread execution isolation
 
-## Release requirement
+Workspace ownership controls credentials, policy and billing. Conversation audience controls transcripts, files, memory and sandbox tokens.
+Keep one workspace assistant in the UI. Persist each team conversation's execution session and governing thread under a unique mapping.
+Concurrent creation shares the team-deletion lock. Restart restores the stored execution identity; missing or cyclic ancestry fails closed.
+Helpers, editors, web threads, events and workflow reports resolve their execution before uploads or prompt admission. Children inherit their parent audience.
+Private Slack audiences require current membership. Team API keys cannot access private executions. Configuration changes evict all mapped execution catalogs.
 
-A private transcript must not write files or memory that another audience can read.
-Workspace ownership controls credentials, policy, billing, and configuration. It does not define the audience of every conversation.
-Keep one workspace assistant in the UI. Reuse existing engine sessions for isolated execution instead of creating a second sandbox lifecycle.
+Default writes, exports and imports use the execution namespace. Reads, searches and snapshots also expose explicit shared team memory under `team:<id>/`.
+Shared projections are read-only. Publication requires a separately authorized copy. Legacy quarantine never enters this union.
+Filesystem, terminal, artifacts and memory routes apply governing-thread authorization; team administration alone cannot read another member's private helper.
 
-## Execution identity
+## Upgrade and recovery
 
-Persist a mapping from the workspace assistant and conversation key to an execution session.
-Each execution keeps the workspace owner and a durable governing thread in the workspace runtime.
-The governing thread supplies the existing reader boundary, including current Slack channel membership.
-Different conversation keys receive separate working directories, sandbox tokens, and default memory namespaces.
-Concurrent creation uses a unique database constraint. Restart resolves the same stored execution identity.
+Do not copy legacy working directories into new executions. Retain mixed-audience runtimes as read-only transcript sources.
+Restoration aborts their queued/interrupted submissions and withdraws gates without replaying tools. Existing admission receipts remain authoritative.
+Workflow nodes and reports resolve live legacy origins into isolated executions with the same governing audience. Missing/archived origins never widen access.
+Legacy team memory moves to `legacy`; personal memory keeps its namespace. Back up the database and working directories before cutover.
+Recover ambiguous notes only after their owner confirms the audience. Never bulk-copy legacy memory into shared memory.
+This is a one-way schema cutover: stop old writers before repair. Rollback requires restoring the pre-upgrade database and files, not reusing migrated data.
 
-New helper, editor, web, event, and workflow-report conversations resolve their execution before uploads or prompt admission.
-Children retain separate sandboxes and memory namespaces. Their reader audience follows the parent conversation.
-Credential ownership remains the workspace owner; execution isolation does not grant access to personal credentials.
-When an administrator clears a workspace integration limit, evict its root runtime and every mapped execution from the cache.
-Existing conversations rebuild their tool catalogs on their next turn. Other workspaces keep their cached sessions.
+`GET /api/workspaces/:workspace/history` lists retained root/retired conversation IDs without waking sandboxes.
+Its encrypted viewer/workspace-scoped `nextCursor` is accepted as `before`; `sessionId` and `threadId` select authorized transcript pages, newest first.
+Current membership and thread audience apply to every page. Hidden identifiers never appear in cursors.
+Sandbox reconciliation retains retired identities' working directories and reports their age. Operators export before explicit deletion.
+The hibernation reaper excludes legacy team roots. On hibernation-capable backends, executions leave cache after the existing idle window when submissions, gates and exec jobs finish; mappings, history and files remain.
+Runtime presence checks only running sessions and active child watches. Thread lists filter archived-only executions before loading histories; archived history remains available on request.
+Originless workflow runs receive separate report executions. Report archival evicts only after submissions and decisions finish; origin executions remain available.
 
-## Data access
+## Artifact cutover gate
 
-Thread history and decisions continue to use the existing thread APIs.
-Workspace lists include execution threads and exclude empty governing threads.
-The chat page selects the listed execution session. Private helper and editor labels follow their governing audience.
-Legacy conversation views replace the composer with an instruction to start a new thread.
-Session-wide filesystem and terminal requests require access to the execution's governing audience.
-A team API key cannot access a private execution. An unknown or missing governing thread denies access.
-Default memory reads, writes, snapshots, searches, exports, and imports use the execution namespace.
-An explicit publication or memory copy remains a separate audience-changing operation with existing authorization.
-
-## Upgrade
-
-Do not copy a legacy shared working directory into each new execution.
-Legacy mixed-audience runtimes retain read-only transcript access. New work starts in isolated execution sessions.
-On restoration, queued and interrupted legacy submissions settle as aborted with the migration reason.
-The engine withdraws their pending decision gates. It does not replay tools or resume their models.
-Workflow Thread nodes and settlement reports to a live legacy team thread use an isolated execution under the same thread key.
-Its governing thread preserves the original private helper or Slack audience. Missing threads and unavailable or archived explicit origins fail closed. They never fall back to a broader team audience.
-Retries retain prior legacy admission receipts, including aborted outcomes. They do not execute those submissions again.
-Block writes and terminal access to ambiguous legacy sandboxes until an operator exports or classifies their data.
-Retain old memory and artifacts for authorized recovery; never reinterpret ambiguous data as team-shared.
-Retired assistant state must remain exportable before sandbox cleanup can destroy it.
-
-## Acceptance evidence
-
-Alice writes a marker from her team helper; Bob cannot read it through tools, memory, uploads, terminal, or a child.
-The same checks pass after an API restart. Private Slack audiences retain live membership checks.
-A scheduled team turn still uses team credentials or a current explicit lender grant.
-Missing origins and stale mappings fail closed. Concurrent first opens produce one execution.
-Upgrade tests preserve old history and prevent ambiguous state from entering a new execution.
-
-## Scope
-
-Slack-event workflow chaining remains unavailable until its audience can be carried into child runs.
-That limitation is explicit and does not prevent this isolation change from shipping.
-
-## Recovery
-
-`GET /api/workspaces/:workspace/history` lists retained root and retired conversation IDs without waking a sandbox.
-The response includes `nextCursor`; send it as `before` to read the next page.
-Cursors are encrypted and scoped to the viewer and workspace. They do not expose hidden thread IDs.
-Add `sessionId` and `threadId` to export one authorized transcript page. Entries are newest first.
-This route applies current workspace membership and each conversation's reader boundary, including private helper ownership.
-It never grants team administrators access to another member's private helper.
-
-On upgrade, existing team memory moves to the `legacy` namespace. Personal memory stays in its existing namespace.
-The database retains these rows; normal memory routes cannot select that namespace.
-Operators must preserve a database backup before cutover. Recover notes only after the owner confirms their intended audience.
-Do not bulk-copy the legacy namespace into shared team memory.
-
-The sandbox reconciler retains working directories for identities marked `<owner>:retired:<assistant-id>`.
-It continues to report their age. Operators export retained data before explicitly deleting the sandbox.
-This retention does not make a retired sandbox available through terminal or file routes.
-The hibernation reaper also excludes legacy team roots. Isolated executions keep the normal retention policy.
-Artifact publication verifies that the publisher can access the source thread, including inherited execution ancestry.
-Team ownership alone cannot authorize source attribution to another member's private helper. Internal publication uses its verified actor identity.
-Legacy team artifacts with an unknown source thread remain hidden on token, comment, version, and management routes as well as lists. Restore their provenance only from verified publication receipts.
-
-## Shared briefing privacy
-
-Team briefings require a public Slack classification checked within five minutes.
-The same bound applies to collected evidence and cached responses, including event-only workflow runs and their effects.
-Expired classifications exclude evidence until a successful channel check refreshes them. An outage must not extend a shared briefing's public classification.
-
-## Slack delivery recovery
-
-Slack ingress drains independently of workflow event delivery. One slow media download cannot block unrelated workflow events.
-The durable inbox retains an encrypted delivery after ten failed processing attempts.
-It records `failed_at` and a `slack_delivery_failed` problem. Automatic drains exclude these records.
-An operator inspects the delivery's receipt stages and repairs the failing consumer before replay.
-To replay, reset `attempts` to zero, `failed_at` to null, and `next_attempt_at` to zero for the verified organization and delivery ID.
-Never delete the accepted payload to clear the error. Durable engine dispatch IDs prevent a previously admitted message from starting another turn.
-
-## Blocking artifact cutover check
-
-Run this check against each target database before enabling the refactored deployment.
-Use an operator connection. Do not paste artifact content or publication tokens into shared review comments.
-
-1. Back up the database and retained working directories.
-2. Inventory affected artifacts with the query below.
-3. Inspect the recorded source session for a successful `artifact_publish` or `mem_share` tool call and its paired tool result.
-4. Match the exact artifact token, normalized publish key, and current version's content against that receipt.
-5. Verify that exactly one existing thread satisfies the evidence. Verify its organization and owner.
-6. Record the receipt entry IDs and version in the private deployment record.
-7. Lock the artifact row in a transaction. Repeat the version, source session, and null-thread checks before updating `source_thread_id`.
-8. Test access as the intended reader and as an unauthorized team member.
-9. Repeat the inventory. Stop cutover if any row lacks verified provenance or an owner-approved recovery disposition.
+Run this procedure against both target database copies before release. Keep content, tokens and receipts in private deployment records.
+Inventory live team artifacts with a source session and no source thread:
 
 ```sql
-SELECT a.id, a.org_id, a.owner_id, a.source_session_id,
-       a.source_memory_path, a.version, a.updated_at
-FROM artifacts a
-WHERE a.owner_type = 'team' AND a.source_session_id <> ''
-  AND a.source_thread_id IS NULL AND a.revoked_at IS NULL
-ORDER BY a.org_id, a.owner_id, a.id;
+SELECT id, org_id, owner_id, source_session_id, source_memory_path, version, updated_at
+FROM artifacts WHERE owner_type = 'team' AND source_session_id <> ''
+  AND source_thread_id IS NULL AND revoked_at IS NULL ORDER BY org_id, owner_id, id;
 ```
 
-A quoted URL in an ordinary message is not a publication receipt.
-The publishing actor and default thread are not proof of audience.
-If the latest version cannot be verified, keep the artifact quarantined.
-Ask its owner to recover and republish it under a new key from an authorized conversation, or explicitly accept quarantine.
-Record that disposition in the deployment record. Re-publication cannot replace an unknown source and expose its retained version history.
-Never assign an arbitrary shared thread to clear this check.
+Match each token, normalized key and current content/version to a successful `artifact_publish` or `mem_share` call and its result.
+Verify one existing source thread, its organization and owner. Lock the artifact and repeat these checks before updating `source_thread_id`.
+Test intended and unauthorized readers. A quoted URL, publishing actor or default thread is not audience evidence.
+Unverified artifacts remain quarantined on every access route. Obtain owner-approved quarantine or republish under a new key; never expose retained versions by assigning a shared thread.
+Record provenance/recovery dispositions and repeat the inventory. Unexplained rows block cutover; code review cannot certify target data.
 
-This procedure is a release gate, not an automatic backfill. A code review cannot certify the target database's recovery state.
+## Delivery and briefing recovery
 
-## Briefing refresh ownership
+Slack-event workflow chaining stays blocked until child runs carry the channel audience. Linked-account admission remains required.
+Slack ingress and workflow events drain independently. At most ten inbox rows process concurrently, with renewed fenced leases.
+After ten failures, retain the encrypted payload, set `failed_at`, and record `slack_delivery_failed` atomically.
+Operators inspect receipt stages and repair consumers before resetting the verified organization's delivery to `attempts=0`, `failed_at=null`, `next_attempt_at=0`.
+Do not delete accepted payloads. Durable dispatch IDs prevent replay from starting another admitted turn.
+Shared briefing evidence and cached responses require public Slack classifications checked within five minutes, including event-only sources and effects.
+Outages exclude expired evidence. Refreshes renew leases through collection/generation/validation; replaced workers cannot publish or renew.
 
-A refresh renews its lease during collection, generation, and validation, including background refreshes.
-Only the worker holding the current lease token can publish or renew.
-If its deadline expires without another worker taking ownership, it can publish its validated result.
-A replaced worker cannot overwrite the new owner's result.
+## Validation
 
-Workspace channel lists and detail pages include the logical runtime and its registered execution sessions.
-Each session keeps its governing-thread visibility checks. Message queries match both session and thread IDs before applying the result limit.
-
-## Workflow report retention
-
-An originless team run uses one execution for its report thread. Separate runs do not share execution state.
-When the existing settlement hook archives that thread, it evicts the execution cache only after submissions and pending decisions finish.
-It leaves origin conversation executions cached. Durable mappings, transcripts, and files remain available under existing access checks and sandbox retention.
-No time-based deletion of workflow report history is introduced.
-If the run settles before its report finishes, the hook leaves that execution active; existing sandbox idle handling still applies.
+Test Alice/Bob isolation across tools, memory, uploads, terminal, children and restart; preserve team credentials and current lender grants.
+Test missing origins, allocation/deletion races, repeated repairs and retained history without importing ambiguous state.
+Workspace channel/history reads match session and thread IDs before limits and retain governing visibility.
+Run the separate [database-copy checks](../testing/migration-checks.md) for both deployments.

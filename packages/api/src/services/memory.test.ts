@@ -53,7 +53,12 @@ describe("memory service", () => {
     await patchFile(db, alice, { path: "notes/plan.md", oldString: "acquisition", newString: "merger" });
     expect(await readFile(db, bob, "notes/plan.md")).toMatchObject({ kind: "file", file: { content: "Bob plan" } });
     await moveFile(db, alice, { from: "notes/plan.md", to: "notes/private.md" });
-    expect((await listFiles(db, bob)).map(row => row.path)).toEqual(["notes/plan.md"]);
+    expect((await listFiles(db, bob)).map(row => row.path)).toEqual(["notes/plan.md", `team:${team.id}/notes/plan.md`]);
+    expect(await readFile(db, bob, `team:${team.id}/notes/plan.md`)).toMatchObject({ kind: "file", file: { content: "Shared plan" } });
+    expect((await searchFiles(db, bob, { query: "plan" })).map(row => row.path)).toEqual(expect.arrayContaining(["notes/plan.md", `team:${team.id}/notes/plan.md`]));
+    await expect(writeFile(db, bob, { path: `team:${team.id}/notes/plan.md`, content: "Unsafe publication" })).rejects.toThrow();
+    await writeFile(db, { ...shared, namespace: "legacy" }, { path: "old.md", content: "Quarantined private content" });
+    expect(await searchFiles(db, bob, { query: "Quarantined" })).toEqual([]);
     const exported = await exportFiles(db, alice);
     expect(exported["notes/private.md"]?.content).toContain("Confidential merger");
     expect(exported).not.toHaveProperty("notes/plan.md");

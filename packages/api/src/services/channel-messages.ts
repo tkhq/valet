@@ -388,19 +388,24 @@ export async function recordTerminalPullRequestWrite(
  * archived thread is skipped: work there would run where no list shows it, so
  * the comment goes to the shared events thread instead.
  */
-export async function threadKeyForPullRequest(
+export async function threadForPullRequest(
   db: AppDb, orgId: string, owner: Principal, url: string,
-): Promise<string | null> {
+): Promise<{ sessionId: string; threadId: string; key: string } | null> {
   const result = await db.execute(sql`
-    SELECT et.key FROM thread_pull_requests pr
-    JOIN assistants a ON a.session_id = pr.session_id
+    SELECT pr.session_id AS "sessionId", pr.thread_id AS "threadId", COALESCE(x.conversation_key, et.key) AS key
+    FROM thread_pull_requests pr
+    LEFT JOIN assistant_executions x ON x.session_id = pr.session_id
+    JOIN assistants a ON a.session_id = pr.session_id OR a.id = x.assistant_id
     JOIN engine_threads et ON et.session_id = pr.session_id AND et.id = pr.thread_id
+    JOIN agent_sessions s ON s.id = pr.session_id AND s.status <> 'deleted' AND s.org_id = a.org_id
     LEFT JOIN session_threads st ON st.session_id = pr.session_id AND st.id = pr.thread_id
+    LEFT JOIN session_threads governing ON governing.session_id = a.session_id AND governing.id = x.governing_thread_id
     WHERE pr.url = ${url} AND a.org_id = ${orgId} AND a.owner_type = ${owner.type} AND a.owner_id = ${owner.id}
-      AND a.archived_at IS NULL AND st.archived_at IS NULL
-    ORDER BY pr.created_at DESC LIMIT 1`) as { rows: Array<{ key: string | null }> };
-  return result.rows[0]?.key ?? null;
+      AND a.archived_at IS NULL AND st.archived_at IS NULL AND governing.archived_at IS NULL
+    ORDER BY pr.created_at DESC LIMIT 1`) as { rows: Array<{ sessionId: string; threadId: string; key: string }> };
+  return result.rows[0] ?? null;
 }
+
 
 const CHANNEL_ACTIONS = new Set([...SLACK_SEND_ACTIONS, "github.create_comment", "github.create_review"]);
 

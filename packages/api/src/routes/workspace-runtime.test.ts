@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teams, teamMembers } from "../schema/index.js";
+import { agentSessions, assistantExecutions, teams, teamMembers } from "../schema/index.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 describe("workspace runtime authorization", () => {
@@ -28,6 +28,19 @@ describe("workspace runtime authorization", () => {
     await api.providers.db.insert(teamMembers).values({ teamId: "legacy-team", userId: "local-user", role: "member" });
     const legacy = await (await fetch(`${api.baseUrl}/api/teams/legacy-team/orchestrator`, { method: "POST" })).json();
     expect(legacy).toEqual(await (await fetch(`${api.baseUrl}/api/workspaces/legacy-team/runtime`, { method: "POST" })).json());
+  });
+  it("returns a writable, viewer-isolated team runtime for default CLI prompts", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "cli-team", orgId: "local-org", name: "CLI", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values({ teamId: "cli-team", userId: "local-user", role: "admin" });
+    const response = await fetch(`${api.baseUrl}/api/workspaces/cli-team/runtime`, { method: "POST" });
+    const { sessionId } = await response.json() as { sessionId: string };
+    expect(sessionId).toMatch(/^execution:/);
+    const session = api.providers.engineHost.liveSession(sessionId);
+    if (!session) throw new Error("Missing ensured runtime");
+    expect(session.options.readOnlyReason).toBeUndefined();
+    const [mapping] = await api.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, sessionId));
+    expect(mapping.conversationKey).toBe("app-assistant:local-user");
   });
   it("authorizes every operation by the requested team's organization and membership", async () => {
     api = await bootTestApi();

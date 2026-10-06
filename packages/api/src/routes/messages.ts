@@ -342,10 +342,14 @@ async function loadEngineSession(
 messagesRouter.get("/:id/threads", (c) => listThreads(c, c.req.param("id")));
 
 /** Enumerate execution histories without waking their sandboxes. */
-async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSessions.$inferSelect) {
+async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSessions.$inferSelect, archived?: boolean) {
   const { db, engineStore } = c.var.providers;
   const executions = session.ownerType === "team"
-    ? await db.select({ session: agentSessions, governingThreadId: assistantExecutions.governingThreadId, governingKey: assistantExecutions.conversationKey }).from(assistantExecutions)
+    ? await db.select({ session: agentSessions, governingThreadId: assistantExecutions.governingThreadId, governingKey: assistantExecutions.conversationKey,
+        matchesArchive: archived === undefined ? sql<boolean>`true` : sql<boolean>`EXISTS (
+          SELECT 1 FROM engine_threads t LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
+          WHERE t.session_id = ${agentSessions.id} AND (m.archived_at IS NOT NULL) = ${archived}
+        )` }).from(assistantExecutions)
       .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
       .innerJoin(agentSessions, eq(agentSessions.id, assistantExecutions.sessionId))
       .where(and(eq(assistants.sessionId, session.id), eq(agentSessions.orgId, session.orgId),
@@ -360,7 +364,7 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
     if (self) keys.set(session.id, self.key);
   }
   const groups = [];
-  for (const row of [session, ...executions.map(e => e.session)]) {
+  for (const row of [session, ...executions.filter(e => e.matchesArchive).map(e => e.session)]) {
     if (!await spawnedFromVisibleThread(c, row)) continue;
     const visible = threadsVisibleTo(c, row);
     const stored = await engineStore.listThreads(row.id);
@@ -387,7 +391,8 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const { db } = c.var.providers;
 
   if (!session.id.startsWith("execution:")) await engineSession.ensureDefaultThread();
-  const groups = await workspaceThreadGroups(c, session);
+  const wantArchived = c.req.query("archived") === "1";
+  const groups = await workspaceThreadGroups(c, session, wantArchived);
   const threads = groups.flatMap(group => group.threads.map(t => ({ ...t,
     model: t.model ?? group.defaults?.model, reasoning: t.reasoning ?? group.defaults?.reasoning })));
 
@@ -421,7 +426,6 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   );
 
   // Default list excludes archived threads; `?archived=1` lists only them.
-  const wantArchived = c.req.query("archived") === "1";
   // A team runtime's private threads show only to the people they belong to
   // (`services/thread-access.ts`).
   const query = c.req.query("q")?.trim().toLowerCase() ?? "";

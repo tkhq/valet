@@ -1,13 +1,8 @@
-/**
- * `POST /api/workspaces/:id/runtime` — get-or-create the team's DEFAULT
- * assistant session (`services/session-access.ts`'s companion route: this
- * creates the `agent_sessions` row that route widens read access to).
- * Mirrors `POST /api/workspaces/user/runtime`'s own contract for the user case.
- */
+/** Team runtime admission and shared-root lifecycle authorization. */
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, assistants, teamMembers, teams } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
 import type { EnsureWorkspaceRuntimeResponse, PatchSessionResponse } from "../wire/types.js";
@@ -20,7 +15,7 @@ afterEach(async () => {
 });
 
 describe("POST /api/workspaces/:id/runtime", () => {
-  it("creates the team's default assistant session for a member and returns its id", async () => {
+  it("creates a member's writable team execution and returns its id", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await api.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
@@ -29,9 +24,7 @@ describe("POST /api/workspaces/:id/runtime", () => {
     const res = await fetch(`${api.baseUrl}/api/workspaces/team_1/runtime`, { method: "POST" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as EnsureWorkspaceRuntimeResponse;
-    // The address is the assistant's own id, so the test asserts the
-    // scheme and the owner columns rather than a derivable literal.
-    expect(body.sessionId).toMatch(/^assistant:asst_/);
+    expect(body.sessionId).toMatch(/^execution:/);
 
     const rows = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, body.sessionId));
     expect(rows[0]?.ownerType).toBe("team");
@@ -109,24 +102,8 @@ describe("GET /api/sessions/:id — team view access", () => {
   });
 });
 
-/**
- * The lifecycle routes on a team-owned session: `PATCH /api/sessions/:id`
- * (model), `POST /api/sessions/:id/pause`, `DELETE /api/sessions/:id`. They
- * follow team authority (`canAdministerSession`), not the `user_id` that
- * `ensureDefaultAssistantSession` stamped from the first member to open the
- * team's assistant.
- *
- * Two identities do the work, both seeded by `bootTestApi`: the default
- * `local-user` is an org admin, and `test-member` is a plain org member
- * selected with the `x-valet-test-user-id` impersonation header.
- *
- * `pause` gets no further than the hibernation-capability check here — the
- * harness runs a `VirtualSandboxProvider`, whose `capabilities().hibernation`
- * is false. A 409 from it therefore means the caller passed authorization,
- * which is what these tests measure. `PATCH` with an empty body reads the
- * same way: 400 `model is required` is the guard directly after the
- * authorization check.
- */
+/** Shared-root operations follow current team authority, not the first opener.
+ * VirtualSandboxProvider returns 409 after successful pause authorization. */
 describe("team-owned session lifecycle routes", () => {
   const MEMBER_HEADERS = { "x-valet-test-user-id": "test-member" };
 
@@ -138,13 +115,12 @@ describe("team-owned session lifecycle routes", () => {
     await target.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: memberRole });
   }
 
-  /** Opens the team's assistant as `headers`' identity. That call stamps
-   * `agent_sessions.userId` with the caller — the first-opener effect. */
+  /** Materialize the team root through runtime admission, then address its identity. */
   async function openTeamAssistant(target: TestApi, headers: Record<string, string>): Promise<string> {
     const res = await fetch(`${target.baseUrl}/api/workspaces/team_1/runtime`, { method: "POST", headers });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as EnsureWorkspaceRuntimeResponse;
-    return body.sessionId;
+    const [root] = await target.providers.db.select().from(assistants).where(eq(assistants.ownerId, "team_1"));
+    return root.sessionId;
   }
 
   async function statusOf(target: TestApi, sessionId: string): Promise<string | undefined> {

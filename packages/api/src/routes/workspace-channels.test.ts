@@ -7,7 +7,7 @@ import { linkIdentity } from "../channels/identity-links.js";
 import { recordDelegatedPullRequest } from "../services/thread-pull-requests.js";
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
-import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadKeyForPullRequest, wasSentByValet } from "../services/channel-messages.js";
+import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -212,7 +212,7 @@ it("routes a delegated child's pull request back to the thread that delegated it
   });
   const url = "https://github.com/acme/app/pull/77";
   await recordDelegatedPullRequest(api.providers.db, { sessionId: "child-1", threadId: "child-thread", url });
-  expect(await threadKeyForPullRequest(api.providers.db, "local-org", owner, url)).toBe("web:delegating");
+  expect((await threadForPullRequest(api.providers.db, "local-org", owner, url))?.key ?? null).toBe("web:delegating");
 });
 
 it("finds the thread that opened a pull request, and records the comment Valet posts there", async () => {
@@ -223,13 +223,13 @@ it("finds the thread that opened a pull request, and records the comment Valet p
   await api.providers.db.insert(threadPullRequests).values({
     sessionId, threadId: thread.id, url, repo: "acme/app", number: 12, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1,
   });
-  expect(await threadKeyForPullRequest(api.providers.db, "local-org", owner, url)).toBe("web:pr-thread");
+  expect((await threadForPullRequest(api.providers.db, "local-org", owner, url))?.key ?? null).toBe("web:pr-thread");
   // An archived thread no list shows does not take the comment; it goes to the events thread.
   await api.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId, createdAt: 1, archivedAt: 2 })
     .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: 2 } });
-  expect(await threadKeyForPullRequest(api.providers.db, "local-org", owner, url)).toBeNull();
+  expect((await threadForPullRequest(api.providers.db, "local-org", owner, url))?.key ?? null).toBeNull();
   await api.providers.db.update(sessionThreads).set({ archivedAt: null }).where(eq(sessionThreads.id, thread.id));
-  expect(await threadKeyForPullRequest(api.providers.db, "local-org", { type: "team", id: "other" }, url)).toBeNull();
+  expect((await threadForPullRequest(api.providers.db, "local-org", { type: "team", id: "other" }, url))?.key ?? null).toBeNull();
 
   await recordActionChannelMessage(api.providers.db, {
     actionId: "github.create_comment", status: "completed", orgId: "local-org", sessionId, threadId: thread.id,
@@ -291,4 +291,44 @@ it("includes execution channel activity while excluding executions from another 
   expect(detail.messages).toEqual([expect.objectContaining({ sessionId: shared.sessionId, threadId: visibleThread.id, text: "execution reply" })]);
   expect(detail.conversations).toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: shared.sessionId, threadId: visibleThread.id })]));
   expect(detail.conversations.some(conversation => conversation.sessionId === hidden.sessionId)).toBe(false);
+});
+
+it("retains the exact execution and thread when routing a private team's pull request", async () => {
+  api = await bootTestApi();
+  const team = await createTeam(api.providers.db, { orgId: "local-org", name: "PR routing", creatorUserId: "local-user" });
+  const owner = { type: "team", id: team.id } as const;
+  const execution = await ensureAssistantExecution(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:local-user");
+  const thread = await execution.session.ensureDefaultThread();
+  const url = "https://github.com/acme/app/pull/819";
+  await api.providers.db.insert(threadPullRequests).values({ sessionId: execution.sessionId, threadId: thread.id,
+    url, repo: "acme/app", number: 819, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1 });
+  expect(await threadForPullRequest(api.providers.db, "local-org", owner, url)).toEqual({
+    sessionId: execution.sessionId, threadId: thread.id, key: "app-assistant:local-user",
+  });
+  expect(await threadForPullRequest(api.providers.db, "foreign-org", owner, url)).toBeNull();
+});
+
+
+it("does not hydrate archived-only executions in the active thread list", async () => {
+  api = await bootTestApi();
+  const root = await teamRuntime(api);
+  const teamOwner = { type: "team", id: root.assistant.ownerId } as const;
+  const archivedIds: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const execution = await ensureAssistantExecution(api.providers, teamOwner,
+      { orgId: "local-org", actorUserId: "local-user" }, `workflow-report:archived-${i}`);
+    const thread = await execution.session.ensureDefaultThread();
+    archivedIds.push(execution.sessionId);
+    await api.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId: execution.sessionId, createdAt: 1, archivedAt: 2 });
+  }
+  const list = vi.spyOn(api.providers.engineStore, "listThreads");
+  const defaults = vi.spyOn(api.providers.engineStore, "getSession");
+  const url = `${api.baseUrl}/api/sessions/${root.sessionId}/threads`;
+  expect((await fetch(url)).status).toBe(200);
+  for (const id of archivedIds) {
+    expect(list.mock.calls.some(call => call[0] === id)).toBe(false);
+    expect(defaults.mock.calls.some(call => call[0] === id)).toBe(false);
+  }
+  const archived = await (await fetch(`${url}?archived=1`)).json() as ListThreadsResponse;
+  expect(archived.threads.map(t => t.sessionId).sort()).toEqual(archivedIds.sort());
 });

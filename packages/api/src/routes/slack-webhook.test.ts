@@ -283,15 +283,19 @@ describe("POST /api/channels/slack/webhook", () => {
     expect(await dropReasons(api)).toContain("unknown_org");
   });
 
-  it("acks and drop-logs when the credential exists but the transport is not running", async () => {
+  it("requests retry until the configured transport starts", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedCredential(api);
 
     const body = envelope(dmMessage(), "Ev-notransport");
     const res = await post(api.baseUrl, body, sign(body));
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("5");
+    expect(await api.providers.db.select().from(slackWebhookInbox)).toEqual([]);
     expect(await dropReasons(api)).toContain("transport_unavailable");
+    await api.providers.channelHost.start();
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
   });
 
   it("401s a body signed with the wrong secret", async () => {
@@ -1107,6 +1111,37 @@ describe("Slack receipt diagnostics", () => {
     release();
     // Let the post-ack fan-out finish before the next test boots.
     await expect.poll(() => eventCount(api!, "Ev-slow-receipt"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("drains unrelated deliveries while a receipt stalls and renews the slow delivery's lease", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.message"]);
+    await api.providers.eventDispatcher.stop();
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = receiptsModule.createEventReceipt;
+    vi.spyOn(receiptsModule, "createEventReceipt").mockImplementation(async (db, input) => {
+      if (input.externalId === "Ev-slow-concurrent") await gate;
+      return original(db, input);
+    });
+    for (const id of ["Ev-slow-concurrent", "Ev-fast-concurrent"]) {
+      const body = envelope(humanChannelMessage(), id);
+      expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    }
+    const before = await api.providers.db.select().from(slackWebhookInbox);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const drain = drainSlackIngress(api.providers);
+    try {
+      await expect.poll(() => eventCount(api!, "Ev-fast-concurrent"), { timeout: 5_000 }).toBe(1);
+      expect(await eventCount(api, "Ev-slow-concurrent")).toBe(0);
+      await vi.advanceTimersByTimeAsync(40_000);
+      const [pending] = await api.providers.db.select().from(slackWebhookInbox);
+      expect(pending.nextAttemptAt).toBeGreaterThan(Math.max(...before.map(row => row.nextAttemptAt)) + 60_000);
+      release();
+      await drain;
+      expect(await api.providers.db.select().from(slackWebhookInbox)).toEqual([]);
+    } finally { release(); await drain; vi.useRealTimers(); }
   });
 
   it("records foreign-workspace receipt without running any consumer", async () => {

@@ -60,3 +60,9 @@ Named approvers on private child sessions receive exact pending-gate decision ac
 ## Validation
 
 Exercise both route families against retained history, thread-local decisions, private/team access, malformed origins, named gate-only approvals, credential revocation races, account switching, and recovery. Retain unique API/client regression coverage and the final end-to-end scorecard. Removing obsolete aliases requires client-floor evidence; deployment requires the separate database-copy migration and artifact-cutover checks.
+
+Team CLI runtime resolution returns a writable execution: human requests use their private helper; team keys use the shared default.
+PR replies retain their exact source session/thread, recheck archive state, and suppress recorded own writes even when source routing is unavailable.
+Team deletion locks execution allocation, marks every owned session deleted, and tears down roots, executions, children, grants, and sandbox tokens.
+Deleted executions cannot reopen. Logical workspace assistants remain permanent; individual executions can be deleted by authorized callers.
+Slack startup returns 503 until verification and durable admission are available. At most ten inbox rows drain concurrently; each renews its fenced lease.

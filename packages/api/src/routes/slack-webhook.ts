@@ -427,8 +427,7 @@ slackWebhookRouter.post("/webhook", async (c) => {
 
   const transport = channelHost.transportFor("slack");
   if (!transport) {
-    // The credential exists but the transport did not start, so nothing can
-    // verify the signature. Ack for the same reason as above.
+    // No verified durable admission exists yet. Slack must retry after startup.
     await throttledDropLog(db, {
       orgId,
       reason: "transport_unavailable",
@@ -436,7 +435,8 @@ slackWebhookRouter.post("/webhook", async (c) => {
         "slack webhook received but the slack transport is not running. " +
         "Read the api startup log for the slack transport error.",
     });
-    return c.body(null, 200);
+    c.header("Retry-After", "5");
+    return c.json({ error: "Slack is starting. Retry this delivery shortly." }, 503);
   }
 
   // `verifyWebhook` is wrapped defensively: a crafted signature header must
@@ -486,7 +486,20 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
   // Repeat the due predicate on UPDATE to fence concurrent process claims.
   const rows = await db.update(slackWebhookInbox).set({ nextAttemptAt: now + 60_000, attempts: sql`${slackWebhookInbox.attempts} + 1` })
     .where(and(inArray(slackWebhookInbox.id, due), isNull(slackWebhookInbox.failedAt), lte(slackWebhookInbox.nextAttemptAt, now))).returning();
-  for (const row of rows) {
+  await Promise.all(rows.map(async row => {
+    let leaseUntil = row.nextAttemptAt;
+    let leaseLost = false;
+    let renewal = Promise.resolve();
+    const heartbeat = setInterval(() => {
+      renewal = renewal.then(async () => {
+        const next = Date.now() + 60_000;
+        const [claimed] = await db.update(slackWebhookInbox).set({ nextAttemptAt: next })
+          .where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, leaseUntil))).returning({ id: slackWebhookInbox.id });
+        if (!claimed) leaseLost = true;
+        else leaseUntil = next;
+      }).catch(err => { leaseLost = true; console.error(`[slack-webhook] inbox ${row.id} lease renewal failed`, err); });
+    }, 20_000);
+    heartbeat.unref?.();
     try {
       const payload: unknown = JSON.parse(decryptSecret(row.payload, deriveSecretKey(`slack-inbox:${providers.encryptionKey}`)));
       if (!isRecord(payload) || !Array.isArray(payload.raws) || !isRecord(payload.headers)
@@ -524,17 +537,24 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
           continue;
         }
         await appendReceiptStage(db, receiptId, { stage: "workspace", outcome: "accepted", detail: "The delivery belongs to the connected Slack workspace." });
+        if (leaseLost) throw new Error("Slack delivery lease was lost. Leave the retained request for its current owner.");
         await fanOutUpdate(deps, raw, receiptId);
       }
-      await db.delete(slackWebhookInbox).where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, row.nextAttemptAt)));
+      clearInterval(heartbeat);
+      await renewal;
+      if (leaseLost) throw new Error("Slack delivery lease was lost. Leave the retained request for its current owner.");
+      await db.delete(slackWebhookInbox).where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, leaseUntil)));
     } catch (err) {
+      clearInterval(heartbeat);
+      await renewal;
+      if (leaseLost) return;
       // Keep the accepted encrypted request. Persistent failures need operator
       // recovery instead of repeating side effects indefinitely.
       if (row.attempts >= 10) {
         await db.transaction(async tx => {
           const failedAt = Date.now();
           const [failed] = await tx.update(slackWebhookInbox).set({ failedAt })
-            .where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, row.nextAttemptAt))).returning({ id: slackWebhookInbox.id });
+            .where(and(eq(slackWebhookInbox.id, row.id), eq(slackWebhookInbox.nextAttemptAt, leaseUntil))).returning({ id: slackWebhookInbox.id });
           if (!failed) return;
           // The terminal state and its per-delivery problem must commit together.
           // A shared reason throttle would permanently hide other failed records.
@@ -545,6 +565,9 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
         });
       }
       console.error(`[slack-webhook] inbox ${row.id} processing failed`, err);
+    } finally {
+      clearInterval(heartbeat);
+      await renewal;
     }
-  }
+  }));
 }

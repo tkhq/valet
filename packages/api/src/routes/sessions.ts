@@ -1407,7 +1407,7 @@ sessionsRouter.delete("/:id", async (c) => {
 
   // The workspace runtime is permanent; users archive conversations instead.
   const assistant = await loadAssistantBySessionId(db, id);
-  if (assistant) return c.json({ error: "The workspace assistant cannot be deleted. Archive individual threads instead." }, 409);
+  if (assistant && !id.startsWith("execution:")) return c.json({ error: "The workspace assistant cannot be deleted. Archive individual threads instead." }, 409);
 
   // Keep the owning session visible until required teardown succeeds.
   try {
