@@ -310,13 +310,14 @@ describe("DB-backed actions", () => {
     deps.plugins = [githubPlugin];
     const workflowId = await seedWorkflow();
     const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_trigger")!;
-    const input = { proposal_key: "pulls", workflow_id: workflowId, name: "Pulls", event_keys: ["github.pull_request.opened"] };
+    const input = { proposal_key: "pulls", workflow_id: workflowId, name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper" } };
     expect(await tool.execute(input, ctx({ userId: "other" }))).toMatchObject({ success: false });
     const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
-    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId } } } } });
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId, presence: input.presence } } } } });
     expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
     await db.update(eventSubscriptions).set({ enabled: true });
     expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true } } });
+    expect(await tool.execute({ ...input, presence: { displayName: "Different" } }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { presence: input.presence } } } } });
   });
 
   it("keeps one proposal key separate per workflow", async () => {

@@ -2649,6 +2649,7 @@ export interface UpdateWorkflowEventTriggerRequest {
 
 export interface WorkflowEventTriggerResponse {
   trigger: {
+    presence?: Presence;
     triggerId: string;
     workflowId: string;
     name: string;

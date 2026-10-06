@@ -455,3 +455,14 @@ support native spans.
 The web question card accepts image uploads, clipboard images, and dropped images. An answer can contain images without text. Failed submissions retain the draft and its images. Changing questions clears that draft.
 
 Question resolutions retain inline images for restart replay. The question tool returns them as model-visible image attachments. The avatar publishing tool can select a question-answer photo from the same thread. Approval and credential gates do not accept images. Existing image count and size limits apply; remote URLs are rejected.
+
+### Agent configuration tools
+
+`events.list_subscriptions` lists the current personal or team workspace's subscriptions.
+It supports an exact name filter and bounded pagination (default 25, maximum 100).
+`events.set_subscription_presence` replaces the selected subscription's presence; null clears it.
+Both tools require organization membership. Team access also requires current team membership.
+Unlinked channel senders cannot use either tool. Organization-owned subscriptions remain outside these tools.
+The write changes only the target's presence field and update timestamp with an atomic JSONB operation.
+It preserves concurrent target edits, matching rules, ownership, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` accept presence for new workflow event subscriptions.

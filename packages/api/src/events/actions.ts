@@ -1,3 +1,4 @@
+import { validatePresence } from "@valet/shared";
 import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { Type } from "typebox";
@@ -66,6 +67,75 @@ function matchOutcome(reason: string): "excluded_by_filter" | null {
  * only store: it retains a small, redacted event identity for filter misses,
  * never the source payload. */
 export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => ValetPlugin[]) = []): ActionPlugin {
+  async function withSubscriptionScope(
+    ctx: PluginActionContext,
+    operation: (tx: Parameters<Parameters<typeof withAuthorizedTeamOwnership>[2]>[0], scope: { orgId: string; ownerType: "user" | "team"; ownerId: string }) => Promise<PluginActionResult>,
+  ): Promise<PluginActionResult> {
+    if (ctx.externalSender) return EXTERNAL_SENDER;
+    const userId = ctx.actor?.id ?? ctx.userId;
+    if (!userId || !ctx.orgId || (ctx.owner && ctx.owner.type !== "user" && ctx.owner.type !== "team") ||
+        (ctx.owner?.type === "user" && ctx.owner.id !== userId)) {
+      return { success: false, error: "Open your personal or team assistant to manage its subscriptions." };
+    }
+    const [membership] = await db.select({ userId: orgMembers.userId }).from(orgMembers)
+      .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
+    if (!membership) return { success: false, error: "Sign in as an organization member to manage subscriptions." };
+    const ownerType = ctx.owner?.type === "team" ? "team" as const : "user" as const;
+    const scope = { orgId: ctx.orgId, ownerType, ownerId: ownerType === "team" ? ctx.owner!.id : userId };
+    const result = ownerType === "team"
+      ? await withAuthorizedTeamOwnership(db, { teamId: scope.ownerId, orgId: scope.orgId, userId, principalTeamId: scope.ownerId, requireMembership: true }, (tx) => operation(tx, scope))
+      : await operation(db, scope);
+    return result ?? { success: false, error: "Team is no longer available. Open a team you belong to and retry." };
+  }
+
+  const listSubscriptions = action(Type.Object({
+    name: Type.Optional(Type.String({ description: "Exact subscription name." })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMIT })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+  }))({
+    id: "events.list_subscriptions",
+    name: "List workspace event subscriptions",
+    description: "List event subscriptions owned by the current personal or team workspace, including IDs and configured presence. Uses exact name matching. Defaults to 25 records; use nextOffset for the next page.",
+    riskLevel: "low",
+    execute: async ({ name, limit, offset }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
+      const pageLimit = limit ?? DEFAULT_LIMIT;
+      const pageOffset = offset ?? 0;
+      if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > MAX_LIMIT || !Number.isSafeInteger(pageOffset) || pageOffset < 0) {
+        return { success: false, error: "Use a limit from 1 to 100 and a nonnegative integer offset." };
+      }
+      const rows = await tx.select().from(eventSubscriptions).where(and(
+        eq(eventSubscriptions.orgId, scope.orgId), eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId),
+        name !== undefined ? eq(eventSubscriptions.name, name) : undefined,
+      )).orderBy(eventSubscriptions.id).limit(pageLimit + 1).offset(pageOffset);
+      return { success: true, data: { subscriptions: rows.slice(0, pageLimit), nextOffset: rows.length > pageLimit ? pageOffset + pageLimit : null } };
+    }),
+  });
+
+  const setSubscriptionPresence = action(Type.Object({
+    subscription_id: Type.String({ minLength: 1 }),
+    presence: Type.Union([Type.Object({ displayName: Type.Optional(Type.String()), avatarUrl: Type.Optional(Type.String()) }), Type.Null()]),
+  }))({
+    id: "events.set_subscription_presence",
+    name: "Set event subscription presence",
+    description: "Replace the channel display name and avatar for an existing subscription in the current personal or team workspace. Use null to clear the override. Does not enable the subscription or change its target, prompts, or matching rules.",
+    riskLevel: "low",
+    execute: async ({ subscription_id, presence }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
+      if (presence !== null) {
+        const error = validatePresence(presence);
+        if (error) return { success: false, error };
+      }
+      const [row] = await tx.update(eventSubscriptions).set({
+        target: presence === null
+          ? sql`${eventSubscriptions.target} - 'presence'`
+          : sql`jsonb_set(${eventSubscriptions.target}, '{presence}', ${JSON.stringify(presence)}::jsonb, true)`,
+        updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})`,
+      }).where(and(eq(eventSubscriptions.id, subscription_id), eq(eventSubscriptions.orgId, scope.orgId),
+        eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId))).returning();
+      return row ? { success: true, data: { subscription: row } }
+        : { success: false, error: "Subscription not found in this workspace. Use events.list_subscriptions to select one." };
+    }),
+  });
+
   const proposeSubscription = action(Type.Object({
     proposal_key: Type.String({ minLength: 1, maxLength: 200, description: "Stable proposal key. Reuse on retries; use a new key for a different proposal." }),
     name: Type.String({ minLength: 1 }),
@@ -252,5 +322,5 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       return { success: true, data: { receipts: rows.slice(0, pageLimit).map(receiptWire), hasMore: rows.length > pageLimit, retentionDays: RECEIPT_RETENTION_DAYS } };
     },
   });
-  return { service: "events", description: "Diagnose event delivery and propose disabled subscriptions for human review.", actions: [listProblems, listLogs, proposeSubscription] };
+  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, and configure presence on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence] };
 }

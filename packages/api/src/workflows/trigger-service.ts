@@ -8,7 +8,7 @@
  * Scoped deliberately to workflow targets: orchestrator/signal
  * subscriptions have their own management surface (`/api/event-subscriptions`).
  */
-import type { Presence } from "@valet/shared";
+import { readPresence, type Presence } from "@valet/shared";
 import { linearEventArmBlock } from "../services/linear-ingress.js";
 import { proposalId } from "../events/proposals.js";
 import { randomUUID } from "node:crypto";
@@ -35,6 +35,7 @@ import {
 } from "./service.js";
 
 export interface WorkflowTriggerSummary {
+  presence?: Presence;
   triggerId: string;
   workflowId: string;
   name: string;
@@ -61,9 +62,11 @@ export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
 }
 
 function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTriggerSummary | null {
-  const target = row.target as { kind?: string; workflowId?: string };
+  const target = row.target as { kind?: string; workflowId?: string; presence?: unknown };
   if (target?.kind !== "workflow" || typeof target.workflowId !== "string") return null;
+  const presence = readPresence(target.presence);
   return {
+    ...(presence ? { presence } : {}),
     triggerId: row.id,
     workflowId: target.workflowId,
     name: row.name,

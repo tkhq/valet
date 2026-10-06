@@ -158,3 +158,9 @@ An event subscription's `target.presence` overrides individual workflow fields. 
 Tool steps, agent tool calls, automatic replies, and approval cards inherit this identity without extra prompt instructions or `set` nodes.
 Explicit Slack `sender_name` / `sender_avatar_url` arguments still override one message; use them only for deliberate exceptions.
 These settings customize messages, not the Slack account or DM conversation. See the `slack-tools` skill.
+
+For an existing event subscription, call `events.list_subscriptions` in its personal or team workspace.
+Use the exact `name` filter or follow `nextOffset` with `offset` to find its ID.
+Call `events.set_subscription_presence` with `subscription_id` and `presence: { displayName?, avatarUrl? }`.
+This replaces the override. Send `presence: null` to clear it. The tool preserves matching rules, target, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` also accept optional `presence`.

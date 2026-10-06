@@ -35,6 +35,61 @@ describe("eventsActionPlugin", () => {
     ]);
   });
 
+  it("lists only the current workspace with bounded pages and exact name matching", async () => {
+    const now = Date.now();
+    await db.insert(eventSubscriptions).values([
+      { id: "a", orgId: ORG, ownerType: "user", ownerId: "member", name: "Match", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "member", createdAt: now, updatedAt: now },
+      { id: "b", orgId: ORG, ownerType: "user", ownerId: "member", name: "Other", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "member", createdAt: now, updatedAt: now },
+      { id: "c", orgId: ORG, ownerType: "user", ownerId: "admin", name: "Match", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "admin", createdAt: now, updatedAt: now },
+      { id: "d", orgId: "foreign", ownerType: "user", ownerId: "member", name: "Match", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "member", createdAt: now, updatedAt: now },
+    ]);
+    const tool = eventsActionPlugin(db).actions.find(a => a.id === "events.list_subscriptions")!;
+    expect(await tool.execute({ limit: 1 }, context("member"))).toMatchObject({ success: true, data: { subscriptions: [{ id: "a" }], nextOffset: 1 } });
+    expect(await tool.execute({ limit: 1, offset: 1 }, context("member"))).toMatchObject({ data: { subscriptions: [{ id: "b" }], nextOffset: null } });
+    expect(await tool.execute({ name: "Match" }, context("member"))).toMatchObject({ data: { subscriptions: [{ id: "a" }], nextOffset: null } });
+    expect(await tool.execute({ limit: 101 }, context("member"))).toMatchObject({ success: false });
+    expect(await tool.execute({}, context("member", { externalSender: true }))).toMatchObject({ success: false });
+    expect(await tool.execute({}, context("member", { owner: { type: "user", id: "admin" } }))).toMatchObject({ success: false });
+  });
+
+  it("sets and clears only presence while preserving target fields and refusing other tenants or owners", async () => {
+    const now = Date.now();
+    const target = { kind: "workflow", workflowId: "wf", deliveryPolicy: "always", futureField: "preserve" };
+    await db.insert(eventSubscriptions).values({ id: "edit", orgId: ORG, ownerType: "user", ownerId: "member", name: "Rule", eventKeys: ["github.pull_request.opened"], filters: [], target, enabled: false, createdBy: "member", createdAt: now, updatedAt: now });
+    await db.insert(orgs).values({ id: "foreign", name: "Foreign", createdAt: now });
+    await db.insert(orgMembers).values({ orgId: "foreign", userId: "member", role: "member" });
+    const tool = eventsActionPlugin(db).actions.find(a => a.id === "events.set_subscription_presence")!;
+    const input = { subscription_id: "edit", presence: { displayName: "Helper" } };
+    expect(await tool.execute(input, context("admin"))).toMatchObject({ success: false });
+    expect(await tool.execute(input, context("member", { orgId: "foreign" }))).toMatchObject({ success: false });
+    expect(await tool.execute(input, context("member", { externalSender: true }))).toMatchObject({ success: false });
+    expect(await tool.execute({ ...input, presence: { avatarUrl: "http://example.com/a" } }, context("member"))).toMatchObject({ success: false });
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { subscription: { target: { ...target, presence: input.presence }, enabled: false } } });
+    expect(await tool.execute({ ...input, presence: null }, context("member"))).toMatchObject({ success: true });
+    const [row] = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "edit"));
+    expect(row!.target).toEqual(target);
+    expect(row!.enabled).toBe(false);
+    expect(row!.updatedAt).toBeGreaterThan(now);
+    expect(row!.eventKeys).toEqual(["github.pull_request.opened"]);
+  });
+
+  it("requires current membership for team subscription reads and writes", async () => {
+    const now = Date.now();
+    await db.insert(teams).values({ id: "presence-team", orgId: ORG, name: "Team", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "presence-team", userId: "member", role: "member" });
+    await db.insert(eventSubscriptions).values({ id: "team-rule", orgId: ORG, ownerType: "team", ownerId: "presence-team", name: "Team rule", eventKeys: [], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "presence-team" }, createdBy: "member", createdAt: now, updatedAt: now });
+    const plugin = eventsActionPlugin(db);
+    const list = plugin.actions.find(a => a.id === "events.list_subscriptions")!;
+    const set = plugin.actions.find(a => a.id === "events.set_subscription_presence")!;
+    const ctx = context("member", { owner: { type: "team", id: "presence-team" } });
+    expect(await list.execute({}, ctx)).toMatchObject({ success: true, data: { subscriptions: [{ id: "team-rule" }] } });
+    expect(await set.execute({ subscription_id: "team-rule", presence: { displayName: "Team helper" } }, ctx)).toMatchObject({ success: true });
+    await db.delete(teamMembers).where(eq(teamMembers.userId, "member"));
+    expect(await list.execute({}, ctx)).toMatchObject({ success: false });
+    expect(await set.execute({ subscription_id: "team-rule", presence: null }, ctx)).toMatchObject({ success: false });
+    expect((await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "team-rule")))[0]!.target).toMatchObject({ presence: { displayName: "Team helper" } });
+  });
+
   it("persists proposal presence and rejects invalid avatar URLs", async () => {
     const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
     const input = { proposal_key: "presence", name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper", avatarUrl: "https://example.com/a.webp" } };

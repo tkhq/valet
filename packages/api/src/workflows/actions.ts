@@ -926,6 +926,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     Type.Object({
       workflow_id: Type.String(),
       name: Type.String(),
+      presence: Type.Optional(Type.Object({ displayName: Type.Optional(Type.String()), avatarUrl: Type.Optional(Type.String()) })),
       event_keys: Type.Array(Type.String(), {
         description: 'Event key patterns; trailing ".*" wildcard supported (e.g. "github.pull_request.*").',
       }),
@@ -960,14 +961,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "{{trigger.data.payload...}} plus {{trigger.data.key}}/{{trigger.data.refs...}}. " +
       "Returns { triggerId }.",
     riskLevel: "medium",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await createWorkflowTrigger(
         armDepsFrom(deps),
         owner,
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, presence },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -1052,15 +1053,17 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Propose workflow event trigger",
     description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Events.",
     riskLevel: "low",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowTrigger(armDepsFrom(getDeps()), owner, {
-        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key,
+        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, presence,
       });
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: proposalResult("subscription", result.trigger.triggerId, result.trigger.enabled, {
-        ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId },
+        ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId,
+          ...(result.trigger.presence ? { presence: result.trigger.presence } : {}),
+        },
       }) };
     },
   });

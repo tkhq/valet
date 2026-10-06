@@ -101,3 +101,9 @@ An event subscription may set `target.presence` (or pass `presence` to `propose_
 These defaults apply to tool steps, agent tool calls, automatic replies, and approval cards.
 Use explicit `sender_name` / `sender_avatar_url` only when one message should differ from those defaults.
 File uploads and Slack's DM header/sidebar retain the underlying bot identity.
+
+For an existing event subscription, call `events.list_subscriptions` in its personal or team workspace.
+Use the exact `name` filter or follow `nextOffset` with `offset` to find its ID.
+Call `events.set_subscription_presence` with `subscription_id` and `presence: { displayName?, avatarUrl? }`.
+This replaces the override. Send `presence: null` to clear it. The tool preserves matching rules, target, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` also accept optional `presence`.
