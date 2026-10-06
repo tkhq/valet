@@ -408,3 +408,5 @@ Kubernetes lists private PVC owners after CR deletion so failed state deletion r
 The provider checks the saved browser owner before it changes credentials or the Sandbox CR.
 It uses the node Localhost profile and waits for the browser preflight marker.
 Missing retained state fails closed. See `deploy/browser.md` for node installation and image requirements.
+
+Retained execution paths containing colons use CSV-escaped `--mount` bind arguments during creation and restoration. Existing directories remain in place.

@@ -40,6 +40,17 @@ describe("buildDockerRunArgs (pure)", () => {
     ]);
   });
 
+  it("mounts retained execution paths containing colons without parsing them as volume modes", () => {
+    const path = '/tmp/team,work/"private"/execution:abc';
+    const args = buildDockerRunArgs({ ...baseOpts, workspaceHostPath: path, runtimeStateDir: path, credsHostDir: path });
+    expect(args).not.toContain("-v");
+    expect(args.filter((_, i) => args[i - 1] === "--mount")).toEqual([
+      'type=bind,"src=/tmp/team,work/""private""/execution:abc",dst=/workspace',
+      'type=bind,"src=/tmp/team,work/""private""/execution:abc",dst=/var/lib/valet',
+      'type=bind,"src=/tmp/team,work/""private""/execution:abc",dst=/etc/valet/creds,readonly',
+    ]);
+  });
+
   // A bridge-network container reaches the api over `host.docker.internal`
   // (see `resolveSandboxApiUrl` in the api package). Docker Desktop and
   // colima publish that name; a Linux daemon needs the explicit mapping.
