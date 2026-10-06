@@ -244,7 +244,7 @@ import { WorkflowsIndexPage } from "./workflows.index";
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 
 /** `workspace` selects the workspace the page is being read in — what the
- * nav's switcher sets. Seeded through localStorage, which is where the real
+ * nav's switcher sets. Seeded through sessionStorage, which is where the real
  * scope lives. */
 function SwitchWorkspace() {
   const scope = useWorkspaceScope();
@@ -252,7 +252,7 @@ function SwitchWorkspace() {
 }
 
 function renderPage(workspace = PERSONAL) {
-  window.localStorage.setItem("valet:workspace", workspace);
+  window.sessionStorage.setItem("valet:workspace", workspace);
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <TooltipProvider>

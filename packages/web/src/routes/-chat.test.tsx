@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import "./chat";
+import { PageTitleProvider } from "~/lib/page-title";
 const capture = vi.hoisted(() => ({ page: undefined as (() => ReactElement) | undefined }));
 const createThread = vi.fn();
 const navigate = vi.fn<(options: { search: (previous: { thread?: string; workspace?: string }) => { thread?: string; workspace?: string } }) => void>();
@@ -20,16 +21,16 @@ vi.mock("~/api/settings", () => ({ useTeams: () => ({ data: teamMetadata ? { tea
 let threadKey: string | undefined = "web:default";
 let empty = false;
 vi.mock("~/api/queries", () => ({
-  useThreads: () => ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: "shared-execution", key: threadKey, createdAt: 1 }] } }),
+  useThreads: () => ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }),
   useCreateThread: () => ({ mutateAsync: createThread, isPending: false }),
 }));
 vi.mock("~/hooks/use-invalidate-messages-on-queue-state", () => ({ useInvalidateMessagesOnQueueState: vi.fn() }));
 vi.mock("~/components/session/session-view", () => ({ SessionView: ({ sessionId, activeThreadId, scopeNotice }: { sessionId: string; activeThreadId?: string; scopeNotice?: string }) => <div data-testid="conversation" data-scope-notice={scopeNotice}>{sessionId}:{activeThreadId}</div> }));
 vi.mock("~/components/session/child-panel", () => ({ ChildPanel: () => null }));
 beforeEach(() => { data = { sessionId: "team-session" }; error = null; empty = false; teamMetadata = true; vi.clearAllMocks(); createThread.mockResolvedValue({ id: "created" }); });
-function show() { if (!capture.page) throw new Error("missing route"); const Page = capture.page; return render(<Page />); }
+function show() { if (!capture.page) throw new Error("missing route"); const Page = capture.page; return render(<PageTitleProvider workspaceName="Platform"><Page /></PageTitleProvider>); }
 it("opens the resolved workspace thread and labels its audience", () => {
-  show(); expect(screen.getByTestId("conversation").textContent).toBe("shared-execution:thread-a");
+  show(); expect(document.title).toBe("Fix login · Platform · Valet"); expect(screen.getByTestId("conversation").textContent).toBe("shared-execution:thread-a");
   expect(screen.getByTestId("conversation").getAttribute("data-scope-notice")).toBe("Shared with Platform. Members can read and reply.");
 });
 it("offers a new thread instead of mounting a read-only root when no conversation is available", async () => {

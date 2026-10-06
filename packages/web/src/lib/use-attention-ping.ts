@@ -2,6 +2,8 @@ import { useRouterState } from "@tanstack/react-router";
 import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
 import { useEffect, useRef } from "react";
 import { useNotifications } from "~/api/queries";
+import { usePageTitleCount } from "./page-title";
+export { titleWithCount } from "./page-title";
 import { playAttentionChime } from "./notification-sound";
 import { useWorkspaceScope } from "./workspace-scope";
 
@@ -91,12 +93,6 @@ export function hrefMatchesLocation(href: string, pathname: string, search: stri
   return thread === null || thread === current.get("thread");
 }
 
-/** The document title, with the count of things waiting on you. Restores
- * the bare title at zero rather than leaving a stale `(0)`. */
-export function titleWithCount(base: string, count: number): string {
-  return count > 0 ? `(${count}) ${base}` : base;
-}
-
 export function useAttentionPing(): void {
   const notificationsQ = useNotifications();
   const { key: workspace } = useWorkspaceScope();
@@ -145,23 +141,5 @@ export function useAttentionPing(): void {
     playAttentionChime();
   }, [notifications, pathname, search, workspace]);
 
-  // The title the page chose for itself, captured once before this hook
-  // first writes to it. Prefixing THAT rather than a hardcoded product name
-  // means a page that titles itself keeps its title — otherwise every poll
-  // would overwrite it, and several open tabs would be indistinguishable.
-  const baseTitle = useRef<string | null>(null);
-
-  // The title is the fallback that always works: muted tab, blocked
-  // autoplay, headphones out. It costs nothing and it is the only signal
-  // visible from another application's window.
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    baseTitle.current ??= document.title || "Valet";
-    const base = baseTitle.current;
-    const count = (notifications ?? []).filter(isActionable).length;
-    document.title = titleWithCount(base, count);
-    return () => {
-      document.title = base;
-    };
-  }, [notifications]);
+  usePageTitleCount((notifications ?? []).filter(isActionable).length);
 }

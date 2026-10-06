@@ -1,7 +1,9 @@
 import { WorkflowAgentApprovals } from "~/components/workflows/agent-approvals";
 import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
-import { useSession } from "~/api/queries";
+import { useSession, useThreads } from "~/api/queries";
+import { defaultThreadId } from "~/lib/thread-default";
+import { usePageTitle } from "~/lib/page-title";
 import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 import { SecuritySessionLayout } from "~/components/security/engagement-panel";
 import { ChildPanel } from "~/components/session/child-panel";
@@ -65,6 +67,10 @@ export function SessionDetailPage({ sessionId, search, onSearchChange }: {
   // move the switcher to that session's workspace so the nav matches the
   // header (which badges the owning team) instead of leaving you in Personal.
   useAdoptWorkspaceScope(session.data?.owner);
+  const threads = useThreads(sessionId);
+  const list = threads.data?.threads ?? [];
+  const activeThread = list.find(item => item.id === (thread ?? defaultThreadId(list)));
+  usePageTitle(activeThread?.title || session.data?.title || "Session");
 
   const workspace = session.data?.owner.type === "team" ? session.data.owner.id
     : session.data?.owner.type === "user" ? "user" : undefined;

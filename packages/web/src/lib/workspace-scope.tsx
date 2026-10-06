@@ -11,8 +11,10 @@ import {
 } from "react";
 
 import { useOrg, useTeams } from "~/api/settings";
+import { PageTitleProvider } from "~/lib/page-title";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 
+// Keep each browser tab's workspace independent, including after a reload.
 const STORAGE_KEY = "valet:workspace";
 
 /** Your own workspace. Not a team id, and never a user id — the key is a
@@ -22,7 +24,7 @@ export const PERSONAL = "user";
 
 function loadStored(): string {
   try {
-    return window.localStorage.getItem(STORAGE_KEY) ?? PERSONAL;
+    return window.sessionStorage.getItem(STORAGE_KEY) ?? PERSONAL;
   } catch {
     return PERSONAL;
   }
@@ -77,7 +79,7 @@ export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
   const setKey = useCallback((next: string) => {
     setStored(next);
     try {
-      window.localStorage.setItem(STORAGE_KEY, next);
+      window.sessionStorage.setItem(STORAGE_KEY, next);
     } catch {
       // Non-persistent environments still get the in-session behaviour.
     }
@@ -115,7 +117,10 @@ export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
     [key, available, setKey],
   );
 
-  return <WorkspaceScopeContext.Provider value={value}>{children}</WorkspaceScopeContext.Provider>;
+  const workspaceName = key === PERSONAL ? "Personal" : teams.find(team => team.id === key)?.name ?? "Team workspace";
+  return <WorkspaceScopeContext.Provider value={value}>
+    <PageTitleProvider workspaceName={workspaceName}>{children}</PageTitleProvider>
+  </WorkspaceScopeContext.Provider>;
 }
 
 /**

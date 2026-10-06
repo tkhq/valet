@@ -22,6 +22,19 @@ A workspace is a place, not a filter. One rule, applied everywhere:
 The design adds no new controls. It makes the one existing control —
 the switcher — legible and trustworthy.
 
+## Browser tabs
+
+Each browser tab keeps its workspace choice in `sessionStorage`. Reloading a tab
+restores its own choice. Workspace choices in other tabs do not replace it.
+An explicit workspace link still takes precedence. A new tab without a stored
+choice or an explicit workspace starts in Personal.
+
+Browser titles show the active chat thread or session title, the workspace name,
+and Valet. Renames update the title through the existing query data. Other pages
+show the workspace name and Valet. Child panels and assistant docks do not replace
+the page title. Notification counts prefix the current title without replacing it.
+Public pages keep their own titles.
+
 ## Decisions
 
 1. **The workspace clause.** One shared grammar names the active

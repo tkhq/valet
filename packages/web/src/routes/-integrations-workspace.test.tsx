@@ -79,7 +79,7 @@ beforeEach(() => {
   setKey.mockClear();
   teamId = undefined;
   realWorkspace = false;
-  window.localStorage.clear();
+  window.sessionStorage.clear();
   orgRole = "member";
   teams = [team("a", "Team A", "admin"), team("b", "Team B", "admin")];
   teamsError = null;
@@ -322,7 +322,7 @@ describe("Team account connection", () => {
     mount();
     expect(await screen.findByText("Connected Linear via MCP.")).toBeTruthy();
     expect(await screen.findByText("Linear MCP")).toBeTruthy();
-    expect(window.localStorage.getItem("valet:workspace")).toBe("a");
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("a");
     expect(screen.getByRole("button", { name: "Stop sharing Alice's Linear with Team A" })).toBeTruthy();
     expect(api.listCredentials).toHaveBeenCalledWith("team", "a");
   });
@@ -333,7 +333,7 @@ describe("Team account connection", () => {
     mount();
     expect(await screen.findByText("Team access changed. Ask a team admin to restart the connection.")).toBeTruthy();
     expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
-    expect(window.localStorage.getItem("valet:workspace")).toBe("user");
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
     expect(screen.queryByText("Team unavailable")).toBeNull();
     expect(api.listCredentials).not.toHaveBeenCalled();
   });
