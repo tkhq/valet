@@ -76,8 +76,11 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
         }
         const rawBody = await readPluginBody(c.req.raw, route.maxBodyBytes);
         if (rawBody === null) return tooLarge();
+        const headers = new Headers(c.req.raw.headers);
+        // Host authentication is represented by caller, never reusable credentials.
+        for (const name of ['cookie', 'authorization', 'x-api-key', 'x-valet-sandbox', 'x-valet-test-user-id', 'x-valet-internal']) headers.delete(name);
         const request: PluginHttpRequest = {
-          url: c.req.url, headers: Object.fromEntries(c.req.raw.headers),
+          url: c.req.url, headers: Object.fromEntries(headers),
           params: c.req.param(), rawBody, signal: c.req.raw.signal,
         };
         if (route.auth === 'public') return route.handle(request);

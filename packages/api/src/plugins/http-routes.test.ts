@@ -21,6 +21,27 @@ const plugin: ValetPlugin = {
 };
 
 describe('plugin route mounting', () => {
+  it('strips host credentials while preserving provider signature headers and bytes', async () => {
+    const app = new Hono<AppEnv>();
+    let received: PluginHttpRequest | undefined;
+    mountPluginHttpRoutes(app, [{ name: 'header-test', version: '1', httpRoutes: [{
+      id: 'headers', path: '/headers', method: 'POST', maxBodyBytes: 64, auth: 'public',
+      handle: (request) => { received = request; return new Response('ok'); },
+    }] }], 'public');
+    const response = await app.request('/plugins/header-test/http/headers', {
+      method: 'POST', body: 'exact body', headers: {
+        cookie: 'session=secret', authorization: 'Bearer secret', 'x-api-key': 'secret',
+        'x-valet-sandbox': 'secret', 'x-valet-test-user-id': 'secret', 'x-valet-internal': 'secret', 'linear-signature': 'signature',
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(received?.headers['linear-signature']).toBe('signature');
+    for (const header of ['cookie', 'authorization', 'x-api-key', 'x-valet-sandbox', 'x-valet-test-user-id', 'x-valet-internal']) {
+      expect(received?.headers[header]).toBeUndefined();
+    }
+    expect(new TextDecoder().decode(received?.rawBody)).toBe('exact body');
+  });
+
   it('does not treat inherited object properties as legacy route aliases', async () => {
     const app = new Hono<AppEnv>();
     mountPluginHttpRoutes(app, [{ name: 'linear', version: '1', httpRoutes: [{

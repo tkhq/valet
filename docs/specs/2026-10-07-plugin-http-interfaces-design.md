@@ -108,3 +108,12 @@ This iteration does not move connection handlers, GitHub, Slack, or Security rou
 It does not implement arbitrary callback state capabilities, plugin-owned storage, lifecycle hooks, or the complete event-emission interface.
 New signed plugins currently need an installation adapter. This restriction remains until plugin-owned installation storage is available.
 No database migration or existing-data rewrite is required.
+
+## Host compatibility checks
+
+The node_modules loader quarantines signed-route plugins when no host installation resolver exists. Other plugins continue to load.
+Route mounting retains its defensive check for invalid host configuration.
+
+The host removes Cookie, Authorization, X-API-Key, X-Valet-Sandbox, X-Valet-Internal, and X-Valet-Test-User-ID headers before invoking plugin code.
+Authenticated routes receive caller identity through the caller argument. Provider signatures must use separate headers, such as Linear-Signature.
+Signature headers and raw body bytes remain unchanged.

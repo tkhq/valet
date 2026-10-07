@@ -3,6 +3,7 @@ import type { NormalizedEvent, PluginValidationIssue, TriggerRejection } from '.
 /** Portable declarations only. The API host owns routing and authentication. */
 export interface PluginHttpRequest {
   url: string;
+  /** Provider headers only; the host removes its authentication credentials. */
   headers: Record<string, string>;
   params: Record<string, string>;
   rawBody: Uint8Array;
