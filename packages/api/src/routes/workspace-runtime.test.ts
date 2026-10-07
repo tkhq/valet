@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, assistantExecutions, teams, teamMembers } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, teams, teamMembers } from "../schema/index.js";
 import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -14,14 +14,40 @@ describe("workspace runtime authorization", () => {
     expect(await (await fetch(`${api.baseUrl}/api/orchestrator`, { method: "POST" })).json()).toEqual(first);
     expect((await fetch(`${api.baseUrl}/api/teams/unknown/orchestrator`, { method: "POST" })).status).toBe(404);
   });
-  it("preserves explicit runtime session deletion", async () => {
+  it("opens a fresh workspace runtime while preserving explicit session deletion", async () => {
     api = await bootTestApi();
     const root = `${api.baseUrl}/api/workspaces/user/runtime`;
     const { sessionId } = await (await fetch(root, { method: "POST" })).json() as { sessionId: string };
     await api.providers.db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, sessionId));
-    expect((await fetch(root, { method: "POST" })).status).toBeGreaterThanOrEqual(400);
+    const reopened = await fetch(root, { method: "POST" });
+    expect(reopened.status).toBe(200);
+    const replacement = await reopened.json() as { sessionId: string };
+    expect(replacement.sessionId).not.toBe(sessionId);
+    expect((await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/threads`)).status).toBe(409);
     const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId));
     expect(row?.status).toBe("deleted");
+  });
+  it("replaces an archived personal default once without reviving its history", async () => {
+    api = await bootTestApi();
+    const root = `${api.baseUrl}/api/workspaces/user/runtime`;
+    const { sessionId } = await (await fetch(root, { method: "POST" })).json() as { sessionId: string };
+    const originalSession = await api.providers.engineStore.getSession(sessionId);
+    await api.providers.db.execute(sql`UPDATE assistants SET behavior = '{"integrations":{"mode":"allowlist","entries":[]}}' WHERE session_id = ${sessionId}`);
+    await api.providers.db.update(assistants).set({ archivedAt: 123 }).where(eq(assistants.sessionId, sessionId));
+    const replies = await Promise.all(Array.from({ length: 4 }, () => fetch(root, { method: "POST" })));
+    const ids = [];
+    for (const reply of replies) {
+      expect(reply.status).toBe(200);
+      ids.push((await reply.json() as { sessionId: string }).sessionId);
+    }
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).not.toBe(sessionId);
+    const [old] = await api.providers.db.select().from(assistants).where(eq(assistants.sessionId, sessionId));
+    expect(old.archivedAt).toBe(123);
+    expect(await api.providers.engineStore.getSession(sessionId)).toEqual(originalSession);
+    const limit = await fetch(`${api.baseUrl}/api/workspaces/user/integration-limit`);
+    expect(await limit.json()).toEqual({ services: [] });
+    expect((await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(ids[0])}/threads`)).status).toBe(200);
   });
   it("answers a team runtime on the older team path for a member", async () => {
     api = await bootTestApi();

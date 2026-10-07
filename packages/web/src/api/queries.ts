@@ -86,10 +86,10 @@ export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSession
   });
 }
 
-export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>) {
+export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>, selectedThreadId?: string) {
   return useQuery<ListThreadsResponse>({
-    queryKey: qk.threads(id),
-    queryFn: () => api.listThreads(id),
+    queryKey: selectedThreadId ? [...qk.threads(id), "selected", selectedThreadId] : qk.threads(id),
+    queryFn: () => api.listThreads(id, { threadId: selectedThreadId }),
     enabled: !!id,
     ...opts,
   });

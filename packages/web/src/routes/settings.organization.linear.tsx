@@ -138,8 +138,8 @@ function SetupCards({ data }: { data: GetLinearConnectionResponse }) {
       </div>
     </div>
 
-    <div className="flex items-center justify-between gap-4 border-t border-line px-6 py-4">
-      <p className="text-xs text-muted">{data.redirectUri && <>Redirect URI: <span className="font-mono">{data.redirectUri}</span></>}</p>
+    <div className="flex flex-col items-start justify-between gap-4 border-t sm:flex-row sm:items-center border-line px-6 py-4">
+      <p className="min-w-0 [overflow-wrap:anywhere] text-xs text-muted">{data.redirectUri && <>Redirect URI: <span className="font-mono">{data.redirectUri}</span></>}</p>
       <Button type="submit" disabled={save.isPending || incomplete}>
         {save.isPending ? "Checking with Linear…" : "Connect Linear"}
       </Button>

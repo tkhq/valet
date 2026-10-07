@@ -3896,6 +3896,15 @@ export class Thread {
       this.activeSkillInvocations.set(queuedSkillFact.id, queuedSkillFact);
     }
 
+    // Re-read the session's skills before the tools are built. The host's
+    // `skill` tool describes and serves this map, and a cached session can
+    // outlive many skill edits. A failed read keeps the previous set.
+    try {
+      await this.session.refreshSkills();
+    } catch (err) {
+      console.error(`skill refresh failed for session ${this.session.id}; the previous skills stay:`, err);
+    }
+
     // Build the AgentTool list with closures over this turn's ToolContext.
     this.agent.state.tools = this.buildTools();
 

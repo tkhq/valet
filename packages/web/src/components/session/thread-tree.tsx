@@ -35,8 +35,6 @@ import {
 } from "lucide-react";
 import type {
   DecisionGate,
-  GetModelTiersResponse,
-  ModelInfo,
   ChildWorkSummary,
   ThreadPullRequest,
   ThreadSummary,
@@ -46,7 +44,6 @@ import {
   useCreateThread,
   useRenameThread,
   useReplaceSandbox,
-  useSession,
   useMarkThreadsRead,
   useSetThreadArchived,
   useThreads,
@@ -56,7 +53,7 @@ import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thre
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { useThreadProjects } from "~/lib/thread-projects";
-import { useMe, useModels, useModelTiers } from "~/api/settings";
+import { useMe } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { ThreadStatusIcon } from "./thread-status-icon";
 import { useStreamStore, useThreadLiveStatus, useQueueStateForThread, queueBusy } from "~/stores/stream";
@@ -82,8 +79,6 @@ import {
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
-import { sameModelSpec } from "~/lib/models";
-import { isSizeTier, selectionLabel, tierSubtitle, TIER_LABELS } from "~/lib/model-tiers";
 import { getSubconversationsCollapsed, setSubconversationsCollapsed } from "~/lib/preferences";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 
@@ -291,13 +286,6 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   }
   const threadsQ = useThreads(sessionId);
   const markRead = useMarkThreadsRead(sessionId);
-  // Session default model, for the pin chip: a chip renders only on threads
-  // whose pin DIVERGES from it (every new thread pins at creation, so an
-  // always-on chip would just be noise).
-  const sessionQ = useSession(sessionId);
-  const sessionModel = sessionQ.data?.model;
-  const modelsQ = useModels();
-  const tierMapQ = useModelTiers();
   const childrenQ = useChildWork(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
     enabled: showChildren,
@@ -447,9 +435,6 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               key={t.id}
               thread={t}
               isDefault={t.id === defaultId}
-              sessionModel={sessionModel}
-              models={modelsQ.data?.models ?? []}
-              tierMap={tierMapQ.data}
               active={t.id === activeThreadId}
               hasPendingGate={gatedThreadIds.has(t.id)}
               childSessions={grouped.get(t.id) ?? []}
@@ -652,9 +637,6 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 function ThreadNode({
   thread,
   isDefault,
-  sessionModel,
-  models,
-  tierMap,
   active,
   hasPendingGate,
   childSessions,
@@ -678,10 +660,6 @@ function ThreadNode({
   onDragEnd: () => void;
   thread: ThreadSummary;
   isDefault: boolean;
-  /** Session default model — the pin chip shows only when the thread's pin diverges from it. */
-  sessionModel?: string;
-  models: ModelInfo[];
-  tierMap?: GetModelTiersResponse;
   active: boolean;
   /** The thread holds a pending decision gate — show the response-required bell. */
   hasPendingGate: boolean;
@@ -718,22 +696,6 @@ function ThreadNode({
     setCollapsed(next);
     setSubconversationsCollapsed(thread.id, next);
   }
-
-  // Pin chip: the thread runs on a model other than the session default.
-  // Requires a KNOWN session default — while the session query loads, and
-  // for non-live sessions (GET /sessions/:id omits `model` unless the
-  // engine session is materialized), divergence is unknowable and a chip on
-  // every stamped thread would be pure noise.
-  const pinnedModel =
-    sessionModel && thread.model && !sameModelSpec(thread.model, sessionModel)
-      ? thread.model
-      : undefined;
-  const pinnedTier = isSizeTier(pinnedModel) ? pinnedModel : undefined;
-  const pinnedModelLabel = pinnedModel
-    ? pinnedTier
-      ? tierSubtitle(pinnedTier, tierMap, models)
-      : selectionLabel(pinnedModel, tierMap, models)
-    : undefined;
 
   // Port the v1 inline editor. Enter and blur save. Escape cancels.
   // `savedRef` prevents Enter and its following blur from saving twice.
@@ -857,18 +819,6 @@ function ThreadNode({
                 ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
                 : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
               <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
-              {pinnedModelLabel && (
-                <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>
-                  <span className="max-w-28 truncate text-[10px] font-normal text-muted">
-                    {pinnedModelLabel}
-                  </span>
-                  {pinnedTier && (
-                    <span className="shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 text-[9px] font-normal text-muted">
-                      {TIER_LABELS[pinnedTier]}
-                    </span>
-                  )}
-                </span>
-              )}
 
             </Link>
           </Tooltip>

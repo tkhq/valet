@@ -2562,3 +2562,16 @@ CREATE TABLE "legacy_workflow_run_runtimes" (run_id text PRIMARY KEY, session_id
 
 --> statement-breakpoint
 CREATE TABLE "legacy_artifact_publications" (artifact_id text PRIMARY KEY, org_id text NOT NULL, owner_type text NOT NULL, owner_id text NOT NULL, source_session_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "product_announcements" (
+  "id" text PRIMARY KEY, "activated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO "product_announcements" ("id", "activated_at")
+VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_timestamp()) * 1000)::bigint);
+--> statement-breakpoint
+CREATE TABLE "product_announcement_acknowledgements" (
+  "announcement_id" text NOT NULL, "user_id" text NOT NULL, "acknowledged_at" bigint NOT NULL,
+  PRIMARY KEY ("announcement_id", "user_id")
+);

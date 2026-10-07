@@ -117,7 +117,7 @@ export function SessionHeader({
   // thread) a session-default write would silently not affect the pinned
   // active thread — the exact wrong-scope switch pinning exists to prevent.
   // The picker disables until the thread row resolves instead.
-  const threads = useThreads(session.id);
+  const threads = useThreads(session.id, undefined, threadId);
   const activeThread = threads.data?.threads.find((t) => t.id === threadId);
   const threadScoped = threadId !== undefined;
   const modelConfigurationResolved = !threadScoped || activeThread !== undefined;

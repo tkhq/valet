@@ -375,7 +375,7 @@ function WorkflowEditorPane({
         <div className="mt-2 space-y-2 text-xs">
           {permissionsError ? <p role="alert">Could not check permissions. Refresh before running.</p> : !permissions ? <p>Checking workflow actions…</p> : <>
             {permissions.nodes.length === 0 && <p>No direct tool permissions detected. Agent and nested workflow actions are checked when they run.</p>}
-            <ul className="max-h-48 overflow-auto divide-y divide-line">{permissions.nodes.map((node) => <li key={`${node.nodeId}:${node.actionId ?? node.action}`} className="flex justify-between gap-3 py-2">
+            <ul className="max-h-48 overflow-auto divide-y divide-line">{permissions.nodes.map((node) => <li key={`${node.nodeId}:${node.actionId ?? node.action}`} className="flex flex-col gap-1 py-2 sm:flex-row sm:justify-between sm:gap-3">
               <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
               <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
             </li>)}</ul>

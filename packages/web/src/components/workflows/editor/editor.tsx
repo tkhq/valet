@@ -437,7 +437,7 @@ function EditorDraft({
       {conflict && (
         <div
           role="alert"
-          className="flex items-center gap-3 border-b border-amber/40 bg-amber/10 px-3 py-2 text-xs text-ink"
+          className="flex flex-col items-start gap-3 border-b border-amber/40 sm:flex-row sm:items-center bg-amber/10 px-3 py-2 text-xs text-ink"
         >
           <span className="min-w-0 flex-1">
             The assistant changed this workflow while you were editing. Your unsaved edits are

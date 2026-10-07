@@ -138,7 +138,12 @@ export function createBriefingGenerator(options: {
   const max = Math.max(1,options.maxCacheEntries ?? 128);
   const unavailable = (): WorkspaceBriefingsResponse => ({ briefings: [], generatedAt: null, coverage: "recent", unavailable: true });
   return async (orgId: string, owner: Principal, evidence: readonly BriefingEvidence[], access?: BriefingModelAccess): Promise<WorkspaceBriefingsResponse> => {
-    if (!evidence.length) return { briefings: [], generatedAt: null, coverage: "recent" };
+    // The parser requires two source kinds and at least one contextual source.
+    // No model output can produce a valid group when the input cannot meet these rules.
+    const kinds = new Set(evidence.map(item => item.source.kind));
+    if (kinds.size < 2 || !evidence.some(item => ["thread", "workflow", "artifact"].includes(item.source.kind))) {
+      return { briefings: [], generatedAt: null, coverage: "recent" };
+    }
     const key = digest(JSON.stringify({ orgId, owner, evidence }));
     const cached = cache.get(key);
     if (cached) return cached;

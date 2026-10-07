@@ -42,7 +42,7 @@ Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications
 
 The existing session view re-mounted for the assistant session id (threads, gates, tool cards, WS resume — not a rebuild), with three changes:
 
-1. **Thread tree sidebar.** Threads list children nested beneath the thread that spawned them:
+1. **Thread tree sidebar.** Thread titles take priority over compact status indicators. Model names and size badges appear in the open thread’s header, not sidebar rows. Threads list children nested beneath the thread that spawned them:
 
    ```
    THREADS
@@ -155,3 +155,15 @@ Empty states direct, in-voice: dashboard before first message ("Say hello — {n
 ## Explicitly out of scope
 
 Org page and org activity; memory editing/graph/import UI; avatars and handles beyond the name; team management UI; channel/schedule thread origins (render when Phase 6 delivers them); mobile-app polish beyond responsive-that-works; legacy client changes.
+
+On phone widths, the thread summary stays closed until the user opens it. Opening a chat does not cover its transcript with the summary popover.
+
+On phones, Ask Valet and available plugins live inside the navigation menu. Briefing cards wrap their titles, actions, links, and timestamps instead of imposing fixed row heights. The thread summary popover is bounded by the viewport width and available height.
+
+A cold briefing request waits up to two seconds for evidence collection and generation after claiming its lease. If it is still running, the response reports `refreshing` and the UI polls the same job. The generation lease stays active until publication or failure; repeated reads do not start duplicate model calls.
+
+Briefings reuse a valid snapshot for five minutes before collecting evidence again. Each read still checks source access. Collection failures preserve the last valid snapshot. The generator skips model calls when the evidence cannot meet the two-source-kind and contextual-source requirements. Refresh logs report collection and generation durations separately, without source text.
+
+Workflow-owned run conversations are listed under Automations, with Conversation and Run details views sharing the existing chat components. The normal Threads list retains human-origin and workflow-editor conversations. Run links keep their existing session/thread IDs and access checks. Switching run views retains the mounted composer and draft, while suppressing hidden summary overlays. A reply continues the conversation; retrying a workflow remains a separate Run details action.
+
+On phones, work-list actions sit below the title and details. Long identifiers wrap within the row. Section tabs scroll horizontally within their own strip. Event review fields, workflow status controls, and integration connection actions wrap or stack without reducing the text to a narrow column. Desktop rows retain their horizontal layout.

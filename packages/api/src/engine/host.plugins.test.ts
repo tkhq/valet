@@ -287,7 +287,7 @@ describe("EngineHost + plugin extras", () => {
     });
 
     expectPromptToolConsistency(session);
-    expect(session.options.tools?.map((tool) => tool.name)).toEqual(["list_tools", "call_tool"]);
+    expect(session.options.tools?.map((tool) => tool.name)).toEqual(["list_tools", "call_tool", "skill"]);
     const nativeResult = await listTools(session, stubCredentials, "thread");
     expect(nativeResult).toContain("list_threads, thread_read");
     expect(session.options.skills).toBeUndefined();

@@ -83,6 +83,18 @@ describe("workspace briefing synthesis", () => {
     expect(slackThreadUrl("slack:C0123:not-a-ts")).toBeUndefined();
     expect(slackThreadUrl(null)).toBeUndefined();
   });
+  it("skips model work when no group can meet the source requirements", async () => {
+    const summarize = vi.fn<BriefingSummarizer>();
+    const generate = createBriefingGenerator({ summarize });
+    for (const kind of ["thread", "workflow", "artifact", "pull_request"] as const) {
+      const onlyKind = evidence.map(item => ({ ...item, source: { ...item.source, kind } }));
+      expect(await generate("org",user,onlyKind)).toEqual({ briefings: [], generatedAt: null, coverage: "recent" });
+    }
+    const effects = evidence.map((item,index) => ({ ...item,
+      source: { ...item.source, kind: index % 2 ? "message" as const : "pull_request" as const } }));
+    expect((await generate("org",user,effects)).briefings).toEqual([]);
+    expect(summarize).not.toHaveBeenCalled();
+  });
   it("coalesces identical requests and binds the cache to full evidence, org and owner", async () => {
     let release: ((value: string) => void) | undefined;
     const summarize = vi.fn<BriefingSummarizer>(() => new Promise(resolve => { release = resolve; }));

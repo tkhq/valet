@@ -7,6 +7,7 @@ import { threadsRouter } from "./routes/threads.js";
  * I/O (open sqlite, build providers) out of the hot test path.
  */
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
+import { productAnnouncementsRouter } from "./routes/product-announcements.js";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -365,6 +366,7 @@ export function createApp(
   // identityLinksRouter above.
   app.route("/api/me/github", githubConnectRouter);
   app.route("/api/me", meRouter);
+  app.route("/api/product-announcements", productAnnouncementsRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
   app.route("/api/proxy", proxyUsageRouter);

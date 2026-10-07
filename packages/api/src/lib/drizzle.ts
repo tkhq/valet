@@ -391,6 +391,15 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "product announcements", probe: { kind: "table", table: "product_announcements" }, sql: `CREATE TABLE "product_announcements" (
+  "id" text PRIMARY KEY, "activated_at" bigint NOT NULL
+);
+INSERT INTO "product_announcements" ("id", "activated_at")
+VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_timestamp()) * 1000)::bigint);` },
+  { describe: "product announcement acknowledgements", probe: { kind: "table", table: "product_announcement_acknowledgements" }, sql: `CREATE TABLE "product_announcement_acknowledgements" (
+  "announcement_id" text NOT NULL, "user_id" text NOT NULL, "acknowledged_at" bigint NOT NULL,
+  PRIMARY KEY ("announcement_id", "user_id")
+);` },
   { describe: "quarantine unscoped legacy workflow approvals", probe: { kind: "column", table: "action_policy_overrides", column: "legacy_unscoped" }, sql: `DO $$ BEGIN
     ALTER TABLE action_policy_overrides ADD COLUMN legacy_unscoped boolean NOT NULL DEFAULT true;
     ALTER TABLE action_policy_overrides ALTER COLUMN legacy_unscoped SET DEFAULT false; END $$` },

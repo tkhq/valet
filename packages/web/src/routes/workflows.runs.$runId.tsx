@@ -1,3 +1,5 @@
+import { RunWorkspace } from "~/components/workflows/run-workspace";
+import { textParam } from "~/lib/search-params";
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunDetail } from "@valet/api/wire";
@@ -30,10 +32,15 @@ import { formatWhen } from "~/lib/format-when";
  */
 export const Route = createFileRoute("/workflows/runs/$runId")({
   component: RunDetailPage,
+  validateSearch: (raw: unknown): { view?: "details" | "conversation"; conversation?: string } => ({
+    view: textParam(raw, "view") === "details" ? "details" : undefined,
+    conversation: textParam(raw, "conversation"),
+  }),
 });
 
 function RunDetailPage() {
   const { runId } = Route.useParams();
+  const search = Route.useSearch();
   const { data, isLoading, error } = useRunDetail(runId);
   // Arriving from a run notification for a team's run: move the switcher to
   // the run's workspace so the nav matches the page instead of showing
@@ -61,6 +68,8 @@ function RunDetailPage() {
           ← Workflows
         </Link>
       </div>
+      <RunWorkspace conversations={data.conversations ?? []} view={search.view} conversationId={search.conversation}
+        onSelect={(view, conversation) => void navigate({ to: "/workflows/runs/$runId", params: { runId }, search: { view, conversation }, replace: true })}>
       <RunDetailBody
         runId={runId}
         data={data}
@@ -74,6 +83,7 @@ function RunDetailPage() {
         }
         retryPending={retryRun.isPending}
       />
+      </RunWorkspace>
     </div>
   );
 }

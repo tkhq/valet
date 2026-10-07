@@ -175,8 +175,8 @@ beforeEach(() => {
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
 });
 
-describe("ThreadTree — model label", () => {
-  it("shows the resolved model name with the selected size in a pill", () => {
+describe("ThreadTree — title-first sidebar", () => {
+  it("keeps model names and size badges out of the thread row", () => {
     sessionModel = "s";
     models = [
       {
@@ -190,12 +190,13 @@ describe("ThreadTree — model label", () => {
       },
     ];
     tierMap = { xs: [], s: [], m: [], l: ["anthropic/claude-sonnet-5"], xl: [] };
-    threads = [thread({ model: "l" })];
+    threads = [thread({ model: "l", title: "Investigate onboarding workflow" })];
 
     renderTree();
 
-    expect(screen.getByText("Claude Sonnet 5")).toBeTruthy();
-    expect(screen.getByText("Large")).toBeTruthy();
+    expect(screen.getByText("Investigate onboarding workflow")).toBeTruthy();
+    expect(screen.queryByText("Claude Sonnet 5")).toBeNull();
+    expect(screen.queryByText("Large")).toBeNull();
     expect(screen.queryByText("l")).toBeNull();
   });
 });

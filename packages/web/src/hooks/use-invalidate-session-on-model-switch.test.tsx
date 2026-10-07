@@ -11,7 +11,8 @@ it("refreshes model settings without invalidating transcript or decision caches"
   useStreamStore.setState({ bySession: {} });
   const client = new QueryClient();
   const sid = "team-runtime";
-  const keys = [qk.session(sid), qk.threads(sid), qk.messages(sid, "thread"), qk.decisions(sid)];
+  const selectedKey = [...qk.threads(sid), "selected", "thread"];
+  const keys = [selectedKey, qk.session(sid), qk.threads(sid), qk.messages(sid, "thread"), qk.decisions(sid)];
   for (const key of keys) client.setQueryData(key, {});
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -20,6 +21,7 @@ it("refreshes model settings without invalidating transcript or decision caches"
   act(() => useStreamStore.getState().ingest(sid, {
     seq: 1, ts: 1, type: "model_switched", fromModel: "s", toModel: "l", reason: "set_via_api", scope: "thread", threadId: "thread",
   }));
+  expect(client.getQueryState(selectedKey)?.isInvalidated).toBe(true);
   expect(client.getQueryState(qk.session(sid))?.isInvalidated).toBe(true);
   expect(client.getQueryState(qk.threads(sid))?.isInvalidated).toBe(true);
   expect(client.getQueryState(qk.messages(sid, "thread"))?.isInvalidated).toBe(false);

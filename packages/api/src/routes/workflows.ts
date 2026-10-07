@@ -7,6 +7,7 @@
  * All definition/run logic lives in `../workflows/service.ts` (shared with
  * the agent-facing workflows action plugin); this file is HTTP plumbing.
  */
+import { workflowRunConversations } from "./workflow-run-conversations.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { NotFoundError } from "@valet/shared";
@@ -865,7 +866,7 @@ workflowsRouter.get("/runs/:runId", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const resp = await getWorkflowRunDetail(deps, owner, c.req.param("runId"));
   if (!resp) return c.json({ error: "run not found" }, 404);
-  return c.json(resp);
+  return c.json({ ...resp, conversations: await workflowRunConversations(c, c.req.param("runId")) });
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {

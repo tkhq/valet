@@ -39,6 +39,7 @@ export const LIST_SEARCH_ACTIONS: string[] = [
 ];
 
 export const READ_GET_ACTIONS: string[] = [
+  'slides.get_presentation', 'slides.get_page', 'slides.get_thumbnail',
   'drive.get_document_info',
   'drive.get_folder_info',
   'drive.download_file',
@@ -56,6 +57,7 @@ export const READ_GET_ACTIONS: string[] = [
 ];
 
 export const WRITE_MODIFY_ACTIONS: string[] = [
+  'slides.batch_update',
   'drive.copy_file',
   'drive.move_file',
   'drive.rename_file',
@@ -112,6 +114,7 @@ export const WRITE_MODIFY_ACTIONS: string[] = [
 ];
 
 export const CREATE_ACTIONS: string[] = [
+  'slides.create_presentation',
   'drive.create_document',
   'drive.create_folder',
   'drive.create_from_template',
@@ -309,6 +312,9 @@ export function extractFileId(actionId: string, params: Record<string, unknown>)
   if (actionId.startsWith('drive.')) {
     return typeof params.fileId === 'string' ? params.fileId : null;
   }
+  if (actionId.startsWith('slides.')) {
+    return typeof params.presentationId === 'string' ? params.presentationId : null;
+  }
   if (actionId.startsWith('docs.')) {
     return typeof params.documentId === 'string' ? normalizeDocumentId(params.documentId) : null;
   }
@@ -334,6 +340,9 @@ export function extractCreatedFileId(
 
   if (actionId.startsWith('drive.')) {
     return typeof data.id === 'string' ? data.id : null;
+  }
+  if (actionId.startsWith('slides.')) {
+    return typeof data.presentationId === 'string' ? data.presentationId : null;
   }
   if (actionId.startsWith('docs.')) {
     return typeof data.documentId === 'string' ? data.documentId : null;

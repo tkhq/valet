@@ -89,7 +89,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
 
 export function WorkspaceAssistantButton() {
   const assistant = useWorkspaceAssistant();
-  return <Button size="sm" variant="ghost" onClick={() => assistant.open()}><Sparkles className="h-4 w-4" /><span className="hidden sm:inline">Ask Valet</span></Button>;
+  return <Button size="sm" variant="ghost" aria-label="Ask Valet" onClick={() => assistant.open()}><Sparkles className="h-4 w-4" /><span className="hidden sm:inline">Ask Valet</span></Button>;
 }
 
 export function WorkspaceAssistantDock() { return useWorkspaceAssistant().panel; }
