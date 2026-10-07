@@ -68,3 +68,7 @@ PR replies retain their exact source session/thread, recheck archive state, and 
 Team deletion locks execution allocation, marks every owned session deleted, and tears down roots, executions, children, grants, and sandbox tokens.
 Deleted executions cannot reopen. Logical workspace assistants remain permanent; individual executions can be deleted by authorized callers.
 Slack startup returns 503 until verification and durable admission are available. At most ten inbox rows drain concurrently; each renews its fenced lease.
+
+## Home conversation update pagination
+
+Conversation updates show at most 10 rows per page, after excluding questions and active work. Previous and Next controls appear when more than 10 updates exist. The section count shows all available updates. Switching workspaces resets the page. Archiving or refreshing clamps the selected page to the last available page. Questions remain in Needs attention. This is display pagination over the existing waiting-thread response.
