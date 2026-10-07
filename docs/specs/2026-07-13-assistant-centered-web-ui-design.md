@@ -42,7 +42,7 @@ Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications
 
 The existing session view re-mounted for the assistant session id (threads, gates, tool cards, WS resume — not a rebuild), with three changes:
 
-1. **Thread tree sidebar.** Threads list children nested beneath the thread that spawned them:
+1. **Thread tree sidebar.** Thread titles take priority over compact status indicators. Model names and size badges appear in the open thread’s header, not sidebar rows. Threads list children nested beneath the thread that spawned them:
 
    ```
    THREADS
