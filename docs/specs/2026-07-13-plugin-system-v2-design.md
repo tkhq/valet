@@ -32,6 +32,7 @@ export interface ValetPlugin {
   actions?: ActionPlugin[];              // plugin-catalog shape, unchanged
   transports?: ChannelTransportFactory[]; // v2 channel contract (engine spec)
   triggers?: TriggerDef[];               // this spec, below
+  httpRoutes?: PluginHttpRoute[];        // host-mounted portable route declarations
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[]; // declaration only, below
@@ -299,3 +300,7 @@ when present, then parses JSON text, then tries TOON, and finally preserves raw
 text. The TOON step requires a standalone first-line array or table marker such
 as `[2]:`, `items[2]:`, or `items[2]{id,name}:`. This gate keeps ordinary text
 such as `Error: Invalid input` as text.
+
+## Plugin HTTP routes
+
+The [HTTP interfaces design](2026-10-07-plugin-http-interfaces-design.md) defines `ValetPlugin.httpRoutes`. The host owns authentication, namespace assignment, and streaming body limits. Linear webhook ingress uses this interface. Existing connection handlers and other providers remain unchanged.

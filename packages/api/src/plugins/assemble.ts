@@ -31,6 +31,7 @@
 import { createHash } from "node:crypto";
 import {
   buildPluginCatalog,
+  validatePluginHttpRoutes,
   pluginCatalogTools,
   type ActionPlugin,
   type ValetPlugin,
@@ -87,6 +88,10 @@ export function assemblePlugins(sources: ValetPlugin[][]): AssembledPlugins {
 
       if (seenNames.has(plugin.name)) continue;
       seenNames.add(plugin.name);
+      const routeIssues = validatePluginHttpRoutes(plugin.httpRoutes);
+      if (routeIssues.length) {
+        throw new Error(`Invalid HTTP routes for plugin ${plugin.name}: ${routeIssues.map((issue) => `${issue.path}: ${issue.message}`).join("; ")}`);
+      }
       plugins.push(plugin);
 
       for (const actionPlugin of plugin.actions ?? []) {
