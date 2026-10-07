@@ -74,7 +74,10 @@ export function SessionView({
   enableReplies = false,
   scopeNotice,
   chatOnly = false,
+  active = true,
 }: {
+  /** Hidden embedded views keep drafts/streams but suppress floating overlays. */
+  active?: boolean;
   chatOnly?: boolean;
   scopeNotice?: string;
   sessionId: string;
@@ -111,6 +114,7 @@ export function SessionView({
   /** Enable message-level replies on an orchestrator chat surface. */
   enableReplies?: boolean;
 }) {
+  const [summaryOpen, setSummaryOpen] = useState(() => !panel && typeof window.matchMedia === "function" && window.matchMedia("(min-width: 768px)").matches);
   const session = useSession(sessionId);
   // Keep the header's model picker honest for switches this client did not
   // make itself (/model command, other tabs, direct API).
@@ -131,7 +135,7 @@ export function SessionView({
     if (tab === "browser" && next !== "browser") browserWatch.open();
     setTab(next);
   }
-  const threads = useThreads(sessionId);
+  const threads = useThreads(sessionId, undefined, activeThreadId);
   // Open the WS — pipes events into the store keyed by sessionId.
   useSessionWebSocket(sessionId);
   const stream = useSessionStream(sessionId);
@@ -262,7 +266,7 @@ export function SessionView({
   }
 
   const summaryControl = effectiveThreadId ? (
-    <Popover key={`${sessionId}:${effectiveThreadId}`} defaultOpen={!panel && typeof window.matchMedia === "function" && window.matchMedia("(min-width: 768px)").matches}>
+    <Popover key={`${sessionId}:${effectiveThreadId}`} open={active && summaryOpen} onOpenChange={setSummaryOpen}>
       <PopoverTrigger asChild>
         <button type="button" aria-label="Toggle summary" title="Toggle summary" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink data-[state=open]:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss">
           <ListTree className="h-4 w-4" aria-hidden />

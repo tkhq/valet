@@ -11,6 +11,7 @@
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import { Hono, type Context } from "hono";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -392,8 +393,9 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
 
   if (!session.id.startsWith("execution:") && !engineSession.options.readOnlyReason) await engineSession.ensureDefaultThread();
   const wantArchived = c.req.query("archived") === "1";
-  const groups = await workspaceThreadGroups(c, session, wantArchived);
-  const threads = groups.flatMap(group => group.threads.map(t => ({ ...t,
+  const selectedThreadId = c.req.query("threadId");
+  const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
+  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key)).map(t => ({ ...t,
     model: t.model ?? group.defaults?.model, reasoning: t.reasoning ?? group.defaults?.reasoning })));
 
   // Titles + archive state live in the app-side `session_threads` mirror
@@ -443,7 +445,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const matchingIds = new Set(contentMatches.map((row) => row.threadId));
   const summaries = threads
     .filter(t => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
-    .filter(t => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
+    .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map(t => threadToSummary(t.id, t.createdAt, t.sessionId,
       metaById.get(t.id)?.lastUserActivityAt ?? t.createdAt, metaById.get(t.id)?.title,
       t.model, t.key, metaById.get(t.id)?.archivedAt, t.reasoning ?? null));

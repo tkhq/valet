@@ -73,9 +73,9 @@ vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMi
   <button onClick={onClose}>close preview</button><button onClick={onExpand}>expand preview</button></section> }));
 vi.mock("./browser/browser-pane", () => ({ BrowserPane: () => <section aria-label="Full browser" /> }));
 
-function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void) {
+function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void, active = true) {
   const rootRoute = createRootRoute({
-    component: () => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} />,
+    component: () => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} active={active} />,
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([]),
@@ -93,6 +93,12 @@ function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void)
 
 describe("SessionView header chrome", () => {
   afterEach(() => vi.unstubAllGlobals());
+  it("suppresses summary portals for a hidden embedded chat", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    renderInRouter("sess-1", false, undefined, false);
+    await screen.findByRole("button", { name: "Toggle summary" });
+    expect(screen.queryByText("Thread summary contents")).toBeNull();
+  });
   it("leaves the chat unobscured until the user opens the summary on mobile", async () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
     renderInRouter("sess-1", false);

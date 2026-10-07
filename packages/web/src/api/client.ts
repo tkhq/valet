@@ -517,6 +517,8 @@ export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearch
 }
 
 export const api = {
+  productAnnouncements: () => request<import("@valet/api/wire").ProductAnnouncementsResponse>("GET", "/product-announcements"),
+  acknowledgeProductAnnouncement: (id: string) => request<{ acknowledged: true }>("POST", `/product-announcements/${encodeURIComponent(id)}/acknowledge`),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);
@@ -795,11 +797,17 @@ export const api = {
     request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string }) =>
-    request<ListThreadsResponse>(
+  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string; threadId?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.archived) params.set("archived", "1");
+    if (opts?.q) params.set("q", opts.q);
+    if (opts?.threadId) params.set("threadId", opts.threadId);
+    const query = params.toString();
+    return request<ListThreadsResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.q ? `?q=${encodeURIComponent(opts.q)}${opts.archived ? "&archived=1" : ""}` : opts?.archived ? "?archived=1" : ""}`,
-    ),
+      `/sessions/${encodeURIComponent(sessionId)}/threads${query ? `?${query}` : ""}`,
+    );
+  },
   markThreadsRead: (sessionId: string, threadIds?: string[]) =>
     request<void>("POST", `/sessions/${encodeURIComponent(sessionId)}/threads/read`, threadIds ? { threadIds } : {}),
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>

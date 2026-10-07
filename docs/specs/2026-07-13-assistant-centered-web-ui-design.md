@@ -161,3 +161,7 @@ On phone widths, the thread summary stays closed until the user opens it. Openin
 On phones, Ask Valet and available plugins live inside the navigation menu. Briefing cards wrap their titles, actions, links, and timestamps instead of imposing fixed row heights. The thread summary popover is bounded by the viewport width and available height.
 
 A cold briefing request waits up to two seconds for evidence collection and generation after claiming its lease. If it is still running, the response reports `refreshing` and the UI polls the same job. The generation lease stays active until publication or failure; repeated reads do not start duplicate model calls.
+
+Briefings reuse a valid snapshot for five minutes before collecting evidence again. Each read still checks source access. Collection failures preserve the last valid snapshot. The generator skips model calls when the evidence cannot meet the two-source-kind and contextual-source requirements. Refresh logs report collection and generation durations separately, without source text.
+
+Workflow-owned run conversations are listed under Automations, with Conversation and Run details views sharing the existing chat components. The normal Threads list retains human-origin and workflow-editor conversations. Run links keep their existing session/thread IDs and access checks. Switching run views retains the mounted composer and draft, while suppressing hidden summary overlays. A reply continues the conversation; retrying a workflow remains a separate Run details action.

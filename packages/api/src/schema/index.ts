@@ -2832,3 +2832,14 @@ export const legacyArtifactPublications = pgTable("legacy_artifact_publications"
   ownerId: text("owner_id").notNull(),
   sourceSessionId: text("source_session_id").notNull(),
 });
+
+// Release activation is seeded once; acknowledgements belong to the signed-in user.
+export const productAnnouncements = pgTable("product_announcements", {
+  id: text("id").primaryKey(),
+  activatedAt: bigint("activated_at", { mode: "number" }).notNull(),
+});
+export const productAnnouncementAcknowledgements = pgTable("product_announcement_acknowledgements", {
+  announcementId: text("announcement_id").notNull(),
+  userId: text("user_id").notNull(),
+  acknowledgedAt: bigint("acknowledged_at", { mode: "number" }).notNull(),
+}, (t) => [primaryKey({ columns: [t.announcementId, t.userId] })]);

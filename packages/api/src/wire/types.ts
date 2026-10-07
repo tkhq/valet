@@ -2088,7 +2088,16 @@ export interface WorkflowRunSignal {
   createdAt: number;
 }
 
+export interface WorkflowRunConversation {
+  sessionId: string;
+  threadId: string;
+  title?: string;
+  nodeId?: string;
+}
+
 export interface WorkflowRunDetail {
+  /** Run-owned histories, excluding the human conversation that started the run. */
+  conversations?: WorkflowRunConversation[];
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -5493,3 +5502,12 @@ export interface WorkspaceBriefingsResponse {
   coverage: "recent";
   unavailable?: boolean;
 }
+
+/** A release notice with a stable identity and an internal destination. */
+export interface ProductAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  action: { label: string; href: string };
+}
+export interface ProductAnnouncementsResponse { announcements: ProductAnnouncement[] }
