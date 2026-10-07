@@ -302,3 +302,5 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 - **Write-back.** Sync reads. Nothing pushes a locally written skill into a repository.
 - **Org-wide skills.** `owner_type` accepts `org`, and delivery reads an `org` principal's rows, but no route creates one. An org-wide skill needs an admin gate first.
 - **`argsSchema` on a stored skill.** Only a plugin can supply one, because it is code, not frontmatter. A stored skill takes no arguments.
+
+Session-bound skill tools remain installed even when the initial registry is empty. The first saved skill becomes visible on the next turn.

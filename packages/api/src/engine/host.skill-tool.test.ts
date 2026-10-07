@@ -197,7 +197,7 @@ describe("the `skill` tool on a real session", () => {
     });
   });
 
-  it("is absent from a session whose plugins ship no skills", async () => {
+  it("discovers the first personal skill added to an initially empty runtime", async () => {
     api = await bootTestApi({ plugins: [] });
     const session = await api.providers.engineHost.sessionFor("skill-tool-none", {
       userId: "local-user",
@@ -205,6 +205,12 @@ describe("the `skill` tool on a real session", () => {
       workspace: "/tmp",
     });
 
-    expect((session.options.tools ?? []).map((t) => t.name)).not.toContain("skill");
+    await createSkill(api.providers.db, { userId: "local-user", orgId: "local-org" }, {
+      name: "custom-slides", description: "Edit presentations.", content: "Use the Slides API.",
+    });
+    await session.refreshSkills();
+    const tool = findSkillTool(session.options.tools);
+    expect(tool.description).toContain("custom-slides");
+    expect((await tool.execute({ name: "custom-slides" }, makeCtx())).text).toContain("Use the Slides API.");
   });
 });

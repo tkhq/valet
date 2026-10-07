@@ -105,8 +105,8 @@ export interface SkillToolSession {
 
 /**
  * Builds the `skill` ToolDef over an assembled plugin set's skills.
- * Returns `null` when the set ships no skills — a tool that can list
- * nothing is worse than no tool.
+ * Returns `null` only for an empty static set. A session-bound tool stays
+ * available so its first saved skill can appear without a runtime restart.
  *
  * `session` returns the session that carries this tool, once the host has
  * built it and bound it (`PluginSessionExtras.bindSession`). Until then, and
@@ -124,9 +124,9 @@ export interface SkillToolSession {
  */
 export function buildSkillTool(
   skills: SkillSource[],
-  session: () => SkillToolSession | undefined = () => undefined,
+  session?: () => SkillToolSession | undefined,
 ): ToolDef | null {
-  if (skills.length === 0) return null;
+  if (skills.length === 0 && !session) return null;
   const builtWith = new Map<string, SkillSource>();
   for (const skill of skills) {
     if (builtWith.has(skill.name)) {
@@ -136,7 +136,7 @@ export function buildSkillTool(
     }
     builtWith.set(skill.name, skill);
   }
-  const current = (): ReadonlyMap<string, SkillSource> => session()?.skills ?? builtWith;
+  const current = (): ReadonlyMap<string, SkillSource> => session?.()?.skills ?? builtWith;
 
   return defineTool({
     name: SKILL_TOOL_NAME,
@@ -150,7 +150,7 @@ export function buildSkillTool(
       // A skill saved earlier in this same turn is not in the turn-start
       // read. Re-read the session's skills once before answering that a
       // name does not exist. A failed read answers from the previous set.
-      const bound = session();
+      const bound = session?.();
       if (bound && !bound.skills.has(args.name)) {
         try {
           await bound.refreshSkills();

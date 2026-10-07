@@ -76,13 +76,13 @@ describe("pluginSessionExtras", () => {
 
   it("keeps catalog tools for an inert plugin set", () => {
     const { tools } = pluginSessionExtras([makePlugin("inert")]);
-    expect(tools.map((tool) => tool.name)).toEqual(["list_tools", "call_tool"]);
+    expect(tools.map((tool) => tool.name)).toEqual(["list_tools", "call_tool", "skill"]);
   });
 
-  it("returns exactly [list_tools, call_tool] when action plugins exist", () => {
+  it("keeps catalog and skill discovery when action plugins exist", () => {
     const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
     const { tools } = pluginSessionExtras(plugins);
-    expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["call_tool", "list_tools", "skill"]);
   });
 
   it("concatenates skills and roles across plugins", () => {
@@ -141,10 +141,10 @@ describe("pluginSessionExtras", () => {
     expect(skillTool?.description).toContain("workflows");
   });
 
-  it("adds no `skill` tool when no plugin ships a skill", () => {
+  it("keeps a bindable `skill` tool when no plugin ships a skill", () => {
     const plugins = [makePlugin("github", { actions: [makeActionPlugin("github")] })];
     const { tools } = pluginSessionExtras(plugins);
-    expect(tools.map((t) => t.name)).not.toContain("skill");
+    expect(tools.map((t) => t.name)).toContain("skill");
   });
 
   it("builds a fresh tools array on every call (no module-scope caching)", () => {
