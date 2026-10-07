@@ -288,6 +288,10 @@ export function createApp(
         const rows = await listStandaloneSessions(providers.db, userId);
         return rows.map((r) => ({ id: r.id, title: r.title, status: r.status }));
       },
+      // Agent tools call `/api` routes in-process. `app` is complete by the
+      // time a tool runs, so this sees every route mounted below.
+      dispatch: (inner) => Promise.resolve(app.fetch(inner)),
+      engineStore: providers.engineStore,
     });
     app.all("/mcp", (c) => mcp(c.req.raw));
   }

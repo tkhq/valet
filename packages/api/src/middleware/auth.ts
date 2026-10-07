@@ -8,6 +8,7 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
+import { mcpCallerFor, mcpRouteAllowed } from "../auth/mcp-caller.js";
 import {
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
@@ -257,6 +258,10 @@ export async function resolveOptionalIdentity(
  * Auth middleware ladder (auth-v2 design). First match wins:
  *
  *   1. `x-valet-internal` valid → `next()`, no `c.var.user`/`c.var.sandbox`.
+ *   1b. An MCP tool call: the `/mcp` handler attached an OAuth-verified user to
+ *      this in-process `Request` (`auth/mcp-caller.ts`). Sets a user principal
+ *      with `authVia: "mcp"` on the MCP allow-listed routes and 403s every
+ *      other route. No header can produce this identity.
  *   2. `x-valet-sandbox` present → `verifySandboxToken`; invalid 401s even
  *      in stub mode — an explicit credential beats every fallback below it.
  *      Valid tokens only set `c.var.sandbox` and `next()` when the path
@@ -302,6 +307,19 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
   return async (c, next) => {
     // 1. Internal token — unconditional bypass.
     if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+      await next();
+      return;
+    }
+
+    // 1b. MCP tool call. The `/mcp` handler verified the OAuth bearer token
+    // and attached the user to this in-process `Request` object. No header
+    // can produce this identity, and it applies only to the MCP routes.
+    const mcpUser = mcpCallerFor(c.req.raw);
+    if (mcpUser) {
+      if (!mcpRouteAllowed(c.req.method, c.req.path)) {
+        return c.json({ error: "This route is not available to MCP clients." }, 403);
+      }
+      setCaller(c, mcpUser, "mcp", userPrincipal(mcpUser.id), auth);
       await next();
       return;
     }

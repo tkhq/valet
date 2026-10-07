@@ -4,7 +4,7 @@
  * session and a personal key authenticate as the user. `user` stays on the
  * context for audit (the creating admin on a team key).
  */
-export type AuthVia = "session" | "apiKey" | "stub";
+export type AuthVia = "session" | "apiKey" | "stub" | "mcp";
 
 export type RequestPrincipal = { type: "user"; id: string } | { type: "team"; id: string };
 
