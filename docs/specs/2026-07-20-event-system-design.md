@@ -525,3 +525,22 @@ Readiness requires the installation, the signing secret, and a matching workspac
 Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. App credentials stay excluded from agent and workflow credential resolution, and generic credential routes cannot change them.
 
 Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.
+
+## Terminal review attribution (2026-10-01)
+
+A successful `gh pr review` command MUST report its command start time in the
+terminal outcome. The pull-request watcher MUST persist that start time in the
+terminal-review marker. The marker persistence time is the command interval's
+upper bound, with at most five seconds of provider clock skew after that bound.
+
+A GitHub review or inline review comment MUST match the marker only when its
+provider timestamp is no more than five seconds before the command start. This
+lower tolerance covers GitHub timestamps that have second precision. The upper
+bound is five seconds after marker persistence. A marker MUST NOT match a human
+event from 30 seconds before the command. The dispatcher MUST use the immutable
+provider timestamp on every settle or retry attempt. Poll time, attempt count,
+and backoff delay MUST NOT change the attribution result.
+
+When an event has no provider timestamp, the dispatcher MAY match a marker that
+was persisted in the preceding 60 seconds. This fallback does not apply when a
+provider timestamp exists.

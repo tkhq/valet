@@ -94,6 +94,16 @@ it("records pull requests a thread creates and follows their GitHub state", asyn
   } }, "tool-end-8");
   await expect.poll(async () => (await listThreads(api!, thread.sessionId)).find(t => t.id === thread.id)?.pullRequests)
     .toEqual([{ url: "https://github.com/acme/app/pull/7", repo: "acme/app", number: 7, state: "open" }]);
+  const reviewStartedAt = Date.now() - 1_000;
+  await api.providers.eventStream.append({ sessionId: thread.sessionId, threadId: thread.id, timestamp: Date.now(), event: {
+    type: "tool_end", threadId: thread.id, tool: "bash", result: "", isError: false,
+    outcome: { kind: "review_submitted", startedAt: reviewStartedAt },
+  } }, "tool-end-review");
+  await expect.poll(async () => {
+    const markers = await api!.providers.db.execute(sql`SELECT provider_message_id FROM channel_messages
+      WHERE provider_message_id = ${`terminal-review:${reviewStartedAt}`}`) as { rows: unknown[] };
+    return markers.rows.length;
+  }).toBe(1);
   stop();
   expect(await recordThreadPullRequest(api.providers.db, { sessionId: thread.sessionId, threadId: thread.id, url: "https://github.com/acme/app/pull/9" })).toBe(true);
   await setPullRequestState(api.providers.db, "local-org", "https://github.com/acme/app/pull/7", "merged");

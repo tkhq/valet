@@ -6418,7 +6418,10 @@ export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] 
   const kind = TOOL_OUTCOME_KINDS.find((known) => known === outcome.kind);
   if (!kind) return {};
   const url = "url" in outcome && typeof outcome.url === "string" ? outcome.url : undefined;
-  return { outcome: { kind, ...(url ? { url } : {}) } };
+  const startedAt = "startedAt" in outcome && typeof outcome.startedAt === "number" && Number.isFinite(outcome.startedAt)
+    ? outcome.startedAt
+    : undefined;
+  return { outcome: { kind, ...(url ? { url } : {}), ...(startedAt !== undefined ? { startedAt } : {}) } };
 }
 
 /** The tools a turn from a channel sender with no Valet account may run

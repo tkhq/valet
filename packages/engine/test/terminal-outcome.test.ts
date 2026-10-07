@@ -63,6 +63,12 @@ describe("toolOutcome", () => {
       return outcome?.kind;
     });
     expect(kinds).toEqual(["pull_request_created", "review_submitted", "pull_request_comment"]);
+    expect(toolOutcome({ details: { outcome: { kind: "review_submitted", startedAt: 1234 } } })).toEqual({
+      outcome: { kind: "review_submitted", startedAt: 1234 },
+    });
+    expect(toolOutcome({ details: { outcome: { kind: "review_submitted", startedAt: "bad" } } })).toEqual({
+      outcome: { kind: "review_submitted" },
+    });
     expect(toolOutcome({ details: { outcome: { kind: "unknown" } } })).toEqual({});
   });
 });

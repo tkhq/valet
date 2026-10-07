@@ -103,6 +103,24 @@ describe("bash tool: mode selection", () => {
     expect((result as { text: string }).text).toBe("job-out\n");
   });
 
+  it.each([59, 61])("records command start for recognized outcomes in timeout %is mode", async (timeout) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(12_345);
+    try {
+      const sandbox: FakeSandbox = {
+        id: `sb-outcome-${timeout}`,
+        exec: vi.fn(async (): Promise<ExecResult> => ({ stdout: "", stderr: "", exitCode: 0 })),
+        execJob: vi.fn(async (): Promise<ExecJobHandle> => ({ execId: "job-outcome" })),
+        pollJob: vi.fn(async (): Promise<JobPoll> => ({ status: "done", exitCode: 0, output: "", nextOffset: 0 })),
+        cancelJob: vi.fn(async () => {}),
+      };
+      const result = await execute({ command: "gh pr review 42 --approve", timeout }, makeCtx(sandbox));
+      expect(result.outcome).toEqual({ kind: "review_submitted", startedAt: 12_345 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("execJob rejecting with [job_unsupported] falls back to sync exec", async () => {
     const sandbox: FakeSandbox = {
       id: "sb-3",
