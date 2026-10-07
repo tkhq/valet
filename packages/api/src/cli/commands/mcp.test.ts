@@ -18,12 +18,12 @@ const stdout = (): string => outSpy.mock.calls.map((c) => String(c[0])).join("")
 const stderr = (): string => errSpy.mock.calls.map((c) => String(c[0])).join("");
 
 describe("buildMcpServerConfig", () => {
-  it("computes <instanceUrl>/mcp, http transport, and a placeholder bearer when no token", () => {
+  it("computes <instanceUrl>/mcp and http transport, with no headers when no token (the client runs OAuth)", () => {
     const cfg = buildMcpServerConfig({ url: "https://valet.example.com", name: "valet" });
     const entry = cfg.mcpServers.valet;
     expect(entry.type).toBe("http");
     expect(entry.url).toBe("https://valet.example.com/mcp");
-    expect(entry.headers.Authorization).toBe("Bearer <MCP_OAUTH_TOKEN>");
+    expect(entry.headers).toBeUndefined();
   });
 
   it("strips a trailing slash on the base before appending /mcp", () => {
@@ -38,7 +38,7 @@ describe("buildMcpServerConfig", () => {
 
   it("embeds an explicit token when provided", () => {
     const cfg = buildMcpServerConfig({ url: "http://x", name: "valet", token: "tok-123" });
-    expect(cfg.mcpServers.valet.headers.Authorization).toBe("Bearer tok-123");
+    expect(cfg.mcpServers.valet.headers?.Authorization).toBe("Bearer tok-123");
   });
 
   it("honors a custom server name", () => {
@@ -59,11 +59,11 @@ describe("run — --print", () => {
     });
     expect(code).toBe(ExitCode.OK);
     const parsed = JSON.parse(stdout()) as {
-      mcpServers: Record<string, { type: string; url: string; headers: { Authorization: string } }>;
+      mcpServers: Record<string, { type: string; url: string; headers?: { Authorization: string } }>;
     };
     expect(parsed.mcpServers.valet.type).toBe("http");
     expect(parsed.mcpServers.valet.url).toBe("http://localhost:8787/mcp");
-    expect(parsed.mcpServers.valet.headers.Authorization).toBe("Bearer <MCP_OAUTH_TOKEN>");
+    expect(parsed.mcpServers.valet.headers).toBeUndefined();
   });
 
   it("defaults the agent to claude-code when omitted", async () => {
@@ -72,13 +72,13 @@ describe("run — --print", () => {
     expect(JSON.parse(stdout())).toHaveProperty("mcpServers.valet");
   });
 
-  it("writes the bearer-OAuth caveat to stderr (not stdout) so JSON stays clean", async () => {
+  it("writes the OAuth sign-in note to stderr (not stdout) so JSON stays clean", async () => {
     const code = await run(["setup", "--print"], { command: "mcp", config: configWith("http://x") });
     expect(code).toBe(ExitCode.OK);
     // stdout must remain parseable JSON
     expect(() => JSON.parse(stdout())).not.toThrow();
-    expect(stderr()).toContain("OAuth bearer token");
-    expect(stderr()).toContain("x-api-key");
+    expect(stderr()).toContain("OAuth flow");
+    expect(stderr()).toContain("API key does not work");
   });
 
   it("embeds a --token when given and skips the caveat", async () => {
@@ -157,7 +157,7 @@ describe("writeClaudeCodeConfig", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
-  it("leaves default perms alone when only the placeholder is embedded", () => {
+  it("leaves default perms alone when the entry carries no token", () => {
     const path = join(dir, ".mcp.json");
     writeFileSync(path, "{}", { mode: 0o644 });
     writeClaudeCodeConfig(path, "valet", entry, defaultFsSeam);

@@ -2,25 +2,16 @@
  * `valet mcp setup [claude-code] [--print]` — wire a local agent (Claude Code
  * today) to the instance's `/mcp` endpoint in one command.
  *
- * ─────────────────────────────────────────────────────────────────────────
- * DEVIATION / KNOWN LIMITATION — `/mcp` auth is Bearer OAuth, not `x-api-key`
- * ─────────────────────────────────────────────────────────────────────────
- * VERIFIED against `packages/api/src/app.ts`:
- *   - `/mcp` is mounted with `mcpHandler` guarded by better-auth's MCP OAuth
- *     (`withMcpAuth`): it expects `Authorization: Bearer <token>`, NOT the
- *     `x-api-key` header the other REST commands (sessions/send/gates/status)
- *     use.
- *   - `/mcp` is ONLY mounted when real auth is configured (the `auth` object
- *     is present). Under the local stub (`VALET_LOCAL_AUTH=1`) it is not
- *     mounted at all.
+ * `/mcp` auth is OAuth, not `x-api-key`. The endpoint is mounted only when
+ * the instance runs real auth, and it 401s with a `WWW-Authenticate` header
+ * that names the instance's OAuth protected-resource metadata. The instance
+ * also supports dynamic client registration. An MCP client that implements
+ * the MCP authorization spec (Claude Code does) therefore signs in by
+ * itself: it opens the browser login on first connect and stores the token.
  *
- * The CLI / auth-v2 cannot mint an MCP bearer token yet — that requires the
- * instance's MCP OAuth handshake, which is a later task. So this command
- * PROVISIONS the correct config *shape* (streamable-HTTP transport, bearer
- * header) and documents the token requirement; it does NOT perform the OAuth
- * handshake. When the caller has a token out-of-band they can pass `--token`;
- * otherwise the header carries a clear `<MCP_OAUTH_TOKEN>` placeholder and the
- * command prints the caveat.
+ * So without `--token` this command writes the endpoint with no headers.
+ * With `--token <bearer>` it embeds `Authorization: Bearer <token>` for a
+ * client that cannot run the OAuth flow, and writes the file `0600`.
  */
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -33,7 +24,7 @@ import type { CliContext } from "../types.js";
 export interface McpServerEntry {
   type: "http";
   url: string;
-  headers: { Authorization: string };
+  headers?: { Authorization: string };
 }
 
 /** The Claude Code MCP config document shape (partial — we only own `mcpServers`). */
@@ -41,40 +32,36 @@ export interface ClaudeCodeMcpConfig {
   mcpServers: Record<string, McpServerEntry>;
 }
 
-/** Placeholder used when no explicit bearer token is supplied. */
-const TOKEN_PLACEHOLDER = "<MCP_OAUTH_TOKEN>";
-
-/** The caveat explaining the Bearer-OAuth-vs-x-api-key deviation. */
-const BEARER_CAVEAT =
-  "note: the instance's /mcp endpoint requires an OAuth bearer token obtained via the " +
-  "instance's MCP OAuth flow (auth-v2) — NOT the x-api-key used by other valet commands. " +
-  "Replace the Authorization header's placeholder with a real token (or re-run with --token <bearer>). " +
-  "The /mcp endpoint is also only available when the instance runs with real auth configured.";
+/** How the client authenticates when no token is embedded. */
+const OAUTH_NOTE =
+  "note: the client signs in through the instance's OAuth flow the first time it connects. " +
+  "In Claude Code, run /mcp and choose Authenticate if the browser does not open. " +
+  "Your valet API key does not work here. The /mcp endpoint needs an instance with real auth configured.";
 
 export interface BuildConfigInput {
   /** The instance base URL (any trailing slashes are stripped). */
   url: string;
   /** The MCP server name (map key under `mcpServers`). */
   name: string;
-  /** An explicit bearer token; a placeholder is used when omitted. */
+  /** An explicit bearer token. Omit it to let the client run the OAuth flow. */
   token?: string;
 }
 
 /**
  * Pure builder for the Claude Code MCP server config. Computes the endpoint as
  * `<instanceUrl>/mcp` (stripping any trailing slashes on the base) and emits a
- * streamable-HTTP server entry carrying an `Authorization: Bearer …` header.
+ * streamable-HTTP server entry. The entry carries an `Authorization` header
+ * only for an explicit token.
  */
 export function buildMcpServerConfig(input: BuildConfigInput): ClaudeCodeMcpConfig {
   const base = input.url.replace(/\/+$/, "");
   const endpoint = `${base}/mcp`;
-  const bearer = input.token ?? TOKEN_PLACEHOLDER;
   return {
     mcpServers: {
       [input.name]: {
         type: "http",
         url: endpoint,
-        headers: { Authorization: `Bearer ${bearer}` },
+        ...(input.token !== undefined ? { headers: { Authorization: `Bearer ${input.token}` } } : {}),
       },
     },
   };
@@ -121,7 +108,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * `opts.secret` → the write is 0600. Only set when the entry embeds a REAL
  * bearer token (`--token`): `.mcp.json` is a project-local file that users
- * legitimately commit/share when it only carries the placeholder.
+ * legitimately commit/share when it carries only the endpoint URL.
  */
 export function writeClaudeCodeConfig(
   path: string,
@@ -200,10 +187,10 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   const config = buildMcpServerConfig({ url: instance.url, name, token });
 
   // `--print`: universal path — emit config to stdout for any agent, write
-  // nothing. Keep stdout pure JSON; the token caveat goes to stderr.
+  // nothing. Keep stdout pure JSON; the sign-in note goes to stderr.
   if (flags.flags.print === true) {
     printJson(config);
-    if (token === undefined) printErr(BEARER_CAVEAT);
+    if (token === undefined) printErr(OAUTH_NOTE);
     return ExitCode.OK;
   }
 
@@ -212,14 +199,14 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   // global `~/.claude.json` — it's scoped to the repo and easy to inspect/undo.
   const target = resolve(process.cwd(), ".mcp.json");
   const entry = config.mcpServers[name];
-  // A real --token in the file → owner-only perms; placeholder-only stays default.
+  // A real --token in the file → owner-only perms; a URL-only entry stays default.
   writeClaudeCodeConfig(target, name, entry, defaultFsSeam, { secret: token !== undefined });
 
   printLine(`wrote MCP server "${name}" → ${target}`);
   printLine(`endpoint: ${entry.url}`);
   if (token === undefined) {
     printLine("");
-    printLine(BEARER_CAVEAT);
+    printLine(OAUTH_NOTE);
   }
   return ExitCode.OK;
 }

@@ -181,12 +181,17 @@ command merges a streamable-HTTP server entry into the project-local
 `.mcp.json` and preserves everything else in the file. `--print` emits the
 config JSON to stdout for any agent instead of writing.
 
-The `/mcp` endpoint requires an OAuth **bearer token** from the instance's
-MCP OAuth flow, not the `x-api-key` the other commands use. The endpoint
-is mounted only when the instance runs real auth. Without `--token`, the
-written config carries a `<MCP_OAUTH_TOKEN>` placeholder and the command
-prints the caveat. With `--token`, the file is written with owner-only
-permissions (`0600`).
+The `/mcp` endpoint uses OAuth, not the `x-api-key` the other commands use.
+It is mounted only when the instance runs real auth. Without `--token`, the
+written entry carries only the endpoint URL. Claude Code then signs in through
+the instance's OAuth flow the first time it connects: it opens a browser login
+and stores the token. If the browser does not open, run `/mcp` in Claude Code
+and choose Authenticate. With `--token <bearer>`, the entry embeds an
+`Authorization` header for a client that cannot run OAuth, and the file is
+written with owner-only permissions (`0600`).
+
+The MCP tools let a local agent delegate work and follow it. See
+[MCP agent tools](./specs/2026-10-07-mcp-agent-tools-design.md).
 
 ### `valet reset [--yes]`
 
