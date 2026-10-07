@@ -10,7 +10,7 @@
  * All data hooks are mocked so this stays a pure rendering/branching test.
  */
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -57,10 +57,11 @@ vi.mock("~/stores/stream", async (importOriginal) => {
 
 vi.mock("./session-header", () => ({
   SandboxChip: () => null,
-  SessionHeader: ({ session }: { session: { title?: string } }) => (
-    <div data-testid="full-header">{session.title}</div>
+  SessionHeader: ({ session, summaryControl }: { session: { title?: string }; summaryControl?: ReactNode }) => (
+    <div data-testid="full-header">{session.title}{summaryControl}</div>
   ),
 }));
+vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: () => <div>Thread summary contents</div> }));
 vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) => <div data-testid="message-list">{header}</div> }));
 vi.mock("./composer", () => ({ Composer: () => <div data-testid="composer" /> }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
@@ -91,6 +92,16 @@ function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void)
 }
 
 describe("SessionView header chrome", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("leaves the chat unobscured until the user opens the summary on mobile", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
+    renderInRouter("sess-1", false);
+    const toggle = await screen.findByRole("button", { name: "Toggle summary" });
+    expect(screen.queryByText("Thread summary contents")).toBeNull();
+    fireEvent.click(toggle);
+    expect(await screen.findByText("Thread summary contents")).toBeTruthy();
+
+  });
   it("shows a recovery instruction instead of a composer for legacy history", async () => {
     readOnlyReason = "This legacy conversation is read-only. Start a new thread to continue.";
     renderInRouter("sess-1", false);

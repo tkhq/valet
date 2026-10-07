@@ -8,7 +8,7 @@ import {
   WorkspaceSwitcher,
   workspaceOptions,
 } from "~/components/layout/workspace-switcher";
-import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
@@ -152,7 +152,7 @@ export function TopNav() {
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
   const destinations: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/chat", label: "Threads" },
-    { to: "/memory", label: "Memory" },
+    { to: "/artifacts", label: "Artifacts" },
     { to: "/workflows", label: "Automation" },
     { to: "/events", label: "Events" },
     { to: "/usage", label: "Usage" },
@@ -203,7 +203,7 @@ export function TopNav() {
       </nav>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" className={`shrink-0 gap-1 ${onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE}`}>
+          <Button variant="ghost" size="sm" className={`hidden shrink-0 gap-1 md:inline-flex ${onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE}`}>
             Plugins <ChevronDown className="h-3 w-3" aria-hidden />
           </Button>
         </DropdownMenuTrigger>
@@ -233,18 +233,28 @@ export function TopNav() {
                 </Link>
               </DropdownMenuItem>
             ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link to="/settings"><Settings className="h-4 w-4" aria-hidden />Settings</Link>
+            </DropdownMenuItem>
+            {securityEnabled && <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem asChild>
+                <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
+              </DropdownMenuItem>
+            </>}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
 
-      <div className="shrink-0">
+      <div className="flex shrink-0 items-center">
         <WorkspaceAssistantButton />
         <NotificationsBell />
       </div>
 
       <Link
         to="/settings"
-        className="inline-flex shrink-0 min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
+        className="hidden shrink-0 md:inline-flex items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
         activeProps={{ className: "text-ink" }}
         aria-label="Settings"
       >

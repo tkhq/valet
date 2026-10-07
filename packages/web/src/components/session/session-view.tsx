@@ -262,7 +262,7 @@ export function SessionView({
   }
 
   const summaryControl = effectiveThreadId ? (
-    <Popover key={`${sessionId}:${effectiveThreadId}`} defaultOpen={!panel}>
+    <Popover key={`${sessionId}:${effectiveThreadId}`} defaultOpen={!panel && typeof window.matchMedia === "function" && window.matchMedia("(min-width: 768px)").matches}>
       <PopoverTrigger asChild>
         <button type="button" aria-label="Toggle summary" title="Toggle summary" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink data-[state=open]:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss">
           <ListTree className="h-4 w-4" aria-hidden />

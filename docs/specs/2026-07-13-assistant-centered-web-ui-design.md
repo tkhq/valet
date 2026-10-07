@@ -155,3 +155,5 @@ Empty states direct, in-voice: dashboard before first message ("Say hello — {n
 ## Explicitly out of scope
 
 Org page and org activity; memory editing/graph/import UI; avatars and handles beyond the name; team management UI; channel/schedule thread origins (render when Phase 6 delivers them); mobile-app polish beyond responsive-that-works; legacy client changes.
+
+On phone widths, the thread summary stays closed until the user opens it. Opening a chat does not cover its transcript with the summary popover.

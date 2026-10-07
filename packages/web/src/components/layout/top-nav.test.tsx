@@ -116,7 +116,7 @@ describe("TopNav", () => {
     renderNav();
     await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
     const menu = screen.getByRole("menu");
-    expect(within(menu).queryByRole("menuitem", { name: "Security" })).toBeNull();
+    expect(within(menu).getByRole("menuitem", { name: "Valet Security" })).toBeTruthy();
     await userEvent.click(within(menu).getByRole("menuitem", { name: "Skills" }));
     expect(screen.queryByRole("menu")).toBeNull();
   });
@@ -125,7 +125,7 @@ describe("TopNav", () => {
     securityPlugins = [];
     renderNav();
     await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
-    expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: "Security" })).toBeNull();
+    expect(within(screen.getByRole("menu")).queryByRole("menuitem", { name: "Valet Security" })).toBeNull();
   });
 
   it("renders the Valet logo, not the orchestrator's name", async () => {
@@ -144,14 +144,14 @@ describe("TopNav", () => {
     expect(screen.getByRole("link", { name: "Threads" }).getAttribute("href")).toBe("/chat");
     expect(screen.getByRole("link", { name: "Skills" }).getAttribute("href")).toBe("/skills");
     expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Artifacts" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
     const nav = screen.getByRole("navigation", { name: "Primary" });
     const labels = within(nav)
       .getAllByRole("link")
       .map((el) => el.textContent);
     expect(labels).toEqual([
       "Threads",
-      "Memory",
+      "Artifacts",
       "Automation",
       "Events",
       "Usage",
@@ -159,6 +159,27 @@ describe("TopNav", () => {
       "Integrations",
       "Changelog",
     ]);
+  });
+
+  it("keeps artifacts and enabled plugins reachable in mobile navigation", async () => {
+    renderNav();
+    await userEvent.click(await screen.findByRole("button", { name: "Open navigation" }));
+    const menu = screen.getByRole("menu", { name: "Open navigation" });
+    expect(within(menu).getByRole("menuitem", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
+    expect(within(menu).getByRole("menuitem", { name: "Valet Security" }).getAttribute("href")).toBe("/security");
+    expect(within(menu).queryByRole("menuitem", { name: "Memory" })).toBeNull();
+  });
+
+  it("moves Settings into mobile navigation and keeps the desktop shortcut", async () => {
+    renderNav();
+    const shortcut = await screen.findByRole("link", { name: "Settings" });
+    expect(shortcut.classList.contains("hidden")).toBe(true);
+    expect(shortcut.classList.contains("md:inline-flex")).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    const menu = screen.getByRole("menu", { name: "Open navigation" });
+    expect(within(menu).getByRole("menuitem", { name: "Settings" }).getAttribute("href")).toBe("/settings");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Settings" }));
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("opens Valet Security from the Plugins dropdown", async () => {
