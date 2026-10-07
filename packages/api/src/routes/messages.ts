@@ -11,6 +11,7 @@
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import { Hono, type Context } from "hono";
@@ -25,7 +26,7 @@ import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@vale
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, assistants, assistantExecutions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -357,6 +358,23 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
         eq(agentSessions.ownerType, session.ownerType), eq(agentSessions.ownerId, session.ownerId),
         sql`${agentSessions.status} <> 'deleted'`))
     : [];
+  // The singleton cutover retained older assistant runtimes under their original
+  // workspace ownership. Include their history without moving threads or files.
+  const legacy = (session.ownerType === "user" || session.ownerType === "team" || session.ownerType === "org") && session.ownerId
+    ? await db.select({ session: agentSessions }).from(legacyAssistantRuntimes)
+      .innerJoin(agentSessions, eq(agentSessions.id, legacyAssistantRuntimes.sessionId))
+      .where(and(eq(legacyAssistantRuntimes.orgId, session.orgId),
+        eq(legacyAssistantRuntimes.ownerType, session.ownerType), eq(legacyAssistantRuntimes.ownerId, session.ownerId),
+        eq(agentSessions.orgId, session.orgId), eq(agentSessions.ownerType, session.ownerType), eq(agentSessions.ownerId, session.ownerId),
+        sql`${agentSessions.status} <> 'deleted'`,
+        sql`EXISTS (SELECT 1 FROM assistants a WHERE a.session_id = ${session.id}
+          AND a.org_id = ${session.orgId} AND a.owner_type = ${session.ownerType}
+          AND a.owner_id = ${session.ownerId} AND a.archived_at IS NULL)`))
+    : [];
+  const retained = [];
+  for (const row of legacy) {
+    if (row.session.id !== session.id && await isLegacyAssistantRuntime(db, row.session.id, session.orgId)) retained.push(row.session);
+  }
   const anchors = new Set(executions.map(e => e.governingThreadId));
   const keys = new Map(executions.map(e => [e.session.id, e.governingKey]));
   if (session.id.startsWith("execution:")) {
@@ -365,7 +383,7 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
     if (self) keys.set(session.id, self.key);
   }
   const groups = [];
-  for (const row of [session, ...executions.filter(e => e.matchesArchive).map(e => e.session)]) {
+  for (const row of [session, ...retained, ...executions.filter(e => e.matchesArchive).map(e => e.session)]) {
     if (!await spawnedFromVisibleThread(c, row)) continue;
     const visible = threadsVisibleTo(c, row);
     const stored = await engineStore.listThreads(row.id);

@@ -1,10 +1,13 @@
+import { ensureDefaultAssistantSession, retireAssistant } from "../assistants/service.js";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { eq, sql } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, assistants, assistantExecutions, teams, teamMembers } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, legacyAssistantConversations, teams, teamMembers } from "../schema/index.js";
 import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse } from "../wire/types.js";
 let api: TestApi | undefined;
-afterEach(async () => { await api?.cleanup(); api = undefined; });
+let faux: FauxProviderRegistration | undefined;
+afterEach(async () => { await api?.cleanup(); api = undefined; faux?.unregister(); faux = undefined; vi.unstubAllEnvs(); });
 describe("workspace runtime authorization", () => {
   it("ensures personal runtime idempotently and answers the entry point older clients call", async () => {
     api = await bootTestApi();
@@ -48,6 +51,76 @@ describe("workspace runtime authorization", () => {
     const limit = await fetch(`${api.baseUrl}/api/workspaces/user/integration-limit`);
     expect(await limit.json()).toEqual({ services: [] });
     expect((await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(ids[0])}/threads`)).status).toBe(200);
+  });
+  it("lists retained personal history after singleton retirement and workspace replacement", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    faux.appendResponses([() => fauxAssistantMessage("Continued existing work")]);
+    api = await bootTestApi();
+    const request = (path: string, method = "GET", body?: unknown) => fetch(`${api!.baseUrl}/api${path}`, {
+      method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const created = await request("/threads", "POST", { title: "Existing work" });
+    expect(created.status).toBe(201);
+    const thread = await created.json() as CreateThreadResponse;
+    const { db, engineStore, engineHost } = api.providers;
+    await engineStore.appendEntries(thread.sessionId, thread.id, [{ id: "retained-message", sessionId: thread.sessionId,
+      threadId: thread.id, parentId: null, type: "message", role: "user", content: "Keep my existing work", createdAt: 1 }]);
+    const [old] = await db.select().from(assistants).where(eq(assistants.sessionId, thread.sessionId));
+    // This is the persisted state of a live duplicate after the singleton migration.
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: old.id, sessionId: old.sessionId,
+      orgId: old.orgId, ownerType: old.ownerType, ownerId: old.ownerId });
+    await db.insert(legacyAssistantConversations).values({ threadId: thread.id, sessionId: old.sessionId, conversationKey: thread.key! });
+    await db.update(assistants).set({ ownerId: `${old.ownerId}:retired:${old.id}`, archivedAt: 123 }).where(eq(assistants.id, old.id));
+    engineHost.evictCache(old.sessionId);
+    const replacement = await (await request("/workspaces/user/runtime", "POST")).json() as EnsureWorkspaceRuntimeResponse;
+    expect(replacement.sessionId).not.toBe(old.sessionId);
+    for (const path of ["/threads", `/sessions/${encodeURIComponent(replacement.sessionId)}/threads`]) {
+      expect(await (await request(path)).json()).toMatchObject({ threads: expect.arrayContaining([
+        expect.objectContaining({ id: thread.id, sessionId: old.sessionId, title: "Existing work" }),
+      ]) });
+    }
+    const history = await request(`/threads/${thread.id}/messages`);
+    expect(history.status).toBe(200);
+    expect(await history.text()).toContain("Keep my existing work");
+    expect((await request(`/threads/${thread.id}`, "PATCH", { archived: true })).status).toBe(200);
+    expect(await (await request("/threads?archived=1")).json()).toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
+    expect(await (await request("/threads")).json()).not.toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
+    expect((await request(`/threads/${thread.id}`, "PATCH", { archived: false })).status).toBe(200);
+    expect(await (await request("/threads?q=existing work")).json()).toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
+    expect((await request(`/threads/${thread.id}`, "PATCH", { model: "claude-haiku-4-5" })).status).toBe(200);
+    const continued = await request(`/threads/${thread.id}/messages`, "POST", { text: "Continue my existing work" });
+    expect(continued.status).toBe(202);
+    await vi.waitFor(async () => {
+      const messages = await (await request(`/threads/${thread.id}/messages`)).text();
+      expect(messages).toContain("Continued existing work");
+      expect(messages).toContain("Keep my existing work");
+    }, { timeout: 10000 });
+    expect((await fetch(`${api.baseUrl}/api/workspaces/user/runtime`, { method: "POST", headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(200);
+    const other = await fetch(`${api.baseUrl}/api/threads`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(await other.json()).not.toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
+    await db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, old.sessionId));
+    expect(await (await request("/threads")).json()).not.toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
+  });
+  it("lists migration-retained team history but not explicitly retired identities", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await db.insert(teams).values({ id: "retained-team", orgId: "local-org", name: "Retained", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "retained-team", userId: "local-user", role: "admin" });
+    const owner = { type: "team" as const, id: "retained-team" };
+    const old = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    const thread = await old.session.createThread("web:retained-shared");
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: old.assistant.id, sessionId: old.sessionId,
+      orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    await db.insert(legacyAssistantConversations).values({ threadId: thread.id, sessionId: old.sessionId, conversationKey: thread.key });
+    await db.update(assistants).set({ ownerId: `${owner.id}:retired:${old.assistant.id}`, archivedAt: 123 }).where(eq(assistants.id, old.assistant.id));
+    engineHost.evictCache(old.sessionId);
+    const current = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    const list = () => fetch(`${api!.baseUrl}/api/sessions/${encodeURIComponent(current.sessionId)}/threads`).then(r => r.json());
+    expect(await list()).toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id, sessionId: old.sessionId })]) });
+    expect((await fetch(`${api.baseUrl}/api/threads/${thread.id}/messages`)).status).toBe(200);
+    await retireAssistant(db, old.assistant.id);
+    expect(await list()).not.toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
   });
   it("answers a team runtime on the older team path for a member", async () => {
     api = await bootTestApi();

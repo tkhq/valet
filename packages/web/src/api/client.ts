@@ -1007,9 +1007,10 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; q?: string; cursor?: string }) => {
+  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; diagnostics?: boolean; q?: string; cursor?: string }) => {
     const qs = new URLSearchParams({ ownerType: params.owner.ownerType, ownerId: params.owner.ownerId });
     if (params.problems) qs.set("problems", "1");
+    if (params.diagnostics) qs.set("diagnostics", "1");
     if (params.q) qs.set("q", params.q);
     if (params.cursor) qs.set("cursor", params.cursor);
     return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);

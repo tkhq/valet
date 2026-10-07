@@ -10,7 +10,7 @@
  * the backdrop, the ✕, and any link inside it (thread selection).
  */
 import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppShell, useSidebarControls } from "./app-shell";
 
@@ -128,3 +128,19 @@ describe("AppShell — mobile sidebar drawer", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
+
+ it("remembers the resized sidebar width across collapse and remount", async () => {
+  localStorage.removeItem("valet:sidebar-collapsed");
+  localStorage.removeItem("valet:sidebar-width");
+  const first = renderShell();
+  const handle = screen.getByRole("separator", { name: "Resize thread sidebar" });
+  fireEvent.keyDown(handle, { key: "ArrowRight" });
+  expect(handle.getAttribute("aria-valuenow")).toBe("312");
+  await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+  expect(screen.queryByRole("separator")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+  first.unmount();
+  renderShell();
+  expect(screen.getByRole("separator").getAttribute("aria-valuenow")).toBe("312");
+  localStorage.removeItem("valet:sidebar-width");
+ });

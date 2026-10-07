@@ -10,13 +10,13 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { EventLogItem } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
 
-let lastParams: { owner: OwnerFilter | undefined; problems: boolean; q?: string } | undefined;
+let lastParams: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string } | undefined;
 let items: EventLogItem[] = [];
 let owner: OwnerFilter | undefined = { ownerType: "user", ownerId: "u1" };
 let role = "member";
 
 vi.mock("~/api/events", () => ({
-  useEventLog: (params: { owner: OwnerFilter | undefined; problems: boolean; q?: string }) => {
+  useEventLog: (params: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string }) => {
     lastParams = params;
     const held = params.owner === undefined;
     return {
@@ -96,4 +96,16 @@ describe("EventLog", () => {
     expect(screen.getByText("Receipts list")).toBeTruthy();
     expect(lastParams?.owner).toBeUndefined();
   });
+});
+
+it("opts into diagnostics and stops requesting them when switched off", () => {
+  role = "admin";
+  renderLog();
+  expect(lastParams?.diagnostics).toBe(false);
+  expect(screen.queryByRole("button", { name: "Raw receipts" })).toBeNull();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
+  expect(lastParams?.diagnostics).toBe(true);
+  expect(screen.getByRole("button", { name: "Raw receipts" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
+  expect(lastParams?.diagnostics).toBe(false);
 });
