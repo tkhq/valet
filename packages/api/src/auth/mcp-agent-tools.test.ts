@@ -182,6 +182,9 @@ describe("MCP agent tools", () => {
 
 describe("MCP route allow-list", () => {
   it("refuses an attached identity on a route the tools do not use", async () => {
+    // With no auth instance, VALET_LOCAL_AUTH=1 makes the stub rung answer every
+    // request. CI sets it, so pin it off: the last check must see the real 401.
+    vi.stubEnv("VALET_LOCAL_AUTH", "");
     const { Hono } = await import("hono");
     const { buildAuthMiddleware } = await import("../middleware/auth.js");
     const { freshTestPgDb } = await import("../test-helpers/pg-test-db.js");
