@@ -151,8 +151,16 @@ ordinary tool approval as a substitute for the resource's admin check.
 
 ### Slack sender identity
 
-To send as a named workflow identity, set `sender_name` and optional `sender_avatar_url` on each Slack messaging tool step.
-For an uploaded photo, call `profile_pictures.publish_avatar` in its chat and save the returned `avatar_url` in the workflow.
-Alternatively, use a public HTTPS image URL supplied by the user. These fields customize messages, not the Slack account or DM conversation.
-An upstream `set` node can hold both values. Reference them through `{{nodes.identity.result.sender_name}}` and `{{nodes.identity.result.sender_avatar_url}}`.
-For agent steps, include the identity and these tool arguments in the prompt. See the `slack-tools` skill.
+Set top-level `definition.presence: { displayName: "Hestia · People", avatarUrl: "<supplied HTTPS URL>" }`.
+Omit `avatarUrl` if no image was supplied. `patch_workflow` accepts `presence` directly; `null` clears it.
+For an uploaded photo, call `profile_pictures.publish_avatar` in its chat and save the returned `avatar_url` as `presence.avatarUrl`.
+An event subscription's `target.presence` overrides individual workflow fields. Unset fields inherit the workflow, then workspace default.
+Tool steps, agent tool calls, automatic replies, and approval cards inherit this identity without extra prompt instructions or `set` nodes.
+Explicit Slack `sender_name` / `sender_avatar_url` arguments still override one message; use them only for deliberate exceptions.
+These settings customize messages, not the Slack account or DM conversation. See the `slack-tools` skill.
+
+For an existing event subscription, call `events.list_subscriptions` in its personal or team workspace.
+Use the exact `name` filter or follow `nextOffset` with `offset` to find its ID.
+Call `events.set_subscription_presence` with `subscription_id` and `presence: { displayName?, avatarUrl? }`.
+This replaces the override. Send `presence: null` to clear it. The tool preserves matching rules, target, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` also accept optional `presence`.

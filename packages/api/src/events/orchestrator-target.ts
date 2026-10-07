@@ -47,7 +47,7 @@ export function buildOrchestratorTarget(deps: {
   /** Seed a channel thread's earlier messages on the assistant's first turn. */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
 }): OrchestratorDeliverFn {
-  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, threadKey, target, inbound, author }) => {
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, threadKey, target, inbound, author, presence }) => {
     // Every subscription resolves the singleton runtime of its owner.
     await deliverToAssistantThread(deps, {
       orgId,
@@ -55,7 +55,7 @@ export function buildOrchestratorTarget(deps: {
       actorUserId,
       threadKey: threadKey ?? threadKeyForSignal(signal),
       signal,
-      dispatchId,
+      ...(presence ? { presence } : {}),      dispatchId,
       target,
       mismatchReason: "event_target_mismatch",
       ...(inbound ? { inbound } : {}),

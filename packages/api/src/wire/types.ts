@@ -11,6 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
+import type { Presence } from "@valet/shared";
+export type { Presence } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
@@ -2632,6 +2634,7 @@ export interface WorkflowScheduleResponse {
 }
 
 export interface CreateWorkflowEventTriggerRequest {
+  presence?: Presence;
   workflowId: string;
   name: string;
   eventKeys: string[];
@@ -2655,6 +2658,7 @@ export interface UpdateWorkflowEventTriggerRequest {
 
 export interface WorkflowEventTriggerResponse {
   trigger: {
+    presence?: Presence;
     triggerId: string;
     workflowId: string;
     name: string;
@@ -4488,12 +4492,13 @@ export interface FilterOptionsResponse {
 export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignoreIfAnyTeamSubscribed";
 
 export type EventSubscriptionTargetWire =
-  | { kind: "workflow"; workflowId: string }
+  | { kind: "workflow"; workflowId: string; presence?: Presence }
   /** `teamId` is required when `orchestrator` is `"team"`, and refused
    * otherwise — the two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
   | {
       kind: "orchestrator";
+      presence?: Presence;
       orchestrator?: "user" | "team" | "org";
       teamId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
@@ -4648,6 +4653,8 @@ export interface ListEventSubscriptionsResponse {
 }
 
 export interface PatchEventSubscriptionRequest {
+  /** Replace channel identity. Null clears the override; omission preserves it. */
+  presence?: Presence | null;
   deliveryPolicy?: EventDeliveryPolicy;
   pauseOnOverlap?: boolean;
   name?: string;

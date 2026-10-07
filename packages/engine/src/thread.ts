@@ -1,3 +1,4 @@
+import { mergePresence, readPresence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -677,7 +678,10 @@ export class Thread {
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
-    const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
+    const requestedMode = opts.queueMode ?? this.mode;
+    // A sender override belongs to one submission, never a collect digest.
+    const effectiveMode: QueueMode = requestedMode === "collect" && readPresence(opts.metadata?.presence)
+      ? "followup" : requestedMode;
 
     // Validate a per-item model pin at admission, the same way setModel
     // validates a thread pin: an unknown spec is rejected here with the
@@ -743,7 +747,7 @@ export class Thread {
     // in parallel would otherwise each scan before the other's digest
     // lands and produce two overlapping digests.
     let receiptItem = admitted;
-    if (wasAdmitted && effectiveMode === "followup") {
+    if (wasAdmitted && effectiveMode === "followup" && !readPresence(admitted.metadata?.presence)) {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
@@ -786,6 +790,8 @@ export class Thread {
         (i) =>
           i.threadId === this.id &&
           i.status === "queued" &&
+          // Custom sender identities keep their own durable submission.
+          !readPresence(i.metadata?.presence) &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
           i.author?.id === author?.id &&
@@ -5091,6 +5097,8 @@ export class Thread {
     const { signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
+    const presence = mergePresence(readPresence(this.runningItem?.metadata?.presence));
+    const resolveDefaultSender = session.options.resolveOutboundSender;
     const actorId = this.runningItem?.author?.id
       ?? (session.owner.type === "team" && session.options.purpose !== "workflow" && session.options.purpose !== "child"
         ? `team:${session.owner.id}` : session.options.userId);
@@ -5135,7 +5143,9 @@ export class Thread {
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,
       sharedTranscript: session.options.sharedTranscript,
-      resolveOutboundSender: session.options.resolveOutboundSender,
+      resolveOutboundSender: presence
+        ? async () => mergePresence(await resolveDefaultSender?.(), presence)
+        : resolveDefaultSender,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,

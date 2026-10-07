@@ -210,3 +210,18 @@ describe("buildSubscriptionPatch", () => {
     });
   });
 });
+
+
+describe("presence overrides", () => {
+  it.each(["workflow", "orchestrator"] as const)("preserves and clears %s presence without rewriting the match", (kind) => {
+    const presence = { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" };
+    const target = kind === "workflow" ? { kind, workflowId: "wf_1", presence } : { kind, presence };
+    const stored = sub({ target });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), presence })).toBeNull();
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), presence: {} })).toEqual({ presence: null });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), presence: { displayName: "New bot" } }))
+      .toEqual({ presence: { displayName: "New bot" } });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), name: "Renamed" }))
+      .toEqual({ name: "Renamed" });
+  });
+});

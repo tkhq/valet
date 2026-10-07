@@ -1,3 +1,4 @@
+import type { Presence } from "@valet/shared";
 import type { DeliveryPreferencesValue } from "./delivery-preferences";
 /**
  * The pure diff behind the edit-subscription dialog: compare the form state
@@ -43,6 +44,7 @@ export function buildSubscriptionPatch(
     eventKeys: string[];
     filters: EventSubscriptionFilterWire[];
     anyChannel: boolean;
+    presence?: Presence;
     prompts?: PromptFieldsValue;
     deliveryPreferences?: DeliveryPreferencesValue;
   },
@@ -80,6 +82,13 @@ export function buildSubscriptionPatch(
     const next = form.deliveryPreferences;
     if (next.deliveryPolicy !== (sub.target.deliveryPolicy ?? "always")) body.deliveryPolicy = next.deliveryPolicy;
     if (next.deliveryPolicy !== "always" && next.pauseOnOverlap !== (sub.target.pauseOnOverlap ?? false)) body.pauseOnOverlap = next.pauseOnOverlap;
+  }
+
+  if (form.presence !== undefined) {
+    const stored = sub.target.presence ?? {};
+    if (form.presence.displayName !== stored.displayName || form.presence.avatarUrl !== stored.avatarUrl) {
+      body.presence = Object.keys(form.presence).length > 0 ? form.presence : null;
+    }
   }
 
   return Object.keys(body).length === 0 ? null : body;

@@ -1,3 +1,4 @@
+import type { Presence } from "@valet/shared";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
@@ -36,6 +37,7 @@ async function seedRun(
   runId: string,
   workflowId: string,
   origin?: WorkflowRunOrigin,
+  presence?: { definition?: Presence; run?: Presence },
 ): Promise<void> {
   const { db, workflowStore } = a.providers;
   const now = Date.now();
@@ -53,8 +55,8 @@ async function seedRun(
     });
   await workflowStore.createRun(
     runId,
-    { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}) },
-    { version: "dag/v1", nodes: [], edges: [] },
+    { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}), ...(presence?.run ? { presence: presence.run } : {}) },
+    { version: "dag/v1", nodes: [], edges: [], ...(presence?.definition ? { presence: presence.definition } : {}) },
     "v1",
     { ownerType: "user", ownerId: LOCAL_USER.id },
   );
@@ -82,6 +84,36 @@ function makeFixturePlugin(): { plugin: ValetPlugin; actionPlugin: ActionPlugin;
   const plugin: ValetPlugin = { name: "demo", version: "0.0.1", actions: [actionPlugin] };
   return { plugin, actionPlugin, calls: () => count };
 }
+
+describe("workflow presence snapshots", () => {
+  it("uses the persisted snapshot for both queue paths and direct actions after definition edits", async () => {
+    const action: PluginAction = {
+      id: "demo.identity", name: "identity", description: "Read sender", riskLevel: "low", parameters: Type.Object({}),
+      execute: async (_args, ctx) => ({ success: true, data: await ctx.resolveOutboundSender?.() }),
+    };
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [action] };
+    api = await bootTestApi({ plugins: [{ name: "demo", version: "1", actions: [actionPlugin] }] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const build = () => buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await seedRun(api, "presence-run", "presence-workflow", undefined, {
+      definition: { displayName: "Snapshot", avatarUrl: "https://example.com/snapshot.png" },
+      run: { displayName: "Subscription" },
+    });
+    await db.update(workflowDefinitions).set({ definition: { version: "dag/v1", nodes: [], edges: [], presence: { displayName: "Edited" } } })
+      .where(eq(workflowDefinitions.id, "presence-workflow"));
+    const expected = { displayName: "Subscription", avatarUrl: "https://example.com/snapshot.png" };
+    const sessionId = "wf:presence-run:session";
+    const sessionReceipt = await build().prompt(sessionId, "read sender", { dispatchId: "workflow:presence-run:session" });
+    expect((await engineStore.getQueueItem(sessionId, sessionReceipt.queueItemId))?.metadata?.presence).toEqual(expected);
+    const reportReceipt = await build().promptOrchestrator("report", { dispatchId: "workflow:presence-run:report", queueMode: "followup", ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id } });
+    expect((await engineStore.getQueueItem(reportReceipt.sessionId, reportReceipt.queueItemId))?.metadata?.presence).toEqual(expected);
+    expect(await build().invokeAction({ service: "demo", action: "identity", params: {}, invocationId: "workflow:presence-run:identity" }))
+      .toEqual({ ok: true, result: expected });
+    await seedRun(api, "plain-run", "plain-workflow");
+    expect(await build().invokeAction({ service: "demo", action: "identity", params: {}, invocationId: "workflow:plain-run:identity" }))
+      .toEqual({ ok: true, result: undefined });
+  });
+});
 
 describe("buildWorkflowEngineDeps: invokeAction", () => {
   it("happy path: resolves the fixture action and returns {ok:true, result}", async () => {

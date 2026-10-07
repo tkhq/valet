@@ -599,9 +599,14 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("web-typed result"))).toHaveLength(0);
   });
 
-  it("posts only the first addressed response and keeps the final result internal", async () => {
+  it.each([undefined, { displayName: "Hestia", avatarUrl: "https://example.com/hestia.webp" }])("posts only the first addressed response with its submission presence: %j", async (presence) => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("events").id;
+    await engineStore.admitSubmission(session.id, threadId, {
+      id: "qi-addressed", threadId, content: "do the thing", status: "settled", outcome: { outcome: "completed" },
+      metadata: presence ? { presence } : undefined,
+      attemptCount: 1, maxAttempts: 10, timeoutAt: Date.now() + 60_000, createdAt: Date.now(), updatedAt: Date.now(),
+    });
     await engineStore.appendEntries(session.id, threadId, [
       userEntry({
         sessionId: session.id,
@@ -632,6 +637,7 @@ describe("ChannelHost outbound delivery", () => {
 
     await vi.waitFor(() => expect(keyedTransport.sent).toHaveLength(1));
     expect(keyedTransport.sent[0]?.message.markdown).toBe("I am on it");
+    expect(keyedTransport.sent[0]?.message.sender).toEqual(presence);
   });
 
   it("keeps an explicit later reply and does not auto-post the final result", async () => {

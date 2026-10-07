@@ -1,3 +1,5 @@
+import { type Presence, validatePresence } from "@valet/shared";
+import { PresenceSettings } from "~/components/presence-settings";
 import { AutomationReview } from "./automation-review";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
 /**
@@ -71,6 +73,7 @@ export function EditSubscriptionDialog({
     deliveryPolicy: sub.target.kind === "orchestrator" ? sub.target.deliveryPolicy ?? "always" : "always",
     pauseOnOverlap: sub.target.kind === "orchestrator" ? sub.target.pauseOnOverlap ?? true : true,
   });
+  const [presence, setPresence] = useState<Presence>(sub.target.presence ?? {});
   const [name, setName] = useState(sub.name);
   const { keys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(
     services, sub.eventKeys, () => fromWireFilters(sub.filters),
@@ -91,6 +94,8 @@ export function EditSubscriptionDialog({
 
   function save(allowCollision = false) {
     setError(null);
+    const presenceError = validatePresence(presence);
+    if (presenceError) { setError(presenceError); return; }
     if (name.trim().length === 0) {
       setError("Enter a name.");
       return;
@@ -114,6 +119,7 @@ export function EditSubscriptionDialog({
       filters,
       anyChannel,
       prompts,
+      presence,
       ...(sub.ownerType === "user" && sub.target.kind === "orchestrator" ? { deliveryPreferences } : {}),
     });
     if (review && !sub.enabled) body = { ...body, enabled: true };
@@ -198,6 +204,8 @@ export function EditSubscriptionDialog({
           </div>
 
           {sub.ownerType === "user" && sub.target.kind === "orchestrator" && <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />}
+
+          <PresenceSettings value={presence} onChange={setPresence} subscription disabled={patch.isPending} />
 
           <AutomationReview follow={sub.target.kind === "orchestrator" ? sub.target.follow : undefined} audience={sub.audience} workflowId={sub.target.kind === "workflow" ? sub.target.workflowId : undefined} when={[...keys].join(", ")} scope={filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
             result={sub.target.kind === "orchestrator" ? prompts.userPromptTemplate || "Deliver matching events to the workspace assistant" : targetLabel}

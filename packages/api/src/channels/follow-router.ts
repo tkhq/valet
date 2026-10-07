@@ -1,3 +1,6 @@
+import { readPresence } from "@valet/shared";
+import { and, eq } from "drizzle-orm";
+import { eventSubscriptions } from "../schema/index.js";
 /**
  * The follow-router: the third consumer of a Slack webhook update, beside the
  * channel (DM) and event-trigger consumers. A threaded channel message on a
@@ -163,6 +166,12 @@ async function routeFollowedMessage(
       attributes.rehydrated = "true";
     }
   }
+  const [subscription] = follow.subscriptionId ? await deps.db.select({ target: eventSubscriptions.target })
+    .from(eventSubscriptions).where(and(eq(eventSubscriptions.id, follow.subscriptionId),
+      eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.ownerType, follow.ownerType),
+      eq(eventSubscriptions.ownerId, follow.ownerId))).limit(1) : [];
+  const target = subscription?.target;
+  const presence = target && typeof target === "object" && "presence" in target ? readPresence(target.presence) : undefined;
   const inbound = inboundSlackMessage(threadKey, f.ts, sender, normalized.text);
   const author = follow.ownerType === "team" ? actorUserId ? await newcomerAuthor(deps.db, orgId, actorUserId, f.user, sender) : undefined : undefined;
   try {
@@ -171,6 +180,7 @@ async function routeFollowedMessage(
       owner: { type: follow.ownerType, id: follow.ownerId },
       actorUserId,
       threadKey,
+      ...(presence ? { presence } : {}),
       signal: {
         kind: "signal",
         signalType: "slack.message",

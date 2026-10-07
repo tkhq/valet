@@ -113,3 +113,20 @@ describe("EditSubscriptionDialog match form", () => {
   });
 
 });
+
+
+it("loads a workflow Presence override and clears it without rewriting the match", () => {
+  edit({ ...sub, target: { kind: "workflow", workflowId: "wf_1", presence: { displayName: "Release bot" } } });
+  expect(screen.getByLabelText<HTMLInputElement>("Display name").value).toBe("Release bot");
+  fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "" } });
+  save();
+  expect(patch.mock.calls[0][0]).toEqual({ id: "sub-1", body: { presence: null } });
+});
+
+it("rejects an insecure avatar URL before sending a subscription edit", () => {
+  edit();
+  fireEvent.change(screen.getByLabelText("Avatar URL"), { target: { value: "http://example.com/avatar.png" } });
+  save();
+  expect(patch).not.toHaveBeenCalled();
+  expect(screen.getAllByText(/Enter an HTTPS URL/).length).toBeGreaterThan(0);
+});

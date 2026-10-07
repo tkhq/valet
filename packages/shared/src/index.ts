@@ -1,3 +1,4 @@
+export * from './presence.js';
 export * from './types/index.js';
 export * from './types/message-parts.js';
 export * from './types/plugin-entitlements.js';
