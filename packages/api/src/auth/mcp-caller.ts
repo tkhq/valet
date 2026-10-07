@@ -39,6 +39,9 @@ const MCP_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: "POST", pattern: /^\/api\/threads\/[^/]+\/messages$/ },
   { method: "GET", pattern: /^\/api\/threads\/[^/]+\/decisions$/ },
   { method: "POST", pattern: /^\/api\/threads\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  { method: "GET", pattern: /^\/api\/actions$/ },
+  { method: "GET", pattern: /^\/api\/actions\/[^/]+$/ },
+  { method: "POST", pattern: /^\/api\/actions\/[^/]+\/invoke$/ },
 ];
 
 /** Whether an MCP caller may use this route. */

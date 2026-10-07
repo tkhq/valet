@@ -22,6 +22,26 @@ The CLI is not a good substitute for an agent. `valet send` subscribes to its st
 
 `whoami` and `list_sessions` stay for existing clients.
 
+### Tool broker
+
+Valet holds the organization's integrations: bundled plugins and the remote MCP servers in the instance config. Three more tools let a harness use them without holding any credential.
+
+| Tool | Route | Purpose |
+|---|---|---|
+| `search_tools` | `GET /api/actions` | Finds tools by text and service. Returns `tool_id`s. |
+| `describe_tool` | `GET /api/actions/:toolId` | Returns the description, the JSON Schema parameters, and the policy mode that applies to the caller. |
+| `call_tool` | `POST /api/actions/:toolId/invoke` | Runs the tool with the workspace owner's credential. |
+
+The `valet tools search|describe|call` command calls the same routes, for a harness without MCP.
+
+The routes run the headless `ActionInvoker` with `external` set. That mode resolves the policy hierarchy with `appliesIn: "session"`, the scope a person's own Valet agent uses, so org, team, and personal policies apply unchanged. Without `external` or a workflow run, the invoker enforces no policy, so every external caller must set it.
+
+- `allow`: the tool runs. The response is `completed` or `failed`.
+- `deny`: the tool does not run. The response is `failed` and names the policy.
+- `require_approval`: the tool does not run. The response is `approval_required` with a `next_step`. An external call cannot open an approval yet, because a decision gate resumes a paused agent turn and an external call has none. The caller delegates with `start_thread`, which raises a normal approval, or an admin changes the policy.
+
+Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}`, with the caller's user id, the decision, the parameters, and the outcome. The invocation id is `ext:{userId}:{ownerType}:{ownerId}:{key}`. A repeated `idempotency_key` from the same caller and owner returns the stored result. The same key from another caller runs separately.
+
 ### Access control stays in the routes
 
 The tools call the existing `/api` routes in-process (`app.fetch`). They add no queries that decide access. Thread privacy, team membership, and decision approver rules apply to an MCP caller exactly as they apply to the web client and the CLI.
@@ -48,10 +68,11 @@ The instance publishes OAuth protected-resource and authorization-server metadat
 
 ## Not included
 
+- Approvals for external tool calls. This needs a decision gate that is not tied to an agent turn.
 - File upload over MCP. Agents use `valet upload` until a tool exists.
 - Streaming partial output. A long task returns `running`, and the agent polls with `get_thread`.
 - Team API keys. MCP tokens are user tokens. A team acts through a member.
 
 ## Validation
 
-`auth/mcp-agent-tools.test.ts` boots the API with real auth, seeds OAuth tokens, and drives JSON-RPC calls against the faux model provider: delegation with a wait, follow-ups, thread reads, the question-decision loop, cross-user isolation, the route allow-list, and wait timeouts.
+`auth/mcp-tool-broker.test.ts` covers search, describe, policy inheritance (allow, deny, require_approval), credential isolation between users, idempotency, and audit rows. `cli/commands/tools.test.ts` covers the CLI command. `auth/mcp-agent-tools.test.ts` boots the API with real auth, seeds OAuth tokens, and drives JSON-RPC calls against the faux model provider: delegation with a wait, follow-ups, thread reads, the question-decision loop, cross-user isolation, the route allow-list, and wait timeouts.

@@ -49,6 +49,7 @@ import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { actionsRouter } from "./routes/actions.js";
 import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
@@ -317,6 +318,7 @@ export function createApp(
   mountPluginHttpRoutes(app, providers.plugins, "authenticated");
 
   app.route("/api/threads", threadsRouter);
+  app.route("/api/actions", actionsRouter);
   app.route("/api/sessions", childWorkRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.

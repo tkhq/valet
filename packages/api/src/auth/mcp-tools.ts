@@ -66,7 +66,10 @@ function fail(message: string): CallToolResult {
 
 function errorText(status: number, body: unknown, what: string): string {
   const detail = body && typeof body === "object" && "error" in body && typeof body.error === "string" ? body.error : undefined;
-  if (status === 404) return `${what} not found, or you do not have access to it. Use list_threads or list_workspaces to find a valid id.`;
+  if (status === 404 && (what === "Thread" || what === "Workspace")) {
+    return `${what} not found, or you do not have access to it. Use list_threads or list_workspaces to find a valid id.`;
+  }
+  if (status === 404 && detail) return detail;
   if (status === 403) return detail ?? `You do not have permission for this ${what.toLowerCase()}.`;
   return detail ? `${what} request failed (${status}): ${detail}` : `${what} request failed with status ${status}.`;
 }
@@ -316,6 +319,71 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
         url: threadUrl(deps, thread_id),
       };
     }),
+  );
+
+  server.registerTool(
+    "search_tools",
+    {
+      description:
+        "Searches the integrations Valet brokers for you (GitHub, Slack, Linear, Google, and the MCP servers your org connects). " +
+        "Returns tool_ids for describe_tool and call_tool. Valet holds the credentials; you never see them.",
+      inputSchema: {
+        query: z.string().min(1).optional().describe("Text to match against tool ids, names, and descriptions, e.g. \"create issue\"."),
+        service: z.string().min(1).optional().describe("Only this service, e.g. \"github\" or \"linear\"."),
+        workspace: workspaceArg,
+        limit: z.number().int().min(1).max(100).optional().describe("Maximum tools to return. Default: 25."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    run(async ({ query, service, workspace, limit }: { query?: string; service?: string; workspace?: string; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (query) params.set("q", query);
+      if (service) params.set("service", service);
+      if (workspace && workspace !== "user") params.set("workspace", workspace);
+      if (limit) params.set("limit", String(limit));
+      const suffix = params.size > 0 ? `?${params.toString()}` : "";
+      return call<unknown>(deps, "GET", `/api/actions${suffix}`, "Tool search");
+    }),
+  );
+
+  server.registerTool(
+    "describe_tool",
+    {
+      description:
+        "Returns one tool's description, JSON Schema parameters, and the policy that applies to you: " +
+        "allow (call_tool runs it), require_approval (a person must approve), or deny.",
+      inputSchema: {
+        tool_id: z.string().min(1).describe("A tool_id from search_tools, e.g. \"github.create_issue\"."),
+        workspace: workspaceArg,
+      },
+      annotations: { readOnlyHint: true },
+    },
+    run(async ({ tool_id, workspace }: { tool_id: string; workspace?: string }) =>
+      call<unknown>(deps, "GET", `/api/actions/${encodeURIComponent(tool_id)}${wsQuery(workspace)}`, "Tool")),
+  );
+
+  server.registerTool(
+    "call_tool",
+    {
+      description:
+        "Runs a tool through Valet with the workspace's credentials and policies. " +
+        "Call describe_tool first for the parameter schema. Results: completed (with result), failed (with error), " +
+        "or approval_required (the action did not run; next_step says what to do).",
+      inputSchema: {
+        tool_id: z.string().min(1).describe("A tool_id from search_tools."),
+        params: z.record(z.string(), z.unknown()).optional().describe("Arguments matching the tool's parameter schema."),
+        workspace: workspaceArg,
+        idempotency_key: z.string().min(1).max(200).optional()
+          .describe("Reuse the same key to retry safely: a repeated key returns the first result instead of running the tool again."),
+      },
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    run(async ({ tool_id, params, workspace, idempotency_key }: { tool_id: string; params?: Record<string, unknown>; workspace?: string; idempotency_key?: string }) =>
+      call<unknown>(deps, "POST", `/api/actions/${encodeURIComponent(tool_id)}/invoke`, "Tool", {
+        params: params ?? {},
+        ...(workspace ? { workspace } : {}),
+        ...(idempotency_key ? { idempotencyKey: idempotency_key } : {}),
+      })),
   );
 
   server.registerTool(

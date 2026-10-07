@@ -193,6 +193,19 @@ written with owner-only permissions (`0600`).
 The MCP tools let a local agent delegate work and follow it. See
 [MCP agent tools](./specs/2026-10-07-mcp-agent-tools-design.md).
 
+### `valet tools search|describe|call`
+
+Use the integrations Valet brokers (GitHub, Slack, Linear, Google, and the MCP servers your organization connects) from a shell or an agent harness. Valet keeps the credentials. The organization's tool policies apply.
+
+```bash
+valet tools search "create issue" --service github
+valet tools describe github.create_issue
+valet tools call github.create_issue --params '{"owner":"tkhq","repo":"valet","title":"Bug"}'
+valet tools call linear.create_issue --params-file issue.json --idempotency-key retry-1
+```
+
+`--workspace <team-id>` uses a team's credentials and policies. `--params-file -` reads the params from stdin. A repeated `--idempotency-key` returns the first result instead of running the tool again. `call` exits `0` when the tool completes, `3` when a policy requires approval (the tool did not run), and `4` when it fails. MCP clients get the same tools as `search_tools`, `describe_tool`, and `call_tool`.
+
 ### `valet reset [--yes]`
 
 Wipe the local runtime state under the data dir: PGlite, blobs, and the

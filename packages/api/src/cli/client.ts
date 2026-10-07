@@ -30,6 +30,10 @@ import type {
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
+  ActionDescribeResponse,
+  ActionInvokeRequest,
+  ActionInvokeResponse,
+  ActionSearchResponse,
 } from "../wire/types.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -101,6 +105,27 @@ export class InstanceClient {
     const text = await res.text();
     if (text === "") return undefined as T;
     return JSON.parse(text) as T;
+  }
+
+  // ── tool broker (`/api/actions`) ───────────────────────────────────────
+
+  searchTools(opts: { query?: string; service?: string; workspace?: string; limit?: number }): Promise<ActionSearchResponse> {
+    const params = new URLSearchParams();
+    if (opts.query) params.set("q", opts.query);
+    if (opts.service) params.set("service", opts.service);
+    if (opts.workspace) params.set("workspace", opts.workspace);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request<ActionSearchResponse>("GET", `/api/actions${suffix}`);
+  }
+
+  describeTool(toolId: string, workspace?: string): Promise<ActionDescribeResponse> {
+    const suffix = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
+    return this.request<ActionDescribeResponse>("GET", `/api/actions/${encodeURIComponent(toolId)}${suffix}`);
+  }
+
+  callTool(toolId: string, body: ActionInvokeRequest): Promise<ActionInvokeResponse> {
+    return this.request<ActionInvokeResponse>("POST", `/api/actions/${encodeURIComponent(toolId)}/invoke`, body);
   }
 
   // ── auth / identity ────────────────────────────────────────────────────

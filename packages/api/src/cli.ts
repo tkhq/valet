@@ -42,6 +42,7 @@ const COMMANDS: Record<string, CommandImporter> = {
   config: () => import("./cli/commands/config.js"),
   chat: () => import("./cli/commands/chat.js"),
   mcp: () => import("./cli/commands/mcp.js"),
+  tools: () => import("./cli/commands/tools.js"),
   reset: () => import("./cli/commands/reset.js"),
   prebuild: () => import("./cli/commands/prebuild.js"),
 };
@@ -63,6 +64,7 @@ Commands:
   config      View or edit CLI config
   chat        Interactive chat with a thread
   mcp         MCP client operations
+  tools       Search, describe, and call Valet-brokered tools
   reset       Reset local state
   prebuild    Test a repo's .valet/prebuild.yaml locally (plan / docker build)
 

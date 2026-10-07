@@ -5523,3 +5523,47 @@ export interface ProductAnnouncement {
   action: { label: string; href: string };
 }
 export interface ProductAnnouncementsResponse { announcements: ProductAnnouncement[] }
+
+// ── Tool broker (`/api/actions`, docs/specs/2026-10-07-mcp-agent-tools-design.md) ──
+
+/** One brokered action, as search and describe return it. */
+export interface ActionToolSummary {
+  /** `service.action`, e.g. `github.create_issue`. */
+  tool_id: string;
+  service: string;
+  name: string;
+  description: string;
+  risk_level: "low" | "medium" | "high" | "critical";
+}
+
+/** `GET /api/actions` */
+export interface ActionSearchResponse {
+  tools: ActionToolSummary[];
+  /** Matches before `limit` applied. */
+  total: number;
+  /** Services that could not list tools, with the reason. */
+  unavailable?: Array<{ service: string; reason: string }>;
+}
+
+/** `GET /api/actions/:toolId` */
+export interface ActionDescribeResponse extends ActionToolSummary {
+  /** JSON Schema for `params`. */
+  parameters: unknown;
+  /** What a call resolves to now under the policy hierarchy. */
+  policy: "allow" | "require_approval" | "deny";
+}
+
+/** `POST /api/actions/:toolId/invoke` request. */
+export interface ActionInvokeRequest {
+  params?: Record<string, unknown>;
+  /** `user` or a team id. Default: `user`. */
+  workspace?: string;
+  /** A repeated key returns the first result instead of running again. */
+  idempotencyKey?: string;
+}
+
+/** `POST /api/actions/:toolId/invoke` response. */
+export type ActionInvokeResponse =
+  | { tool_id: string; status: "completed"; result: unknown }
+  | { tool_id: string; status: "failed"; error: string }
+  | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string }; next_step: string };

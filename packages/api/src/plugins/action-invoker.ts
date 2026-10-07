@@ -109,6 +109,22 @@ export interface ActionInvocationContext {
    * context), so the action executes as before.
    */
   workflowExecutionId?: string;
+  /**
+   * Set for a call from an external agent harness (MCP or the CLI) acting
+   * for `userId`. The call resolves policy exactly as the person's own Valet
+   * agent does (`appliesIn: "session"`), so the policy hierarchy is inherited,
+   * and it writes an audit row keyed `pol:ext:{invocationId}`. `client` names
+   * the caller for the audit trail, e.g. the OAuth client id.
+   */
+  external?: { client: string };
+}
+
+/** The audit-row key for a policy-enforced invocation, or undefined when none is written. */
+function auditKey(req: WorkflowInvokeActionRequest, ctx: ActionInvocationContext): string | undefined {
+  if (!ctx.orgId) return undefined;
+  if (ctx.workflowExecutionId) return `pol:wf:${req.invocationId}`;
+  if (ctx.external) return `pol:ext:${req.invocationId}`;
+  return undefined;
 }
 
 export interface ActionInvokerOpts {
@@ -387,7 +403,8 @@ async function computeResult(
   const policyActionId = qualifiedActionId(req.service, action);
   // Set only when enforceWorkflowPolicy wrote a decision row (org + run
   // context present); also the org scope for the outcome-stamp UPDATE.
-  const auditOrgId = ctx.orgId && ctx.workflowExecutionId ? ctx.orgId : undefined;
+  const auditOrgId = auditKey(req, ctx) ? ctx.orgId : undefined;
+  const auditId = auditKey(req, ctx) ?? "";
   const denial = await enforceWorkflowPolicy(
     opts,
     req,
@@ -401,7 +418,7 @@ async function computeResult(
   const prepared = prepareActionArgs(action.parameters, req.params);
   if (!prepared.ok) {
     if (auditOrgId) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
+      await updateInvocationOutcome(opts.db, auditId, auditOrgId, {
         status: "error",
         error: `invalid params: ${prepared.error}`,
       });
@@ -422,7 +439,7 @@ async function computeResult(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (auditOrgId) {
-      await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
+      await updateInvocationOutcome(opts.db, auditId, auditOrgId, {
         status: "error",
         error: message,
         startedAt,
@@ -438,7 +455,7 @@ async function computeResult(
   // `result` is the full `PluginActionResult` — the same shape the session
   // path's `PolicyInvocationRecord.result` carries.
   if (auditOrgId) {
-    await updateInvocationOutcome(opts.db, `pol:wf:${req.invocationId}`, auditOrgId, {
+    await updateInvocationOutcome(opts.db, auditId, auditOrgId, {
       status: result.success ? "completed" : "error",
       result,
       error: result.success ? undefined : (result.error ?? "failed with no error detail"),
@@ -512,8 +529,14 @@ async function enforceWorkflowPolicy(
   pluginDefault: ApprovalMode | undefined,
   policyActionId: string,
 ): Promise<WorkflowInvokeActionResult | null> {
-  if (!ctx.orgId || !ctx.workflowExecutionId) return null;
+  const key = auditKey(req, ctx);
+  if (!ctx.orgId || !key) return null;
   const now = (opts.clock ?? Date.now)();
+  // A workflow run resolves in its own scope. An external harness acts for
+  // the person interactively, so it resolves exactly as their Valet agent does.
+  const scope = ctx.workflowExecutionId
+    ? { appliesIn: "workflow" as const, workflowExecutionId: ctx.workflowExecutionId }
+    : { appliesIn: "session" as const };
 
   let decision: Awaited<ReturnType<typeof resolveActionPolicy>>;
   try {
@@ -525,8 +548,7 @@ async function enforceWorkflowPolicy(
       actionId: policyActionId,
       riskLevel,
       params: req.params,
-      appliesIn: "workflow",
-      workflowExecutionId: ctx.workflowExecutionId,
+      ...scope,
       pluginDefault,
       now,
     });
@@ -539,7 +561,7 @@ async function enforceWorkflowPolicy(
       // Write a best-effort audit row so the approved execution is
       // auditable even when the policy store was unreachable.
       await persistInvocationAudit(opts.db, {
-        invocationId: `pol:wf:${req.invocationId}`,
+        invocationId: key,
         service: req.service,
         actionId: policyActionId,
         riskLevel,
@@ -562,7 +584,7 @@ async function enforceWorkflowPolicy(
 
   if (decision.mode === "allow") {
     await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
+      invocationId: key,
       service: req.service,
       actionId: policyActionId,
       riskLevel,
@@ -583,7 +605,7 @@ async function enforceWorkflowPolicy(
 
   if (decision.mode === "deny") {
     await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
+      invocationId: key,
       service: req.service,
       actionId: policyActionId,
       riskLevel,
@@ -606,7 +628,7 @@ async function enforceWorkflowPolicy(
   if (req.approval) {
     // The tool executor holds an approved, unconsumed signal — treat as authorized.
     await persistInvocationAudit(opts.db, {
-      invocationId: `pol:wf:${req.invocationId}`,
+      invocationId: key,
       service: req.service,
       actionId: policyActionId,
       riskLevel,
@@ -629,7 +651,7 @@ async function enforceWorkflowPolicy(
   // then return the requiresApproval signal. This row must NOT live in the
   // dedup table — the approved retry must reach enforcement fresh.
   await persistInvocationAudit(opts.db, {
-    invocationId: `pol:wf:${req.invocationId}`,
+    invocationId: key,
     service: req.service,
     actionId: policyActionId,
     riskLevel,
@@ -649,6 +671,83 @@ async function enforceWorkflowPolicy(
 }
 
 export { qualifiedActionId };
+
+/** One service's actions for a caller, or why it has none. */
+export type ServiceActions =
+  | { service: string; actions: PluginAction[] }
+  | { service: string; unavailable: string };
+
+/**
+ * List the actions a caller can use on one service: static actions plus any
+ * the plugin discovers with the caller's credential (an MCP-backed service
+ * lists its tools over the authenticated upstream). Runs the same
+ * availability gate and credential resolution as an invocation. Executes no
+ * action. External harnesses use this for tool search and description.
+ */
+export async function discoverServiceActions(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  service: string,
+): Promise<ServiceActions> {
+  const entry = opts.actionPluginByService.get(service);
+  if (!entry) return { service, unavailable: `unknown service: ${service}` };
+  const owner = credentialOwnerFor(ctx.owner);
+  if (!owner) return { service, unavailable: `owner type "${ctx.owner.type}" cannot use actions` };
+  const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
+  const registry = registryOf(opts);
+  const declared = findCredentialDeclaration(registry, credentialService);
+  if (declared) {
+    const mode = await connectModeFor({
+      plugins: registry, decl: declared, service: credentialService, orgId: ctx.orgId,
+      credentials: opts.credentials, env: process.env, owner,
+    });
+    if (mode === "unconfigured") {
+      return { service, unavailable: `${credentialService} is not configured for this organization. An admin can set it up in Settings → Organization.` };
+    }
+  }
+  if (!entry.actionPlugin.resolveActions) return { service, actions: entry.actionPlugin.actions };
+  const probe: WorkflowInvokeActionRequest = { service, action: "", params: {}, invocationId: "" };
+  const base = credentialService === "github"
+    ? buildGithubCredentialProvider(opts, probe, ctx, owner)
+    : buildCredentialProvider(opts, ctx, owner, credentialService);
+  const credentials = credentialService === "slack" && ctx.owner.type === "user"
+    ? withOwnerSlackIdentity(base, opts.db, ctx.owner.id)
+    : base;
+  try {
+    const resolved = await entry.actionPlugin.resolveActions({ credentials });
+    const ids = new Set(entry.actionPlugin.actions.map((a) => a.id));
+    return { service, actions: [...entry.actionPlugin.actions, ...resolved.filter((a) => !ids.has(a.id))] };
+  } catch (err) {
+    return { service, unavailable: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * The policy mode an external call to this action would resolve to now:
+ * `allow`, `require_approval`, or `deny`. Same precedence and scope as
+ * `invoke` with `external` set. Writes nothing.
+ */
+export async function externalActionMode(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  service: string,
+  action: PluginAction,
+): Promise<ApprovalMode> {
+  const entry = opts.actionPluginByService.get(service);
+  const decision = await resolveActionPolicy(opts.db, {
+    orgId: ctx.orgId,
+    teamId: ctx.owner.type === "team" ? ctx.owner.id : undefined,
+    userId: ctx.userId,
+    service,
+    actionId: qualifiedActionId(service, action),
+    riskLevel: action.riskLevel,
+    params: undefined,
+    appliesIn: "session",
+    pluginDefault: entry?.actionPlugin.defaultApprovalMode,
+    now: (opts.clock ?? Date.now)(),
+  });
+  return decision.mode;
+}
 
 /** Matches a bare or service-qualified `PluginAction.id` against `(service, action)`, mirroring `@valet/engine`'s `plugin-catalog.ts` fqid convention. */
 export function findAction(actions: PluginAction[], service: string, actionId: string): PluginAction | undefined {
