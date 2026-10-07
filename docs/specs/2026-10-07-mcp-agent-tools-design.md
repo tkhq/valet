@@ -63,6 +63,15 @@ MCP prompts are not exposed. The server is created for each request, so listing 
 
 An MCP client is an agent. The thread decision route refuses an `approval` or `credential_request` gate when `authVia` is `mcp`, and returns "A person must approve this request." Without this rule, one agent could approve another agent's `require_approval` action. An agent can still answer a `question` gate. `list_inbox` marks each thread decision with `agent_can_answer`. No MCP tool resolves a workflow approval: the workflow approval route records every resolution as `via: "web"`, so it cannot tell an agent from a person.
 
+### Agent onboarding
+
+Onboarding is one link. A person tells their agent to read `<instance>/agent-setup.md` and follow it. The instance serves two public markdown pages (`onboarding/routes.ts`) and fills `{{VALET_URL}}` with its public URL:
+
+- `/agent-setup.md`: install the CLI, have the person run `valet login` in their own terminal, connect MCP, install the skill, and check the setup. The page forbids the agent to request, print, or save a secret, or to approve a Valet approval.
+- `/agent-skill.md`: the `valet` skill (`SKILL.md` format). It maps tasks to MCP tools and CLI commands and repeats the safety rules.
+
+The pages hold no secrets or per-user data. The build inlines the markdown, so the bundle and the binary serve it.
+
 ### Access control stays in the routes
 
 The tools call the existing `/api` routes in-process (`app.fetch`). They add no queries that decide access. Thread privacy, team membership, and decision approver rules apply to an MCP caller exactly as they apply to the web client and the CLI.

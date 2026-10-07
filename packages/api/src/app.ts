@@ -50,6 +50,7 @@ import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { actionsRouter } from "./routes/actions.js";
+import { mountOnboardingRoutes } from "./onboarding/routes.js";
 import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
@@ -244,6 +245,9 @@ export function createApp(
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
   // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
+  // Public agent onboarding pages (`/agent-setup.md`, `/agent-skill.md`).
+  mountOnboardingRoutes(app);
+
   app.get("/api/health", (c) => {
     const body: HealthResponse = {
       ok: true,

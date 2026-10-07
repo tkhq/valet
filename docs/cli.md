@@ -35,6 +35,16 @@ Global options:
   -V, --version   Show the CLI version
 ```
 
+## Agent onboarding
+
+To connect a local coding agent (Claude Code, Codex, Cursor) to Valet, give it one instruction:
+
+```text
+Read https://<your-valet>/agent-setup.md and follow it.
+```
+
+Every Valet instance serves `/agent-setup.md` and `/agent-skill.md` without login. Each page fills in that instance's public URL (`VALET_PUBLIC_URL`, else a public `BETTER_AUTH_URL`, else the request origin). The setup page tells the agent to install the CLI, ask the person to log in from their own terminal, connect MCP with `valet mcp setup`, install the `valet` skill from `/agent-skill.md`, and check the result. The agent never handles the API key: `valet login` reads it from a hidden prompt. The page sources are `packages/api/src/onboarding/agent-setup.md` and `valet-skill.md`.
+
 ## Quick Start
 
 ```bash
