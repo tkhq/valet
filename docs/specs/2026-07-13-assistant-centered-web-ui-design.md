@@ -167,3 +167,7 @@ Briefings reuse a valid snapshot for five minutes before collecting evidence aga
 Workflow-owned run conversations are listed under Automations, with Conversation and Run details views sharing the existing chat components. The normal Threads list retains human-origin and workflow-editor conversations. Run links keep their existing session/thread IDs and access checks. Switching run views retains the mounted composer and draft, while suppressing hidden summary overlays. A reply continues the conversation; retrying a workflow remains a separate Run details action.
 
 On phones, work-list actions sit below the title and details. Long identifiers wrap within the row. Section tabs scroll horizontally within their own strip. Event review fields, workflow status controls, and integration connection actions wrap or stack without reducing the text to a narrow column. Desktop rows retain their horizontal layout.
+
+On desktop, drag the thread sidebar divider to resize it from 200 to 480 pixels. Focus the divider and use arrow keys for keyboard resizing. Width persists across reloads and collapse. The mobile drawer keeps its existing width.
+
+On narrow screens, conversation sharing details open from an information button beside the thread tabs. The full notice stays visible on wide screens.
