@@ -6,6 +6,7 @@
  * the full linter before persisting, so a bad patch surfaces as lint
  * errors, never a bad save.
  */
+import { validatePresence, type Presence } from "@valet/shared";
 import type { WorkflowDefinition, WorkflowEdge, WorkflowNode } from "@valet/workflow";
 
 export interface WorkflowEdgeRef {
@@ -15,6 +16,8 @@ export interface WorkflowEdgeRef {
 }
 
 export interface WorkflowPatch {
+  /** Replace channel identity. Null clears it; omission preserves it. */
+  presence?: Presence | null;
   /** Replace-by-id, or append when the id is new. */
   upsertNodes?: unknown[];
   /** Also drops every edge touching a removed node, and its ui position. */
@@ -83,6 +86,14 @@ export function applyWorkflowModelPatch(
 export function applyWorkflowPatch(definition: WorkflowDefinition, patch: WorkflowPatch): PatchResult {
   const errors: string[] = [];
   const next: WorkflowDefinition = structuredClone(definition);
+
+  if (patch.presence === null) {
+    delete next.presence;
+  } else if (patch.presence !== undefined) {
+    const error = validatePresence(patch.presence);
+    if (error) return { ok: false, errors: [error] };
+    next.presence = structuredClone(patch.presence);
+  }
 
   for (const raw of patch.upsertNodes ?? []) {
     if (typeof raw !== "object" || raw === null || typeof (raw as { id?: unknown }).id !== "string") {

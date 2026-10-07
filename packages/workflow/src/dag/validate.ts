@@ -1,3 +1,4 @@
+import { validatePresence } from '@valet/shared';
 /**
  * dag/v1 definition validator — linter-grade.
  *
@@ -201,6 +202,11 @@ export function validateWorkflowDefinition(
   env: ValidateEnvironment = {},
 ): ValidationResult {
   const errors: string[] = [];
+
+  if (definition.presence !== undefined) {
+    const error = validatePresence(definition.presence);
+    if (error) errors.push(error);
+  }
 
   if (definition.version !== 'dag/v1') {
     errors.push(`unsupported version ${JSON.stringify(definition.version)}: expected "dag/v1"`);

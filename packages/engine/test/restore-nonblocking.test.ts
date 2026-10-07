@@ -66,6 +66,7 @@ describe("restoreSession does not block on the resumed turn", () => {
     const hangA = deferred();
     const hangB = deferred();
     let aStarted = false;
+    let resumedSender: { displayName?: string; avatarUrl?: string } | undefined;
 
     const toolHangA: ToolDef<ReturnType<typeof Type.Object>> = {
       name: "hang_a",
@@ -81,7 +82,8 @@ describe("restoreSession does not block on the resumed turn", () => {
       name: "hang_b",
       description: "blocks until released — the resumed turn's parked call",
       parameters: Type.Object({}),
-      execute: async () => {
+      execute: async (_args, ctx) => {
+        resumedSender = await ctx.resolveOutboundSender?.();
         await hangB.promise;
         return { text: "b done" };
       },
@@ -112,7 +114,7 @@ describe("restoreSession does not block on the resumed turn", () => {
         model: faux.getModel(),
         tools: [toolHangA, toolHangB],
       });
-      const receipt = await session1.prompt("go");
+      const receipt = await session1.prompt("go", { metadata: { presence: { displayName: "Persisted automation" } } });
       await poll(() => aStarted, 10_000, "hang_a to start executing");
       // Settle window so the entry write is unambiguously committed.
       await sleep(250);
@@ -136,6 +138,7 @@ describe("restoreSession does not block on the resumed turn", () => {
           sandbox: {},
           model: faux.getModel(),
           tools: [toolHangA, toolHangB],
+          resolveOutboundSender: async () => ({ displayName: "New workspace default", avatarUrl: "https://example.com/default.png" }),
         },
       });
 
@@ -163,6 +166,7 @@ describe("restoreSession does not block on the resumed turn", () => {
 
       const item = await store.getQueueItem("restore-nonblocking-sess", receipt.queueItemId);
       expect(item?.status).toBe("settled");
+      expect(resumedSender).toEqual({ displayName: "Persisted automation", avatarUrl: "https://example.com/default.png" });
 
       // Pin the RESUME branch (not the release-and-rerun branch, which would
       // also satisfy every assertion above): the resume path replaces the

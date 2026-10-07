@@ -147,6 +147,21 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(1);
   });
 
+  it("merges invocation presence over the workspace identity without changing later invocations", async () => {
+    const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Workspace", createdAt: 1 });
+    const fixture = countingAction({ execute: async (_args, ctx) => ({ success: true, data: await ctx.resolveOutboundSender?.() }) });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const owner: ActionInvocationContext = { userId: "u1", orgId: "org1", owner: { type: "org", id: "org1" } };
+    const request = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "presence" };
+    expect(await invoke(request, { ...owner, presence: { avatarUrl: "https://example.com/run.png" } }))
+      .toEqual({ ok: true, result: { displayName: "Workspace", avatarUrl: "https://example.com/run.png" } });
+    expect(await invoke({ ...request, invocationId: "presence-name" }, { ...owner, presence: { displayName: "Automation" } }))
+      .toEqual({ ok: true, result: { displayName: "Automation" } });
+    expect(await invoke({ ...request, invocationId: "presence-unset" }, owner))
+      .toEqual({ ok: true, result: { displayName: "Workspace" } });
+  });
+
   it("a workflow tool action can extract a document, the same as a session action", async () => {
     // Document extraction needs no session, thread or sandbox: it is a pure
     // call over bytes, and the native extractor lives in this process. A

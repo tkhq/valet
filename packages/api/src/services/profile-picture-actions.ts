@@ -14,7 +14,7 @@ export function profilePictureActions(store: SessionStore, blobs: BlobStore, pub
   const publish: PluginAction<typeof parameters> = {
     id: "profile_pictures.publish_avatar",
     name: "Publish Chat Photo as Avatar",
-    description: "Use a photo uploaded to this chat as a workflow's Slack avatar. Only call when asked to use that photo as an avatar. Publishes a resized copy at a public URL; the original chat stays private. Save the returned avatar_url as sender_avatar_url in the workflow. Reads the last 50 chat entries; ask for a fresh upload if the photo is older.",
+    description: "Use a photo uploaded to this chat as a workflow's Slack avatar. Only call when asked to use that photo as an avatar. Publishes a resized copy at a public URL; the original chat stays private. Save the returned avatar_url as presence.avatarUrl in the workflow definition or event subscription target. Reads the last 50 chat entries; ask for a fresh upload if the photo is older.",
     riskLevel: "high",
     parameters,
     async execute(args, ctx) {

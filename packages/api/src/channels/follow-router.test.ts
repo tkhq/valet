@@ -12,7 +12,7 @@ import { findFollowedThread, upsertFollowedThread } from "../events/followed-thr
 import { linkIdentity } from "./identity-links.js";
 import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { eventSubscriptions, teams, teamMembers, orgMembers } from "../schema/index.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { followedMessageActor } from "../events/team-slack-gate.js";
@@ -82,6 +82,52 @@ describe("handleFollowedMessage", () => {
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
+  });
+
+  it("snapshots current subscription presence on each follow without leaking it to unconfigured turns", async () => {
+    faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("(noted)")));
+    const first = { displayName: "Release helper", avatarUrl: "https://example.com/first.webp" };
+    const edited = { displayName: "Incident helper" };
+    const target = { kind: "orchestrator", orchestrator: "user" };
+    await testDb.appDb.insert(eventSubscriptions).values({
+      id: "presence-follow", orgId: ORG, ownerType: "user", ownerId: USER, createdBy: USER,
+      name: "Replies", eventKeys: ["slack.app_mention"], filters: [], target: { ...target, presence: first },
+      enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    for (const channelId of ["C1", "C2"]) {
+      await upsertFollowedThread(testDb.appDb, {
+        orgId: ORG, channelType: "slack", channelId, threadTs: "1.2",
+        ownerType: "user", ownerId: USER, createdBy: USER,
+        ...(channelId === "C1" ? { subscriptionId: "presence-follow" } : {}),
+      });
+    }
+    const deps = { db: testDb.appDb, engineHost };
+    const deliver = (eventId: string, channel: string, ts: string) => handleFollowedMessage(deps, {
+      orgId: ORG, raw: envelope({ type: "message", channel, thread_ts: "1.2", ts, user: "U9", text: "follow up" }, eventId),
+    });
+    await deliver("presence-first", "C1", "1.3");
+    await testDb.appDb.update(eventSubscriptions).set({ target: { ...target, presence: edited } })
+      .where(eq(eventSubscriptions.id, "presence-follow"));
+    await deliver("presence-edited", "C1", "1.4");
+    await deliver("presence-unbound", "C2", "1.5");
+    await testDb.appDb.update(eventSubscriptions).set({ target })
+      .where(eq(eventSubscriptions.id, "presence-follow"));
+    await deliver("presence-cleared", "C1", "1.6");
+
+    // Read persisted queue metadata after all four admissions. Editing the
+    // rule must not rewrite earlier turns or retain removed avatar fields.
+    for (const [eventId, expected] of [
+      ["presence-first", { presence: first }],
+      ["presence-edited", { presence: edited }],
+      ["presence-unbound", null],
+      ["presence-cleared", null],
+    ] as const) {
+      const dispatchId = `slack:follow:${eventId}`;
+      const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
+      expect(result.rows).toHaveLength(1);
+      const metadata = result.rows[0]!.metadata;
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(expected);
+    }
   });
 
   it.each(["removed", "foreign-org", "org-removed"])("denies a team follow with %s membership before fetching context", async (mode) => {

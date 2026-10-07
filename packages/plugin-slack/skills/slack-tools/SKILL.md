@@ -87,17 +87,23 @@ Large channels require paging via `cursor` / `next_cursor`. Prefer narrowing wit
 When asked to send as an identity, set `sender_name` on `dm_user`, `dm_owner`, `send_message`, or `reply_to_origin`.
 For an uploaded photo, call `profile_pictures.publish_avatar` in the chat containing it.
 The tool publishes a resized copy of the selected image. It does not publish the chat or other attachments.
-Use its returned `avatar_url` as `sender_avatar_url`. Store that URL in the workflow so future runs need no access to this chat.
+Use its returned `avatar_url` as `sender_avatar_url` for a single message, or save it as workflow `presence.avatarUrl` for future runs.
 Use `image_index` to select among multiple photos, or `message_id` to select a recent upload.
 Alternatively, use a public HTTPS image URL. Do not invent an image URL.
 For example, use `sender_name: "Hestia · People"` and the user-provided image URL.
 These fields affect that message only. They do not change the bot account, credentials, or DM conversation.
-If omitted, messages use the existing workspace name or bot identity.
+If omitted, message fields inherit from the subscription presence, then workflow presence, then workspace name or bot identity.
 Slack requires `chat:write.customize`. If Slack rejects customization, Valet retries with the bot identity to deliver the message.
 
-For a workflow, save both fields in its Slack tool steps. To share one identity, declare it in an upstream `set` node.
-For example, use node `identity` with `values: { sender_name: "Hestia · People", sender_avatar_url: "https://example.com/hestia.png" }`.
-Set each Slack step's parameters to `sender_name: "{{nodes.identity.result.sender_name}}"` and `sender_avatar_url: "{{nodes.identity.result.sender_avatar_url}}"`.
-Connect the identity node before those steps. Replace the example URL with the supplied image URL, or omit the avatar field.
-For agent steps, put the identity and the instruction to pass these tool arguments in the step's prompt.
-Automatic replies, approval cards, and file uploads keep their existing identity.
+For a workflow, set top-level `definition.presence: { displayName: "Hestia · People", avatarUrl: "<supplied HTTPS URL>" }`.
+Omit `avatarUrl` if no image was supplied. `patch_workflow` accepts `presence` directly; `null` clears it.
+An event subscription may set `target.presence` (or pass `presence` to `propose_subscription`) to override individual fields for that subscription.
+These defaults apply to tool steps, agent tool calls, automatic replies, and approval cards.
+Use explicit `sender_name` / `sender_avatar_url` only when one message should differ from those defaults.
+File uploads and Slack's DM header/sidebar retain the underlying bot identity.
+
+For an existing event subscription, call `events.list_subscriptions` in its personal or team workspace.
+Use the exact `name` filter or follow `nextOffset` with `offset` to find its ID.
+Call `events.set_subscription_presence` with `subscription_id` and `presence: { displayName?, avatarUrl? }`.
+This replaces the override. Send `presence: null` to clear it. The tool preserves matching rules, target, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` also accept optional `presence`.

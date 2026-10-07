@@ -47,6 +47,10 @@ The client cannot request a grant for a different action.
 
 ## Item content
 
+Approval cards give the workflow title the full card width. Request time, trigger
+type, and the run link wrap below it. Trigger IDs remain available on hover and
+to screen readers without squeezing the title in the notification panel.
+
 `GET /api/workflows/action-required` returns one item for each pending gate.
 Each item includes these fields:
 

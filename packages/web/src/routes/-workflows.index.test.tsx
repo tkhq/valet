@@ -411,7 +411,8 @@ describe("WorkflowsIndexPage", () => {
     expect(details?.open).toBe(false);
     expect(within(approvalRow).getByText("Ship this release?", { selector: "summary *" })).toBeTruthy();
     expect(screen.getAllByText("slack.send_message").length).toBeGreaterThan(0);
-    expect(screen.getByText("Started by schedule (sched_1)")).toBeTruthy();
+    expect(screen.getByText("Started by schedule")).toBeTruthy();
+    expect(screen.getByTitle("Trigger ID: sched_1")).toBeTruthy();
   });
 
   it("keeps private-run decisions available without a broken run link", () => {

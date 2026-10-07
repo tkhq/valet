@@ -26,7 +26,7 @@ export function WorkflowApprovalItem({
       data-testid="action-required-item"
       className={`min-w-0 rounded-lg border bg-paper p-3 sm:p-4 ${focused ? "border-warning-fg ring-2 ring-warning-fg/20" : "border-line"}`}
     >
-      <div className="mb-3 flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="mb-3 flex min-w-0 flex-col gap-2">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1 rounded-full bg-warning-wash px-2 py-0.5 text-xs font-medium text-warning-fg">
@@ -47,11 +47,11 @@ export function WorkflowApprovalItem({
           </Link>
           {policy && <p className="break-all font-mono text-xs text-muted">{action}</p>}
         </div>
-        <div className="shrink-0 text-left text-xs text-muted sm:text-right">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 break-words text-xs text-muted">
           <div>Requested {relativeTime(gate.waitingSince ?? item.runCreatedAt)}</div>
-          <div>
+          <div title={item.canReadRun !== false && item.trigger.triggerId ? `Trigger ID: ${item.trigger.triggerId}` : undefined}>
             {item.canReadRun === false ? "Private run" : item.trigger.type === "manual" ? "Started manually" : `Started by ${item.trigger.type}`}
-            {item.canReadRun !== false && item.trigger.triggerId ? ` (${item.trigger.triggerId})` : ""}
+            {item.canReadRun !== false && item.trigger.triggerId && <span className="sr-only">{` (Trigger ID: ${item.trigger.triggerId})`}</span>}
           </div>
           {item.canReadRun !== false && <Link
             to="/workflows/runs/$runId"

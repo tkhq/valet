@@ -1,3 +1,5 @@
+import { type Presence, validatePresence } from "@valet/shared";
+import { PresenceSettings } from "~/components/presence-settings";
 import { AutomationReview } from "~/components/events/automation-review";
 /**
  * TriggerDialog — create or edit a schedule or event trigger.
@@ -96,6 +98,7 @@ export function TriggerDialog({
   const [inputJsonError, setInputJsonError] = useState<string | null>(null);
 
   // ── event fields ───────────────────────────────────────────────────────
+  const [presence, setPresence] = useState<Presence>({});
   const [eventKey, setEventKey] = useState("");
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
   // Explicit opt-out of the channel requirement on a `slack.app_mention`
@@ -159,6 +162,7 @@ export function TriggerDialog({
       setInputJson("");
       setInputJsonError(null);
       setEventKey("");
+      setPresence({});
       setFilterRows([]);
       setAnyChannel(false);
       setFormError(null);
@@ -269,6 +273,10 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
+        if (!isEditing) {
+          const presenceError = validatePresence(presence);
+          if (presenceError) { setFormError(presenceError); return; }
+        }
         const incomplete = incompleteFilterRow(filterRows);
         if (incomplete) {
           setFormError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
@@ -339,6 +347,7 @@ export function TriggerDialog({
           const wfId = workflowId ?? selectedWorkflowId;
           await createEvent.mutateAsync({
             workflowId: wfId,
+            ...(Object.keys(presence).length > 0 ? { presence } : {}),
             name,
             eventKeys: [eventKey],
             filters,
@@ -613,6 +622,8 @@ export function TriggerDialog({
               </div>
             </>
           )}
+
+          {kind === "event" && !isEditing && <PresenceSettings value={presence} onChange={setPresence} subscription disabled={isPending} />}
 
           {/* Form validation error */}
           <AutomationReview workflowId={targetKind === "workflow" ? selectedWorkflowId || workflowId : undefined} when={kind === "schedule" ? `${cron} (${timezone})` : eventKey}

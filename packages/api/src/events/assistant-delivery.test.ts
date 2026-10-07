@@ -95,6 +95,23 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(session.owner).toEqual(OWNER);
   });
 
+  it("persists presence per delivery without changing other turns", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    for (const [dispatchId, presence] of [
+      ["presence-first", { displayName: "Hestia", avatarUrl: "https://example.com/hestia.webp" }],
+      ["presence-default", undefined],
+    ] as const) {
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+        signal: { kind: "signal", signalType: "test", body: dispatchId },
+        dispatchId, presence, mismatchReason: "test",
+      });
+      const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
+      const metadata = result.rows[0]?.metadata;
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(presence ? { presence } : null);
+    }
+  });
+
   it("uses the current team defaults for new Slack threads after restore", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const owner = { type: "team", id: "team-defaults" } as const;

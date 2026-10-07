@@ -433,6 +433,26 @@ describe("event-trigger CRUD", () => {
     expect(body.error).toContain("Confirm the id");
   });
 
+  it("stores trigger presence under workflow ownership and rejects invalid identity", async () => {
+    const a = await boot();
+    const workflowId = await createWorkflow(a.baseUrl, "presence_workflow");
+    const presence = { displayName: "Review helper", avatarUrl: "https://example.com/reviewer.webp" };
+    const create = (identity: unknown) => fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflowId, name: "PR review", eventKeys: ["github.pull_request.opened"], presence: identity }),
+    });
+    const response = await create(presence);
+    expect(response.status).toBe(201);
+    const created = await response.json() as WorkflowEventTriggerResponse;
+    const [stored] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.trigger.triggerId));
+    const [workflow] = await a.providers.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
+    expect(stored).toMatchObject({ ownerType: workflow!.ownerType, ownerId: workflow!.ownerId, target: { kind: "workflow", workflowId, presence } });
+    const invalid = await create({ avatarUrl: "http://example.com/reviewer.webp" });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ error: expect.stringContaining("HTTPS") });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(1);
+  });
+
   it("round-trips create/patch/delete and 400s a bogus event key on create", async () => {
     const a = await boot();
     const wfId = await createWorkflow(a.baseUrl, "wf_evt");

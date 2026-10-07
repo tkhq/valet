@@ -181,7 +181,7 @@ describe("EventDispatcher", () => {
       updatedAt: now,
     });
     const { eventId, subscriptionId, deliveryId } = await seedDelivery({
-      target: { kind: "workflow", workflowId: "wf-1" },
+      target: { kind: "workflow", workflowId: "wf-1", presence: { displayName: "Event Hestia" } },
     });
 
     const runHost = fakeRunHost();
@@ -201,6 +201,7 @@ describe("EventDispatcher", () => {
     expect(def).toEqual(definition);
     // The workflow owner determines shared automation identity.
     expect(owner).toEqual({ ownerType, ownerId: "user-1", actorUserId: ownerType === "user" ? "user-1" : `${ownerType}:user-1` });
+    expect(params.presence).toEqual({ displayName: "Event Hestia" });
     expect(params.workflowId).toBe("wf-1");
     expect(params.triggerId).toBe(subscriptionId);
     const trigger = params.input as WorkflowTriggerPayload;
