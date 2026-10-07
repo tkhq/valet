@@ -1,6 +1,6 @@
 /** Workspace runtime identities. Each personal or team workspace owns one
  * assistant; all channels, workflow threads and subscriptions resolve it by
- * ownership. The database enforces this invariant, including retired rows.
+ * ownership. Retired identities keep separate tombstone owner keys.
  */
 import { assistantSessionId, type Principal, type Session } from "@valet/engine";
 import { and, eq, sql, type SQL } from "drizzle-orm";
@@ -69,7 +69,7 @@ export async function loadAssistantBySessionId(
 }
 
 /** Find the workspace identity without creating it. Retired rows remain
- * visible here so callers cannot create a replacement for the same owner. */
+ * visible here so the resolver can replace the entry point transactionally. */
 export async function findDefaultAssistant(
   db: AppQueryable,
   orgId: string,
@@ -112,35 +112,48 @@ async function ownerExists(db: AppQueryable, orgId: string, principal: Principal
   return rows.length > 0;
 }
 
-/** Explicit archival remains effective while the owner's unique slot stays reserved. */
-async function liveOrRestored(_db: AppQueryable, _orgId: string, _principal: Principal, row: AssistantRow): Promise<AssistantRow> {
-  if (row.archivedAt !== null) throw new ArchivedAssistantError();
-  return row;
-}
-
-/** Resolve the sole workspace identity. Concurrent first use converges via
- * the unconditional owner unique index. Accepts transactions so team creation
- * and its runtime identity commit or roll back together. */
+/** Resolve a workspace entry point without reviving a retired runtime.
+ * Old profile deletion can leave a retired row in a live owner's only slot.
+ * Move that tombstone aside and create a new identity in one transaction.
+ * Direct access to the old identity still rejects it; its data is retained.
+ */
 export async function resolveDefaultAssistant(
   db: AppQueryable,
   orgId: string,
   principal: Principal,
 ): Promise<AssistantRow> {
-  const existing = await findDefaultAssistant(db, orgId, principal);
-  if (existing) return liveOrRestored(db, orgId, principal, existing);
-
-  const row = newAssistantRow({ orgId, principal });
-  const inserted = await db.insert(assistants).values(row).onConflictDoNothing().returning();
-  if (inserted[0]) return inserted[0];
-
-  const winner = await findDefaultAssistant(db, orgId, principal);
-  if (!winner) {
-    throw new Error(
-      `assistants: no default assistant for ${principal.type}:${principal.id} after an insert conflict — ` +
-        `the workspace unique index rejected the insert but no owner row exists`,
-    );
-  }
-  return liveOrRestored(db, orgId, principal, winner);
+  return db.transaction(async tx => {
+    // Match team teardown's lock order before changing its runtime identity.
+    if (principal.type === "team") await lockTeamForOwnership(tx, principal.id);
+    const [existing] = await tx.select().from(assistants)
+      .where(ownerMatch(orgId, principal)).limit(1).for("update");
+    if (existing) {
+      const [app] = await tx.select({ status: agentSessions.status }).from(agentSessions)
+        .where(eq(agentSessions.id, existing.sessionId)).limit(1);
+      if (existing.archivedAt === null && app?.status !== "deleted") return existing;
+      if (!await ownerExists(tx, orgId, principal)) throw new ArchivedAssistantError();
+      // This is explicit retirement, not a live duplicate moved by migration.
+      // Remove the continuity proof so the old identity cannot become live.
+      await tx.delete(legacyAssistantRuntimes).where(eq(legacyAssistantRuntimes.assistantId, existing.id));
+      await tx.update(assistants).set({
+        ownerId: `${principal.id}:retired:${existing.id}`,
+        archivedAt: existing.archivedAt ?? Date.now(),
+      }).where(eq(assistants.id, existing.id));
+    }
+    const row = newAssistantRow({ orgId, principal });
+    const [inserted] = await tx.insert(assistants).values(row).onConflictDoNothing().returning();
+    if (inserted) {
+      if (existing) {
+        // The legacy allow-list belongs to the workspace, not the retired profile.
+        await tx.execute(sql`UPDATE assistants SET behavior = old.behavior FROM assistants old
+          WHERE assistants.id = ${inserted.id} AND old.id = ${existing.id}`);
+      }
+      return inserted;
+    }
+    const winner = await findDefaultAssistant(tx, orgId, principal);
+    if (!winner || winner.archivedAt !== null) throw new ArchivedAssistantError();
+    return winner;
+  });
 }
 
 /**
