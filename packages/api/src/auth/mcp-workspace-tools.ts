@@ -124,7 +124,8 @@ type MemoryReadBody = {
 };
 
 function memoryView(res: MemoryReadBody) {
-  const text = res.rendered ?? res.file?.content ?? "";
+  // A file returns its body; frontmatter fields appear below. A directory has no file, so it returns the rendered index.
+  const text = res.file?.content ?? res.rendered ?? "";
   return {
     path: res.path ?? res.file?.path ?? "",
     kind: res.kind ?? "file",
