@@ -1,6 +1,6 @@
-import { WorkspaceAssistantButton } from "./workspace-assistant";
+import { useWorkspaceAssistant, WorkspaceAssistantButton } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, Menu, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
+import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
 import { useSession } from "~/api/queries";
 import { pluginEnabledForCaller, useMe, useOrg, useTeams } from "~/api/settings";
@@ -114,6 +114,7 @@ function SidebarToggle() {
 }
 
 export function TopNav() {
+  const assistant = useWorkspaceAssistant();
   const mobileNav = useResponsiveOverlay("md");
   const scope = useWorkspaceScope();
 
@@ -198,7 +199,17 @@ export function TopNav() {
         className="hidden min-w-0 flex-1 items-center gap-2 overflow-x-auto md:flex xl:justify-end [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {destinations.map(({ to, label, active }) => (
-          <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
+          to === "/artifacts" ? <div key={to} className="flex shrink-0 items-center">
+            <NavLink to={to}>{label}</NavLink>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label="Artifacts and memory" className="px-1"><ChevronDown className="h-3 w-3" aria-hidden /></Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div> : <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
         ))}
       </nav>
       <DropdownMenu>
@@ -220,7 +231,9 @@ export function TopNav() {
               <Menu className="h-5 w-5" aria-hidden />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" aria-label="Navigation" className="w-64">
+          <DropdownMenuContent align="end" aria-label="Navigation" className="w-64 max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
+            <DropdownMenuItem onSelect={() => assistant.open()}><Sparkles className="h-4 w-4" aria-hidden />Ask Valet</DropdownMenuItem>
+            <DropdownMenuSeparator />
             {destinations.map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link
@@ -233,12 +246,14 @@ export function TopNav() {
                 </Link>
               </DropdownMenuItem>
             ))}
+            <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem asChild>
               <Link to="/settings"><Settings className="h-4 w-4" aria-hidden />Settings</Link>
             </DropdownMenuItem>
             {securityEnabled && <>
               <DropdownMenuSeparator />
+              <div className="px-2 py-1 text-xs text-muted">Plugins</div>
               <DropdownMenuItem asChild>
                 <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
               </DropdownMenuItem>
@@ -248,7 +263,7 @@ export function TopNav() {
       </div>
 
       <div className="flex shrink-0 items-center">
-        <WorkspaceAssistantButton />
+        <div className="hidden md:block"><WorkspaceAssistantButton /></div>
         <NotificationsBell />
       </div>
 

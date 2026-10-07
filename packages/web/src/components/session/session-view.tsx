@@ -268,7 +268,7 @@ export function SessionView({
           <ListTree className="h-4 w-4" aria-hidden />
         </button>
       </PopoverTrigger>
-      <PopoverContent aria-label="Thread summary" align="end" sideOffset={12} onOpenAutoFocus={(event) => event.preventDefault()} className="w-80 p-0 rounded-2xl">
+      <PopoverContent aria-label="Thread summary" align="end" sideOffset={12} onOpenAutoFocus={(event) => event.preventDefault()} className="w-80 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-0 rounded-2xl">
                 <ThreadContextPanel
                   key={`${sessionId}:${effectiveThreadId}`}
                   owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}

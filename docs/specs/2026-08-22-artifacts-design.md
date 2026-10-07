@@ -428,3 +428,5 @@ Pagination uses URL cursor stacks. A workspace change starts at its first page a
 
 On mobile, Settings and enabled plugins appear in the navigation menu to leave room for workspace and assistant controls.
 Artifact titles and paths wrap within the page width.
+
+Artifacts remains a direct primary-navigation link. Its adjacent dropdown exposes Memory; both destinations also appear in mobile navigation.

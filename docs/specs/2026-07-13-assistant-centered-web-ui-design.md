@@ -157,3 +157,5 @@ Empty states direct, in-voice: dashboard before first message ("Say hello — {n
 Org page and org activity; memory editing/graph/import UI; avatars and handles beyond the name; team management UI; channel/schedule thread origins (render when Phase 6 delivers them); mobile-app polish beyond responsive-that-works; legacy client changes.
 
 On phone widths, the thread summary stays closed until the user opens it. Opening a chat does not cover its transcript with the summary popover.
+
+On phones, Ask Valet and available plugins live inside the navigation menu. Briefing cards wrap their titles, actions, links, and timestamps instead of imposing fixed row heights. The thread summary popover is bounded by the viewport width and available height.

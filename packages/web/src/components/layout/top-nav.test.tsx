@@ -167,7 +167,7 @@ describe("TopNav", () => {
     const menu = screen.getByRole("menu", { name: "Open navigation" });
     expect(within(menu).getByRole("menuitem", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
     expect(within(menu).getByRole("menuitem", { name: "Valet Security" }).getAttribute("href")).toBe("/security");
-    expect(within(menu).queryByRole("menuitem", { name: "Memory" })).toBeNull();
+    expect(within(menu).getByRole("menuitem", { name: "Memory" }).getAttribute("href")).toBe("/memory");
   });
 
   it("moves Settings into mobile navigation and keeps the desktop shortcut", async () => {
@@ -296,4 +296,22 @@ describe("TopNav — sidebar toggle", () => {
   });
 });
 
-vi.mock("~/components/layout/workspace-assistant", () => ({ WorkspaceAssistantButton: () => <button>Ask Valet</button> }));
+const openAssistant = vi.fn();
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }), WorkspaceAssistantButton: () => <button>Ask Valet</button> }));
+
+it("keeps Artifacts directly accessible with Memory in its dropdown", async () => {
+  const user = userEvent.setup();
+  renderNav();
+  expect((await screen.findByRole("link", { name: "Artifacts" })).getAttribute("href")).toBe("/artifacts");
+  await user.click(screen.getByRole("button", { name: "Artifacts and memory" }));
+  expect(screen.getByRole("menuitem", { name: "Memory" }).getAttribute("href")).toBe("/memory");
+});
+
+it("opens Ask Valet from the mobile menu", async () => {
+  const user = userEvent.setup();
+  renderNav();
+  await user.click(await screen.findByRole("button", { name: "Open navigation" }));
+  await user.click(screen.getByRole("menuitem", { name: "Ask Valet" }));
+  expect(openAssistant).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("menu", { name: "Navigation" })).toBeNull();
+});

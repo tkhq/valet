@@ -57,7 +57,7 @@ function ScopedBriefings({ owner }: { owner: OwnerFilter }) {
     ) : (
       <div className="space-y-4">
         {dismissNote && <p role="status" className="text-xs text-muted">{dismissNote}</p>}
-        {/* Cards keep fixed row heights, so title, next action, and links line up across a row. */}
+        {/* Cards expand and wrap to keep actions reachable on narrow screens. */}
         <div className="grid items-start gap-4 md:grid-cols-2">
           {briefings.data.briefings.map(briefing => <BriefingCard key={briefing.id} briefing={briefing}
             onDismiss={() => dismissBriefing(briefing)} dismissing={dismiss.isPending && dismiss.variables?.id === briefing.id} />)}
@@ -115,19 +115,19 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
   // A run a schedule or an event started has no conversation. Link the newest run instead.
   const latestRun = briefing.latestThread ? undefined
     : [...briefing.sources].filter(source => source.kind === "workflow" && source.runId).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.runId;
-  return <article aria-labelledby={headingId} className={cn(cardClass, "px-5 py-3")}>
-    <header className="flex h-6 items-center gap-2">
-      <h2 id={headingId} title={briefing.title} className="min-w-0 flex-1 truncate text-sm font-medium leading-6 text-ink">{briefing.title}</h2>
+  return <article aria-labelledby={headingId} className={cn(cardClass, "min-w-0 px-4 py-3 sm:px-5")}>
+    <header className="flex min-h-6 items-start gap-2">
+      <h2 id={headingId} title={briefing.title} className="min-w-0 flex-1 [overflow-wrap:anywhere] text-sm font-medium leading-6 text-ink">{briefing.title}</h2>
       <Badge variant={status.variant} className="shrink-0">{status.label}</Badge>
-      <Button variant="ghost" size="icon" onClick={onDismiss} disabled={dismissing} className="-mr-1"
+      <Button variant="ghost" size="icon" onClick={onDismiss} disabled={dismissing} className="-mr-1 shrink-0"
         title="Dismiss this brief and archive its threads. Threads waiting on an approval stay open."
         aria-label={`Dismiss ${briefing.title}`}
       ><X aria-hidden className="h-3.5 w-3.5" /></Button>
     </header>
-    <p title={briefing.nextAction} className={`mt-2 line-clamp-2 h-10 text-sm leading-5 ${briefing.nextAction ? "text-ink" : "text-muted"}`}>
+    <p title={briefing.nextAction} className={`mt-2 min-h-10 [overflow-wrap:anywhere] text-sm leading-5 ${briefing.nextAction ? "text-ink" : "text-muted"}`}>
       {briefing.nextAction ? <><span className="font-medium">Next: </span>{briefing.nextAction}</> : NO_ACTION[briefing.status]}
     </p>
-    <div className="mt-2 flex h-6 items-center gap-x-4 text-xs">
+    <div className="mt-2 flex min-h-6 flex-wrap items-center gap-x-4 gap-y-2 text-xs">
       {briefing.latestThread ? <Link
         to="/threads/$threadId"
         params={{ threadId: briefing.latestThread.threadId }}
@@ -140,11 +140,11 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
       {originUrl && <a href={originUrl} target="_blank" rel="noopener noreferrer"
         className={textLinkClass}
       >Open in Slack <ArrowUpRight aria-hidden className="h-3.5 w-3.5" /></a>}
-      <span className="ml-auto shrink-0 text-muted">Updated {relativeTime(briefing.updatedAt)}</span>
+      <span className="basis-full text-muted sm:ml-auto sm:basis-auto">Updated {relativeTime(briefing.updatedAt)}</span>
     </div>
     <details className="mt-2 border-t border-line pt-2">
       <summary className="h-6 cursor-pointer text-xs leading-6 text-muted hover:text-ink">Details{sources.length > 0 ? ` · ${sources.length} ${sources.length === 1 ? "source" : "sources"}` : ""}</summary>
-      <p className="mt-2 whitespace-pre-line text-sm text-muted">{briefing.summary}</p>
+      <p className="mt-2 whitespace-pre-line [overflow-wrap:anywhere] text-sm text-muted">{briefing.summary}</p>
       {sources.length > 0 && <ul aria-label="Sources" className="mt-2 flex flex-wrap gap-2">
         {sources.map(source => <BriefingSource key={source.id} source={source} />)}
       </ul>}
@@ -155,7 +155,7 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
 function BriefingSource({ source }: { source: WorkspaceBriefingSource }) {
   const Icon = source.kind === "pull_request" ? GitPullRequest : source.kind === "workflow" ? Workflow : source.kind === "artifact" ? FileText : MessageSquare;
   const className = "inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-ink-wash hover:text-ink";
-  const content = <><Icon aria-hidden className="h-3.5 w-3.5 shrink-0" /><span className="break-words">{source.title}</span></>;
+  const content = <><Icon aria-hidden className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 [overflow-wrap:anywhere]">{source.title}</span></>;
   const url = safeResultUrl(source.url);
   return <li className="min-w-0 max-w-full">
     {source.token ? <Link to="/a/$token" params={{ token: source.token }} className={className}>{content}</Link>
