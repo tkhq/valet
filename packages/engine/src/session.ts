@@ -1223,15 +1223,34 @@ export class Session {
       skillsProvider ? skillsProvider() : Promise.resolve(null),
     ]);
     this.workspaceSkillsCache = workspaceSkills;
-    if (managedSkills !== null) {
-      // Replace, not merge: the provider returns the full merged set (plugin
-      // + stored). A deleted or renamed stored skill must drop out here, and
-      // `skill`-tool lookups (thread.ts) read this same map, so both surfaces
-      // stay consistent.
-      this.skills.clear();
-      for (const skill of managedSkills) this.skills.set(skill.name, skill);
-    }
+    if (managedSkills !== null) this.replaceSkills(managedSkills);
     this.commandRegistryCache = null;
+  }
+
+  /**
+   * Re-read the session's skill map from the host `skillsProvider` only.
+   * Each turn calls this before it builds its tools, so a skill created,
+   * edited, or deleted while the session sat in the host cache reaches the
+   * model on the next turn. The `workspaceSkillsProvider` is not read: repo
+   * templates reach slash commands only, and that read can need the sandbox.
+   * No provider === no-op. A provider rejection propagates, and the previous
+   * map keeps serving.
+   */
+  async refreshSkills(): Promise<void> {
+    const skillsProvider = this.options.skillsProvider;
+    if (!skillsProvider) return;
+    this.replaceSkills(await skillsProvider());
+    this.commandRegistryCache = null;
+  }
+
+  /**
+   * Replace, not merge: the provider returns the full merged set (plugin +
+   * stored). A deleted or renamed stored skill must drop out here. The host's
+   * `skill` tool reads this same map, so both surfaces stay consistent.
+   */
+  private replaceSkills(skills: SkillSource[]): void {
+    this.skills.clear();
+    for (const skill of skills) this.skills.set(skill.name, skill);
   }
 
   /**

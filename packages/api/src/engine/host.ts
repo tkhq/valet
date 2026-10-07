@@ -1283,6 +1283,7 @@ export class EngineHost {
       pendingStartRef = undefined;
     }
 
+    extras.bindSession(session);
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     // Retention: after a successful restore of an existing session, prune
@@ -1477,7 +1478,6 @@ export class EngineHost {
       await listSkillSourcesFor(this.opts.db, owner, orgId),
       effectivePins,
       catalogOptions,
-      this.skillsProviderFor(owner, orgId, extraPlugins),
     );
   }
 
@@ -2831,6 +2831,7 @@ export class EngineHost {
     }
     builtSession = session;
 
+    extras.bindSession(session);
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
@@ -3863,6 +3864,7 @@ export class EngineHost {
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
     builtSession = session;
+    provisionedExtras.bindSession(session);
     this.cache.set(childSessionId, { engine, session });
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
@@ -4024,6 +4026,7 @@ export class EngineHost {
       ? await engine.restoreSession({ sessionId, options: sessionOptions })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
+    extras.bindSession(session);
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
