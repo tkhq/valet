@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { useWorkspaceAssistant, WorkspaceAssistantButton } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
@@ -15,6 +16,41 @@ import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useSidebarControls } from "./app-shell";
 import { NotificationsBell } from "./notifications-bell";
+
+/** One navigation link with a hover menu; clicking still opens Artifacts. */
+function ArtifactsNav() {
+  const [open, setOpen] = useState(false);
+  const hover = useRef(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const cancelClose = () => clearTimeout(closeTimer.current);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
+  const leave = () => { closeTimer.current = setTimeout(() => setOpen(false), 150); };
+  return <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
+    <DropdownMenuTrigger asChild>
+      <Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}
+        className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash"
+        activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}
+        onPointerEnter={(event) => {
+          if (event.pointerType !== "mouse") return;
+          cancelClose(); hover.current = true; setOpen(true);
+        }}
+        onPointerLeave={leave}
+        onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
+        onClick={() => { cancelClose(); setOpen(false); }}
+        onKeyDown={(event) => {
+          hover.current = false;
+          if (event.key === "Enter") { event.preventDefault(); event.currentTarget.click(); }
+        }}
+      >Artifacts<ChevronDown className="h-3 w-3" aria-hidden /></Link>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="start" aria-label="Artifacts and memory"
+      onPointerEnter={cancelClose} onPointerLeave={leave}
+      onCloseAutoFocus={(event) => { if (hover.current) event.preventDefault(); }}>
+      <DropdownMenuItem asChild><Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}>Artifacts</Link></DropdownMenuItem>
+      <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>;
+}
 
 /**
  * Top-nav link with a working active state. Text color lives in
@@ -199,17 +235,7 @@ export function TopNav() {
         className="hidden min-w-0 flex-1 items-center gap-2 overflow-x-auto md:flex xl:justify-end [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {destinations.map(({ to, label, active }) => (
-          to === "/artifacts" ? <div key={to} className="flex shrink-0 items-center">
-            <NavLink to={to}>{label}</NavLink>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" aria-label="Artifacts and memory" className="px-1"><ChevronDown className="h-3 w-3" aria-hidden /></Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div> : <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
+          to === "/artifacts" ? <ArtifactsNav key={to} /> : <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
         ))}
       </nav>
       <DropdownMenu>

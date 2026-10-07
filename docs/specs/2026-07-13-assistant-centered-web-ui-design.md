@@ -175,3 +175,7 @@ On narrow screens, conversation sharing details open from an information button 
 ### Draft synchronization across browser tabs
 
 Remote draft updates change only in-memory state. They must not write back to browser storage. Ignore queued storage events whose values no longer match storage, including events queued before a successful send cleared the draft. This prevents stale text from cycling between tabs.
+
+### Artifacts navigation
+
+Artifacts is one desktop navigation link with an inline chevron. Clicking it opens Artifacts. Hover opens a list containing Artifacts and Memory. Arrow Down opens the same list for keyboard users. Mobile navigation keeps both destinations as separate menu entries.

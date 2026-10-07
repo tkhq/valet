@@ -9,7 +9,7 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OrgPluginWire, TeamSummary } from "@valet/api/wire";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -85,8 +85,10 @@ function renderNav(opts: { withSidebar?: boolean; workspace?: string } = {}) {
     path: "/skills",
     component: () => null,
   });
+  const artifactsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/artifacts", component: () => null });
+  const memoryRoute = createRoute({ getParentRoute: () => rootRoute, path: "/memory", component: () => null });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([indexRoute, threadsRoute, skillsRoute]),
+    routeTree: rootRoute.addChildren([indexRoute, threadsRoute, skillsRoute, artifactsRoute, memoryRoute]),
     history: createMemoryHistory({ initialEntries: [opts.workspace ? `/?workspace=${opts.workspace}` : "/"] }),
   });
   const queryClient = new QueryClient();
@@ -299,12 +301,27 @@ describe("TopNav — sidebar toggle", () => {
 const openAssistant = vi.fn();
 vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }), WorkspaceAssistantButton: () => <button>Ask Valet</button> }));
 
-it("keeps Artifacts directly accessible with Memory in its dropdown", async () => {
+it("opens Memory on hover while Artifacts remains a direct link", async () => {
   const user = userEvent.setup();
   renderNav();
   expect((await screen.findByRole("link", { name: "Artifacts" })).getAttribute("href")).toBe("/artifacts");
-  await user.click(screen.getByRole("button", { name: "Artifacts and memory" }));
+  await user.hover(screen.getByRole("link", { name: "Artifacts" }));
   expect(screen.getByRole("menuitem", { name: "Memory" }).getAttribute("href")).toBe("/memory");
+});
+
+it("navigates directly to Artifacts and opens the list with Arrow Down", async () => {
+  const user = userEvent.setup();
+  renderNav();
+  const link = await screen.findByRole("link", { name: "Artifacts" });
+  await user.click(link);
+  await waitFor(() => expect(link.getAttribute("aria-current")).toBe("page"));
+  expect(screen.queryByRole("menu")).toBeNull();
+  link.focus();
+  await user.keyboard("{ArrowDown}");
+  expect(screen.getByRole("menuitem", { name: "Memory" })).toBeTruthy();
+  await user.click(screen.getByRole("menuitem", { name: "Memory" }));
+  await waitFor(() => expect(link.getAttribute("aria-current")).toBeNull());
+  expect(screen.queryByRole("menu")).toBeNull();
 });
 
 it("opens Ask Valet from the mobile menu", async () => {
