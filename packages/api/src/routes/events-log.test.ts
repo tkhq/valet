@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
@@ -30,7 +31,7 @@ async function seed(a: TestApi) {
 const MINE = "ownerType=user&ownerId=local-user";
 
 async function log(a: TestApi, query = "", headers: Record<string, string> = {}) {
-  return await (await fetch(`${a.baseUrl}/api/events/log?${MINE}${query}`, { headers })).json() as EventLogResponse;
+  return await (await fetch(`${a.baseUrl}/api/events/log?${MINE}&diagnostics=1${query}`, { headers })).json() as EventLogResponse;
 }
 
 it("merges the workspace's events and the org's problems newest first, each with one status", async () => {
@@ -90,7 +91,7 @@ it("counts only this workspace's deliveries, and shows why a skipped event was s
 it("keeps other workspaces' events out, and hides form diagnostics from members", async () => {
   api = await bootTestApi();
   await seed(api);
-  const other = await (await fetch(`${api.baseUrl}/api/events/log?ownerType=team&ownerId=other`)).json() as EventLogResponse;
+  const other = await (await fetch(`${api.baseUrl}/api/events/log?ownerType=team&ownerId=other&diagnostics=1`)).json() as EventLogResponse;
   expect(other.items.map((item) => item.kind)).toEqual(["problem", "problem"]);
   const member = await (await fetch(`${api.baseUrl}/api/events/log?ownerType=user&ownerId=test-member`, { headers: { "x-valet-test-user-id": "test-member" } })).json() as EventLogResponse;
   expect(member.items.map((item) => item.id)).not.toContain("drop_form");
@@ -113,4 +114,20 @@ it("includes events an org-owned rule received, skips other orgs, and looks back
     id: `d_${eventId}`, eventId, subscriptionId: "sub_org", status: "delivered" as const, attempts: 1, nextAttemptAt: 0, createdAt: now,
   })));
   expect((await log(api)).items.map((item) => item.id)).toEqual(["ev_org"]);
+});
+
+it("keeps disabled subscription history while hiding new webhook diagnostics by default", async () => {
+  api = await bootTestApi();
+  await seed(api);
+  await api.providers.db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "sub_mine"));
+  await api.providers.db.insert(eventDropLog).values({ id: "incoming_after_disable", orgId: "local-org", reason: "no_subscription_match", detail: "No active subscription", createdAt: Date.now() });
+  const read = async () => (await (await fetch(`${api!.baseUrl}/api/events/log?${MINE}&limit=1`)).json()) as EventLogResponse;
+  const first = await read();
+  expect(first.items.map(item => item.id)).toEqual(["ev_ok"]);
+  expect(first.nextCursor).toBeTruthy();
+  const second = await (await fetch(`${api.baseUrl}/api/events/log?${MINE}&limit=1&cursor=${encodeURIComponent(first.nextCursor!)}`)).json() as EventLogResponse;
+  expect(second.items.map(item => item.id)).toEqual(["ev_bad"]);
+  expect(second.nextCursor).toBeNull();
+  expect((await log(api)).items.some(item => item.id === "incoming_after_disable")).toBe(true);
+  expect((await fetch(`${api.baseUrl}/api/events/log?${MINE}&diagnostics=1&cursor=${encodeURIComponent(first.nextCursor!)}`)).status).toBe(400);
 });

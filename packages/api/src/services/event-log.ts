@@ -1,9 +1,7 @@
 /**
- * The Events page Log: a workspace's stored events and the organization's
- * recorded problems (the drop log) in one timeline, newest first, with one
- * status per row. Each source is read in keyset order and merged, so one
- * cursor pages the combined list. "Problems only" keeps failed events and
- * every drop.
+ * Workspace delivery history, optionally merged with organization-wide diagnostics.
+ * Each source uses keyset order. Diagnostics and delivery history share one cursor.
+ * Problems-only mode keeps failed deliveries and any requested diagnostics.
  */
 import { sql, type SQL } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
@@ -44,6 +42,8 @@ export interface EventLogQuery {
   admin: boolean;
   /** Only failed events and recorded problems. */
   problemsOnly?: boolean;
+  /** Include organization-wide ingestion diagnostics, independently of deliveries. */
+  diagnostics?: boolean;
   q?: string;
   before?: { at: number; id: string };
   limit: number;
@@ -117,7 +117,7 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
 
   // Problems carry no owner, so the organization's are listed in every workspace.
   const problemRows: EventLogItem[] = [];
-  {
+  if (query.diagnostics) {
     const where: SQL[] = [sql`org_id = ${orgId}`];
     if (!query.admin) where.push(sql`reason NOT IN (${sql.join(ADMIN_ONLY_REASONS.map((r) => sql`${r}`), sql`, `)})`);
     if (like) where.push(sql`(reason ILIKE ${like} ESCAPE '\\' OR detail ILIKE ${like} ESCAPE '\\')`);
@@ -141,8 +141,8 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
 }
 
 /** When anything last reached ingest: a stored event or a visible problem. */
-export async function lastEventLogActivity(db: AppDb, orgId: string, admin: boolean): Promise<number | null> {
-  const hidden = admin ? sql`` : sql`AND reason NOT IN (${sql.join(ADMIN_ONLY_REASONS.map((r) => sql`${r}`), sql`, `)})`;
+export async function lastEventLogActivity(db: AppDb, orgId: string, admin: boolean, diagnostics = false): Promise<number | null> {
+  const hidden = !diagnostics ? sql`AND false` : admin ? sql`` : sql`AND reason NOT IN (${sql.join(ADMIN_ONLY_REASONS.map((r) => sql`${r}`), sql`, `)})`;
   const result = await db.execute(sql`
     SELECT GREATEST(
       (SELECT MAX(received_at) FROM events WHERE org_id = ${orgId}),

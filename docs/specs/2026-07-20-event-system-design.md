@@ -525,3 +525,5 @@ Readiness requires the installation, the signing secret, and a matching workspac
 Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. App credentials stay excluded from agent and workflow credential resolution, and generic credential routes cannot change them.
 
 Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.
+
+The Events Log defaults to subscription delivery history. Disabling a subscription stops new matching and preserves existing history. Show diagnostics includes organization-wide ingestion problems and exposes raw receipts to administrators. The diagnostics filter is part of both the query cache key and page cursor scope.

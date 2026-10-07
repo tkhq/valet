@@ -1,10 +1,5 @@
-/**
- * The Events Log: this workspace's stored events and the organization's
- * recorded problems in one timeline, newest first. "Problems" keeps what went
- * wrong; a stored event opens its own page (deliveries, payload, redeliver).
- * Admins also get the raw incoming receipts behind their own chip, in place
- * of the list.
- */
+/** Workspace delivery history, with organization-wide diagnostics available on request. */
+import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { EventLogItem, EventLogStatus } from "@valet/api/wire";
 import { useEventLog } from "~/api/events";
@@ -42,18 +37,20 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
   const me = useMe();
   const admin = !me.error && me.data?.orgRole === "admin";
   const owner = useListOwner();
-  const receipts = filter === "receipts" && admin;
-  const log = useEventLog({ owner: receipts ? undefined : owner, problems: filter === "problems", ...(query ? { q: query } : {}) });
+  const [showDiagnostics, setShowDiagnostics] = useState(filter === "receipts");
+  const receipts = showDiagnostics && filter === "receipts" && admin;
+  const log = useEventLog({ owner: receipts ? undefined : owner, problems: filter === "problems", diagnostics: showDiagnostics, ...(query ? { q: query } : {}) });
   const items = log.data?.pages.flatMap((page) => page.items) ?? [];
   const first = log.data?.pages[0];
 
   return (
     <div className="space-y-4">
+      <label className="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked={showDiagnostics} onChange={event => { setShowDiagnostics(event.target.checked); if (!event.target.checked && filter === "receipts") onFilterChange("all"); }} />Show diagnostics</label>
       <FilterChips
         label="Show"
         value={receipts ? "receipts" : filter === "receipts" ? "all" : filter}
         onChange={onFilterChange}
-        options={admin ? [...FILTERS, { value: "receipts", label: "Raw receipts" }] : FILTERS}
+        options={admin && showDiagnostics ? [...FILTERS, { value: "receipts", label: "Raw receipts" }] : FILTERS}
       />
       {receipts ? <ReceiptsPanel /> : <>
         <SearchInput
@@ -65,15 +62,16 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
         />
         {first && (
           <p className="text-xs text-muted">
-            {first.lastEventAt ? `Last activity ${relativeTime(first.lastEventAt)}. ` : "Nothing has arrived yet. "}
-            Events from the last {first.windowDays} days that reached this workspace, and problems from the whole organization.
+            {showDiagnostics && first.lastEventAt ? `Last incoming activity ${relativeTime(first.lastEventAt)}. ` : ""}
+            Subscription activity from the last {first.windowDays} days. Turning off a subscription stops new deliveries; existing history stays visible.
+            {showDiagnostics && " Diagnostics also include incoming events and problems from the whole organization."}
           </p>
         )}
         {owner === undefined && me.isError && <ErrorRow>Could not load your workspace. Reload the page to try again.</ErrorRow>}
         {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
         {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
         {log.data && items.length === 0 && (
-          <EmptyRow>{query || filter === "problems" ? "Nothing matches. Choose All or clear the search." : "Nothing has arrived yet. Events and problems appear here as integrations report them."}</EmptyRow>
+          <EmptyRow>{query || filter === "problems" ? "Nothing matches. Choose All or clear the search." : "No subscription activity yet. Enable a subscription to receive events, or turn on Show diagnostics to inspect incoming webhooks."}</EmptyRow>
         )}
         {items.length > 0 && (
           <WorkList>
