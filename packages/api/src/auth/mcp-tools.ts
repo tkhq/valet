@@ -30,7 +30,7 @@ import type {
 } from "../wire/types.js";
 
 /** One in-process call to an `/api` route as the verified MCP user. */
-export type ApiCaller = (method: "GET" | "POST", path: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
+export type ApiCaller = (method: "GET" | "POST" | "PUT", path: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
 
 export interface McpToolDeps {
   api: ApiCaller;
@@ -400,8 +400,9 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     "resolve_decision",
     {
       description:
-        "Answers a pending decision (an approval or a question) with one of its options, then, by default, waits for the turn to continue. " +
-        "Use the gate_id and action_id exactly as list_decisions or a waiting_for_decision result returned them.",
+        "Answers a pending question with one of its options, then, by default, waits for the turn to continue. " +
+        "Use the gate_id and action_id exactly as list_decisions or a waiting_for_decision result returned them. " +
+        "Approvals and credential requests need a person: give them the thread url instead.",
       inputSchema: {
         thread_id: z.string().min(1).describe("Thread id."),
         gate_id: z.string().min(1).describe("The decision's gate_id."),

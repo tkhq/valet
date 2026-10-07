@@ -85,8 +85,10 @@ describe("MCP agent tools", () => {
     const { result } = await rpc(testApi.baseUrl, token, "tools/list", {});
     const names = ((result?.tools as Array<{ name: string }>) ?? []).map((t) => t.name).sort();
     expect(names).toEqual([
-      "call_tool", "describe_tool", "get_thread", "list_decisions", "list_sessions", "list_threads",
-      "list_workspaces", "resolve_decision", "search_tools", "send_message", "start_thread", "whoami",
+      "call_tool", "describe_tool", "get_skill", "get_thread", "get_workflow_run", "list_artifacts",
+      "list_decisions", "list_inbox", "list_sessions", "list_skills", "list_threads", "list_workflows",
+      "list_workspaces", "publish_artifact", "read_memory", "resolve_decision", "run_workflow",
+      "search_memory", "search_tools", "send_message", "start_thread", "whoami", "write_memory",
     ]);
   });
 

@@ -18,7 +18,7 @@ The CLI is not a good substitute for an agent. `valet send` subscribes to its st
 | `send_message` | Follow-up prompt in a thread, optional wait. |
 | `get_thread` | Status, recent messages, pending decisions. Optional wait for the latest turn. |
 | `list_decisions` | Pending approvals and questions in a thread. |
-| `resolve_decision` | Answers a decision, then optionally waits for the turn to continue. |
+| `resolve_decision` | Answers a question, then optionally waits for the turn to continue. Approvals need a person. |
 
 `whoami` and `list_sessions` stay for existing clients.
 
@@ -41,6 +41,27 @@ The routes run the headless `ActionInvoker` with `external` set. That mode resol
 - `require_approval`: the tool does not run. The response is `approval_required` with a `next_step`. An external call cannot open an approval yet, because a decision gate resumes a paused agent turn and an external call has none. The caller delegates with `start_thread`, which raises a normal approval, or an admin changes the policy.
 
 Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}`, with the caller's user id, the decision, the parameters, and the outcome. The invocation id is `ext:{userId}:{ownerType}:{ownerId}:{key}`. A repeated `idempotency_key` from the same caller and owner returns the stored result. The same key from another caller runs separately.
+
+### Workspace tools
+
+These tools give a local agent the rest of the workspace. Each one calls the route named here, so that route's ownership and permission rules apply.
+
+| Tool | Route | Purpose |
+|---|---|---|
+| `list_skills`, `get_skill` | `GET /api/skills`, `GET /api/skills/:name` | Lists the skills the caller can use and returns one skill's instructions. `args` fills `{{placeholders}}` with the engine's `renderTemplate`. |
+| `search_memory`, `read_memory` | `GET /api/memory/search`, `GET /api/memory` | Searches and reads personal or team memory. |
+| `write_memory` | `PUT /api/memory` | Creates or replaces a memory file. A team write needs team admin rights, as in the web client. |
+| `list_workflows`, `run_workflow`, `get_workflow_run` | `GET /api/workflows`, `POST /api/workflows/:id/runs`, `GET /api/workflows/runs/:runId` | Lists and starts workflows. A run waits on the server until it settles, stops for approval, or the wait ends. |
+| `list_inbox` | `GET /api/notifications/decisions`, `GET /api/workflows/action-required` | Lists thread decisions and workflow approvals that wait for the caller. |
+| `list_artifacts`, `publish_artifact` | `GET /api/artifacts`, `POST /api/artifacts/share` | Lists and publishes artifact pages. A repeated key adds a version at the same link. |
+
+A team workspace maps to `ownerType=team&ownerId=<team id>` on the memory, skills, workflow, and artifact routes.
+
+MCP prompts are not exposed. The server is created for each request, so listing skills as prompts would add a skill query to every MCP call.
+
+### Agents answer questions; people approve
+
+An MCP client is an agent. The thread decision route refuses an `approval` or `credential_request` gate when `authVia` is `mcp`, and returns "A person must approve this request." Without this rule, one agent could approve another agent's `require_approval` action. An agent can still answer a `question` gate. `list_inbox` marks each thread decision with `agent_can_answer`. No MCP tool resolves a workflow approval: the workflow approval route records every resolution as `via: "web"`, so it cannot tell an agent from a person.
 
 ### Access control stays in the routes
 
@@ -70,9 +91,11 @@ The instance publishes OAuth protected-resource and authorization-server metadat
 
 - Approvals for external tool calls. This needs a decision gate that is not tied to an agent turn.
 - File upload over MCP. Agents use `valet upload` until a tool exists.
+- Skills as MCP prompts and a `valet skills pull` command that writes native Claude Code skills.
+- Skill supporting files. Sync stores only `SKILL.md` text and frontmatter.
 - Streaming partial output. A long task returns `running`, and the agent polls with `get_thread`.
 - Team API keys. MCP tokens are user tokens. A team acts through a member.
 
 ## Validation
 
-`auth/mcp-tool-broker.test.ts` covers search, describe, policy inheritance (allow, deny, require_approval), credential isolation between users, idempotency, and audit rows. `cli/commands/tools.test.ts` covers the CLI command. `auth/mcp-agent-tools.test.ts` boots the API with real auth, seeds OAuth tokens, and drives JSON-RPC calls against the faux model provider: delegation with a wait, follow-ups, thread reads, the question-decision loop, cross-user isolation, the route allow-list, and wait timeouts.
+`auth/mcp-workspace-tools.test.ts` covers skills, memory, workflows, the inbox, artifacts, and the refusal of an MCP approval, each with two users. `auth/mcp-tool-broker.test.ts` covers search, describe, policy inheritance (allow, deny, require_approval), credential isolation between users, idempotency, and audit rows. `cli/commands/tools.test.ts` covers the CLI command. `auth/mcp-agent-tools.test.ts` boots the API with real auth, seeds OAuth tokens, and drives JSON-RPC calls against the faux model provider: delegation with a wait, follow-ups, thread reads, the question-decision loop, cross-user isolation, the route allow-list, and wait timeouts.

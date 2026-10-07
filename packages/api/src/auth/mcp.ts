@@ -37,6 +37,7 @@ import { users } from "../schema/index.js";
 import type { ValetAuth } from "./index.js";
 import { attachMcpCaller } from "./mcp-caller.js";
 import { registerAgentTools, type ApiCaller } from "./mcp-tools.js";
+import { registerWorkspaceTools } from "./mcp-workspace-tools.js";
 
 export interface McpHandlerOpts {
   auth: ValetAuth;
@@ -76,6 +77,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
         return { status: res.status, body: parsed };
       };
       registerAgentTools(server, { api, engineStore, origin });
+      registerWorkspaceTools(server, { api, engineStore, origin });
     }
 
     server.registerTool(
