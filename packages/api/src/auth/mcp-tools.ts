@@ -382,13 +382,14 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
       description:
         "Runs a tool through Valet with the workspace's credentials and policies. " +
         "Call describe_tool first for the parameter schema. Results: completed (with result), failed (with error), " +
-        "or approval_required (the action did not run; next_step says what to do).",
+        "approval_required (the action did not run; next_step says what to do), or in_progress (an earlier call with the " +
+        "same idempotency_key and params is still running; call again later with the same key).",
       inputSchema: {
         tool_id: z.string().min(1).describe("A tool_id from search_tools."),
         params: z.record(z.string(), z.unknown()).optional().describe("Arguments matching the tool's parameter schema."),
         workspace: workspaceArg,
         idempotency_key: z.string().min(1).max(200).optional()
-          .describe("Reuse the same key to retry safely: a repeated key returns the first result instead of running the tool again."),
+          .describe("Reuse the same key with the same params to retry safely: the retry returns the first result instead of running the tool again. A failed call is not kept, so a retry after a failure runs again."),
       },
       annotations: { destructiveHint: true, openWorldHint: true },
     },

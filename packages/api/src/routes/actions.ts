@@ -14,7 +14,8 @@
  * audit row. A `require_approval` action does not run: the response says
  * `approval_required` and names the next step.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { PluginAction } from "@valet/engine";
 import type { AppEnv } from "../env.js";
@@ -30,9 +31,31 @@ import {
 } from "../plugins/action-invoker.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
+import { actionInvocations } from "../schema/index.js";
 import type { ActionDescribeResponse, ActionInvokeResponse, ActionSearchResponse, ActionToolSummary } from "../wire/types.js";
 
 export const actionsRouter = new Hono<AppEnv>();
+
+/** Longer than any single action call. A claim older than this is a leftover. */
+const CLAIM_STALE_MS = 15 * 60_000;
+
+/** A stable digest of params: object keys are sorted, so key order does not change it. */
+function paramsDigest(value: unknown): string {
+  const canonical = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canonical);
+    if (v && typeof v === "object") {
+      return Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, x]) => [k, canonical(x)]));
+    }
+    return v;
+  };
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex").slice(0, 24);
+}
+
+async function storedResultExists(db: AppEnv["Variables"]["providers"]["db"], invocationId: string): Promise<boolean> {
+  const [row] = await db.select({ id: actionInvocations.invocationId }).from(actionInvocations)
+    .where(eq(actionInvocations.invocationId, invocationId)).limit(1);
+  return row !== undefined;
+}
 
 const DISCOVERY_TIMEOUT_MS = 8_000;
 const MAX_IDEMPOTENCY_KEY = 200;
@@ -126,12 +149,47 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   const tool = await loadTool(c, ctx, c.req.param("toolId"));
   if ("error" in tool) return c.json({ error: tool.error }, 404);
 
-  // The dedup table is global, so the key is namespaced by caller and owner:
-  // one person's key can never return another's stored result.
-  const invocationId = `ext:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${typeof key === "string" ? key : randomUUID()}`;
-  const invoke = buildActionInvoker(tool.opts);
-  const result = await invoke({ service: tool.service, action: tool.action.id, params: params as Record<string, unknown>, invocationId }, ctx);
   const toolId = qualifiedActionId(tool.service, tool.action);
+  const db = c.var.providers.db;
+  // The dedup table is global. A key is namespaced by caller, owner, tool, and
+  // params: one person's key never returns another's result, and reusing a
+  // key for another tool or other params runs that call.
+  const invocationId = typeof key === "string"
+    ? `ext:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${toolId}:${paramsDigest(params)}:${key}`
+    : `ext:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${randomUUID()}`;
+  const claimId = `claim:${invocationId}`;
+  const keyed = typeof key === "string";
+
+  // A keyed call that is still running holds a claim, so a retry (a client
+  // timeout, a second agent) waits for it instead of running the action twice.
+  if (keyed && !(await storedResultExists(db, invocationId))) {
+    const claimed = await db.insert(actionInvocations).values({ invocationId: claimId, result: { claim: true }, createdAt: Date.now() })
+      .onConflictDoNothing().returning({ id: actionInvocations.invocationId });
+    if (claimed.length === 0) {
+      const [held] = await db.select({ createdAt: actionInvocations.createdAt }).from(actionInvocations)
+        .where(eq(actionInvocations.invocationId, claimId)).limit(1);
+      if (held && Date.now() - held.createdAt < CLAIM_STALE_MS) {
+        return c.json({
+          tool_id: toolId, status: "in_progress",
+          next_step: "A call with this idempotency_key is still running. Call again with the same key and params to get its result.",
+        } satisfies ActionInvokeResponse);
+      }
+      // A claim older than any call is left over from a crash. Take it over.
+      await db.update(actionInvocations).set({ createdAt: Date.now() }).where(eq(actionInvocations.invocationId, claimId));
+    }
+  }
+
+  let result: Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>;
+  try {
+    result = await buildActionInvoker(tool.opts)({ service: tool.service, action: tool.action.id, params: params as Record<string, unknown>, invocationId }, ctx);
+  } finally {
+    if (keyed) await db.delete(actionInvocations).where(eq(actionInvocations.invocationId, claimId));
+  }
+  // The invoker keeps every outcome. A failure must not stick to the key:
+  // the caller fixes the params or the connection and retries.
+  if (!result.ok && !("requiresApproval" in result)) {
+    await db.delete(actionInvocations).where(eq(actionInvocations.invocationId, invocationId));
+  }
   if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
   if ("requiresApproval" in result) {
     return c.json({

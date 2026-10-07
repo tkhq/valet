@@ -40,7 +40,7 @@ The routes run the headless `ActionInvoker` with `external` set. That mode resol
 - `deny`: the tool does not run. The response is `failed` and names the policy.
 - `require_approval`: the tool does not run. The response is `approval_required` with a `next_step`. An external call cannot open an approval yet, because a decision gate resumes a paused agent turn and an external call has none. The caller delegates with `start_thread`, which raises a normal approval, or an admin changes the policy.
 
-Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}`, with the caller's user id, the decision, the parameters, and the outcome. The invocation id is `ext:{userId}:{ownerType}:{ownerId}:{key}`. A repeated `idempotency_key` from the same caller and owner returns the stored result. The same key from another caller runs separately.
+Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}`, with the caller's user id, the decision, the parameters, and the outcome. With an `idempotency_key`, the invocation id is `ext:{userId}:{ownerType}:{ownerId}:{toolId}:{paramsDigest}:{key}`. A repeat with the same tool and params returns the stored result. The same key for another tool, other params, or another caller runs separately. A failed result is not kept, so a retry after a fix runs again. While a keyed call runs, it holds a `claim:` row, and a duplicate gets `in_progress` instead of a second run. A claim older than 15 minutes is treated as left over from a crash.
 
 ### Workspace tools
 

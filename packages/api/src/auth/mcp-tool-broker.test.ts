@@ -26,6 +26,28 @@ const SECRET = "demo-secret-key-123";
 
 function demoPlugin() {
   const calls: Record<string, number> = {};
+  let releaseSlow: () => void = () => {};
+  let slowStarted: () => void = () => {};
+  const slowStartedP = new Promise<void>((resolve) => { slowStarted = resolve; });
+  const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+  const extra: PluginAction[] = [
+    {
+      id: "demo.flaky", name: "Flaky", description: "Fails the first time.", riskLevel: "low", parameters: Type.Object({}),
+      execute: async () => {
+        calls["demo.flaky"] = (calls["demo.flaky"] ?? 0) + 1;
+        return calls["demo.flaky"] === 1 ? { success: false, error: "temporary outage" } : { success: true, data: { ok: true } };
+      },
+    },
+    {
+      id: "demo.slow", name: "Slow", description: "Waits for the test.", riskLevel: "low", parameters: Type.Object({}),
+      execute: async () => {
+        calls["demo.slow"] = (calls["demo.slow"] ?? 0) + 1;
+        slowStarted();
+        await slowGate;
+        return { success: true, data: { done: true } };
+      },
+    },
+  ];
   const action = (id: string, name: string): PluginAction => ({
     id,
     name,
@@ -42,10 +64,10 @@ function demoPlugin() {
   const plugin: ValetPlugin = {
     name: "demo",
     version: "0.0.1",
-    actions: [{ service: "demo", actions: [action("demo.ping", "Ping"), action("demo.blocked", "Blocked"), action("demo.risky", "Risky")] }],
+    actions: [{ service: "demo", actions: [action("demo.ping", "Ping"), action("demo.pong", "Pong"), action("demo.blocked", "Blocked"), action("demo.risky", "Risky"), ...extra] }],
     credentials: [{ service: "demo", type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }],
   };
-  return { plugin, calls };
+  return { plugin, calls, releaseSlow: () => releaseSlow(), slowStarted: slowStartedP };
 }
 
 async function seedUser(testApi: TestApi, id: string): Promise<string> {
@@ -96,7 +118,7 @@ describe("MCP tool broker", () => {
     const found = await tool(testApi.baseUrl, alice, "search_tools", { query: "ping" });
     expect(found.data.tools).toEqual([expect.objectContaining({ tool_id: "demo.ping", service: "demo", risk_level: "low" })]);
     const byService = await tool(testApi.baseUrl, alice, "search_tools", { service: "demo" });
-    expect((byService.data.tools as Array<{ tool_id: string }>).map((t) => t.tool_id).sort()).toEqual(["demo.blocked", "demo.ping", "demo.risky"]);
+    expect((byService.data.tools as Array<{ tool_id: string }>).map((t) => t.tool_id).sort()).toEqual(["demo.blocked", "demo.flaky", "demo.ping", "demo.pong", "demo.risky", "demo.slow"]);
 
     const ping = await tool(testApi.baseUrl, alice, "describe_tool", { tool_id: "demo.ping" });
     expect(ping.data).toMatchObject({ tool_id: "demo.ping", policy: "allow", parameters: expect.objectContaining({ type: "object" }) });
@@ -139,7 +161,7 @@ describe("MCP tool broker", () => {
   it("returns the first result for a repeated idempotency key, scoped to one caller", async () => {
     const { testApi, demo, alice, bob } = await setup();
     const first = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: "once" }, idempotency_key: "k1" });
-    const again = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: "twice" }, idempotency_key: "k1" });
+    const again = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: "once" }, idempotency_key: "k1" });
     expect(again.data).toEqual(first.data);
     expect(demo.calls["demo.ping"]).toBe(1);
 
@@ -150,5 +172,38 @@ describe("MCP tool broker", () => {
 
     const allowed = await testApi.providers.db.select().from(actionInvocations).where(like(actionInvocations.invocationId, "pol:ext:%"));
     expect(allowed.filter((row) => row.status === "completed").map((row) => row.userId).sort()).toEqual(["alice", "bob"]);
+  });
+
+  it("runs a reused key again for another tool or other params", async () => {
+    const { testApi, demo, alice } = await setup();
+    await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: "a" }, idempotency_key: "shared" });
+    const otherTool = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.pong", params: { text: "a" }, idempotency_key: "shared" });
+    expect(otherTool.data).toMatchObject({ tool_id: "demo.pong", status: "completed" });
+    expect(demo.calls["demo.pong"]).toBe(1);
+    const otherParams = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: "b" }, idempotency_key: "shared" });
+    expect(otherParams.data).toMatchObject({ result: { echoed: "b" } });
+    expect(demo.calls["demo.ping"]).toBe(2);
+  });
+
+  it("does not keep a failure, so a retry with the same key runs again", async () => {
+    const { testApi, demo, alice } = await setup();
+    const failed = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.flaky", idempotency_key: "retry-1" });
+    expect(failed.data).toMatchObject({ status: "failed", error: "temporary outage" });
+    const retried = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.flaky", idempotency_key: "retry-1" });
+    expect(retried.data).toMatchObject({ status: "completed", result: { ok: true } });
+    expect(demo.calls["demo.flaky"]).toBe(2);
+  });
+
+  it("answers a duplicate with in_progress while the first call runs, and never runs it twice", async () => {
+    const { testApi, demo, alice } = await setup();
+    const firstCall = tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.slow", idempotency_key: "slow-1" });
+    await demo.slowStarted;
+    const duplicate = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.slow", idempotency_key: "slow-1" });
+    expect(duplicate.data).toMatchObject({ status: "in_progress" });
+    demo.releaseSlow();
+    expect((await firstCall).data).toMatchObject({ status: "completed", result: { done: true } });
+    const after = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.slow", idempotency_key: "slow-1" });
+    expect(after.data).toMatchObject({ status: "completed", result: { done: true } });
+    expect(demo.calls["demo.slow"]).toBe(1);
   });
 });

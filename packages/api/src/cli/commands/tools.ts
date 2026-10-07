@@ -10,8 +10,8 @@
  *   valet tools call <tool_id> [--params '<json>' | --params-file <path|->]
  *                    [--workspace <w>] [--idempotency-key <k>]
  *
- * `call` exit codes: 0 completed, 3 approval required (the action did not
- * run), 4 failed. `--json` prints the server response unchanged.
+ * `call` exit codes: 0 completed, 3 approval required or still running (the
+ * action did not finish), 4 failed. `--json` prints the server response unchanged.
  */
 import { readFileSync } from "node:fs";
 import { InstanceClient } from "../client.js";
@@ -119,9 +119,10 @@ export async function runTools(deps: ToolsDeps, flags: ParsedFlags): Promise<num
     if (flags.json) printJson(res);
     else if (res.status === "completed") printLine(typeof res.result === "string" ? res.result : JSON.stringify(res.result, null, 2));
     else if (res.status === "failed") printErr(`${res.tool_id} failed: ${res.error}`);
+    else if (res.status === "in_progress") printErr(`${res.tool_id} is still running. ${res.next_step}`);
     else printErr(`${res.tool_id} did not run: approval required. ${res.next_step}`);
     if (res.status === "completed") return ExitCode.OK;
-    return res.status === "approval_required" ? ExitCode.GatePending : ExitCode.TurnError;
+    return res.status === "failed" ? ExitCode.TurnError : ExitCode.GatePending;
   }
 
   printErr(USAGE);

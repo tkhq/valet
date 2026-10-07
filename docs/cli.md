@@ -214,7 +214,7 @@ valet tools call github.create_issue --params '{"owner":"tkhq","repo":"valet","t
 valet tools call linear.create_issue --params-file issue.json --idempotency-key retry-1
 ```
 
-`--workspace <team-id>` uses a team's credentials and policies. `--params-file -` reads the params from stdin. A repeated `--idempotency-key` returns the first result instead of running the tool again. `call` exits `0` when the tool completes, `3` when a policy requires approval (the tool did not run), and `4` when it fails. MCP clients get the same tools as `search_tools`, `describe_tool`, and `call_tool`.
+`--workspace <team-id>` uses a team's credentials and policies. `--params-file -` reads the params from stdin. A repeated `--idempotency-key` returns the first result instead of running the tool again. `call` exits `0` when the tool completes, `3` when a policy requires approval (the tool did not run) or an earlier call with the same key is still running, and `4` when it fails. A failed call is not stored, so a retry with the same key runs again. MCP clients get the same tools as `search_tools`, `describe_tool`, and `call_tool`.
 
 ### `valet reset [--yes]`
 

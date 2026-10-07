@@ -5566,7 +5566,9 @@ export interface ActionInvokeRequest {
 export type ActionInvokeResponse =
   | { tool_id: string; status: "completed"; result: unknown }
   | { tool_id: string; status: "failed"; error: string }
-  | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string }; next_step: string };
+  | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string }; next_step: string }
+  /** A call with the same idempotency key, tool, and params is still running. */
+  | { tool_id: string; status: "in_progress"; next_step: string };
 
 // ── MCP OAuth consent (`/api/oauth/consent`) ──
 
