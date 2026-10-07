@@ -115,6 +115,27 @@ async function waitForRun(deps: McpToolDeps, runId: string, waitSeconds: number)
   }
 }
 
+/** The memory read route returns a full internal row. Agents get the readable part. */
+type MemoryReadBody = {
+  kind?: string;
+  path?: string;
+  rendered?: string;
+  file?: { path?: string; title?: string; description?: string; tags?: string[]; content?: string; updatedAt?: number };
+};
+
+function memoryView(res: MemoryReadBody) {
+  const text = res.rendered ?? res.file?.content ?? "";
+  return {
+    path: res.path ?? res.file?.path ?? "",
+    kind: res.kind ?? "file",
+    ...(res.file?.title ? { title: res.file.title } : {}),
+    ...(res.file?.description ? { description: res.file.description } : {}),
+    ...(res.file?.tags?.length ? { tags: res.file.tags } : {}),
+    ...(res.file?.updatedAt ? { updated_at: new Date(res.file.updatedAt).toISOString() } : {}),
+    content: clip(text),
+  };
+}
+
 export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): void {
   // ── Skills ────────────────────────────────────────────────────────────
 
@@ -201,9 +222,8 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     },
     run(async ({ path, workspace }: { path: string; workspace?: string }) => {
       const params = ownerParams(workspace, new URLSearchParams({ path }));
-      const res = await call<unknown>(deps, "GET", withQuery("/api/memory", params), "Memory file");
-      if (res && typeof res === "object" && "content" in res && typeof res.content === "string") return { ...res, content: clip(res.content) };
-      return res;
+      const res = await call<MemoryReadBody>(deps, "GET", withQuery("/api/memory", params), "Memory file");
+      return memoryView(res);
     }),
   );
 
@@ -222,12 +242,14 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
       },
       annotations: { destructiveHint: true },
     },
-    run(async ({ path, content, description, tags, workspace }: { path: string; content: string; description?: string; tags?: string[]; workspace?: string }) =>
-      call<unknown>(deps, "PUT", withQuery("/api/memory", ownerParams(workspace)), "Memory write", {
+    run(async ({ path, content, description, tags, workspace }: { path: string; content: string; description?: string; tags?: string[]; workspace?: string }) => {
+      const res = await call<{ file?: { path?: string; version?: number } }>(deps, "PUT", withQuery("/api/memory", ownerParams(workspace)), "Memory write", {
         path, content,
         ...(description ? { description } : {}),
         ...(tags ? { tags } : {}),
-      })),
+      });
+      return { path: res.file?.path ?? path, ...(res.file?.version !== undefined ? { version: res.file.version } : {}), written: true };
+    }),
   );
 
   // ── Workflows ─────────────────────────────────────────────────────────
