@@ -41,7 +41,7 @@ If a service is listed as not connected, tell the person to connect it at {{VALE
 ## Hand off work to the Valet assistant
 
 1. Write the prompt as a complete brief: the goal, the repository, the context you have, the constraints, and what done looks like. The assistant cannot see your conversation.
-2. Call `start_thread` with the brief. It waits up to `wait_seconds` (default 60, maximum 300) and returns `status`:
+2. Call `start_thread` with the brief. It waits up to `wait_seconds` (default 45, maximum 55) and returns `status`:
    - `completed`: use `reply`.
    - `running`: call `get_thread` with `wait_seconds` to wait again.
    - `waiting_for_decision`: read `pending_decisions`. Answer a question with `resolve_decision`. For an approval, give the person the `url`.

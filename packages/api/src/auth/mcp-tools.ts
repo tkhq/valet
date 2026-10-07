@@ -35,6 +35,8 @@ export type ApiCaller = (method: "GET" | "POST" | "PUT", path: string, body?: un
 export interface McpToolDeps {
   api: ApiCaller;
   engineStore: Pick<Providers["engineStore"], "getQueueItem">;
+  /** The newest queue item (turn) in a thread. Callers pass ids an authorized route returned. */
+  latestQueueItem: (sessionId: string, threadId: string) => Promise<string | undefined>;
   /** Public origin for thread links, e.g. `https://valet.example.com`. */
   origin: string;
   /** Injectable for tests. */
@@ -42,8 +44,11 @@ export interface McpToolDeps {
   now?: () => number;
 }
 
-const DEFAULT_WAIT_SECONDS = 60;
-const MAX_WAIT_SECONDS = 300;
+// An ingress often ends a request after 60 seconds (nginx's default), and the
+// turn keeps running when it does. Waits stay under that; the agent calls
+// get_thread again to keep waiting.
+const DEFAULT_WAIT_SECONDS = 45;
+const MAX_WAIT_SECONDS = 55;
 const POLL_MS = 1_000;
 const MAX_TEXT_CHARS = 8_000;
 const MAX_MERGE_HOPS = 5;
@@ -123,6 +128,13 @@ async function threadMessages(deps: McpToolDeps, threadId: string, limit: number
   return res.messages;
 }
 
+/** One turn's messages, newest last, via the messages route's queue item filter. */
+async function turnMessages(deps: McpToolDeps, threadId: string, queueItemId: string): Promise<Message[]> {
+  const res = await call<ListMessagesResponse>(deps, "GET",
+    `/api/threads/${encodeURIComponent(threadId)}/messages?limit=50&queueItemId=${encodeURIComponent(queueItemId)}`, "Thread");
+  return res.messages;
+}
+
 /** The final assistant text for a queue item: its last `end_turn` entry, else its last assistant entry. */
 function replyFor(messages: Message[], queueItemId: string): string | undefined {
   const mine = messages.filter((m) => m.role === "assistant" && m.queueItemId === queueItemId && m.content.trim() !== "");
@@ -168,7 +180,7 @@ export async function waitForTurn(
         continue;
       }
       const status: TurnStatus = outcome.outcome === "merged" ? "completed" : outcome.outcome;
-      const reply = replyFor(await threadMessages(deps, opts.threadId, 50), itemId);
+      const reply = replyFor(await turnMessages(deps, opts.threadId, itemId), itemId);
       return { ...base, status, ...(reply ? { reply } : {}), ...(outcome.error ? { error: outcome.error } : {}) };
     }
     const gates = await pendingGates(deps, opts.threadId);
@@ -304,18 +316,20 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     run(async ({ thread_id, messages, wait_seconds }: { thread_id: string; messages?: number; wait_seconds?: number }) => {
       const sessionId = await sessionOf(deps, thread_id);
       const recent = await threadMessages(deps, thread_id, 50);
-      const latestUser = recent.filter((m) => m.role === "user" && m.queueItemId).at(-1);
-      const turn = latestUser?.queueItemId
-        ? await waitForTurn(deps, { sessionId, threadId: thread_id, queueItemId: latestUser.queueItemId, waitSeconds: wait_seconds ?? 0 })
+      // The newest turn comes from the queue, not the message window: a long
+      // tool-heavy turn pushes its own prompt out of the last 50 messages.
+      const latest = await deps.latestQueueItem(sessionId, thread_id);
+      const turn = latest
+        ? await waitForTurn(deps, { sessionId, threadId: thread_id, queueItemId: latest, waitSeconds: wait_seconds ?? 0 })
         : undefined;
-      const latest = turn && wait_seconds ? await threadMessages(deps, thread_id, 50) : recent;
+      const shown = turn && wait_seconds ? await threadMessages(deps, thread_id, 50) : recent;
       return {
         thread_id,
         status: turn?.status ?? "idle",
         ...(turn?.reply ? { reply: turn.reply } : {}),
         ...(turn?.error ? { error: turn.error } : {}),
         ...(turn?.pending_decisions ? { pending_decisions: turn.pending_decisions } : {}),
-        messages: latest.slice(-(messages ?? 10)).map(messageView),
+        messages: shown.slice(-(messages ?? 10)).map(messageView),
         url: threadUrl(deps, thread_id),
       };
     }),
@@ -416,10 +430,9 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
       const sessionId = await sessionOf(deps, thread_id);
       await call<unknown>(deps, "POST", `/api/threads/${encodeURIComponent(thread_id)}/decisions/${encodeURIComponent(gate_id)}/resolve`, "Decision",
         { actionId: action_id, ...(value !== undefined ? { value } : {}) });
-      const recent = await threadMessages(deps, thread_id, 50);
-      const latestUser = recent.filter((m) => m.role === "user" && m.queueItemId).at(-1);
-      if (!latestUser?.queueItemId) return { thread_id, status: "idle", url: threadUrl(deps, thread_id) };
-      return waitForTurn(deps, { sessionId, threadId: thread_id, queueItemId: latestUser.queueItemId, waitSeconds: wait_seconds ?? DEFAULT_WAIT_SECONDS });
+      const latest = await deps.latestQueueItem(sessionId, thread_id);
+      if (!latest) return { thread_id, status: "idle", url: threadUrl(deps, thread_id) };
+      return waitForTurn(deps, { sessionId, threadId: thread_id, queueItemId: latest, waitSeconds: wait_seconds ?? DEFAULT_WAIT_SECONDS });
     }),
   );
 }

@@ -29,7 +29,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { withMcpAuth } from "better-auth/plugins";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { Providers } from "../providers/types.js";
@@ -76,8 +76,15 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
         }
         return { status: res.status, body: parsed };
       };
-      registerAgentTools(server, { api, engineStore, origin });
-      registerWorkspaceTools(server, { api, engineStore, origin });
+      const latestQueueItem = async (sessionId: string, threadId: string) => {
+        const [item] = await db.select({ id: sql<string>`id` }).from(sql`engine_queue_items`)
+          .where(sql`session_id = ${sessionId} and thread_id = ${threadId}`)
+          .orderBy(sql`created_at desc, id desc`).limit(1);
+        return item?.id;
+      };
+      const deps = { api, engineStore, origin, latestQueueItem };
+      registerAgentTools(server, deps);
+      registerWorkspaceTools(server, deps);
     }
 
     server.registerTool(

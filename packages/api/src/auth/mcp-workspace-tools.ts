@@ -25,8 +25,9 @@ import type {
 import type { McpToolDeps } from "./mcp-tools.js";
 
 const MAX_TEXT_CHARS = 20_000;
-const DEFAULT_RUN_WAIT_SECONDS = 60;
-const MAX_WAIT_SECONDS = 300;
+// Under a 60-second ingress timeout; see mcp-tools.ts.
+const DEFAULT_RUN_WAIT_SECONDS = 45;
+const MAX_WAIT_SECONDS = 55;
 const POLL_MS = 1_000;
 
 class ApiError extends Error {}

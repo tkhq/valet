@@ -212,12 +212,45 @@ describe("waitForTurn", () => {
     const result = await waitForTurn({
       api: async () => ({ status: 200, body: { gates: [] } }),
       engineStore: { getQueueItem: async () => ({ status: "running" }) as never },
+      latestQueueItem: async () => "q",
       origin: "https://valet.test",
       now: () => clock,
       sleep: async (ms) => { clock += ms; },
     }, { sessionId: "s", threadId: "t", queueItemId: "q", waitSeconds: 3 });
     expect(result).toEqual({ thread_id: "t", message_id: "q", status: "running", url: "https://valet.test/threads/t" });
     expect(clock).toBe(3000);
+  });
+});
+
+describe("get_thread turn targeting", () => {
+  it("waits on the newest queue item, not the last user message in the window", async () => {
+    const { registerAgentTools } = await import("./mcp-tools.js");
+    const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+    const server = new McpServer({ name: "t", version: "0" });
+    // The last 50 messages hold only an older, finished turn: a long
+    // tool-heavy turn has pushed its own prompt out of the window.
+    const oldTurn = [
+      { id: "u1", role: "user", content: "old prompt", parts: [], createdAt: 1, queueItemId: "q-old" },
+      { id: "a1", role: "assistant", content: "old reply", parts: [], createdAt: 2, queueItemId: "q-old", stopReason: "end_turn" },
+    ];
+    const items: Record<string, unknown> = { "q-old": { status: "settled", outcome: { outcome: "completed" } }, "q-new": { status: "running" } };
+    registerAgentTools(server, {
+      api: async (_m, path) => path.includes("/decisions") ? { status: 200, body: { gates: [] } }
+        : path.endsWith("/messages?limit=50") || path.includes("/messages?") ? { status: 200, body: { messages: oldTurn, hasMore: true } }
+        : { status: 200, body: { sessionId: "s" } },
+      engineStore: { getQueueItem: async (_s: string, id: string) => (items[id] ?? null) as never },
+      latestQueueItem: async () => "q-new",
+      origin: "https://valet.test",
+    });
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(clientSide);
+    const res = await client.callTool({ name: "get_thread", arguments: { thread_id: "t" } });
+    expect(res.structuredContent).toMatchObject({ status: "running" });
+    await client.close();
   });
 });
 

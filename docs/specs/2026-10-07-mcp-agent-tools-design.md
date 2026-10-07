@@ -80,11 +80,13 @@ The `/mcp` handler verifies the OAuth bearer token and attaches the user to each
 
 ### Waiting happens on the server
 
-`wait_seconds` (default 60, maximum 300) polls the turn's queue item and the thread's pending decisions once a second. The wait ends when one of these happens:
+`wait_seconds` (default 45, maximum 55) polls the turn's queue item and the thread's pending decisions once a second. The wait ends when one of these happens:
 
 - The queue item settles. The result carries the outcome and the final assistant text. A `merged` item follows `mergedIntoItemId`.
 - A decision is pending. The result is `waiting_for_decision` with each gate's `gate_id` and options.
 - The time runs out. The result is `running`, not an error. The agent calls `get_thread` with `wait_seconds` to wait again.
+
+The maximum stays under 60 seconds because an ingress commonly ends a request at 60 seconds (nginx's default) while the turn keeps running. The wait finds the turn by its queue item, the thread's newest one for `get_thread` and `resolve_decision`, because a long turn's tool messages can push its prompt out of any fixed message window.
 
 The queue item read uses ids that an authorized route call returned, so it widens no access.
 
