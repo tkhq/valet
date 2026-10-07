@@ -55,3 +55,9 @@ Use an old-schema fixture with two team chats sharing a working directory, a scr
 Upgrade and restart twice. Verify stable conversation/runtime IDs, unchanged file hashes, working script execution, writable old chats, preserved approval state, unchanged permission decisions and a new scheduled run using the original files. Verify the completed external action executes only once. Verify new conversations still use the new runtime model and another organization cannot access retained state.
 
 Run the repository's full validation and an independent review. Rehearse the same assertions on an isolated copy of each deployment's database and working directories before rollout. Disable outbound integrations and schedules in that copy. Preserve and test the pre-upgrade restore path. Repository tests alone cannot certify production data or infrastructure readiness.
+
+## Workspace history discovery
+
+The current workspace thread list includes snapshot-proven legacy runtimes with matching organization and ownership. This includes duplicate identities retired by the singleton migration. Threads keep their original runtime, files, identifiers, titles and archive state. Search covers their persisted messages. Opening or continuing a listed thread addresses that original runtime. Deleted sessions and explicitly retired identities remain excluded.
+
+The regression seeds retained history, replaces the workspace entry point, and checks listing, reading, continuation, search and archive transitions.
