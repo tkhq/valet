@@ -41,7 +41,7 @@ describe("durable workspace briefing cache", () => {
     const pending = deferred<typeof evidence>();
     const collect = vi.fn(async () => evidence);
     const generate = vi.fn(async () => snapshot);
-    const read = createDurableBriefingCache({ version: "v1", collect, generate, validate: valid, now: () => clock, requestWaitMs: 10 });
+    const read = createDurableBriefingCache({ version: "v1", collect, generate, validate: valid, now: () => clock, requestWaitMs: 10, minRegenerateMs: 0 });
     await read(db, "local-org", owner);
     clock += 60_001;
     collect.mockImplementationOnce(() => pending.promise);
@@ -54,7 +54,7 @@ describe("durable workspace briefing cache", () => {
     const db = await setup(); let clock = 1000;
     const collect = vi.fn(async () => evidence);
     const generate = vi.fn(async () => snapshot);
-    const options = { version: "v1", collect, generate, validate: valid, now: () => clock };
+    const options = { version: "v1", collect, generate, validate: valid, now: () => clock, minRegenerateMs: 0 };
     const first = createDurableBriefingCache(options);
     const credentials = new InMemoryCredentialStore();
     expect((await first(db,"local-org",owner,credentials)).generatedAt).toBe(1000);
@@ -102,6 +102,13 @@ describe("durable workspace briefing cache", () => {
     clock += 60_001;
     expect((await cached(db,"local-org",owner)).generatedAt).toBe(1000);
     expect(generate).toHaveBeenCalledTimes(1);
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect((await cached(db,"local-org",owner)).checkedAt).toBe(1000);
+    for (const elapsed of [120_000,180_000,240_000]) {
+      clock = 1000 + elapsed;
+      expect((await cached(db,"local-org",owner)).generatedAt).toBe(1000);
+    }
+    expect(collect).toHaveBeenCalledTimes(1);
     clock = 1000 + 300_000;
     generate.mockResolvedValue({ briefings: [], generatedAt: null, coverage: "recent", unavailable: true });
     expect((await cached(db,"local-org",owner)).refreshing).toBe(true);
@@ -109,6 +116,25 @@ describe("durable workspace briefing cache", () => {
     await vi.waitFor(async () => expect((await cached(db,"local-org",owner)).refreshing).toBeUndefined());
     expect(await cached(db,"local-org",owner)).toMatchObject({ briefings: snapshot.briefings, generatedAt: 1000 });
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+  it("keeps the last valid snapshot when source collection fails", async () => {
+    const db = await setup(); let clock = 1000;
+    const collect = vi.fn(async () => evidence);
+    const validate = vi.fn(valid);
+    const cached = createDurableBriefingCache({ version: "v1", collect, generate: async () => snapshot,
+      validate, now: () => clock });
+    await cached(db,"local-org",owner);
+    clock += 60_001;
+    validate.mockResolvedValueOnce(false);
+    expect(await cached(db,"local-org",owner)).toMatchObject({ unavailable: true });
+    // Access invalidation bypasses the minimum age window on the next read.
+    expect((await cached(db,"local-org",owner)).generatedAt).toBe(1000);
+    expect(collect).toHaveBeenCalledTimes(2);
+    clock += 300_000;
+    collect.mockRejectedValueOnce(new Error("Source query failed"));
+    expect(await cached(db,"local-org",owner)).toMatchObject(snapshot);
+    expect(await cached(db,"local-org",owner)).toMatchObject(snapshot);
+    expect(collect).toHaveBeenCalledTimes(3);
   });
   it("backs off failed generations across instances without repeated source or model reads", async () => {
     const db = await setup(); let clock = 1000;
