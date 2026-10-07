@@ -526,6 +526,10 @@ export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearch
 }
 
 export const api = {
+  oauthConsent: (consentCode: string) =>
+    request<import("@valet/api/wire").OAuthConsentInfo>("GET", `/oauth/consent?consent_code=${encodeURIComponent(consentCode)}`),
+  decideOAuthConsent: (consentCode: string, accept: boolean) =>
+    request<import("@valet/api/wire").OAuthConsentDecision>("POST", "/oauth/consent", { consent_code: consentCode, accept }),
   productAnnouncements: () => request<import("@valet/api/wire").ProductAnnouncementsResponse>("GET", "/product-announcements"),
   acknowledgeProductAnnouncement: (id: string) => request<{ acknowledged: true }>("POST", `/product-announcements/${encodeURIComponent(id)}/acknowledge`),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {

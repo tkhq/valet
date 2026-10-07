@@ -5567,3 +5567,24 @@ export type ActionInvokeResponse =
   | { tool_id: string; status: "completed"; result: unknown }
   | { tool_id: string; status: "failed"; error: string }
   | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string }; next_step: string };
+
+// ── MCP OAuth consent (`/api/oauth/consent`) ──
+
+/** `GET /api/oauth/consent?consent_code=` */
+export interface OAuthConsentInfo {
+  /** The name the app registered with. The app chooses it, so it is not proof of identity. */
+  client_name: string;
+  /** Where the browser sends the authorization code after approval. */
+  redirect_origin: string;
+  /** True when the code goes to this computer (localhost), as with Claude Code. */
+  redirect_is_local: boolean;
+  /** The signed-in Valet account the app would act as. */
+  account: string;
+  /** What an approved app can do. */
+  access: string[];
+}
+
+/** `POST /api/oauth/consent` response: where to send the browser next. */
+export interface OAuthConsentDecision {
+  redirect: string;
+}

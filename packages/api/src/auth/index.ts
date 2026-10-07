@@ -259,7 +259,8 @@ export function buildAuth(opts: BuildAuthOpts): ValetAuth {
           : {}),
       }),
       apiKey({ defaultPrefix: "vlt_", rateLimit: { enabled: false }, enableMetadata: true }),
-      mcp({ loginPage: "/login" }),
+      // The consent page is Valet's own (routes/oauth-consent.ts + web /oauth/consent).
+      mcp({ loginPage: "/login", oidcConfig: { loginPage: "/login", consentPage: "/oauth/consent" } }),
     ],
   });
 
