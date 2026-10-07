@@ -110,15 +110,34 @@ describe("starter drafts", () => {
     expect(localStorage.getItem(`valet:composer-draft:v2:${key}`)).toBeNull();
   });
 
+  it("does not replay a queued draft update over newer text in shared storage", () => {
+    const key = draftKey(SESSION, THREAD);
+    const storageKey = `valet:composer-draft:v2:${key}`;
+    store().setText(key, "aaa");
+    window.dispatchEvent(new StorageEvent("storage", { key: storageKey, newValue: "a", storageArea: localStorage }));
+    expect(store().byKey[key]?.text).toBe("aaa");
+    expect(localStorage.getItem(storageKey)).toBe("aaa");
+    localStorage.setItem(storageKey, "aaaa");
+    window.dispatchEvent(new StorageEvent("storage", { key: storageKey, newValue: "aaaa", storageArea: localStorage }));
+    expect(store().byKey[key]?.text).toBe("aaaa");
+    localStorage.removeItem(storageKey);
+    window.dispatchEvent(new StorageEvent("storage", { key: storageKey, newValue: "aaa", storageArea: localStorage }));
+    expect(localStorage.getItem(storageKey)).toBeNull();
+    window.dispatchEvent(new StorageEvent("storage", { key: storageKey, newValue: null, storageArea: localStorage }));
+    expect(store().byKey[key]).toBeUndefined();
+  });
+
   it("applies another window's draft without touching this window's others", () => {
     const mine = draftKey("session-a", "thread-a");
     const theirs = draftKey("session-b", "thread-b");
     store().setText(mine, "draft A");
-    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${theirs}`, newValue: "draft B" }));
+    localStorage.setItem(`valet:composer-draft:v2:${theirs}`, "draft B");
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${theirs}`, newValue: "draft B", storageArea: localStorage }));
     expect(store().byKey[mine]?.text).toBe("draft A");
     expect(store().byKey[theirs]?.text).toBe("draft B");
     // That window sent its message.
-    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${theirs}`, newValue: null }));
+    localStorage.removeItem(`valet:composer-draft:v2:${theirs}`);
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${theirs}`, newValue: null, storageArea: localStorage }));
     expect(store().byKey[theirs]).toBeUndefined();
     expect(store().byKey[mine]?.text).toBe("draft A");
   });
@@ -135,10 +154,11 @@ describe("account isolation", () => {
     expect(store().byKey).toEqual({});
     store().setFileErrors(alice, ["late upload"]);
     store().setText(bob, "Bob draft");
-    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${alice}`, newValue: "foreign window" }));
+    localStorage.setItem(`valet:composer-draft:v2:${alice}`, "foreign window");
+    window.dispatchEvent(new StorageEvent("storage", { key: `valet:composer-draft:v2:${alice}`, newValue: "foreign window", storageArea: localStorage }));
     expect(store().byKey[alice]).toBeUndefined();
     store().activateOwner("account-a");
-    expect(store().byKey[alice]).toEqual({ ...EMPTY_DRAFT, text: "Alice private draft" });
+    expect(store().byKey[alice]).toEqual({ ...EMPTY_DRAFT, text: "foreign window" });
     expect(store().byKey[bob]).toBeUndefined();
   });
 

@@ -160,7 +160,10 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
   };
 });
 
+let applyingRemoteDraft = false;
+
 useComposerDraftStore.subscribe((state, prev) => {
+  if (applyingRemoteDraft) return;
   if (state.owner !== prev.owner || state.byKey === prev.byKey) return;
   for (const key of new Set([...Object.keys(state.byKey), ...Object.keys(prev.byKey)])) {
     const text = state.byKey[key]?.text ?? "";
@@ -172,7 +175,18 @@ useComposerDraftStore.subscribe((state, prev) => {
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     if (!event.key?.startsWith(STORAGE_PREFIX)) return;
-    useComposerDraftStore.getState().setText(event.key.slice(STORAGE_PREFIX.length), event.newValue ?? "");
+    if (event.storageArea !== localStorage) return;
+    // Storage events can queue behind newer keystrokes or a sent-message clear.
+    // Never replay an obsolete value, or echo a remote update to other tabs.
+    try {
+      if (localStorage.getItem(event.key) !== event.newValue) return;
+    } catch { return; }
+    applyingRemoteDraft = true;
+    try {
+      useComposerDraftStore.getState().setText(event.key.slice(STORAGE_PREFIX.length), event.newValue ?? "");
+    } finally {
+      applyingRemoteDraft = false;
+    }
   });
 }
 

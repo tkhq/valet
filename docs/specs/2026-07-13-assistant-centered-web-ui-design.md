@@ -171,3 +171,7 @@ On phones, work-list actions sit below the title and details. Long identifiers w
 On desktop, drag the thread sidebar divider to resize it from 200 to 480 pixels. Focus the divider and use arrow keys for keyboard resizing. Width persists across reloads and collapse. The mobile drawer keeps its existing width.
 
 On narrow screens, conversation sharing details open from an information button beside the thread tabs. The full notice stays visible on wide screens.
+
+### Draft synchronization across browser tabs
+
+Remote draft updates change only in-memory state. They must not write back to browser storage. Ignore queued storage events whose values no longer match storage, including events queued before a successful send cleared the draft. This prevents stale text from cycling between tabs.
