@@ -23,6 +23,33 @@ const deferred = <T>() => {
 };
 
 describe("durable workspace briefing cache", () => {
+  it("returns preparing during slow collection and publishes without duplicate generation", async () => {
+    const db = await setup();
+    const pending = deferred<typeof evidence>();
+    const collect = vi.fn(() => pending.promise);
+    const generate = vi.fn(async () => snapshot);
+    const read = createDurableBriefingCache({ version: "v1", collect, generate, validate: valid, requestWaitMs: 10 });
+    expect(await read(db, "local-org", owner)).toMatchObject({ refreshing: true, briefings: [] });
+    expect(await read(db, "local-org", owner)).toMatchObject({ refreshing: true });
+    expect(collect).toHaveBeenCalledTimes(1);
+    pending.resolve(evidence);
+    await vi.waitFor(async () => expect((await read(db, "local-org", owner)).generatedAt).toBe(snapshot.generatedAt));
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+  it("keeps a validated snapshot visible during a slow evidence check", async () => {
+    const db = await setup(); let clock = 1000;
+    const pending = deferred<typeof evidence>();
+    const collect = vi.fn(async () => evidence);
+    const generate = vi.fn(async () => snapshot);
+    const read = createDurableBriefingCache({ version: "v1", collect, generate, validate: valid, now: () => clock, requestWaitMs: 10 });
+    await read(db, "local-org", owner);
+    clock += 60_001;
+    collect.mockImplementationOnce(() => pending.promise);
+    expect(await read(db, "local-org", owner)).toMatchObject({ ...snapshot, refreshing: true });
+    pending.resolve(evidence);
+    await vi.waitFor(async () => expect((await read(db, "local-org", owner)).refreshing).toBeUndefined());
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
   it("reuses persisted responses across instances and checks evidence only at the cadence", async () => {
     const db = await setup(); let clock = 1000;
     const collect = vi.fn(async () => evidence);

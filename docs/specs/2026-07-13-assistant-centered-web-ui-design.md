@@ -159,3 +159,5 @@ Org page and org activity; memory editing/graph/import UI; avatars and handles b
 On phone widths, the thread summary stays closed until the user opens it. Opening a chat does not cover its transcript with the summary popover.
 
 On phones, Ask Valet and available plugins live inside the navigation menu. Briefing cards wrap their titles, actions, links, and timestamps instead of imposing fixed row heights. The thread summary popover is bounded by the viewport width and available height.
+
+A cold briefing request waits up to two seconds for evidence collection and generation after claiming its lease. If it is still running, the response reports `refreshing` and the UI polls the same job. The generation lease stays active until publication or failure; repeated reads do not start duplicate model calls.
