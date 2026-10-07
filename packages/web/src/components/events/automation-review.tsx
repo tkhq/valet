@@ -18,7 +18,7 @@ export function AutomationReview({ when, scope, result, destination, permissions
     ["Permissions", permissions ?? (workflowId ? <span><a className="text-moss underline" href={`/workflows/${encodeURIComponent(workflowId)}`} target="_blank" rel="noreferrer">Review workflow permissions</a>. Enabling grants no new access. Dynamic actions are checked at runtime.</span> : "Uses this workspace’s existing access. Enabling does not grant new permissions.")],
   ];
   return <dl aria-label="Automation review" className="divide-y divide-line rounded-lg border border-line px-3">
-    {rows.map(([label, value], index) => <div key={index} className="grid grid-cols-[6rem_minmax(0,1fr)] gap-3 py-3 text-sm">
+    {rows.map(([label, value], index) => <div key={index} className="grid gap-1 py-3 text-sm sm:grid-cols-[6rem_minmax(0,1fr)] sm:gap-3">
       <dt className="text-muted">{label}</dt><dd className="min-w-0 break-words">{value || "Not configured"}</dd>
     </div>)}
   </dl>;

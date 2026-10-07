@@ -102,11 +102,11 @@ export function TeamCredentials({
                 description={group.rows.length === 1 ? "1 account" : `${group.rows.length} accounts`}
               />
               {/* pl-12 starts these lines under the title, past the 36px icon and its gap. */}
-              <ul className="mt-2 space-y-2 pl-12 text-xs">
+              <ul className="mt-2 space-y-3 text-xs sm:pl-12">
                 {group.rows.map((row) => {
                   const removal = removalLabels(row, team.name, nameFor);
                   return (
-                    <li key={row.delegatedFrom ?? "team"} className="flex items-center justify-between gap-3">
+                    <li key={row.delegatedFrom ?? "team"} className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                       <div className="min-w-0">
                         <p className="flex items-center gap-2 text-ink">
                           <span className="truncate">{row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Team connection"}</span>

@@ -90,14 +90,14 @@ function ReceiptRow({ receipt }: { receipt: Receipt }) {
     <details>
       <summary className="cursor-pointer list-none rounded text-sm focus-visible:outline focus-visible:outline-moss">
         <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="min-w-0 flex-1 font-medium">{label(receipt.service)}{receipt.eventKey ? <> · <span className="font-mono text-xs">{receipt.eventKey}</span></> : " · Incoming delivery"}</span>
+          <span className="min-w-0 basis-full break-words font-medium sm:basis-auto sm:flex-1">{label(receipt.service)}{receipt.eventKey ? <> · <span className="font-mono text-xs">{receipt.eventKey}</span></> : " · Incoming delivery"}</span>
           <Badge variant={latest?.outcome === "failed" ? "danger" : latest?.outcome === "rejected" ? "warning" : "neutral"}>{outcome}{latest?.outcome === "started" ? " · no completion recorded" : ""}</Badge>
           <span className="text-xs text-muted" title={new Date(receipt.createdAt).toISOString()}>{relativeTime(receipt.createdAt)}</span>
         </span>
-        {latest?.detail && <span className="mt-1 block text-muted">{latest.detail}</span>}
+        {latest?.detail && <span className="mt-1 block break-words text-muted">{latest.detail}</span>}
         <span className="mt-1 block break-all text-xs text-muted">Reference: {receipt.id}{receipt.externalId ? ` · Provider ID: ${receipt.externalId}` : ""}</span>
       </summary>
-      <div className="mt-3 space-y-4 pl-3">
+      <div className="mt-3 space-y-4 break-words sm:pl-3">
         {receipt.eventId && <Link to="/events/$eventId" params={{ eventId: receipt.eventId }} className="text-sm text-moss underline">View delivery attempts</Link>}
         <section aria-label="Receipt metadata">
           <h3 className="text-sm font-medium">Delivery metadata</h3>

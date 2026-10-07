@@ -163,7 +163,7 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
         <p className="text-sm text-muted">
           A subscription runs a workflow or prompts the workspace assistant when a matching event arrives.
         </p>
-        <div className="flex items-center gap-2"><Button size="sm" onClick={() => assistant.open("Help me configure an event subscription in this workspace. Ask which event should trigger it, what should happen, and where replies should go. Use propose_subscription to save a paused proposal for me to review before enabling it.")}>Create with Valet</Button>
+        <div className="flex max-w-full flex-wrap items-center gap-2"><Button size="sm" onClick={() => assistant.open("Help me configure an event subscription in this workspace. Ask which event should trigger it, what should happen, and where replies should go. Use propose_subscription to save a paused proposal for me to review before enabling it.")}>Create with Valet</Button>
         <Button variant="ghost" type="button" size="sm" className="shrink-0 gap-1.5" onClick={() => setCreating(true)}>
           <Plus className="h-3.5 w-3.5" aria-hidden />
           Manual setup

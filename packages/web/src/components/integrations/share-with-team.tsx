@@ -104,7 +104,7 @@ function TeamShareRow({
     others > 0 ? `${others === 1 ? "1 other member shares" : `${others} other members share`} theirs.` : null].filter(Boolean).join(" ");
 
   return (
-    <li className="flex items-center justify-between gap-2 px-2 py-1">
+    <li className="flex flex-wrap items-center justify-between gap-2 px-2 py-1">
       <div className="min-w-0">
         <p className="truncate text-sm text-ink">{team.name}</p>
         {context && <p className="text-xs text-muted">{context}</p>}
