@@ -163,7 +163,7 @@ describe("MCP workspace tools", () => {
   it("publishes and lists artifacts per person", async () => {
     const { testApi, alice, bob } = await boot();
     const first = await tool(testApi.baseUrl, alice, "publish_artifact", { key: "reports/tests", title: "Test summary", content: "# All green" });
-    expect(first.data).toMatchObject({ key: "reports/tests", version: 1, url: expect.stringContaining("http") });
+    expect(first.data).toMatchObject({ key: "reports/tests", version: 1, url: expect.stringContaining("http"), visible_to: "every member of your Valet organization" });
     const second = await tool(testApi.baseUrl, alice, "publish_artifact", { key: "reports/tests", content: "# Still green" });
     expect(second.data).toMatchObject({ version: 2, url: first.data.url });
 

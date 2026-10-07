@@ -13,6 +13,7 @@ import { like } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
+import { clearDiscoveryCache } from "../routes/actions.js";
 import { actionInvocations, oauthAccessToken, orgMembers, orgs, users } from "../schema/index.js";
 
 let api: TestApi | undefined;
@@ -61,13 +62,25 @@ function demoPlugin() {
       return { success: true, data: { echoed, hasCredential: credential !== null, keyLength: credential?.accessToken.length ?? 0 } };
     },
   });
+  const dyn = { discoveries: 0 };
+  const dynamic: ValetPlugin = {
+    name: "remote",
+    version: "0.0.1",
+    actions: [{
+      service: "remote", actions: [],
+      resolveActions: async () => {
+        dyn.discoveries += 1;
+        return [{ id: "remote.lookup", name: "Lookup", description: "A tool discovered at run time.", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true, data: {} }) }];
+      },
+    }],
+  };
   const plugin: ValetPlugin = {
     name: "demo",
     version: "0.0.1",
     actions: [{ service: "demo", actions: [action("demo.ping", "Ping"), action("demo.pong", "Pong"), action("demo.blocked", "Blocked"), action("demo.risky", "Risky"), ...extra] }],
     credentials: [{ service: "demo", type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }],
   };
-  return { plugin, calls, releaseSlow: () => releaseSlow(), slowStarted: slowStartedP };
+  return { plugin, dynamic, dyn, calls, releaseSlow: () => releaseSlow(), slowStarted: slowStartedP };
 }
 
 async function seedUser(testApi: TestApi, id: string): Promise<string> {
@@ -100,7 +113,8 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
 
 async function setup() {
   const demo = demoPlugin();
-  const testApi = await bootTestApi({ auth: true, plugins: [demo.plugin] });
+  const testApi = await bootTestApi({ auth: true, plugins: [demo.plugin, demo.dynamic] });
+  clearDiscoveryCache();
   api = testApi;
   const alice = await seedUser(testApi, "alice");
   const bob = await seedUser(testApi, "bob");
@@ -113,6 +127,28 @@ async function setup() {
 }
 
 describe("MCP tool broker", () => {
+  it("resolves the described policy for specific params", async () => {
+    const { testApi, alice } = await setup();
+    await createPolicy(testApi.providers.db, { orgId: "broker-org", type: "org", id: "broker-org" },
+      { actionId: "demo.ping", mode: "deny", paramMatchers: [{ path: "text", op: "eq", value: "secret" }], managedBy: "test", now: Date.now() });
+    const general = await tool(testApi.baseUrl, alice, "describe_tool", { tool_id: "demo.ping" });
+    expect(general.data).toMatchObject({ policy: "allow", policy_for: expect.stringContaining("any params") });
+    const specific = await tool(testApi.baseUrl, alice, "describe_tool", { tool_id: "demo.ping", params: { text: "secret" } });
+    expect(specific.data).toMatchObject({ policy: "deny", policy_for: "these params" });
+    const blocked = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: "secret" } });
+    expect(blocked.data).toMatchObject({ status: "failed" });
+  });
+
+  it("discovers a remote service once per caller within the cache window", async () => {
+    const { testApi, demo, alice, bob } = await setup();
+    await tool(testApi.baseUrl, alice, "search_tools", { query: "lookup" });
+    const again = await tool(testApi.baseUrl, alice, "search_tools", { query: "lookup" });
+    expect(again.data.tools).toEqual([expect.objectContaining({ tool_id: "remote.lookup" })]);
+    expect(demo.dyn.discoveries).toBe(1);
+    await tool(testApi.baseUrl, bob, "search_tools", { query: "lookup" });
+    expect(demo.dyn.discoveries).toBe(2);
+  });
+
   it("searches the catalog and describes a tool with the policy that applies", async () => {
     const { testApi, alice } = await setup();
     const found = await tool(testApi.baseUrl, alice, "search_tools", { query: "ping" });

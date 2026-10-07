@@ -25,14 +25,14 @@ Valet runs at {{VALET_URL}}. It holds the organization's integration credentials
 | Follow the team's playbook for a task | `list_skills`, `get_skill` | none |
 | Run a saved automation | `list_workflows`, `run_workflow`, `get_workflow_run` | none |
 | See what waits for the person | `list_inbox` | `valet gates list` |
-| Share a report or page | `publish_artifact` | none |
+| Share a report or page with the organization | `publish_artifact` | none |
 
 Use your own tools for local work: files, the shell, and the local repository. Use Valet for what needs the organization's accounts, shared context, or Valet's cloud sandboxes.
 
 ## Call an integration
 
 1. Search: `search_tools` with a few words and an optional `service`, for example `{"query": "create issue", "service": "github"}`.
-2. Read the schema: `describe_tool` with the `tool_id`. Check `policy`. If it is `deny`, stop. If it is `require_approval`, the call will not run without a person.
+2. Read the schema: `describe_tool` with the `tool_id` and the `params` you plan to send. Check `policy`. If it is `deny`, stop. If it is `require_approval`, the call will not run without a person.
 3. Call: `call_tool` with `tool_id` and `params` that match the schema. Set `idempotency_key` when you might retry, so a retry returns the first result instead of acting twice.
 4. Read `status`: `completed` (use `result`), `failed` (read `error` and fix the params or connection), or `approval_required` (follow `next_step`).
 

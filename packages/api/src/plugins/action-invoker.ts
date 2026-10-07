@@ -725,13 +725,15 @@ export async function discoverServiceActions(
 /**
  * The policy mode an external call to this action would resolve to now:
  * `allow`, `require_approval`, or `deny`. Same precedence and scope as
- * `invoke` with `external` set. Writes nothing.
+ * `invoke` with `external` set. Pass the call's params: a policy can match
+ * on them, so a mode without params can differ from the call's. Writes nothing.
  */
 export async function externalActionMode(
   opts: ActionInvokerOpts,
   ctx: ActionInvocationContext,
   service: string,
   action: PluginAction,
+  params?: Record<string, unknown>,
 ): Promise<ApprovalMode> {
   const entry = opts.actionPluginByService.get(service);
   const decision = await resolveActionPolicy(opts.db, {
@@ -741,7 +743,7 @@ export async function externalActionMode(
     service,
     actionId: qualifiedActionId(service, action),
     riskLevel: action.riskLevel,
-    params: undefined,
+    params,
     appliesIn: "session",
     pluginDefault: entry?.actionPlugin.defaultApprovalMode,
     now: (opts.clock ?? Date.now)(),

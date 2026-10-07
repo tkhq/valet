@@ -29,10 +29,12 @@ Valet holds the organization's integrations: bundled plugins and the remote MCP 
 | Tool | Route | Purpose |
 |---|---|---|
 | `search_tools` | `GET /api/actions` | Finds tools by text and service. Returns `tool_id`s. |
-| `describe_tool` | `GET /api/actions/:toolId` | Returns the description, the JSON Schema parameters, and the policy mode that applies to the caller. |
+| `describe_tool` | `GET /api/actions/:toolId` | Returns the description, the JSON Schema parameters, and the policy mode that applies to the caller. With `params`, the mode is resolved for that exact call, because a policy can match on params. |
 | `call_tool` | `POST /api/actions/:toolId/invoke` | Runs the tool with the workspace owner's credential. |
 
 The `valet tools search|describe|call` command calls the same routes, for a harness without MCP.
+
+A remote MCP-backed service lists its tools over the network with the caller's credential. The routes keep each successful listing for two minutes per caller, owner, and service, so repeated searches do not contact every connected server. A call does not use the cache: the invoker resolves the action and checks credentials and policy again.
 
 The routes run the headless `ActionInvoker` with `external` set. That mode resolves the policy hierarchy with `appliesIn: "session"`, the scope a person's own Valet agent uses, so org, team, and personal policies apply unchanged. Without `external` or a workflow run, the invoker enforces no policy, so every external caller must set it.
 
@@ -53,7 +55,7 @@ These tools give a local agent the rest of the workspace. Each one calls the rou
 | `write_memory` | `PUT /api/memory` | Creates or replaces a memory file. A team write needs team admin rights, as in the web client. |
 | `list_workflows`, `run_workflow`, `get_workflow_run` | `GET /api/workflows`, `POST /api/workflows/:id/runs`, `GET /api/workflows/runs/:runId` | Lists and starts workflows. A run waits on the server until it settles, stops for approval, or the wait ends. |
 | `list_inbox` | `GET /api/notifications/decisions`, `GET /api/workflows/action-required` | Lists thread decisions and workflow approvals that wait for the caller. |
-| `list_artifacts`, `publish_artifact` | `GET /api/artifacts`, `POST /api/artifacts/share` | Lists and publishes artifact pages. A repeated key adds a version at the same link. |
+| `list_artifacts`, `publish_artifact` | `GET /api/artifacts`, `POST /api/artifacts/share` | Lists and publishes artifact pages. A repeated key adds a version at the same link. Artifacts are visible to the whole organization (the narrowest visibility), and the tool says so, so an agent does not publish what the person has not agreed to share. |
 
 A team workspace maps to `ownerType=team&ownerId=<team id>` on the memory, skills, workflow, and artifact routes.
 

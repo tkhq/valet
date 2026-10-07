@@ -119,8 +119,11 @@ export class InstanceClient {
     return this.request<ActionSearchResponse>("GET", `/api/actions${suffix}`);
   }
 
-  describeTool(toolId: string, workspace?: string): Promise<ActionDescribeResponse> {
-    const suffix = workspace ? `?workspace=${encodeURIComponent(workspace)}` : "";
+  describeTool(toolId: string, workspace?: string, params?: Record<string, unknown>): Promise<ActionDescribeResponse> {
+    const q = new URLSearchParams();
+    if (workspace) q.set("workspace", workspace);
+    if (params) q.set("params", JSON.stringify(params));
+    const suffix = q.size > 0 ? `?${q.toString()}` : "";
     return this.request<ActionDescribeResponse>("GET", `/api/actions/${encodeURIComponent(toolId)}${suffix}`);
   }
 

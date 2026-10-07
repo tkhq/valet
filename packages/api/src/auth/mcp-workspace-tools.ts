@@ -371,7 +371,8 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     {
       description:
         "Publishes markdown or HTML as a Valet artifact page and returns its link. " +
-        "Publishing again with the same key adds a new version at the same link.",
+        "Every member of your Valet organization can open the page, so do not publish secrets, credentials, " +
+        "personal data, or code the person has not agreed to share. Publishing again with the same key adds a new version at the same link.",
       inputSchema: {
         key: z.string().min(1).max(200).describe('Stable key for this artifact, e.g. "reports/test-summary". Reuse it to update the page.'),
         content: z.string().min(1).describe("The page content."),
@@ -388,7 +389,10 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
         ...(title ? { title } : {}),
         ...(description ? { description } : {}),
       });
-      return { key: res.path, url: res.url, version: res.version, visibility: res.visibility };
+      return {
+        key: res.path, url: res.url, version: res.version, visibility: res.visibility,
+        visible_to: res.visibility === "public" ? "anyone with the link" : "every member of your Valet organization",
+      };
     }),
   );
 }

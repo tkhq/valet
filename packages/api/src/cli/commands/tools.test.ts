@@ -22,7 +22,7 @@ function deps(response: ActionInvokeResponse, files: Record<string, string> = {}
       total: 3,
       unavailable: [{ service: "notion", reason: "Connect Notion in Settings." }],
     }),
-    describeTool: async (toolId) => ({ tool_id: toolId, service: "github", name: "Create issue", description: "Create a GitHub issue.", risk_level: "medium", parameters: { type: "object" }, policy: "allow" }),
+    describeTool: async (toolId) => ({ tool_id: toolId, service: "github", name: "Create issue", description: "Create a GitHub issue.", risk_level: "medium", parameters: { type: "object" }, policy: "allow", policy_for: "any params" }),
     callTool: async (toolId, body) => {
       calls.push({ toolId, body });
       return response;

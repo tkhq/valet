@@ -28,6 +28,7 @@ import {
   qualifiedActionId,
   type ActionInvocationContext,
   type ActionInvokerOpts,
+  type ServiceActions,
 } from "../plugins/action-invoker.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
@@ -35,6 +36,40 @@ import { actionInvocations } from "../schema/index.js";
 import type { ActionDescribeResponse, ActionInvokeResponse, ActionSearchResponse, ActionToolSummary } from "../wire/types.js";
 
 export const actionsRouter = new Hono<AppEnv>();
+
+/**
+ * Discovery cache. A remote MCP-backed service lists its tools over the
+ * network with the caller's credential, and an unfiltered search asks every
+ * service, so repeated searches would contact every connected server each
+ * time. A listing is kept for DISCOVERY_TTL_MS per caller, owner, and
+ * service. Only successful listings are kept, so a newly connected service
+ * appears at once. A call never relies on this cache: the invoker resolves
+ * the action and checks credentials and policy again.
+ */
+const DISCOVERY_TTL_MS = 2 * 60_000;
+const DISCOVERY_CACHE_MAX = 500;
+const discoveryCache = new Map<string, { at: number; value: ServiceActions }>();
+
+async function discoverCached(opts: ActionInvokerOpts, ctx: ActionInvocationContext, service: string): Promise<ServiceActions> {
+  const key = `${ctx.orgId}:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${service}`;
+  const hit = discoveryCache.get(key);
+  if (hit && Date.now() - hit.at < DISCOVERY_TTL_MS) return hit.value;
+  const value = await discoverServiceActions(opts, ctx, service);
+  if ("actions" in value) {
+    discoveryCache.delete(key);
+    discoveryCache.set(key, { at: Date.now(), value });
+    if (discoveryCache.size > DISCOVERY_CACHE_MAX) {
+      const oldest = discoveryCache.keys().next().value;
+      if (oldest !== undefined) discoveryCache.delete(oldest);
+    }
+  }
+  return value;
+}
+
+/** Test seam: forget cached listings. */
+export function clearDiscoveryCache(): void {
+  discoveryCache.clear();
+}
 
 /** Longer than any single action call. A claim older than this is a leftover. */
 const CLAIM_STALE_MS = 15 * 60_000;
@@ -103,7 +138,7 @@ actionsRouter.get("/", async (c) => {
   const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 25) || 25, 1), 100);
   const services = serviceFilter ? [serviceFilter] : [...opts.actionPluginByService.keys()];
   const listed = await Promise.all(services.map((service) =>
-    withTimeout(discoverServiceActions(opts, ctx, service), DISCOVERY_TIMEOUT_MS, { service, unavailable: "Tool discovery timed out. Try again, or filter by service." })));
+    withTimeout(discoverCached(opts, ctx, service), DISCOVERY_TIMEOUT_MS, { service, unavailable: "Tool discovery timed out. Try again, or filter by service." })));
 
   const matches = (action: PluginAction, service: string) =>
     !query || [qualifiedActionId(service, action), action.name, action.description].some((text) => text.toLowerCase().includes(query));
@@ -117,7 +152,7 @@ async function loadTool(c: Context<AppEnv>, ctx: ActionInvocationContext, toolId
   const parsed = parseToolId(c, toolId);
   if (!parsed) return { error: `Unknown tool "${toolId}". Use search_tools to find a tool_id.` };
   const opts = invokerOpts(c);
-  const listed = await discoverServiceActions(opts, ctx, parsed.service);
+  const listed = await discoverCached(opts, ctx, parsed.service);
   if ("unavailable" in listed) return { error: listed.unavailable };
   const action = findAction(listed.actions, parsed.service, parsed.action);
   if (!action) return { error: `Unknown tool "${toolId}". Use search_tools to find a tool_id.` };
@@ -129,8 +164,25 @@ actionsRouter.get("/:toolId", async (c) => {
   if (!ctx) return c.json({ error: "Workspace not found. Use \"user\" or a team id you belong to." }, 404);
   const tool = await loadTool(c, ctx, c.req.param("toolId"));
   if ("error" in tool) return c.json({ error: tool.error }, 404);
-  const policy = await externalActionMode(tool.opts, ctx, tool.service, tool.action);
-  const body: ActionDescribeResponse = { ...toolSummary(tool.service, tool.action), parameters: tool.action.parameters, policy };
+  // `?params=<json>` resolves the policy for one specific call: a policy can
+  // match on params, so the mode without them can differ.
+  const rawParams = c.req.query("params");
+  let params: Record<string, unknown> | undefined;
+  if (rawParams !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawParams);
+    } catch {
+      return c.json({ error: "Set params to a JSON object." }, 400);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return c.json({ error: "Set params to a JSON object." }, 400);
+    params = Object.fromEntries(Object.entries(parsed));
+  }
+  const policy = await externalActionMode(tool.opts, ctx, tool.service, tool.action, params);
+  const body: ActionDescribeResponse = {
+    ...toolSummary(tool.service, tool.action), parameters: tool.action.parameters, policy,
+    policy_for: params ? "these params" : "any params (a policy that matches on params can differ for a specific call)",
+  };
   return c.json(body);
 });
 

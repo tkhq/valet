@@ -6,7 +6,7 @@
  * policy hierarchy applies.
  *
  *   valet tools search [query] [--service <s>] [--workspace <w>] [--limit <n>]
- *   valet tools describe <tool_id> [--workspace <w>]
+ *   valet tools describe <tool_id> [--params '<json>'] [--workspace <w>]
  *   valet tools call <tool_id> [--params '<json>' | --params-file <path|->]
  *                    [--workspace <w>] [--idempotency-key <k>]
  *
@@ -23,14 +23,14 @@ import type { ActionDescribeResponse, ActionInvokeRequest, ActionInvokeResponse,
 
 const USAGE = [
   "usage: valet tools search [query] [--service <s>] [--workspace <w>] [--limit <n>]",
-  "       valet tools describe <tool_id> [--workspace <w>]",
+  "       valet tools describe <tool_id> [--params '<json>'] [--workspace <w>]",
   "       valet tools call <tool_id> [--params '<json>' | --params-file <path|->] [--workspace <w>] [--idempotency-key <k>]",
 ].join("\n");
 
 /** The subset of `InstanceClient` the `tools` command needs. */
 export interface ToolsClient {
   searchTools(opts: { query?: string; service?: string; workspace?: string; limit?: number }): Promise<ActionSearchResponse>;
-  describeTool(toolId: string, workspace?: string): Promise<ActionDescribeResponse>;
+  describeTool(toolId: string, workspace?: string, params?: Record<string, unknown>): Promise<ActionDescribeResponse>;
   callTool(toolId: string, body: ActionInvokeRequest): Promise<ActionInvokeResponse>;
 }
 
@@ -90,12 +90,17 @@ export async function runTools(deps: ToolsDeps, flags: ParsedFlags): Promise<num
       printErr(USAGE);
       return ExitCode.Usage;
     }
-    const res = await deps.client.describeTool(toolId, workspace);
+    const params = str(flags, "params") !== undefined || str(flags, "params-file") !== undefined ? await readParams(deps, flags) : undefined;
+    if (typeof params === "string") {
+      printErr(params);
+      return ExitCode.Usage;
+    }
+    const res = await deps.client.describeTool(toolId, workspace, params);
     if (flags.json) {
       printJson(res);
       return ExitCode.OK;
     }
-    printLine(`${res.tool_id}  (${res.risk_level} risk, policy: ${res.policy})`);
+    printLine(`${res.tool_id}  (${res.risk_level} risk, policy: ${res.policy} for ${res.policy_for})`);
     printLine(res.description);
     printLine("");
     printLine("params (JSON Schema):");

@@ -209,7 +209,7 @@ Use the integrations Valet brokers (GitHub, Slack, Linear, Google, and the MCP s
 
 ```bash
 valet tools search "create issue" --service github
-valet tools describe github.create_issue
+valet tools describe github.create_issue --params '{"owner":"tkhq","repo":"valet","title":"Bug"}'
 valet tools call github.create_issue --params '{"owner":"tkhq","repo":"valet","title":"Bug"}'
 valet tools call linear.create_issue --params-file issue.json --idempotency-key retry-1
 ```

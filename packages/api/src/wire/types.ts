@@ -5551,6 +5551,8 @@ export interface ActionDescribeResponse extends ActionToolSummary {
   parameters: unknown;
   /** What a call resolves to now under the policy hierarchy. */
   policy: "allow" | "require_approval" | "deny";
+  /** Whether `policy` was resolved for specific params or without them. */
+  policy_for: string;
 }
 
 /** `POST /api/actions/:toolId/invoke` request. */

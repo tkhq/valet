@@ -368,12 +368,19 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
         "allow (call_tool runs it), require_approval (a person must approve), or deny.",
       inputSchema: {
         tool_id: z.string().min(1).describe("A tool_id from search_tools, e.g. \"github.create_issue\"."),
+        params: z.record(z.string(), z.unknown()).optional()
+          .describe("The params you plan to call with. A policy can depend on them, so pass them to check the policy for that exact call."),
         workspace: workspaceArg,
       },
       annotations: { readOnlyHint: true },
     },
-    run(async ({ tool_id, workspace }: { tool_id: string; workspace?: string }) =>
-      call<unknown>(deps, "GET", `/api/actions/${encodeURIComponent(tool_id)}${wsQuery(workspace)}`, "Tool")),
+    run(async ({ tool_id, params, workspace }: { tool_id: string; params?: Record<string, unknown>; workspace?: string }) => {
+      const q = new URLSearchParams();
+      if (workspace && workspace !== "user") q.set("workspace", workspace);
+      if (params) q.set("params", JSON.stringify(params));
+      const suffix = q.size > 0 ? `?${q.toString()}` : "";
+      return call<unknown>(deps, "GET", `/api/actions/${encodeURIComponent(tool_id)}${suffix}`, "Tool");
+    }),
   );
 
   server.registerTool(
