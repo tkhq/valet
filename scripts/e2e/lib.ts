@@ -97,6 +97,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/lazy-session-history.test.ts",
   "src/integration/thread-rename.test.ts",
   "src/integration/thread-create-settings.test.ts",
+  "src/integration/thread-pagination.test.ts",
   "src/integration/child-gate-report.test.ts",
   "src/integration/command-route.test.ts",
   "src/integration/policies.e2e.test.ts",
