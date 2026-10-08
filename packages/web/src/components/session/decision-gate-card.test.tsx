@@ -8,8 +8,8 @@
  * `routes/messages.ts` 403) and enabled for an admin, and that all of the
  * gate's actions render regardless. `useMe` comes from `~/api/settings`.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { DecisionGate, MeResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -59,6 +59,11 @@ function renderCard(g: DecisionGate = gate()) {
     </TooltipProvider>,
   );
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -260,5 +265,171 @@ describe("question image answers", () => {
     await screen.findByAltText("pasted.png");
     view.rerender(<TooltipProvider><DecisionGateCard sessionId="sess_1" gate={gate({ id: "next", type: "question", actions: [] })} /></TooltipProvider>);
     expect(screen.queryByAltText("pasted.png")).toBeNull();
+  });
+});
+
+describe("DecisionGateCard — long request layout", () => {
+  function mockTitleLayout({ scrollHeight, clientHeight }: { scrollHeight: number; clientHeight: number }) {
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.tagName === "H3" ? scrollHeight : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.tagName === "H3" ? clientHeight : 0;
+    });
+  }
+
+  it("bounds only the named request-details region so actions remain reachable", () => {
+    mockTitleLayout({ scrollHeight: 204, clientHeight: 68 });
+    const body = "https://example.com/" + "a".repeat(10_000);
+    const title = "A title ".repeat(100);
+    const { container } = renderCard(gate({ body, title }));
+
+    const card = container.querySelector('[role="dialog"]');
+    const heading = screen.getByRole("heading");
+    const request = screen.getByRole("region", { name: "Request details" });
+    expect(card?.className).not.toContain("max-h-");
+    expect(heading.className).toContain("line-clamp-3");
+    expect(heading.className).toContain("[overflow-wrap:anywhere]");
+    expect(screen.getByRole("dialog").getAttribute("aria-labelledby")).toBe(heading.id);
+    const titleControl = screen.getByRole("button", { name: "Show more" });
+    const action = screen.getByRole("button", { name: "Approve for session" });
+    expect(titleControl.getAttribute("aria-controls")).toBe(heading.id);
+    expect(heading.closest("header")?.contains(titleControl)).toBe(true);
+    expect(heading.closest("header")?.contains(action)).toBe(false);
+    expect(request.id).toBe("gate-gate_1-body");
+    expect(request.getAttribute("tabindex")).toBe("0");
+    expect(request.className).toContain("max-h-[min(14rem,25dvh)]");
+    expect(request.className).toContain("overflow-y-auto");
+    expect(request.className).toContain("[overflow-wrap:anywhere]");
+    expect(request.className).not.toContain("overscroll-y-contain");
+    expect(request.getAttribute("aria-label")).toBe("Request details");
+    expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Always allow" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+
+  it("does not add a title control when the title fits within one pixel", () => {
+    mockTitleLayout({ scrollHeight: 69, clientHeight: 68 });
+    renderCard(gate({ title: "Which workflow should run first?", type: "question" }));
+
+    expect(screen.queryByRole("button", { name: /Show (more|less)/ })).toBeNull();
+  });
+
+  it("lets keyboard users expand and collapse a truncated 300-character question", async () => {
+    mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+    const user = userEvent.setup();
+    const title = "q".repeat(300);
+    renderCard(gate({ type: "question", title, actions: [] }));
+
+    const heading = screen.getByRole("heading", { name: title });
+    const control = screen.getByRole("button", { name: "Show more" });
+    expect(screen.getByRole("dialog", { name: title })).toBeTruthy();
+    expect(heading.className).toContain("line-clamp-3");
+    expect(heading.getAttribute("tabindex")).toBe("-1");
+    expect(control.getAttribute("aria-expanded")).toBe("false");
+    await user.tab();
+    expect(document.activeElement).toBe(control);
+    await user.keyboard("{Enter}");
+    expect(heading.className).not.toContain("line-clamp-3");
+    expect(heading.className).toContain("max-h-[min(14rem,25dvh)]");
+    expect(heading.className).toContain("overflow-y-auto");
+    expect(heading.getAttribute("tabindex")).toBe("0");
+    expect(screen.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
+    await user.keyboard("{Enter}");
+    expect(heading.className).toContain("line-clamp-3");
+  });
+
+  it("resets a scrolled title before restoring its clamp", async () => {
+    mockTitleLayout({ scrollHeight: 592, clientHeight: 68 });
+    const user = userEvent.setup();
+    renderCard(gate({ title: "a".repeat(1_000) }));
+
+    const heading = screen.getByRole("heading");
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    heading.scrollTop = 392;
+    expect(heading.scrollTop).toBe(392);
+
+    await user.click(screen.getByRole("button", { name: "Show less" }));
+
+    expect(heading.scrollTop).toBe(0);
+    expect(heading.className).toContain("line-clamp-3");
+  });
+
+  it("offers full-title recovery for an unconstrained approval title", async () => {
+    mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+    const user = userEvent.setup();
+    const title = "Approve " + "a".repeat(10_000);
+    renderCard(gate({ title, body: undefined }));
+
+    const heading = screen.getByRole("heading", { name: title });
+    expect(screen.getByRole("dialog", { name: title })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    const titleControl = screen.getByRole("button", { name: "Show less" });
+    const action = screen.getByRole("button", { name: "Approve for session" });
+    expect(heading.className).not.toContain("line-clamp-3");
+    expect(heading.className).toContain("max-h-[min(14rem,25dvh)]");
+    expect(heading.className).toContain("overflow-y-auto");
+    expect(heading.parentElement?.contains(titleControl)).toBe(true);
+    expect(heading.closest("header")?.contains(action)).toBe(false);
+  });
+
+  it("keeps focus on Show less after a stale font measurement", async () => {
+    let resolveFonts!: () => void;
+    const fonts = Object.getOwnPropertyDescriptor(document, "fonts");
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { ready: new Promise<void>((resolve) => { resolveFonts = resolve; }) },
+    });
+
+    try {
+      mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+      const user = userEvent.setup();
+      renderCard(gate({ title: "a".repeat(300) }));
+      await user.click(screen.getByRole("button", { name: "Show more" }));
+      const control = screen.getByRole("button", { name: "Show less" });
+      control.focus();
+      mockTitleLayout({ scrollHeight: 68, clientHeight: 68 });
+
+      await act(async () => {
+        resolveFonts();
+        await Promise.resolve();
+      });
+
+      expect(document.activeElement).toBe(control);
+      expect(screen.getByRole("button", { name: "Show less" })).toBe(control);
+    } finally {
+      if (fonts) Object.defineProperty(document, "fonts", fonts);
+      else Reflect.deleteProperty(document, "fonts");
+    }
+  });
+
+  it("moves focus to the heading when resize removes the focused title control", async () => {
+    let callback: ResizeObserverCallback | undefined;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(next: ResizeObserverCallback) { callback = next; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    });
+    mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+    renderCard(gate({ title: "a".repeat(300) }));
+    const heading = screen.getByRole("heading");
+    const control = screen.getByRole("button", { name: "Show more" });
+    control.focus();
+    expect(document.activeElement).toBe(control);
+    mockTitleLayout({ scrollHeight: 68, clientHeight: 68 });
+    const entry: ResizeObserverEntry = {
+      target: heading,
+      contentRect: new DOMRect(),
+      borderBoxSize: [],
+      contentBoxSize: [],
+      devicePixelContentBoxSize: [],
+    };
+    const observer: ResizeObserver = { observe() {}, unobserve() {}, disconnect() {} };
+    act(() => callback?.([entry], observer));
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    expect(heading.getAttribute("tabindex")).toBe("-1");
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   });
 });

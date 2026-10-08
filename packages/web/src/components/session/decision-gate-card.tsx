@@ -10,7 +10,7 @@
  * pending in the store and the agent stays blocked until the user comes
  * back and answers — matching the engine's per-thread suspend model.
  */
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Hand, HelpCircle, KeyRound, Paperclip, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
 import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
@@ -140,9 +140,7 @@ function DecisionGateResponse({
           <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">
             <Badge variant={kind.variant}>{kind.label}</Badge>
-            <h3 id={`gate-${gate.id}-title`} className="mt-1.5 break-words text-sm font-medium leading-relaxed text-ink">
-              {gate.title}
-            </h3>
+            <DecisionGateTitle key={`${gate.id}:${gate.title}`} id={`gate-${gate.id}-title`} title={gate.title} />
           </div>
           <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
             <X aria-hidden className="h-3.5 w-3.5" />
@@ -152,7 +150,13 @@ function DecisionGateResponse({
         {error && <p role="alert" className="px-5 py-2 break-words text-sm text-danger-600">{error} Try again.</p>}
 
         {gate.body && (
-          <div id={`gate-${gate.id}-body`} className="px-5 pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words">
+          <div
+            id={`gate-${gate.id}-body`}
+            role="region"
+            tabIndex={0}
+            aria-label="Request details"
+            className="max-h-[min(14rem,25dvh)] overflow-y-auto px-5 pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+          >
             {gate.body}
           </div>
         )}
@@ -254,6 +258,67 @@ function DecisionGateResponse({
         )}
       </div>
     </div>
+  );
+}
+
+function DecisionGateTitle({ id, title }: { id: string; title: string }) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+
+  useLayoutEffect(() => {
+    if (expanded) return;
+    let active = true;
+    const measure = () => {
+      if (!active) return;
+      const element = heading.current;
+      const next = Boolean(element && element.scrollHeight > element.clientHeight + 1);
+      if (!next && document.activeElement === toggle.current) {
+        queueMicrotask(() => heading.current?.focus({ preventScroll: true }));
+      }
+      setTruncated(next);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(heading.current!);
+    void document.fonts?.ready.then(measure).catch(() => {});
+    return () => {
+      active = false;
+      observer?.disconnect();
+    };
+  }, [expanded, title]);
+
+  return (
+    <>
+      <h3
+        ref={heading}
+        id={id}
+        tabIndex={expanded ? 0 : -1}
+        className={cn(
+          "mt-1.5 break-words text-sm font-medium leading-relaxed text-ink [overflow-wrap:anywhere]",
+          !expanded ? "line-clamp-3" : "max-h-[min(14rem,25dvh)] overflow-y-auto",
+        )}
+      >
+        {title}
+      </h3>
+      {truncated && (
+        <Button
+          ref={toggle}
+          variant="ghost"
+          size="sm"
+          className="-ml-2 mt-0.5"
+          aria-controls={id}
+          aria-expanded={expanded}
+          onClick={() => {
+            if (expanded && heading.current) heading.current.scrollTop = 0;
+            setExpanded((value) => !value);
+          }}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </Button>
+      )}
+    </>
   );
 }
 
