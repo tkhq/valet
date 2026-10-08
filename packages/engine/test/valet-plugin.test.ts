@@ -657,4 +657,16 @@ describe("validateValetPlugin identityLink", () => {
       expect(result.issues.some((i) => i.path === "identityLink.deliveryReply")).toBe(true);
     }
   });
+
+  it("rejects an oauthService that is not a service name", () => {
+    const result = validateValetPlugin({
+      name: "fixture",
+      version: "0.1.0",
+      identityLink: { provider: "slack", instructions: "DM the Valet app: link <code>", oauthService: "Slack User" },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some((i) => i.path === "identityLink.oauthService")).toBe(true);
+    }
+  });
 });

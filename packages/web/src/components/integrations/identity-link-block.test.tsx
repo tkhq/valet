@@ -115,3 +115,28 @@ describe("IdentityLinkBlock unlink", () => {
     expect(screen.getByRole("button", { name: "Unlinking…" })).toBeTruthy();
   });
 });
+
+describe("IdentityLinkBlock sign-in with OAuth", () => {
+  const UNLINKED: IdentityLinkStatus = {
+    provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true, oauthService: "slack-user",
+  };
+
+  it("offers Sign in with Slack only when the page opts in", () => {
+    const { rerender } = render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
+    expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
+    rerender(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
+    expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
+  });
+
+  it("starts the OAuth connect for the declared service", () => {
+    Object.defineProperty(window, "location", { value: { ...window.location, href: "" }, writable: true });
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with Slack" }));
+    expect(window.location.href).toBe("/api/credentials/slack-user/connect");
+  });
+
+  it("hides the button when the deployment has no OAuth client", () => {
+    render(<IdentityLinkBlock link={{ ...UNLINKED, oauthService: undefined }} title="Slack" offerOAuth />);
+    expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
+  });
+});

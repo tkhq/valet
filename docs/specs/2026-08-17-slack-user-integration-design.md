@@ -263,6 +263,13 @@ Three changes close this:
   sender still gets the link instructions. A linked sender never reaches
   this check, so a code-shaped message from them stays a normal message.
 
+Settings also offers "Sign in with Slack". The Slack `identityLink`
+declares `oauthService: "slack-user"`, and `GET /api/me/identity-links`
+reports it only when that OAuth client's environment is set. The button
+starts the slack-user OAuth connect, which writes the identity link on
+success. The Integrations page does not repeat the button, because the
+slack-user tile already offers that connect.
+
 `packages/api/src/channels/slack-link-handshake.test.ts` runs the handshake
 with the real Slack plugin, transport, start route, and host, for both the
 reply line and a pasted bare code.

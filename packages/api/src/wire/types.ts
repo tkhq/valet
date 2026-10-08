@@ -3965,6 +3965,10 @@ export interface IdentityLinkStatus {
   /** True when `GET .../members` works: the transport has a member
    * directory for the "find me by name" fallback. */
   memberSearch: boolean;
+  /** The credential service whose OAuth connect also links this account
+   * (Slack: `slack-user`). Present only when that OAuth client is
+   * configured, so the card can offer "Sign in with Slack". */
+  oauthService?: string;
 }
 
 export interface ListIdentityLinksResponse {

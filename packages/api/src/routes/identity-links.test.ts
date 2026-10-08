@@ -4,7 +4,8 @@
  * mounted BEFORE `/api/me` so the longer, more specific prefix wins under
  * Hono's route matching (see `app.ts`'s comment).
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import slackUserPlugin from "@valet/plugin-slack-user/plugin";
 import type { ChannelTransport, OutboundChannelMessage, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { consumeLinkCode, linkIdentity } from "../channels/identity-links.js";
@@ -17,6 +18,7 @@ import type {
 let api: TestApi | undefined;
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await api?.cleanup();
   api = undefined;
 });
@@ -126,6 +128,25 @@ describe("GET /api/me/identity-links", () => {
     const body = (await res.json()) as ListIdentityLinksResponse;
     expect(body.links).toHaveLength(1);
     expect(body.links[0]).toMatchObject({ provider: "telegram", linked: false, channelReady: false });
+  });
+
+  // "Sign in with Slack" links through the slack-user OAuth connect. The card
+  // offers it only when the deployment can run that flow.
+  it.each([
+    ["configured", "client-id", "slack-user"],
+    ["missing its client env", undefined, undefined],
+  ])("reports the linking OAuth service only when it is %s", async (_label, clientId, expected) => {
+    vi.stubEnv("SLACK_CLIENT_ID", clientId);
+    vi.stubEnv("SLACK_CLIENT_SECRET", clientId === undefined ? undefined : "client-secret");
+    const slack: ValetPlugin = {
+      name: "slack",
+      version: "0",
+      identityLink: { provider: "slack", instructions: "send: link <code>", oauthService: "slack-user" },
+    };
+    api = await bootTestApi({ plugins: [slack, slackUserPlugin] });
+
+    const body = (await (await fetch(`${api.baseUrl}/api/me/identity-links`)).json()) as ListIdentityLinksResponse;
+    expect(body.links[0]?.oauthService).toBe(expected);
   });
 
   it("returns two entries when both telegram and slack declare identityLink", async () => {

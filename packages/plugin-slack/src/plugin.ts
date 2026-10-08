@@ -42,6 +42,9 @@ const plugin: ValetPlugin = {
     // DMed. Must stay parseable by LINK_COMMAND_RE (transport.ts) —
     // asserted in plugin.test.ts.
     deliveryReply: ({ code }) => `link ${code}`,
+    // "Sign in with Slack": the slack-user OAuth connect records the Slack
+    // user id as this identity link, with no code to carry.
+    oauthService: "slack-user",
   },
   credentials: [
     {

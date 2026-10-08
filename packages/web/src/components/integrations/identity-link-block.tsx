@@ -184,7 +184,21 @@ function MemberSearch({
   );
 }
 
-export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; title: string }) {
+/**
+ * `offerOAuth` adds "Sign in with <title>" when the deployment can run the
+ * provider's OAuth connect (`link.oauthService`), which links the account
+ * with no code. Settings turns it on. The Integrations page leaves it off
+ * because that service already has its own tile there.
+ */
+export function IdentityLinkBlock({
+  link,
+  title,
+  offerOAuth = false,
+}: {
+  link: IdentityLinkStatus;
+  title: string;
+  offerOAuth?: boolean;
+}) {
   const [pendingLink, setPendingLink] = useState<StartIdentityLinkResponse | null>(null);
   const [delivery, setDelivery] = useState<DeliverIdentityLinkResponse | null>(null);
   const [searching, setSearching] = useState(false);
@@ -306,6 +320,7 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
   }
 
   const busy = startLink.isPending || deliver.isPending;
+  const oauthService = offerOAuth ? link.oauthService : undefined;
 
   return (
     <div className="space-y-2">
@@ -322,6 +337,17 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
         />
       ) : (
         <div className="flex flex-wrap items-center gap-2">
+          {oauthService && (
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                window.location.href = `/api/credentials/${encodeURIComponent(oauthService)}/connect`;
+              }}
+            >
+              Sign in with {title}
+            </Button>
+          )}
           {link.codeDelivery ? (
             <>
               <Button

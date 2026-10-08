@@ -653,6 +653,17 @@ describe("ConnectedAccountsPage", () => {
       expect(screen.getByRole("button", { name: "Find my Slack account by name" })).toBeTruthy();
     });
 
+    it("a Slack card offers Sign in with Slack when the OAuth client is configured", () => {
+      linksData = {
+        links: [{
+          provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true,
+          oauthService: "slack-user",
+        }],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
+    });
+
     // The Slack bot reads `link <code>`, not a bare code. The card shows the
     // whole line so a copied value links on the first try.
     it("a shown Slack code renders the full reply line, not the bare code", async () => {

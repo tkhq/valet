@@ -50,7 +50,7 @@ function LinkAccountCard({ link }: LinkAccountCardProps) {
   if (!link.linked) {
     return (
       <FieldRow label={label}>
-        <IdentityLinkBlock link={link} title={label} />
+        <IdentityLinkBlock link={link} title={label} offerOAuth />
       </FieldRow>
     );
   }

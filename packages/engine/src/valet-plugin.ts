@@ -554,6 +554,13 @@ export interface IdentityLinkDeclaration {
    * accepts verbatim.
    */
   deliveryReply?: (ctx: { code: string }) => string;
+  /**
+   * The credential service whose OAuth connect also writes this identity
+   * link (Slack: `slack-user`, "Sign in with Slack"). The web card offers it
+   * as a one-click alternative to the code flow when the deployment has
+   * that service's OAuth client configured.
+   */
+  oauthService?: string;
 }
 
 /**
@@ -952,6 +959,9 @@ export function validateValetPlugin(
       }
       if (link.deliveryReply !== undefined && typeof link.deliveryReply !== "function") {
         issues.push({ path: "identityLink.deliveryReply", message: "must be a function when present" });
+      }
+      if (link.oauthService !== undefined && (typeof link.oauthService !== "string" || !NAME_RE.test(link.oauthService))) {
+        issues.push({ path: "identityLink.oauthService", message: "must match /^[a-z][a-z0-9-]*$/ when present" });
       }
     }
   }

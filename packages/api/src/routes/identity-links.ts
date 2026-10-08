@@ -20,6 +20,7 @@ import {
 } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { hasOpenDirect } from "../channels/host.js";
+import { authCodeEnvReady, findOAuthDeclaration } from "../services/integration-oauth.js";
 import {
   CODE_TTL_MS,
   identityForUser,
@@ -67,6 +68,16 @@ function canDeliverCode(decl: IdentityLinkDeclaration, transport: ChannelTranspo
   );
 }
 
+/** The declared OAuth service that also writes this identity link, when the
+ * deployment can run its authorization-code flow. A missing client id or
+ * secret hides the option: the connect route would fail. */
+function linkingOAuthService(plugins: ValetPlugin[], decl: IdentityLinkDeclaration): string | undefined {
+  if (!decl.oauthService) return undefined;
+  const found = findOAuthDeclaration(plugins, decl.oauthService);
+  if (!found || found.oauth.mode !== "authorization_code") return undefined;
+  return authCodeEnvReady(found.oauth, process.env) ? decl.oauthService : undefined;
+}
+
 identityLinksRouter.get("/", async (c) => {
   const { db, channelHost, plugins } = c.var.providers;
   const user = c.var.user;
@@ -80,6 +91,7 @@ identityLinksRouter.get("/", async (c) => {
     const channelReady = channelHost.isRunning(provider);
     const codeDelivery = channelReady && canDeliverCode(decl, transport);
     const memberSearch = channelReady && typeof transport?.listWorkspaceMembers === "function";
+    const oauthService = linkingOAuthService(plugins, decl);
     const link: IdentityLinkStatus = identity
       ? {
           provider,
@@ -90,6 +102,7 @@ identityLinksRouter.get("/", async (c) => {
           channelReady,
           codeDelivery,
           memberSearch,
+          ...(oauthService ? { oauthService } : {}),
         }
       : {
           provider,
@@ -97,6 +110,7 @@ identityLinksRouter.get("/", async (c) => {
           channelReady,
           codeDelivery,
           memberSearch,
+          ...(oauthService ? { oauthService } : {}),
         };
     links.push(link);
   }
