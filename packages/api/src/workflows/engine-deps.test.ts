@@ -846,7 +846,7 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       const result = await deps.llmComplete({ runId, model, prompt: "hi" });
       expect(result.text).toBe("ok");
       expect(stream).toHaveBeenCalledWith(expect.objectContaining({
-        id: "gpt-6.1-sol", provider: "openai", contextWindow: 1_050_000,
+        id: "gpt-6.1-sol", provider: "openai", contextWindow: 272_000,
         thinkingLevelMap: expect.objectContaining({ high: "high" }),
       }), expect.anything(), expect.anything());
     } finally {

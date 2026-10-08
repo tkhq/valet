@@ -40,9 +40,9 @@ export const DEFAULT_TIER_MAP: TierMap = {
  * Read the org's tier map from `orgs.model_tiers`, falling back to defaults
  * when the column is null or not a valid object.
  */
-export async function getOrgTierMap(db: AppQueryable, orgId: string): Promise<TierMap> {
+export async function getOrgTierMap(db: AppQueryable, orgId: string, proposedApproved?: string[] | null): Promise<TierMap> {
   const rows = await db
-    .select({ modelTiers: orgs.modelTiers })
+    .select({ modelTiers: orgs.modelTiers, approvedModels: orgs.approvedModels })
     .from(orgs)
     .where(eq(orgs.id, orgId))
     .limit(1);
@@ -55,7 +55,12 @@ export async function getOrgTierMap(db: AppQueryable, orgId: string): Promise<Ti
   for (const tier of TIER_TOKENS) {
     const entry = stored[tier];
     if (Array.isArray(entry) && entry.every((v) => typeof v === "string")) {
-      merged[tier] = entry as string[];
+      // Upgrade retired recommendations only when the replacement is allowed.
+      // Explicit session/workflow model IDs remain unchanged and resolvable.
+      const approved = proposedApproved === undefined ? rows[0]?.approvedModels : proposedApproved;
+      const canUseSol61 = approved == null || (Array.isArray(approved) && approved.includes("openai/gpt-6.1-sol"));
+      merged[tier] = [...new Set(entry.map((spec: string) =>
+        canUseSol61 && spec === "openai/gpt-5.6-sol" ? "openai/gpt-6.1-sol" : spec))];
     }
   }
   return merged;
