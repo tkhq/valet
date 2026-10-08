@@ -295,7 +295,7 @@ const reqItem: ProxyRequestListItem = {
   hasError: false,
 };
 
-const mockRequests = { items: [reqItem], nextCursor: undefined, pageSize: 25, hasMore: false };
+const mockRequests: { items: ProxyRequestListItem[]; nextCursor: string | undefined; pageSize: number; hasMore: boolean } = { items: [reqItem], nextCursor: undefined, pageSize: 25, hasMore: false };
 
 // --- mocks ---------------------------------------------------------------
 
@@ -327,16 +327,22 @@ let itemsResults: Record<
 // Captures the args of the last useUsageBreakdown call so tests can assert
 // the scope/teamId/enabled the page requests.
 let breakdownCalls: unknown[][] = [];
+let toolEfficiencyCalls: unknown[][] = [];
+let outcomeCalls: unknown[][] = [];
+let itemCalls: unknown[][] = [];
+let requestFilters: unknown;
 
 vi.mock("~/api/usage", () => ({
   useUsageBreakdown: (...args: unknown[]) => {
     breakdownCalls.push(args);
-    return breakdownResult;
+    return { ...breakdownResult, isSuccess: !!breakdownResult.data && !breakdownResult.error };
   },
-  useUsageToolEfficiency: () => toolEfficiencyResult,
-  useUsageOutcomes: () => outcomesResult,
-  useUsageItems: (_period: UsagePeriodSelection, _scope: string, useCase: string) =>
-    itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null },
+  useUsageToolEfficiency: (...args: unknown[]) => { toolEfficiencyCalls.push(args); return toolEfficiencyResult; },
+  useUsageOutcomes: (...args: unknown[]) => { outcomeCalls.push(args); return outcomesResult; },
+  useUsageItems: (period: UsagePeriodSelection, scope: string, useCase: string, teamId: string | undefined, opts?: { enabled?: boolean }) => {
+    itemCalls.push([period, scope, useCase, teamId, opts]);
+    return itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null };
+  },
   qkUsage: {
     breakdown: () => [],
     items: () => [],
@@ -361,6 +367,7 @@ let settingsResult: {
 
 vi.mock("~/api/proxy-usage", () => ({
   useProxyRequests: (_filters: unknown, opts?: { enabled?: boolean }) => {
+    requestFilters = _filters;
     lastProxyRequestsOpts = opts;
     return requestsResult;
   },
@@ -455,6 +462,10 @@ beforeEach(() => {
   usageExportError = undefined;
   usageExportValidations = [];
   breakdownCalls = [];
+  toolEfficiencyCalls = [];
+  outcomeCalls = [];
+  itemCalls = [];
+  requestFilters = undefined;
   lastProxyRequestsOpts = undefined;
   lastProxySettingsOpts = undefined;
 });
@@ -462,6 +473,7 @@ beforeEach(() => {
 describe("UsagePage — tool work", () => {
   it("shows model-directed calls and model-free workflow actions", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     expect(screen.getByText("Tool work per model token")).toBeTruthy();
     const rows = screen.getAllByRole("row");
     const session = rows.find((row) => row.textContent?.includes("Sessions") && row.textContent?.includes("80"));
@@ -475,6 +487,7 @@ describe("UsagePage — tool work", () => {
 describe("UsagePage — outcomes", () => {
   it("shows confirmed outcome types and allocated model spend", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     expect(screen.getByText("Outcomes")).toBeTruthy();
     const row = screen.getByRole("row", { name: /PRs created/ });
     expect(row.textContent).toContain("2");
@@ -556,6 +569,7 @@ describe("UsagePage — token/cache stats", () => {
 
   it("renders input/output/cache columns in the By-model table", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     expect(screen.getByText("Input tok")).toBeTruthy();
     expect(screen.getByText("Output tok")).toBeTruthy();
     expect(screen.getByText("Cache read")).toBeTruthy();
@@ -656,6 +670,7 @@ describe("UsagePage — By-member table (org scope)", () => {
       error: null,
     };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     // Switch to org scope
     fireEvent.click(screen.getByText("Organization"));
     // Re-render happens with org data
@@ -666,6 +681,7 @@ describe("UsagePage — By-member table (org scope)", () => {
 
   it("does not show By-member table in me scope", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     // Default scope=me, byUser not present
     expect(screen.queryByText("By member")).toBeNull();
   });
@@ -674,6 +690,7 @@ describe("UsagePage — By-member table (org scope)", () => {
 describe("UsagePage — by-use-case table", () => {
   it("renders all four use-case labels", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     expect(screen.getByText("Assistant")).toBeTruthy();
     expect(screen.getAllByText("Sessions").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Workflows").length).toBeGreaterThan(0);
@@ -682,6 +699,7 @@ describe("UsagePage — by-use-case table", () => {
 
   it("expanding Assistant row shows runtime items", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const orchRow = screen.getByRole("button", {
       name: /Assistant — expand items/,
     });
@@ -693,6 +711,7 @@ describe("UsagePage — by-use-case table", () => {
 
   it("runtime item does not render as a link (orchestrator: prefix)", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const orchRow = screen.getByRole("button", {
       name: /Assistant — expand items/,
     });
@@ -708,6 +727,7 @@ describe("UsagePage — by-use-case table", () => {
 
   it("expanding Sessions row shows parent and child items", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const sessRow = screen.getByRole("button", {
       name: /Sessions — expand items/,
     });
@@ -720,6 +740,7 @@ describe("UsagePage — by-use-case table", () => {
 
   it("child session row is indented with pl-8 class", async () => {
     const { container } = render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const sessRow = screen.getByRole("button", {
       name: /Sessions — expand items/,
     });
@@ -737,6 +758,7 @@ describe("UsagePage — by-use-case table", () => {
 
   it("regular session item renders as an anchor (links to sessions route)", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const sessRow = screen.getByRole("button", {
       name: /Sessions — expand items/,
     });
@@ -752,6 +774,7 @@ describe("UsagePage — by-use-case table", () => {
 
   it("expanding Workflows row shows workflow items (not linked)", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const wfRow = screen.getByRole("button", {
       name: /Workflows — expand items/,
     });
@@ -768,6 +791,7 @@ describe("UsagePage — by-use-case table", () => {
 
   it("expanding Proxy row shows proxy items (not linked)", async () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const proxyRow = screen.getByRole("button", {
       name: /Proxy.*expand items/,
     });
@@ -788,6 +812,7 @@ describe("UsagePage — by-use-case table", () => {
 describe("UsagePage — skills section", () => {
   it("renders adoption and estimated context telemetry", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const heading = screen.getByText("Skills");
     const section = heading.closest("div");
     expect(section?.textContent).toContain("github");
@@ -800,6 +825,7 @@ describe("UsagePage — skills section", () => {
 describe("UsagePage — by model section", () => {
   it("renders model names in the By model section", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const heading = screen.getByText("By model");
     const section = heading.closest("div");
     expect(section).toBeTruthy();
@@ -846,6 +872,7 @@ describe("UsagePage — CSV export", () => {
 describe("UsagePage — request log pagination", () => {
   it("shows bounded navigation without raw request content", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
     expect(screen.getByText("Page 1 · 25 requests per page")).toBeTruthy();
     expect(screen.queryByText("Hello")).toBeNull();
     expect(screen.queryByText("Request detail")).toBeNull();
@@ -885,6 +912,7 @@ describe("UsagePage — team workspace scope", () => {
       ],
     };
     const view = render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     expect(screen.getByRole("columnheader", { name: "Avg daily active agents" })).toBeTruthy();
     const explanation = screen.getByText("How active agents are counted").closest("details");
     expect(explanation?.open).toBe(false);
@@ -972,6 +1000,7 @@ describe("UsagePage — expanded drill rows across the me/org toggle", () => {
       isLoading: false,
     };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     fireEvent.click(screen.getByRole("button", { name: /Sessions — expand items/ }));
     await waitFor(() => {
       expect(screen.getByText("Parent session")).toBeTruthy();
@@ -985,6 +1014,7 @@ describe("UsagePage — expanded drill rows across the me/org toggle", () => {
 describe("UsagePage — Settings → Proxy link", () => {
   it("renders Settings → Proxy callout link", () => {
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
     const link = document.querySelector("a[href='/settings/proxy']");
     expect(link).toBeTruthy();
     expect(link!.textContent).toMatch(/Settings.*Proxy|Settings → Proxy/);
@@ -995,6 +1025,7 @@ describe("UsagePage — disabled-gateway notice", () => {
   it("shows the notice when enabled=false", () => {
     settingsResult = { data: { enabled: false, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
     expect(screen.getByText(/recording gateway is disabled/)).toBeTruthy();
     const link = document.querySelector("a[href='/settings/organization/proxy']");
     expect(link).toBeTruthy();
@@ -1003,6 +1034,7 @@ describe("UsagePage — disabled-gateway notice", () => {
   it("does not show the notice when enabled=true", () => {
     settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
     expect(screen.queryByText(/recording gateway is disabled/)).toBeNull();
   });
 });
@@ -1107,5 +1139,65 @@ describe("UsagePage custom period controls", () => {
 
     fireEvent.change(month, { target: { value: "" } });
     expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "lookback", window: "7d" });
+  });
+});
+
+
+describe("UsagePage view navigation", () => {
+  it("defaults to Overview and loads detail queries only in their view", () => {
+    render(<UsagePage />);
+    expect(screen.getByRole("button", { name: "overview" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByRole("row", { name: /PRs created/ })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /request log/ })).toBeNull();
+    expect(toolEfficiencyCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(outcomeCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
+    expect(lastProxySettingsOpts?.enabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
+    expect(screen.getByRole("row", { name: /PRs created/ })).toBeTruthy();
+    expect(toolEfficiencyCalls.at(-1)?.[3]).toEqual({ enabled: true });
+    expect(outcomeCalls.at(-1)?.[3]).toEqual({ enabled: true });
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
+    expect(screen.getByRole("heading", { name: /request log/ })).toBeTruthy();
+    expect(toolEfficiencyCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(outcomeCalls.at(-1)?.[3]).toEqual({ enabled: false });
+    expect(lastProxyRequestsOpts?.enabled).toBe(true);
+    expect(lastProxySettingsOpts?.enabled).toBe(true);
+  });
+
+  it("preserves period and expanded rows while pausing hidden drill queries", () => {
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "30d" }));
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
+    fireEvent.click(screen.getByRole("button", { name: /Sessions — expand items/ }));
+    expect(itemCalls.at(-1)?.[4]).toEqual({ enabled: true });
+    fireEvent.click(screen.getByRole("button", { name: "overview" }));
+    expect(itemCalls.at(-1)?.[4]).toEqual({ enabled: false });
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
+    expect(screen.getByRole("button", { name: /Sessions — expand items/ }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Parent session")).toBeTruthy();
+    expect(breakdownCalls.at(-1)?.[0]).toEqual({ kind: "lookback", window: "30d" });
+    expect(itemCalls.at(-1)?.[4]).toEqual({ enabled: true });
+  });
+
+  it("keeps Activity personal and resets its pager when the workspace changes", () => {
+    requestsResult.data = { ...mockRequests, nextCursor: "page-two", hasMore: true };
+    const view = render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(requestFilters).toEqual({ limit: 25, cursor: "page-two" });
+    fireEvent.click(screen.getByRole("button", { name: "overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
+    expect(requestFilters).toEqual({ limit: 25, cursor: "page-two" });
+    workspaceTeamId = "team-x";
+    view.rerender(<UsagePage />);
+    expect(screen.getByText(/Switch to Personal to view it/)).toBeTruthy();
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
+    expect(lastProxySettingsOpts?.enabled).toBe(false);
+    expect(requestFilters).toEqual({ limit: 25, cursor: undefined });
+    expect(screen.queryByRole("heading", { name: /request log/ })).toBeNull();
   });
 });
