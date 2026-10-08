@@ -55,8 +55,9 @@ export function buildFileAttachTool(blobs: BlobStore, configuredPublicUrl?: stri
           await blobs.delete(key);
           throw error;
         }
-        const url = `${origin ?? ""}/api/sessions/${encodeURIComponent(ctx.sessionId)}/threads/${encodeURIComponent(ctx.threadId)}/files/${id}`;
-        return { text: JSON.stringify({ name, mimeType, bytes: bytes.byteLength, url, ...(!origin ? { deliveryNote: "This relative URL works in the Valet web app. For channel delivery, configure VALET_PUBLIC_URL and attach the file again." } : {}) }), ok: true };
+        const webUrl = `/api/sessions/${encodeURIComponent(ctx.sessionId)}/threads/${encodeURIComponent(ctx.threadId)}/files/${id}`;
+        const url = `${origin ?? ""}${webUrl}`;
+        return { text: JSON.stringify({ name, mimeType, bytes: bytes.byteLength, url, webUrl, ...(!origin ? { deliveryNote: "This relative URL works in the Valet web app. For channel delivery, configure VALET_PUBLIC_URL and attach the file again." } : {}) }), ok: true };
       } catch {
         return { text: "Could not attach the file. Verify the file exists and retry file_attach.", ok: false };
       }

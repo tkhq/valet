@@ -40,6 +40,12 @@ describe("file download result", () => {
     expect(parseFileDownload({ text: JSON.stringify({ ...file, url }) })).toBeNull();
   });
 
+  it("uses the authenticated local path when viewed through another deployment alias", () => {
+    expect(parseFileDownload({ text: JSON.stringify({ ...file, url: "https://canonical.test" + file.url, webUrl: file.url }) }, "https://alias.test"))
+      .toEqual({ name: file.name, url: file.url });
+    expect(parseFileDownload({ text: JSON.stringify({ ...file, webUrl: "//evil.test" + file.url }) }, "https://alias.test")).toBeNull();
+  });
+
   it("shows a failed attachment without a download link", () => {
     const Body = fileAttachRenderer.Body;
     render(<Body args={{}} result={undefined} status="error" error="File missing. Create the file and retry." toolName="file_attach" />);

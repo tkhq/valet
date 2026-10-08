@@ -110,3 +110,5 @@ Package tests load all four skill files through the real Markdown loader.
 They check names, credential-free registration, delivery instructions, and format-specific limitations.
 The existing API bundled-skill tests validate frontmatter and registry discovery.
 Runtime tests exercise native file creation, edits, inspection, validation, and rendering where the tools are available.
+
+The tool returns a relative webUrl for authenticated web downloads and a public-origin url for channel replies. The renderer validates the local path. This keeps downloads on the current login origin when a deployment has multiple domains.
