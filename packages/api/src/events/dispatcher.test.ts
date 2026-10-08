@@ -533,6 +533,22 @@ describe("EventDispatcher", () => {
     expect(row?.createdBy).toBe("member-9");
   });
 
+  it("retains the subscription for personal follow presence", async () => {
+    const { subscriptionId } = await seedDelivery({
+      target: { kind: "orchestrator", follow: true, presence: { displayName: "Personal helper" } },
+      service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
+      payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
+    });
+    const dispatcher = new EventDispatcher({
+      db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {}),
+      resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2" }),
+    });
+    await dispatcher.pollOnce();
+    expect(await findFollowedThread(tdb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" }))
+      .toMatchObject({ ownerType: "user", ownerId: "user-1", subscriptionId });
+  });
+
   it("does not create a second follow path for a message subscription", async () => {
     const { deliveryId } = await seedDelivery({
       target: { kind: "orchestrator", follow: true }, service: "slack",

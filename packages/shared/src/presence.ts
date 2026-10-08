@@ -40,7 +40,8 @@ export function validatePresence(value: unknown): string | null {
 /** Read optional identity from persisted JSON. Ignore invalid legacy values. */
 export function readPresence(value: unknown): Presence | undefined {
   if (value === undefined || validatePresence(value) !== null) return undefined;
-  return value as Presence;
+  const presence = value as Presence;
+  return presence.displayName === undefined && presence.avatarUrl === undefined ? undefined : presence;
 }
 
 /** Later values override individual fields; absent fields keep their defaults. */

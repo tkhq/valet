@@ -1,4 +1,4 @@
-import { mergePresence, readPresence } from "@valet/shared";
+import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -747,11 +747,11 @@ export class Thread {
     // in parallel would otherwise each scan before the other's digest
     // lands and produce two overlapping digests.
     let receiptItem = admitted;
-    if (wasAdmitted && effectiveMode === "followup" && !readPresence(admitted.metadata?.presence)) {
+    if (wasAdmitted && effectiveMode === "followup") {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey, item.author),
+          this.coalesceQueuedOverheard(coalesceKey, item.author, readPresence(admitted.metadata?.presence)),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
@@ -782,7 +782,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor, presence?: Presence): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -790,8 +790,9 @@ export class Thread {
         (i) =>
           i.threadId === this.id &&
           i.status === "queued" &&
-          // Custom sender identities keep their own durable submission.
-          !readPresence(i.metadata?.presence) &&
+          // Only combine messages that use the same sender identity.
+          readPresence(i.metadata?.presence)?.displayName === presence?.displayName &&
+          readPresence(i.metadata?.presence)?.avatarUrl === presence?.avatarUrl &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
           i.author?.id === author?.id &&
@@ -809,7 +810,7 @@ export class Thread {
       model: newest.model,
       role: newest.role,
       author: newest.author,
-      metadata: { overheardDigest: digest },
+      metadata: { overheardDigest: digest, ...(presence ? { presence } : {}) },
     });
     const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
     for (const constituent of coalescible) {
@@ -1435,6 +1436,7 @@ export class Thread {
     const priorActive = this.runningItem;
     this.runningItem = {
       id: suspended.queueItemId,
+      metadata: priorActive?.metadata,
       threadId: this.id,
       content: "",
       status: "running",

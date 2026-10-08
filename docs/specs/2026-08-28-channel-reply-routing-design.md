@@ -466,3 +466,9 @@ Unlinked channel senders cannot use either tool. Organization-owned subscription
 The write changes only the target's presence field and update timestamp with an atomic JSONB operation.
 It preserves concurrent target edits, matching rules, ownership, and enabled state.
 `workflows.create_trigger` and `workflows.propose_trigger` accept presence for new workflow event subscriptions.
+
+## Presence during follow and replay
+
+Every subscription-created follow binding retains its subscription ID, including personal subscriptions. Followed replies read current presence from that rule.
+Empty presence objects behave as unset, including previously stored values. Overheard messages coalesce only when their display name and avatar overrides match.
+The digest retains those overrides. Different identities and sender authorities remain separate. Approval replay retains the blocked submission metadata across restart.

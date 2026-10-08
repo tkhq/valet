@@ -1,3 +1,4 @@
+import { readPresence } from "@valet/shared";
 import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
@@ -265,9 +266,16 @@ describe("overheard digest: queue coalescing", () => {
       const customAgain = await thread.submitPrompt(overheardSignal({ body: "custom again" }), { metadata: { presence: { displayName: "Automation" } } });
       const digest = await thread.submitPrompt(overheardSignal({ body: "plain again" }), {});
       expect((await store.getQueueItem(session.id, plain.queueItemId))?.outcome).toEqual({ outcome: "merged" });
-      for (const receipt of [custom, customAgain]) {
-        expect(await store.getQueueItem(session.id, receipt.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+      expect((await store.getQueueItem(session.id, custom.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+      expect(await store.getQueueItem(session.id, customAgain.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+      for (let i = 0; i < 25; i++) {
+        await thread.submitPrompt(overheardSignal({ body: `custom ${i}` }), { metadata: { presence: { displayName: "Automation" } } });
       }
+      await thread.submitPrompt(overheardSignal({ body: "other identity" }), { metadata: { presence: { displayName: "Other" } } });
+      await thread.submitPrompt(overheardSignal({ body: "different avatar" }), { metadata: { presence: { displayName: "Automation", avatarUrl: "https://example.com/avatar.png" } } });
+      const pending = await store.listUnsettledSubmissions(session.id);
+      expect(pending).toHaveLength(4);
+      expect(pending.filter(item => readPresence(item.metadata?.presence)?.displayName === "Automation")).toHaveLength(2);
       const content = (await store.getQueueItem(session.id, digest.queueItemId))?.content;
       if (!content || typeof content !== "object" || !("kind" in content)) throw new Error("Expected a digest signal");
       expect(content.body.split("\n").sort()).toEqual([OVERHEARD_DIGEST_HEADER, "plain", "plain again"].sort());

@@ -421,10 +421,9 @@ export class EventDispatcher {
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
               createdBy: actorUserId,
-              // The follow router re-checks the actor's membership on every
-              // later message, against this rule's CURRENT audience. So the
-              // rule id is what it needs.
-              ...(teamMention ? { subscriptionId: sub.id } : {}),
+              // Followed replies need the source rule for current presence
+              // settings and, for teams, audience authorization.
+              subscriptionId: sub.id,
               preserveBinding,
               // The mention itself is the last message the assistant has seen,
               // so the follow-router's gap re-hydration starts right after it.
