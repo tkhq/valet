@@ -360,3 +360,7 @@ The caller must be that team's synthetic actor. The stored run actor must be abs
 Approval eligibility and subsequent credential borrowing use the same durable ownership check.
 Only the account owner can approve. Existing team membership, share generation, and workflow grant scope checks still apply.
 Tool nodes retain their run-only approval scope. Workflow download, origin, and private-thread visibility rules remain unchanged.
+
+A failed discovery keeps its cause. `resolveDynamic` (`packages/engine/src/plugin-catalog.ts`) reports `<service> tool discovery failed:` followed by the same text `call_tool` gives for that outcome.
+A connector error keeps the upstream message. A missing account names the Integrations page. A shared-account denial says that the caller cannot ask the account owner for approval, and does not call it an org policy.
+Before 2026-10-08, every failure read `Tool discovery requires permitted account access: <outcome kind>`. That text dropped the connector message, and it hid whether a policy or the connector was at fault.

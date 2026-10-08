@@ -1223,6 +1223,37 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     expect(resolveActions).toHaveBeenCalledTimes(answer === "approve" ? 1 : 0);
   });
 
+  it("team discovery reports a pending approval as waiting, not denied", async () => {
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", vi.fn(async () => []))] });
+    const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      policyResolver: { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "lender" } }) },
+      requestDecision: async () => ({ actionId: "pending", resolvedBy: "", resolvedAt: 1 }) }));
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain("remote tool discovery failed: pending-approval: waiting for the account owner");
+    expect(reason).not.toContain("did not approve");
+  });
+
+  // Team discovery runs through the policy pipeline. Its failure must keep
+  // the cause: a connector error is not an account-access problem, and a
+  // shared-account denial is not an org policy.
+  it.each([
+    ["connector error", { mode: "allow", provenance: { baseMode: "allow", source: "plugin_default" } }, "remote tool discovery failed: error: upstream 401 Unauthorized"],
+    ["shared-account denial", { mode: "deny", provenance: { baseMode: "allow", source: "shared_account" } }, "remote tool discovery failed: denied: remote tool discovery would use a teammate's shared account"],
+    ["team policy denial", { mode: "deny", provenance: { baseMode: "deny", source: "team_policy" } }, "remote tool discovery failed: denied: remote tool discovery is blocked by team policy"],
+  ] as const)("team discovery reports the %s", async (_label, decision, expected) => {
+    const resolveActions = vi.fn(async () => {
+      throw new Error("upstream 401 Unauthorized");
+    });
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", resolveActions)] });
+    const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      policyResolver: { resolve: async () => decision } }));
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain(expected);
+    expect(reason).not.toContain("requires permitted account access");
+  });
+
   it("list_tools merges resolveActions results with static actions", async () => {
     const { plugin: staticPlugin } = makeMockPlugin();
     const dynamicAction: PluginAction = {
