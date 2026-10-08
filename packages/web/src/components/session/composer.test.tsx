@@ -97,6 +97,7 @@ vi.mock("~/hooks/use-commands", () => ({
   }),
 }));
 
+import { PageActiveContext } from "~/lib/page-active";
 import { Composer } from "./composer";
 
 function renderComposer(
@@ -475,6 +476,17 @@ describe("Composer — Escape interrupts the running turn", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(abortMutate).toHaveBeenCalledTimes(1);
     expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1", targetItemId: "q-0" });
+  });
+
+  it("does not interrupt a running hidden page", () => {
+    queueStateRef.current = queueState("followup");
+    render(<PageActiveContext.Provider value={false}>
+      <QueryClientProvider client={new QueryClient()}>
+        <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus="streaming" />
+      </QueryClientProvider>
+    </PageActiveContext.Provider>);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(abortMutate).not.toHaveBeenCalled();
   });
 
   it("skips an Escape already claimed by another layer (defaultPrevented)", () => {
