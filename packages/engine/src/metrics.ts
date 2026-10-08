@@ -166,7 +166,7 @@ function inst(): Instruments {
     }),
     leasesActive: meter.createObservableGauge("valet.leases.active", {
       description:
-        "Sandbox leases currently held open, by owner kind (process/watch/hold). A lease keeps a sandbox alive independent of session activity.",
+        "Sandbox leases currently held open, by owner kind (process/watch/hold). A lease keeps a sandbox alive independent of session activity. A persistently high count means that many node hours stay held by leases; check it against expected load.",
     }),
     leaseNodeSeconds: meter.createCounter("valet.leases.node_seconds", {
       description:
