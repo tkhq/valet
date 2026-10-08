@@ -263,6 +263,37 @@ describe("ChannelHost.handleUpdate", () => {
     expect(fakeTransport.sent[0]?.message.markdown).toContain("Linked");
   });
 
+  // People copy the code alone and paste it, without the provider's command
+  // (Slack's `link`). An unlinked sender who does that is still linking.
+  it("an unlinked sender's pasted bare code links the account", async () => {
+    const code = await mintLinkCode(testDb.appDb, USER_ID, "fake");
+    await host.handleUpdate("fake", inbound({ text: `  ${code}\n` }));
+    const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
+    expect(links[0]).toMatchObject({ externalId: "77", userId: USER_ID });
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Linked");
+  });
+
+  it("an unlinked sender's code-shaped text that matches no code replies invalid", async () => {
+    await host.handleUpdate("fake", inbound({ text: "4y1f5rkUvtYjFekkULhrnA" }));
+    expect(fakeTransport.sent[0]?.message.markdown).toMatch(/invalid or expired/i);
+    const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
+    expect(links).toHaveLength(0);
+  });
+
+  it("an unlinked sender's ordinary text still gets the link instructions", async () => {
+    await host.handleUpdate("fake", inbound({ text: "is anyone there?" }));
+    expect(fakeTransport.sent[0]?.message.markdown).toMatch(/Link your Valet account/);
+  });
+
+  it("a linked sender's code-shaped message is not spent as a link code", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const code = await mintLinkCode(testDb.appDb, "someone-else", "fake");
+    await host.handleUpdate("fake", inbound({ text: code }));
+    const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
+    expect(links).toEqual([expect.objectContaining({ externalId: "77", userId: USER_ID })]);
+    expect(fakeTransport.sent.some((s) => /Linked|invalid or expired/i.test(s.message.markdown ?? ""))).toBe(false);
+  });
+
   it("/start with a bad code replies invalid and does not link", async () => {
     await host.handleUpdate("fake", inbound({ kind: "command", command: { name: "start", args: "bad" } }));
     expect(fakeTransport.sent[0]?.message.markdown).toMatch(/invalid or expired/i);

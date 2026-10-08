@@ -375,7 +375,21 @@ export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; t
       )}
       {pendingLink && (
         <CodePanel
-          value={pendingLink.code}
+          intro={
+            pendingLink.deepLink ? (
+              <a
+                href={pendingLink.deepLink}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-medium text-moss underline"
+              >
+                Open {title} and press Start
+              </a>
+            ) : undefined
+          }
+          // The bot reads the whole command (Slack: `link <code>`), so the
+          // panel shows and copies that line when the provider has one.
+          value={pendingLink.replyText ?? pendingLink.code}
           note={pendingLink.instructions}
           expiresInSeconds={pendingLink.expiresInSeconds}
         />

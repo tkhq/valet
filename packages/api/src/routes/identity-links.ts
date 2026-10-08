@@ -138,6 +138,7 @@ identityLinksRouter.post("/:provider/start", async (c) => {
     instructions: decl.instructions,
     expiresInSeconds: START_LINK_TTL_SECONDS,
     ...(deepLink !== undefined ? { deepLink } : {}),
+    ...(decl.deliveryReply ? { replyText: decl.deliveryReply({ code }) } : {}),
   };
   return c.json(resp);
 });

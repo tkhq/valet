@@ -8,6 +8,11 @@ import { identityLinkCodes, userIdentityLinks } from "../schema/index.js";
  * asserted against it in identity-links.test.ts. */
 export const CODE_TTL_MS = 10 * 60_000;
 
+/** The exact shape `mintLinkCode` returns: 16 random bytes as base64url.
+ * The channel host uses it to recognize a link code that a person pasted
+ * without the provider's command, such as Slack's `link`. */
+export const LINK_CODE_RE = /^[A-Za-z0-9_-]{22}$/;
+
 function hashCode(code: string): string {
   return createHash("sha256").update(code).digest("hex");
 }

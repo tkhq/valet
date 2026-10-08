@@ -41,7 +41,7 @@ instead of adding another provider-specific router.
   user both the act-as actions and DM routing.
 - Generalize `/api/me/identity-links` from Telegram-hardcoded routes to
   provider-parameterized routes. The Slack transport emits a `command`
-  event for `link <code>` DMs, so `ChannelHost.handleStart` consumes it
+  event for `link <code>` DMs, so `ChannelHost.redeemLinkCode` consumes it
   with no host changes. This is the fallback for users who do not want to
   grant act-as scopes.
 - Activate the `V2-GAP`: the session credential resolver enriches the org
@@ -238,8 +238,34 @@ into the same event shape Telegram emits
 { kind: "command", command: { name: "start", args: code } }
 ```
 
-`ChannelHost.handleStart` already consumes this shape and already treats
+`ChannelHost.redeemLinkCode` already consumes this shape and already treats
 an unlinked sender's first message as the link command. No host changes.
+
+### Pasted codes and the Settings card (2026-10-08)
+
+On 2026-10-08 a new user could not link. Settings → Connected accounts
+showed the bare code in large type, with `link <code>` only in the
+instructions below it. The user pasted the bare code into the bot DM. The
+transport reads only `link <code>` as a command, so the host answered every
+paste with the generic link instructions.
+
+Three changes close this:
+
+- `POST /api/me/identity-links/:provider/start` returns `replyText` when
+  the plugin declares `deliveryReply` (Slack: `link <code>`). The code panel
+  shows and copies that line, not the bare code.
+- Settings → Connected accounts renders the same `IdentityLinkBlock` as the
+  Integrations tile. Settings now offers "DM me" and "Find me by name", and
+  the Telegram deep link moved into the shared panel.
+- When an unlinked sender sends text with the exact minted code shape
+  (`LINK_CODE_RE`, 22 base64url characters), the host tries it as a link
+  code. A miss replies "invalid or expired". Other text from an unlinked
+  sender still gets the link instructions. A linked sender never reaches
+  this check, so a code-shaped message from them stays a normal message.
+
+`packages/api/src/channels/slack-link-handshake.test.ts` runs the handshake
+with the real Slack plugin, transport, start route, and host, for both the
+reply line and a pasted bare code.
 
 This closes the exact gap the `slack-webhook.ts` docblock names. Update
 that docblock in the same commit.
