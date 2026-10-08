@@ -6,8 +6,8 @@
  * other tests (`thread-tree.test.ts`) cover pure grouping/status logic;
  * this one needs a render since the behavior is a hook call + navigation.
  */
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
@@ -85,6 +85,49 @@ vi.mock("~/stores/stream", async (importOriginal) => ({
 import { ThreadTree } from "./thread-tree";
 
 describe("ThreadTree — new thread affordance", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  it("creates a thread inside a collapsed project and expands it", async () => {
+    const key = "valet:thread-projects:user-1:team-runtime";
+    localStorage.setItem(key, JSON.stringify({ projects: [{ id: "xset", name: "XSET", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
+    render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    await userEvent.click(screen.getByRole("button", { name: "New thread in XSET" }));
+    expect(createThreadMutateAsync).toHaveBeenCalledOnce();
+    const saved = JSON.parse(localStorage.getItem(key) ?? "null");
+    expect(saved.assignments["thread-new"]).toBe("xset");
+    expect(saved.projects[0].collapsed).toBe(false);
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("does not navigate across a workspace switch during creation", async () => {
+    const key = "valet:thread-projects:user-1:team-runtime";
+    localStorage.setItem(key, JSON.stringify({ projects: [{ id: "xset", name: "XSET", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
+    let finish: (thread: { id: string; title: null; createdAt: number }) => void = () => {};
+    createThreadMutateAsync.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const view = render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    await userEvent.click(screen.getByRole("button", { name: "New thread in XSET" }));
+    view.rerender(<TooltipProvider><ThreadTree sessionId="another-runtime" /></TooltipProvider>);
+    await act(async () => finish({ id: "thread-new", title: null, createdAt: 1 }));
+    expect(navigate).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(key) ?? "null").assignments["thread-new"]).toBe("xset");
+    expect(localStorage.getItem("valet:thread-projects:user-1:another-runtime")).toBeNull();
+  });
+
+  it("keeps the project unchanged and shows retry guidance if creation fails", async () => {
+    const key = "valet:thread-projects:user-1:team-runtime";
+    const original = JSON.stringify({ projects: [{ id: "xset", name: "XSET", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false });
+    localStorage.setItem(key, original);
+    createThreadMutateAsync.mockRejectedValueOnce(new Error("offline"));
+    render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    await userEvent.click(screen.getByRole("button", { name: "New thread in XSET" }));
+    expect(screen.getByRole("alert").textContent).toContain("Try again");
+    expect(localStorage.getItem(key)).toBe(original);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("disables the personal runtime query when an explicit session is supplied", () => {
     render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
     expect(runtimeInfo).toHaveBeenLastCalledWith(undefined);

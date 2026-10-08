@@ -112,3 +112,12 @@ ChatContainer (orchestrator)
 
 The first version scans authorized candidate metadata before paging. Activity and pull-request enrichment runs only for returned rows.
 This limits response size and enrichment work, but does not bound candidate metadata reads. Unpaged API callers and archived history keep their existing response behavior.
+
+
+## Start a thread in a project
+
+Each project folder has a visible plus button, including when collapsed.
+The button creates a thread with workspace defaults and assigns it to that project using existing sidebar preferences.
+Creation expands the project, opens the thread, and focuses the composer.
+If creation fails, the project stays unchanged and the sidebar shows retry guidance.
+Switching workspaces while creation is pending must not navigate to the previous workspace's thread.
