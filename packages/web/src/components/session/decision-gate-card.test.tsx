@@ -340,6 +340,22 @@ describe("DecisionGateCard — long request layout", () => {
     expect(heading.className).toContain("line-clamp-3");
   });
 
+  it("resets a scrolled title before restoring its clamp", async () => {
+    mockTitleLayout({ scrollHeight: 592, clientHeight: 68 });
+    const user = userEvent.setup();
+    renderCard(gate({ title: "a".repeat(1_000) }));
+
+    const heading = screen.getByRole("heading");
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    heading.scrollTop = 392;
+    expect(heading.scrollTop).toBe(392);
+
+    await user.click(screen.getByRole("button", { name: "Show less" }));
+
+    expect(heading.scrollTop).toBe(0);
+    expect(heading.className).toContain("line-clamp-3");
+  });
+
   it("offers full-title recovery for an unconstrained approval title", async () => {
     mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
     const user = userEvent.setup();

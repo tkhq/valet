@@ -310,7 +310,10 @@ function DecisionGateTitle({ id, title }: { id: string; title: string }) {
           className="-ml-2 mt-0.5"
           aria-controls={id}
           aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => {
+            if (expanded && heading.current) heading.current.scrollTop = 0;
+            setExpanded((value) => !value);
+          }}
         >
           {expanded ? "Show less" : "Show more"}
         </Button>
