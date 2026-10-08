@@ -14,6 +14,8 @@ const ENGINE_TABLES = [
   "engine_sessions",
   "engine_suspended_turns",
   "engine_threads",
+  "engine_wakeups",
+  "engine_leases",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -38,7 +40,7 @@ describe("applyEngineMigrations", () => {
     await db.close();
   });
 
-  it("creates all 10 engine_* tables", async () => {
+  it("creates all 12 engine_* tables", async () => {
     for (const table of ENGINE_TABLES) {
       expect(await tableExists(db, table), `expected table ${table} to exist`).toBe(true);
     }

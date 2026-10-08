@@ -222,3 +222,45 @@ CREATE TABLE "engine_threads" (
 CREATE INDEX "engine_threads_session" ON "engine_threads" ("session_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "engine_threads_session_key" ON "engine_threads" ("session_id","key");
+--> statement-breakpoint
+CREATE TABLE "engine_wakeups" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"thread_id" text NOT NULL,
+	"kind" text NOT NULL,
+	"status" text NOT NULL,
+	"reason" text NOT NULL,
+	"command" text,
+	"prompt" text,
+	"exec_id" text,
+	"lease_id" text,
+	"fire_at" bigint,
+	"deadline_at" bigint,
+	"exit_code" integer,
+	"cause" text,
+	"log_offset" bigint NOT NULL DEFAULT 0,
+	"log_tail" text NOT NULL DEFAULT '',
+	"event_count" integer NOT NULL DEFAULT 0,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	"ended_at" bigint
+);
+--> statement-breakpoint
+CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status");
+--> statement-breakpoint
+CREATE INDEX "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at");
+--> statement-breakpoint
+CREATE TABLE "engine_leases" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"sandbox_id" text,
+	"owner_kind" text NOT NULL,
+	"owner_id" text,
+	"reason" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"deadline_at" bigint NOT NULL,
+	"released_at" bigint,
+	"release_cause" text
+);
+--> statement-breakpoint
+CREATE INDEX "engine_leases_active" ON "engine_leases" ("session_id") WHERE "released_at" IS NULL;
