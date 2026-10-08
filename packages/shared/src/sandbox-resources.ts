@@ -1,3 +1,5 @@
+import { parseResourceQuantity } from "./resource-quantity.js";
+
 /**
  * Platform CPU ceiling for one sandbox.
  *
@@ -15,4 +17,62 @@ export function isValidSandboxCpu(value: unknown): value is number {
 /** Human-readable range generated from the shared ceiling. */
 export function sandboxCpuRange(): string {
   return `greater than 0 and at most ${MAX_SANDBOX_CPU}`;
+}
+
+/** Scratch caps a deployment sets. `max` undefined means scratch is disabled. */
+export interface ScratchCaps {
+  max?: string;
+  agentMax?: string;
+}
+
+export type ScratchSource = "task" | "prebuild" | "saved" | "create";
+export type ScratchRefusalReason = "invalid" | "disabled" | "deploy_cap" | "agent_cap";
+
+export const MIN_SCRATCH_BYTES = 2 ** 30;
+
+export class ScratchRequestError extends Error {
+  readonly code = "scratch_refused";
+  constructor(readonly reason: ScratchRefusalReason, message: string) {
+    super(message);
+    this.name = "ScratchRequestError";
+  }
+}
+
+export function isScratchRequestError(err: unknown): err is ScratchRequestError {
+  return err instanceof ScratchRequestError;
+}
+
+/**
+ * One validation for every scratch source (spec INV-4). Refuses, never
+ * clamps. The refusal text names the knob and the corrective action.
+ */
+export function validateScratchRequest(value: unknown, source: ScratchSource, caps: ScratchCaps): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  const bytes = text ? parseResourceQuantity(text) : null;
+  if (bytes === null || bytes < MIN_SCRATCH_BYTES) {
+    throw new ScratchRequestError(
+      "invalid",
+      `scratch "${String(value)}" is not a Kubernetes quantity of at least 1Gi. Use a form like "200Gi".`,
+    );
+  }
+  const maxBytes = caps.max ? parseResourceQuantity(caps.max) : null;
+  if (maxBytes === null || maxBytes <= 0) {
+    throw new ScratchRequestError("disabled", "scratch is not enabled on this deployment. Ask an admin to set sandbox.scratchMax.");
+  }
+  if (bytes > maxBytes) {
+    throw new ScratchRequestError(
+      "deploy_cap",
+      `scratch ${text} exceeds the ${caps.max} deploy cap (sandbox.scratchMax). Request at most ${caps.max}, or ask an admin to raise the cap.`,
+    );
+  }
+  if (source === "task") {
+    const agentBytes = caps.agentMax ? parseResourceQuantity(caps.agentMax) : null;
+    if (agentBytes !== null && bytes > agentBytes) {
+      throw new ScratchRequestError(
+        "agent_cap",
+        `scratch ${text} exceeds the ${caps.agentMax} agent cap (sandbox.scratchAgentMax). Declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.`,
+      );
+    }
+  }
+  return text;
 }
