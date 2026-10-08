@@ -46,7 +46,7 @@ import {
   useReplaceSandbox,
   useMarkThreadsRead,
   useSetThreadArchived,
-  useThreads,
+  useSidebarThreads,
   useThreadSearch,
 } from "~/api/queries";
 import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
@@ -237,7 +237,7 @@ export function ThreadTree({ sessionId: override, showChildren = true }: ThreadT
 
   if (!sessionId) return <ThreadTreeWaiting />;
 
-  return <ThreadTreeInner sessionId={sessionId} showChildren={showChildren} />;
+  return <ThreadTreeInner key={sessionId} sessionId={sessionId} showChildren={showChildren} />;
 }
 
 /**
@@ -284,7 +284,35 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setProjectDialog(false);
     setProjectName("");
   }
-  const threadsQ = useThreads(sessionId);
+  const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
+  const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
+  const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
+  // Seed pending gates from REST for ourselves — the tree must not depend
+  // on a SessionView being mounted for the same session. Live updates
+  // arrive via the wire (`gate.*` frames); the record's identity only
+  // changes when a gate opens or resolves, so the derived set is cheap.
+  usePendingGatesSeed(sessionId);
+  const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
+  const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
+
+  const fixedIds = [...new Set([...gatedThreadIds, ...projects.value.pinned, ...Object.keys(projects.value.assignments).filter(id =>
+    projects.value.grouped && projects.value.projects.some(project => project.id === projects.value.assignments[id]))])].sort();
+  const threadsQ = useSidebarThreads(sessionId, { sort: sortMode, origin: originFilter, fixedIds, threadId: search.thread });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const target = moreRef.current;
+    if (!target || !threadsQ.hasNextPage || threadsQ.isFetching || threadsQ.isError || typeof IntersectionObserver === "undefined") return;
+    let requested = false;
+    const observer = new IntersectionObserver(entries => {
+      if (!requested && entries.some(entry => entry.isIntersecting)) {
+        requested = true;
+        void threadsQ.fetchNextPage();
+      }
+    }, { root: scrollRef.current });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [threadsQ.hasNextPage, threadsQ.isFetching, threadsQ.isError, threadsQ.fetchNextPage]);
   const markRead = useMarkThreadsRead(sessionId);
   const childrenQ = useChildWork(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
@@ -302,36 +330,29 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
   const navigate = useNavigate({ from: "/chat" });
 
-  const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
-  const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
   const threads = useMemo(
     () => sortThreads((threadsQ.data?.threads ?? []).filter((thread) => !isAppAssistantThread(thread)), sortMode),
     [threadsQ.data, sortMode],
   );
   // Both the sidebar and SessionView use this creation-order default. Sort only changes row order.
-  const defaultId = defaultThreadId(threads);
+  const defaultId = threadsQ.data?.defaultThreadId ?? defaultThreadId(threads);
   const activeThreadId = search.thread ?? defaultId;
   const grouped = groupChildrenByThread(showChildren ? (childrenQ.error ? [] : flattenChildWork(childrenQ.data)) : []);
-
-  // Seed pending gates from REST for ourselves — the tree must not depend
-  // on a SessionView being mounted for the same session. Live updates
-  // arrive via the wire (`gate.*` frames); the record's identity only
-  // changes when a gate opens or resolves, so the derived set is cheap.
-  usePendingGatesSeed(sessionId);
-  const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
-  const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchSelectedId, setSearchSelectedId] = useState<string>();
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const debouncedSearch = useDebouncedValue(normalizedSearch, 250);
-  const contentSearch = useThreadSearch(sessionId, debouncedSearch, searchOpen);
+  const matchingProjects = projects.value.projects.filter(project => project.name.toLowerCase().includes(debouncedSearch));
+  const projectSearchIds = Object.keys(projects.value.assignments).filter(id => matchingProjects.some(project => project.id === projects.value.assignments[id]));
+  const contentSearch = useThreadSearch(sessionId, debouncedSearch, searchOpen, projectSearchIds);
   const contentMatchIds = new Set(
     debouncedSearch === normalizedSearch ? contentSearch.data?.threads.map((thread) => thread.id) : [],
   );
   const searching = !!normalizedSearch && (debouncedSearch !== normalizedSearch || contentSearch.isFetching);
-  const searchResults = threads.filter((thread) => {
+  const searchCandidates = [...new Map([...threads, ...(debouncedSearch === normalizedSearch ? contentSearch.data?.threads ?? [] : [])].map(thread => [thread.id, thread])).values()];
+  const searchResults = sortThreads(searchCandidates.filter(thread => !isAppAssistantThread(thread)), sortMode).filter((thread) => {
     const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
     return contentMatchIds.has(thread.id) || `${thread.title ?? ""} ${project?.name ?? ""}`.toLowerCase().includes(normalizedSearch);
   });
@@ -341,8 +362,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setSearchOpen(false);
     navigate({ search: (prev) => ({ ...prev, thread: threadId, child: undefined }) });
   }
-  const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
-  const originCounts = useMemo(() => bucketCounts(threads), [threads]);
+  const originCounts = threadsQ.data?.originCounts ?? bucketCounts(threads);
   const visible = originFilter === "all" ? threads : threads.filter((thread) => threadOriginBucket(thread) === originFilter);
   function selectOriginFilter(next: ThreadOriginBucket) {
     setOriginFilter(next);
@@ -520,7 +540,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
       {/* Plain overflow div, NOT the Radix ScrollArea — its viewport wraps
           content in a `display: table` div that sizes to intrinsic content
           width, which defeats row truncation within the fixed-width sidebar. */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
           <div className="flex items-center gap-1 px-3 py-2">
             <button onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-sm text-muted hover:text-ink">Projects {threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
@@ -568,7 +588,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             </div>
           )}
           {threadsQ.error && (
-            <div className="px-4 py-3 text-sm text-danger-500">Failed to load threads</div>
+            <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load threads. <button type="button" onClick={() => void (threadsQ.isFetchNextPageError ? threadsQ.fetchNextPage() : threadsQ.refetch())} className="underline">Retry</button></div>
           )}
           {visible.some((thread) => projects.value.pinned.includes(thread.id)) && <section aria-label="Pinned"><h2 className="px-4 pb-1 pt-3 text-xs font-medium text-muted">Pinned</h2>{visible.filter((thread) => projects.value.pinned.includes(thread.id)).map(renderThread)}</section>}
           {projects.value.grouped && !projects.value.collapsed && projects.value.projects.map((project) => {
@@ -584,6 +604,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className="px-4 pb-1 pt-4 text-xs font-medium text-muted">Recents</h2>
           {visible.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id]))).map(renderThread)}
           </section>
+          {threadsQ.hasNextPage && <button ref={moreRef} type="button" disabled={threadsQ.isFetching} onClick={() => void threadsQ.fetchNextPage()} className="px-4 py-2 text-xs text-moss">{threadsQ.isFetchingNextPage ? "Loading threads…" : "Load more threads"}</button>}
         </nav>
         {showChildren && childrenQ.isLoading && <p className="px-4 py-2 text-xs text-muted">Loading work…</p>}
         {showChildren && childrenQ.error && <p className="px-4 py-2 text-xs text-danger-500">Could not load work. <button onClick={() => void childrenQ.refetch()} className="underline">Retry</button></p>}

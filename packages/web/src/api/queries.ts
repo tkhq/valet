@@ -5,6 +5,8 @@
  * on mutations).
  */
 import {
+  useInfiniteQuery,
+  type InfiniteData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -27,6 +29,7 @@ import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListThreadsResponse,
+  ThreadSummary,
   PatchIdentityLinkRequest,
   PatchSessionResponse,
   PatchThreadResponse,
@@ -50,6 +53,7 @@ export const qk = {
     ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
+  threadPages: (id: string, options?: object) => ["sessions", id, "threads", "pages", ...(options ? [options] : [])] as const,
   threadSearch: (id: string, query: string) => ["sessions", id, "threads", "search", query] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
   messages: (id: string, threadId?: string) =>
@@ -70,6 +74,10 @@ export function threadListFilters(sessionId: string) {
     if (queryKey[0] !== "sessions" || queryKey[2] !== "threads") return false;
     if (queryKey[1] === sessionId) return true;
     const data = state.data;
+    if (data && typeof data === "object" && "pages" in data && Array.isArray(data.pages)) {
+      return data.pages.some(page => page && typeof page === "object" && "threads" in page && Array.isArray(page.threads)
+        && page.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
+    }
     return Boolean(data && typeof data === "object" && "threads" in data && Array.isArray(data.threads)
       && data.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
   } };
@@ -89,16 +97,36 @@ export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSession
 export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>, selectedThreadId?: string) {
   return useQuery<ListThreadsResponse>({
     queryKey: selectedThreadId ? [...qk.threads(id), "selected", selectedThreadId] : qk.threads(id),
-    queryFn: () => api.listThreads(id, { threadId: selectedThreadId }),
+    queryFn: () => api.listThreads(id, { threadId: selectedThreadId, limit: 10 }),
     enabled: !!id,
     ...opts,
   });
 }
 
-export function useThreadSearch(id: string, query: string, enabled: boolean) {
+export function useSidebarThreads(id: string, options: { sort: string; origin: string; fixedIds: string[]; threadId?: string }) {
+  const query = useInfiniteQuery({
+    queryKey: qk.threadPages(id, options),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.listThreads(id, { ...options, limit: 10, cursor: pageParam }),
+    getNextPageParam: page => page.nextCursor,
+    enabled: !!id,
+  });
+  const pages = query.data?.pages;
+  return { ...query, data: pages ? {
+    ...pages[0], threads: [...new Map(pages.flatMap(page => page.threads).map(thread => [thread.id, thread])).values()],
+  } : undefined };
+}
+
+export function mapThreadData(current: ListThreadsResponse | InfiniteData<ListThreadsResponse> | undefined, change: (thread: ThreadSummary) => ThreadSummary) {
+  if (!current) return current;
+  if ("pages" in current) return { ...current, pages: current.pages.map(page => ({ ...page, threads: page.threads.map(change) })) };
+  return { ...current, threads: current.threads.map(change) };
+}
+
+export function useThreadSearch(id: string, query: string, enabled: boolean, fixedIds: string[] = []) {
   return useQuery<ListThreadsResponse>({
-    queryKey: qk.threadSearch(id, query),
-    queryFn: () => api.listThreads(id, { q: query }),
+    queryKey: [...qk.threadSearch(id, query), fixedIds],
+    queryFn: () => api.listThreads(id, { q: query, fixedIds }),
     enabled: enabled && !!id && !!query,
     staleTime: 0,
   });
@@ -298,13 +326,9 @@ export function useSetThreadModel(sessionId: string) {
       await qc.cancelQueries(threadListFilters(sessionId));
       // PATCH confirms the pin. Update only that field so newer activity
       // and title updates survive a slower model save.
-      qc.setQueriesData<ListThreadsResponse>(
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
         threadListFilters(sessionId),
-        (current) => current && ({
-          ...current,
-          threads: current.threads.map((thread) =>
-            thread.id === saved.id ? { ...thread, model: saved.model } : thread),
-        }),
+        (current) => mapThreadData(current, thread => thread.id === saved.id ? { ...thread, model: saved.model } : thread),
       );
     },
   });
@@ -331,12 +355,11 @@ export function useMarkThreadsRead(sessionId: string) {
     mutationFn: ({ threadIds }) => api.markThreadsRead(sessionId, threadIds),
     onMutate: ({ threadIds }) => {
       const at = Date.now();
-      const ids = threadIds ?? qc.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads.map(thread => thread.id);
-      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
-        ...current,
-        threads: current.threads.map((thread) =>
-          (ids ? ids.includes(thread.id) : thread.sessionId === sessionId) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread),
-      }));
+      const ids = new Set(threadIds ?? qc.getQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>({ queryKey: qk.threads(sessionId) })
+        .flatMap(([, data]) => !data ? [] : "pages" in data ? data.pages.flatMap(page => page.threads) : data.threads)
+        .map(thread => thread.id));
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread =>
+        (ids.has(thread.id) || (!threadIds && thread.sessionId === sessionId)) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread));
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["workspace-waiting"] });
@@ -460,14 +483,8 @@ export function useSendPrompt(sessionId: string) {
     // Socket events update other viewers; a later thread-list fetch reconciles
     // this cache with the persisted value.
     onSuccess: (data, { text }) => {
-      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
-        ...current,
-        threads: current.threads.map((thread) =>
-          thread.id === data.threadId
-            ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) }
-            : thread,
-        ),
-      }));
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread => thread.id === data.threadId
+        ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) } : thread));
       if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
     },
   });

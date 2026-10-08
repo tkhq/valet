@@ -6,10 +6,10 @@
  * owns the socket lifecycle.
  */
 import { useEffect } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import type { ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
-import { qk, threadListFilters } from "./queries";
+import { qk, threadListFilters, mapThreadData } from "./queries";
 
 const MAX_RETRY_MS = 8_000;
 const INITIAL_RETRY_MS = 500;
@@ -141,14 +141,10 @@ export function useSessionWebSocket(sessionId: string) {
             void qc.invalidateQueries(threadListFilters(sessionId));
           }
           if (wire.type === "thread.activity") {
-            qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
-              ...current,
-              threads: current.threads.map((thread) =>
-                thread.id === wire.threadId
-                  ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) }
-                  : thread,
-              ),
-            }));
+            qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
+              thread.id === wire.threadId ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) } : thread));
+            const matching = threadListFilters(sessionId);
+            void qc.invalidateQueries({ predicate: query => query.queryKey[3] === "pages" && matching.predicate(query) });
           }
           // Reset backoff only after receiving init — confirms the session
           // is valid and the connection is healthy. Resetting in onopen

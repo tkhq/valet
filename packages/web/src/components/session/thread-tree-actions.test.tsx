@@ -32,6 +32,9 @@ let archivedThreads: ThreadSummary[] = [];
 let children: ChildWorkSummary[] = [];
 let hasNextPage = false;
 const fetchNextPage = vi.fn();
+let hasMoreThreads = false;
+let threadPageError = false;
+const fetchMoreThreads = vi.fn();
 let pendingGates: Record<string, DecisionGate> = {};
 let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
@@ -52,7 +55,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useThreadSearch: () => ({ data: { threads: searchMatches }, isFetching: false, isError: false }),
-    useThreads: () => ({ data: { threads }, isLoading: false, error: null }),
+    useSidebarThreads: () => ({ data: { threads }, isLoading: false, error: threadPageError ? new Error("network") : null,
+      hasNextPage: hasMoreThreads, fetchNextPage: fetchMoreThreads, isFetchNextPageError: threadPageError, isError: threadPageError, isFetching: false }),
     useSession: () => ({
       data: sessionModel ? { model: sessionModel } : undefined,
       isLoading: false,
@@ -169,10 +173,57 @@ beforeEach(() => {
   searchMatches = [];
   children = [];
   hasNextPage = false;
+  hasMoreThreads = false;
+  threadPageError = false;
+  fetchMoreThreads.mockClear();
   pendingGates = {};
   sessionModel = undefined;
   models = [];
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
+});
+
+describe("ThreadTree progressive loading", () => {
+  it("keeps loaded rows and offers explicit load and retry actions", async () => {
+    hasMoreThreads = true;
+    const rendered = renderTree();
+    await userEvent.click(screen.getByRole("button", { name: "Load more threads" }));
+    expect(fetchMoreThreads).toHaveBeenCalledTimes(1);
+    threadPageError = true;
+    rendered.rerender(<TooltipProvider><ThreadTree /></TooltipProvider>);
+    expect(screen.getByText("Plan the launch")).toBeTruthy();
+    await userEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Retry" }));
+    expect(fetchMoreThreads).toHaveBeenCalledTimes(2);
+  });
+
+  it("requests one next page when the scroll sentinel intersects", () => {
+    hasMoreThreads = true;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    let intersect: (() => void) | undefined;
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: IntersectionObserverCallback) {
+        intersect = () => callback([{
+          isIntersecting: true, intersectionRatio: 1, time: 0, target: document.body,
+          boundingClientRect: new DOMRect(), intersectionRect: new DOMRect(), rootBounds: null,
+        }], this);
+      }
+      observe = observe;
+      disconnect = disconnect;
+      unobserve = vi.fn();
+      takeRecords = () => [];
+      root = null;
+      rootMargin = "0px";
+      thresholds = [0];
+    });
+    try {
+      const rendered = renderTree();
+      expect(observe).toHaveBeenCalledWith(screen.getByRole("button", { name: "Load more threads" }));
+      act(() => { intersect?.(); intersect?.(); });
+      expect(fetchMoreThreads).toHaveBeenCalledTimes(1);
+      rendered.unmount();
+      expect(disconnect).toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
 });
 
 describe("ThreadTree — title-first sidebar", () => {

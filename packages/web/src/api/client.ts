@@ -797,11 +797,16 @@ export const api = {
     request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string; threadId?: string }) => {
+  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string; threadId?: string; limit?: number; cursor?: string; sort?: string; origin?: string; fixedIds?: string[] }) => {
     const params = new URLSearchParams();
     if (opts?.archived) params.set("archived", "1");
     if (opts?.q) params.set("q", opts.q);
     if (opts?.threadId) params.set("threadId", opts.threadId);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.cursor) params.set("cursor", opts.cursor);
+    if (opts?.sort) params.set("sort", opts.sort);
+    if (opts?.origin) params.set("origin", opts.origin);
+    for (const id of opts?.fixedIds ?? []) params.append("fixedId", id);
     const query = params.toString();
     return request<ListThreadsResponse>(
       "GET",
