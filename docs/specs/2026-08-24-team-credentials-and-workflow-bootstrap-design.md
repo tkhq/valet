@@ -347,3 +347,16 @@ GitHub has an exception. Its policy paths do not request permission to borrow an
 A shared-account approval applies to later actions for that service in the same thread or workflow run. It can cover later requests from other teammates in that scope. The approval card states this scope before the owner answers. A workflow account owner sees Allow for this run and Deny, without action-level or persistent workflow permission choices. This approval does not change the service's other action policies. Grant scope and credential resolution remain unchanged by this copy update.
 
 Regression coverage migrates an encrypted GitHub credential reference. It verifies that the sharer still resolves the live source credential and that another actor receives no GitHub borrow gate.
+
+
+### Account approval during unattended workflow discovery
+
+An unattended team workflow can request the account owner's approval before authenticated tool discovery.
+The engine session ID must name a workflow run and node, with an optional valid iteration.
+An ordinary application session with the same ID does not qualify.
+The stored run must belong to the exact team, and its definition and team must belong to the current organization.
+The caller must be that team's synthetic actor. The stored run actor must be absent or match that actor.
+
+Approval eligibility and subsequent credential borrowing use the same durable ownership check.
+Only the account owner can approve. Existing team membership, share generation, and workflow grant scope checks still apply.
+Tool nodes retain their run-only approval scope. Workflow download, origin, and private-thread visibility rules remain unchanged.
