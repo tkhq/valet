@@ -25,6 +25,7 @@ import type {
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
   DeliverIdentityLinkResponse,
+  VerifyIdentityLinkResponse,
   GetSessionResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
@@ -622,6 +623,18 @@ export function useDeliverIdentityLink() {
     { provider: string; member?: DeliverIdentityLinkRequest }
   >({
     mutationFn: ({ provider, member }) => api.deliverIdentityLink(provider, member),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.identityLinks() });
+    },
+  });
+}
+
+/** Enters the code the bot DMed. Success links the account, so the link
+ * list refetches and the card flips to "Linked". */
+export function useVerifyIdentityLink() {
+  const qc = useQueryClient();
+  return useMutation<VerifyIdentityLinkResponse, Error, { provider: string; code: string }>({
+    mutationFn: ({ provider, code }) => api.verifyIdentityLink(provider, code),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },

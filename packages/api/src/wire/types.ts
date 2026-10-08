@@ -4012,21 +4012,27 @@ export interface DeliverIdentityLinkRequest {
 }
 
 /** 200 body of `POST /api/me/identity-links/:provider/deliver`: the bot DMed
- * the target account an anchor message. The DM carries NO code — `code`
- * exists only in this authenticated response, and the user carries it into
- * the chat themselves. That trip is the ownership proof. */
+ * the target account a link code. The code is NOT in this response: the
+ * person reads it in the DM and enters it through `POST .../verify`. That
+ * trip proves they control the account it went to. */
 export interface DeliverIdentityLinkResponse {
   delivered: true;
   /** Provider-side account the DM went to (Slack: the `U…` user id). */
   externalId: string;
   displayName?: string;
-  /** The code to send back to the bot. Shown only here, never DMed. */
-  code: string;
-  /** The exact reply to send back (Slack: `link <code>` with the real
-   * code). The card renders it verbatim as one copyable line; the
-   * transport's parser accepts it unchanged. */
-  replyText: string;
   expiresInSeconds: number;
+}
+
+/** Body of `POST /api/me/identity-links/:provider/verify`. */
+export interface VerifyIdentityLinkRequest {
+  /** The code the bot DMed in the deliver flow. */
+  code: string;
+}
+
+/** 200 body of `POST .../verify`: the DMed account is now linked. */
+export interface VerifyIdentityLinkResponse {
+  linked: true;
+  externalId: string;
 }
 
 /** 202 body of `POST .../deliver`: the caller's email names nobody in the

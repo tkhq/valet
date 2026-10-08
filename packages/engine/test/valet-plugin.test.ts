@@ -610,22 +610,22 @@ describe("validateValetPlugin identityLink", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("accepts a non-empty deliveryDm string with a deliveryReply function", () => {
+  it("accepts a deliveryDm function with a deliveryReply function", () => {
     const result = validateValetPlugin({
       name: "fixture",
       version: "0.1.0",
       identityLink: {
         provider: "slack",
         instructions: "DM the Valet app: link <code>",
-        deliveryDm: "Reply with the command shown in Valet.",
+        deliveryDm: (ctx: { code: string }) => `Your Valet link code is ${ctx.code}.`,
         deliveryReply: (ctx: { code: string }) => `link ${ctx.code}`,
       },
     });
     expect(result.ok).toBe(true);
   });
 
-  it("rejects a function-valued or empty deliveryDm (pre-string-contract plugins)", () => {
-    for (const deliveryDm of [() => "dm", ""]) {
+  it("rejects a string deliveryDm (the DM must carry the code)", () => {
+    for (const deliveryDm of ["Reply with the command shown in Valet.", ""]) {
       const result = validateValetPlugin({
         name: "fixture",
         version: "0.1.0",

@@ -249,7 +249,18 @@ instructions below it. The user pasted the bare code into the bot DM. The
 transport reads only `link <code>` as a command, so the host answered every
 paste with the generic link instructions.
 
-Three changes close this:
+The "DM me" and "Find me by name" flows now run in v1's direction. The
+bot DMs a code to the picked account, and the person types it into Valet
+(`POST /api/me/identity-links/:provider/verify`). The v2 port had reversed
+this: its DM carried no code, and the person carried `link <code>` from
+Valet into Slack. The code row records the account it was DMed to
+(`identity_link_codes.external_id`) and the requesting user. Only that
+user can redeem it, and only through verify. `consumeLinkCode`, the chat
+path, skips bound codes. A picked member who replies with the code from
+Slack therefore links nothing. That reply was the takeover the codeless DM
+(#372) prevented.
+
+Three more changes close this:
 
 - `POST /api/me/identity-links/:provider/start` returns `replyText` when
   the plugin declares `deliveryReply` (Slack: `link <code>`). The code panel

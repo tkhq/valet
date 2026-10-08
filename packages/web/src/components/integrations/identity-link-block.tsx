@@ -1,37 +1,30 @@
 /**
- * Account pairing for an org-provided service tile (`/integrations`).
- *
- * An org-provided service ("org" connect mode) has no token for the member
- * to paste — the org credential powers the integration. The member's own
- * step is pairing: link their provider account to their Valet account
- * through the identity-link code flow. Two ways in when the provider can
- * DM (`codeDelivery`):
+ * Account pairing: link a provider account to the Valet user. Settings →
+ * Connected accounts and the org-provided Integrations tile both render it.
+ * Two ways in when the provider can DM (`codeDelivery`), as in v1:
  *
  *   DM me on <title> → `POST /api/me/identity-links/:provider/deliver`. The
  *                      server finds the member by their Valet email and DMs
- *                      them a codeless anchor message; the card shows the
- *                      exact reply line (`replyText`) to send back. The code
- *                      stays in the authenticated session — carrying it into
- *                      the chat is the ownership proof, so the DM must never
- *                      hold it.
+ *                      them a link code. The person enters that code here
+ *                      (`POST .../verify`). Reading the DM proves the
+ *                      provider account; entering the code here proves the
+ *                      Valet user. The code is bound to both and is never
+ *                      redeemable from chat.
  *   Find me by name  → `GET .../members` typeahead; picking a member DMs
  *                      that account. For users whose provider email differs
  *                      from their Valet email. Requires `memberSearch`.
  *
- * The show-code flow (`POST .../start`: the card shows the code and the
- * provider's delivery instructions) is never a third button. It is the
- * single "Link account" flow for providers without `codeDelivery`
- * (Telegram), and the automatic fallback when the email lookup 202s and
- * the provider has no member directory.
+ * With `offerOAuth`, "Sign in with <title>" starts the provider's OAuth
+ * connect, which links the account with no code.
+ *
+ * The show-code flow (`POST .../start`: the card shows the line to send the
+ * bot) is never a third button. It is the single "Link account" flow for
+ * providers without `codeDelivery` (Telegram), and the automatic fallback
+ * when the email lookup 202s and the provider has no member directory.
  *
  * The block renders only for providers `GET /api/me/identity-links` lists,
  * i.e. plugins that declare `identityLink`. Once a code is out, the block
- * polls the link list so the tile flips to "Linked" the moment the user
- * completes the flow in the provider app.
- *
- * The same flow lives on Settings → Connected accounts (`LinkAccountCard`)
- * with notify controls; this block is the tile-sized version so the
- * integrations page offers the pairing where members look for it.
+ * polls the link list so it flips to "Linked" when the flow completes.
  */
 import { useEffect, useState, type ReactNode } from "react";
 import type {
@@ -48,6 +41,7 @@ import {
   useLinkMembers,
   useStartIdentityLink,
   useUnlinkIdentity,
+  useVerifyIdentityLink,
 } from "~/api/queries";
 import { ApiError } from "~/api/client";
 import { errorText } from "~/lib/error-text";
@@ -109,6 +103,55 @@ function CodePanel({
       {note !== undefined && <p className="text-xs leading-relaxed text-muted">{note}</p>}
       <ExpiryLine seconds={expiresInSeconds} />
     </div>
+  );
+}
+
+/** After the bot DMs a code: the person types it here, as in v1. Reading
+ * the DM proves the provider account; entering the code here proves the
+ * Valet user. A match links the account and the card flips to "Linked". */
+function EnterCodeForm({
+  provider,
+  recipient,
+  title,
+  expiresInSeconds,
+}: {
+  provider: string;
+  recipient: string;
+  title: string;
+  expiresInSeconds: number;
+}) {
+  const [code, setCode] = useState("");
+  const verify = useVerifyIdentityLink();
+  return (
+    <form
+      className="space-y-1 rounded-md border border-line bg-ink-wash p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        verify.mutate({ provider, code: code.trim() });
+      }}
+    >
+      <p className="text-xs leading-relaxed text-muted">
+        We DMed <span className="font-medium text-ink">{recipient}</span> on {title}. Enter the code from that
+        message.
+      </p>
+      <div className="flex items-center gap-2">
+        <Input
+          type="text"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          placeholder="Link code"
+          aria-label={`${title} link code`}
+          autoFocus
+          autoComplete="one-time-code"
+          className="h-8 font-mono text-xs"
+        />
+        <Button type="submit" size="sm" disabled={verify.isPending || code.trim() === ""}>
+          {verify.isPending ? "Linking…" : "Link"}
+        </Button>
+      </div>
+      {verify.error && <p className="text-xs text-danger-500">{startErrorMessage(verify.error, title)}</p>}
+      <ExpiryLine seconds={expiresInSeconds} />
+    </form>
   );
 }
 
@@ -385,17 +428,10 @@ export function IdentityLinkBlock({
       {startError && <p className="text-xs text-danger-500">{startError}</p>}
       {fallbackNote && <p className="text-xs leading-relaxed text-muted">{fallbackNote}</p>}
       {delivery && (
-        <CodePanel
-          intro={
-            <p className="text-xs leading-relaxed text-muted">
-              We DMed{" "}
-              <span className="font-medium text-ink">
-                {delivery.displayName ? `@${delivery.displayName}` : "you"}
-              </span>{" "}
-              on {title}. Reply with:
-            </p>
-          }
-          value={delivery.replyText}
+        <EnterCodeForm
+          provider={link.provider}
+          recipient={delivery.displayName ? `@${delivery.displayName}` : "you"}
+          title={title}
           expiresInSeconds={delivery.expiresInSeconds}
         />
       )}

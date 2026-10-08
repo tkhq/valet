@@ -488,11 +488,26 @@ function deliverySlackPlugin(): { plugin: ValetPlugin; transport: FakeDeliverySl
     identityLink: {
       provider: "slack",
       instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-      deliveryDm: "Reply to this message with the command shown in Valet.",
+      deliveryDm: ({ code }) => `Your Valet link code is ${code}. Enter it in Valet.`,
       deliveryReply: ({ code }) => `link ${code}`,
     },
   };
   return { plugin, transport };
+}
+
+/** The code the fake transport DMed, read the way a person reads the DM. */
+function dmCode(transport: FakeDeliverySlackTransport): string {
+  const match = /link code is (\S+)\./.exec(transport.sent[0]?.message.markdown ?? "");
+  if (!match?.[1]) throw new Error("no code in the DM");
+  return match[1];
+}
+
+async function verify(base: string, code: string): Promise<Response> {
+  return fetch(`${base}/api/me/identity-links/slack/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
 }
 
 /** Boots with the delivery-capable slack fake running. */
@@ -544,7 +559,8 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
     expect(booted.transport.sent).toHaveLength(0);
   });
 
-  it("200s, DMs the codeless anchor, and returns the code + reply line only in the response", async () => {
+  // v1's flow: the bot DMs the code and the person types it into Valet.
+  it("200s, DMs the code, and keeps it out of the response", async () => {
     const booted = await bootWithDeliverySlack();
     api = booted.api;
     // The local-auth stub user is local-user <local@dev>.
@@ -552,30 +568,37 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
 
     const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, { method: "POST" });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as DeliverIdentityLinkResponse;
-    expect(body).toMatchObject({
-      delivered: true,
-      externalId: "U777",
-      displayName: "conner",
-      expiresInSeconds: 600,
-    });
-    // The card's copyable line carries the real code, built by deliveryReply.
-    expect(body.replyText).toBe(`link ${body.code}`);
-    // The DM is the declared anchor and MUST NOT contain the code — the
-    // code travelling web → user → chat is the ownership proof.
-    expect(booted.transport.sent).toHaveLength(1);
-    expect(booted.transport.sent[0]?.message.markdown).toBe(
-      "Reply to this message with the command shown in Valet.",
-    );
-    expect(booted.transport.sent[0]?.message.markdown).not.toContain(body.code);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ delivered: true, externalId: "U777", displayName: "conner", expiresInSeconds: 600 });
     // The DM went to the opened direct conversation, not a guessed key.
+    expect(booted.transport.sent).toHaveLength(1);
     expect(booted.transport.sent[0]?.conversationKey).toBe("slack:T1:D-U777:1700000000.000001");
-    // The response's code is the minted one — consuming it links the user.
-    const consumed = await consumeLinkCode(api.providers.db, "slack", body.code);
-    expect(consumed).toMatchObject({ userId: "local-user" });
+    const code = dmCode(booted.transport);
+    expect(JSON.stringify(body)).not.toContain(code);
+
+    // Entering the DMed code links the account the DM went to.
+    const verified = await verify(api.baseUrl, code);
+    expect(verified.status).toBe(200);
+    expect(await verified.json()).toEqual({ linked: true, externalId: "U777" });
+    const links = await (await fetch(`${api.baseUrl}/api/me/identity-links`)).json() as ListIdentityLinksResponse;
+    expect(links.links.find((l) => l.provider === "slack")).toMatchObject({ linked: true, externalId: "U777" });
   });
 
-  it("advertises codeDelivery:false and 404s deliver when deliveryReply is missing", async () => {
+  // The person a code was DMed to holds it. Redeeming it from chat would link
+  // THEIR account to the requester's Valet user, so chat never redeems it.
+  it("never redeems a DMed code from chat", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ externalId: "U888", displayName: "Pat" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await consumeLinkCode(api.providers.db, "slack", dmCode(booted.transport))).toBeNull();
+  });
+
+  it("advertises codeDelivery:false and 404s deliver when deliveryDm is missing", async () => {
     const transport = new FakeDeliverySlackTransport();
     const plugin: ValetPlugin = {
       name: "slack-user",
@@ -584,8 +607,7 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
       identityLink: {
         provider: "slack",
         instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-        deliveryDm: "Reply with the command shown in Valet.",
-        // deliveryReply deliberately absent — delivery must be off.
+        // deliveryDm deliberately absent — delivery must be off.
       },
     };
     api = await bootTestApi({ plugins: [plugin] });
@@ -642,8 +664,9 @@ describe("POST /api/me/identity-links/:provider/deliver", () => {
     expect(body).toMatchObject({ delivered: true, externalId: "U888", displayName: "Pat" });
     expect(booted.transport.sent).toHaveLength(1);
     expect(booted.transport.sent[0]?.conversationKey).toBe("slack:T1:D-U888:1700000000.000001");
-    const consumed = await consumeLinkCode(api.providers.db, "slack", body.code);
-    expect(consumed).toMatchObject({ userId: "local-user" });
+    // The code links the account it was DMed to, not the caller's email match.
+    const verified = await verify(api.baseUrl, dmCode(booted.transport));
+    expect(await verified.json()).toEqual({ linked: true, externalId: "U888" });
   });
 
   it("400s on a malformed JSON body", async () => {
@@ -762,11 +785,44 @@ import { CODE_TTL_MS } from "../channels/identity-links.js";
 import realSlackPlugin from "@valet/plugin-slack/plugin";
 
 describe("link-code TTL copy", () => {
-  it("the slack anchor DM names the same expiry CODE_TTL_MS enforces", () => {
-    // The DM string is static by design (no per-request data may flow into
-    // it), so this assertion is the tripwire that catches a TTL tune the
-    // copy missed.
+  it("the slack link-code DM names the same expiry CODE_TTL_MS enforces", () => {
+    // The tripwire that catches a TTL tune the copy missed.
     const minutes = CODE_TTL_MS / 60_000;
-    expect(realSlackPlugin.identityLink?.deliveryDm).toContain(`${minutes} minutes`);
+    expect(realSlackPlugin.identityLink?.deliveryDm?.({ code: "c0de" })).toContain(`${minutes} minutes`);
+  });
+});
+
+// ── POST /:provider/verify ───────────────────────────────────────────────────
+
+import { mintDeliveredLinkCode } from "../channels/identity-links.js";
+
+describe("POST /api/me/identity-links/:provider/verify", () => {
+  it("400s on a wrong code and links nothing", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    await mintDeliveredLinkCode(api.providers.db, "local-user", "slack", "U777");
+
+    const res = await verify(api.baseUrl, "not-the-code");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("invalid or expired");
+  });
+
+  // A code DMed for someone else's request is bound to that requester, so a
+  // signed-in user who sees it cannot link the account to themselves.
+  it("400s on a code another user requested", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    const code = await mintDeliveredLinkCode(api.providers.db, "someone-else", "slack", "U777");
+
+    const res = await verify(api.baseUrl, code);
+    expect(res.status).toBe(400);
+  });
+
+  it("400s on a shown code, which is redeemed only from chat", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    const start = (await (await fetch(`${api.baseUrl}/api/me/identity-links/slack/start`, { method: "POST" })).json()) as StartIdentityLinkResponse;
+
+    expect((await verify(api.baseUrl, start.code)).status).toBe(400);
   });
 });

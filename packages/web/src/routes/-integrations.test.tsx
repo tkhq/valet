@@ -243,6 +243,8 @@ const startLinkMutateAsync = vi.fn();
 const deliverLinkMutateAsync = vi.fn();
 const unlinkIdentityMutate = vi.fn();
 
+const verifyLinkMutate = vi.fn();
+
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
@@ -250,6 +252,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useIdentityLinks: () => ({ data: identityLinksData, isLoading: identityLinksLoading, error: null }),
     useStartIdentityLink: () => ({ mutateAsync: startLinkMutateAsync, isPending: false }),
     useDeliverIdentityLink: () => ({ mutateAsync: deliverLinkMutateAsync, isPending: false }),
+    useVerifyIdentityLink: () => ({ mutate: verifyLinkMutate, isPending: false, error: null }),
     useLinkMembers: (_provider: string, query: string, enabled: boolean) => ({
       data: enabled && query !== "" ? linkMembersData : undefined,
       isLoading: false,
@@ -1138,14 +1141,13 @@ describe("IntegrationsPage — org-provided pairing", () => {
     expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
   });
 
-  it("after the DM, the card shows the recipient, the exact reply line, and the expiry", async () => {
+  // v1's flow: the bot DMs the code, and the card asks for it.
+  it("after the DM, the card shows the recipient, a code box, and the expiry", async () => {
     identityLinksData = { links: [slackLink({ codeDelivery: true })] };
     deliverLinkMutateAsync.mockResolvedValue({
       delivered: true,
       externalId: "U777",
       displayName: "conner",
-      code: "VLT-1234",
-      replyText: "link VLT-1234",
       expiresInSeconds: 600,
     });
     render(<IntegrationsPage />);
@@ -1155,29 +1157,26 @@ describe("IntegrationsPage — org-provided pairing", () => {
     await waitFor(() => expect(screen.getByText(/We DMed/)).toBeTruthy());
     expect(deliverLinkMutateAsync).toHaveBeenCalledWith({ provider: "slack", member: undefined });
     expect(screen.getByText("@conner")).toBeTruthy();
-    // The full copyable reply line, not a bare code the transport ignores.
-    expect(screen.getByText("link VLT-1234")).toBeTruthy();
-    expect(screen.getByText(/Reply with:/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: "Slack link code" }), { target: { value: "VLT-1234" } });
+    fireEvent.click(screen.getByRole("button", { name: "Link" }));
+    expect(verifyLinkMutate).toHaveBeenCalledWith({ provider: "slack", code: "VLT-1234" });
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
   });
 
-  it("clears the reply line and stops waiting once the code expires", async () => {
+  it("clears the code box and stops waiting once the code expires", async () => {
     identityLinksData = { links: [slackLink({ codeDelivery: true })] };
     deliverLinkMutateAsync.mockResolvedValue({
       delivered: true,
       externalId: "U777",
       displayName: "conner",
-      code: "VLT-1234",
-      replyText: "link VLT-1234",
       expiresInSeconds: 1,
     });
     render(<IntegrationsPage />);
 
     fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
-    await waitFor(() => expect(screen.getByText("link VLT-1234")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Slack link code" })).toBeTruthy());
 
-    await waitFor(() => expect(screen.queryByText("link VLT-1234")).toBeNull(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Slack link code" })).toBeNull(), { timeout: 3000 });
     expect(screen.getByText("The code expired. Start again.")).toBeTruthy();
   });
 
@@ -1198,8 +1197,6 @@ describe("IntegrationsPage — org-provided pairing", () => {
       delivered: true,
       externalId: "U888",
       displayName: "Pat",
-      code: "X",
-      replyText: "link X",
       expiresInSeconds: 600,
     });
     fireEvent.click(screen.getByText("Pat"));

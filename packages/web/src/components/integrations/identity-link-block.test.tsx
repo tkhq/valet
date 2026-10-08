@@ -18,10 +18,15 @@ const unlinkReset = vi.fn(() => {
   unlinkError = null;
 });
 
+const deliverMutateAsync = vi.fn();
+const verifyMutate = vi.fn();
+let verifyError: Error | null = null;
+
 vi.mock("~/api/queries", () => ({
   useIdentityLinks: () => ({ data: { links: [] }, isLoading: false, error: null }),
   useStartIdentityLink: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
-  useDeliverIdentityLink: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+  useDeliverIdentityLink: () => ({ mutateAsync: deliverMutateAsync, isPending: false, error: null }),
+  useVerifyIdentityLink: () => ({ mutate: verifyMutate, isPending: false, error: verifyError }),
   useLinkMembers: () => ({ data: undefined, isLoading: false, isError: false, error: null }),
   useUnlinkIdentity: () => ({
     mutate: unlinkMutate,
@@ -138,5 +143,40 @@ describe("IdentityLinkBlock sign-in with OAuth", () => {
   it("hides the button when the deployment has no OAuth client", () => {
     render(<IdentityLinkBlock link={{ ...UNLINKED, oauthService: undefined }} title="Slack" offerOAuth />);
     expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
+  });
+});
+
+// v1's flow: the bot DMs a code, and the person types it into Valet.
+describe("IdentityLinkBlock DM me", () => {
+  const UNLINKED: IdentityLinkStatus = {
+    provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true,
+  };
+
+  beforeEach(() => {
+    verifyMutate.mockReset();
+    verifyError = null;
+    deliverMutateAsync.mockResolvedValue({
+      delivered: true, externalId: "U777", displayName: "ada", expiresInSeconds: 600,
+    });
+  });
+
+  it("asks for the DMed code and submits it to verify", async () => {
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
+
+    const input = await screen.findByRole("textbox", { name: "Slack link code" });
+    expect(screen.getByText(/We DMed/).textContent).toContain("@ada");
+    fireEvent.change(input, { target: { value: "  Ab3_dE-9fGh1jK2lMn4pQr " } });
+    fireEvent.click(screen.getByRole("button", { name: "Link" }));
+    expect(verifyMutate).toHaveBeenCalledWith({ provider: "slack", code: "Ab3_dE-9fGh1jK2lMn4pQr" });
+  });
+
+  it("shows the server's refusal for a wrong code", async () => {
+    verifyError = new ApiError(400, "POST /me/identity-links/slack/verify → 400", {
+      error: "That code is invalid or expired. Send yourself a new DM from this card.",
+    });
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
+    expect(await screen.findByText(/invalid or expired/)).toBeTruthy();
   });
 });

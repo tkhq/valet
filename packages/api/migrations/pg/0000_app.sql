@@ -434,7 +434,10 @@ CREATE TABLE "identity_link_codes" (
 	"provider" text NOT NULL,
 	"code_hash" text NOT NULL,
 	"expires_at" bigint NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	-- Set for a code the bot DMed to one provider account. Only the minting
+	-- user can redeem it, in the web app, and it links that account.
+	"external_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "identity_link_codes_provider" ON "identity_link_codes" ("provider","code_hash");

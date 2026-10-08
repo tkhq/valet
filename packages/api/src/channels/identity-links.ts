@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { identityLinkCodes, userIdentityLinks } from "../schema/index.js";
 
@@ -21,11 +21,13 @@ function uid(prefix: string): string {
   return `${prefix}-${randomBytes(8).toString("hex")}`;
 }
 
-export async function mintLinkCode(
+/** One pending code per user and provider: a new mint replaces the last. */
+async function insertLinkCode(
   db: AppDb,
   userId: string,
   provider: string,
-  now = Date.now(),
+  externalId: string | null,
+  now: number,
 ): Promise<string> {
   const code = randomBytes(16).toString("base64url");
   await db
@@ -38,10 +40,41 @@ export async function mintLinkCode(
     codeHash: hashCode(code),
     expiresAt: now + CODE_TTL_MS,
     createdAt: now,
+    externalId,
   });
   return code;
 }
 
+/** A code the web app shows. The person sends it to the bot from the
+ * provider account to link (`link <code>`, Telegram `/start <code>`). */
+export async function mintLinkCode(
+  db: AppDb,
+  userId: string,
+  provider: string,
+  now = Date.now(),
+): Promise<string> {
+  return insertLinkCode(db, userId, provider, null, now);
+}
+
+/** A code the bot DMs to one provider account ("DM me", "Find me by name").
+ * Reading the DM proves control of that account, and typing the code into
+ * the signed-in web app proves the Valet user, so only
+ * `consumeDeliveredLinkCode` redeems it. */
+export async function mintDeliveredLinkCode(
+  db: AppDb,
+  userId: string,
+  provider: string,
+  externalId: string,
+  now = Date.now(),
+): Promise<string> {
+  return insertLinkCode(db, userId, provider, externalId, now);
+}
+
+/**
+ * Redeems a shown code sent from the provider. A delivered code never
+ * redeems here: the person it was DMed to holds it, and a reply from their
+ * account would link THEIR account to the requester's Valet user.
+ */
 export async function consumeLinkCode(
   db: AppDb,
   provider: string,
@@ -51,12 +84,41 @@ export async function consumeLinkCode(
   const rows = await db
     .delete(identityLinkCodes)
     .where(
-      and(eq(identityLinkCodes.provider, provider), eq(identityLinkCodes.codeHash, hashCode(code))),
+      and(
+        eq(identityLinkCodes.provider, provider),
+        eq(identityLinkCodes.codeHash, hashCode(code)),
+        isNull(identityLinkCodes.externalId),
+      ),
     )
     .returning();
   const row = rows[0];
   if (!row || row.expiresAt < now) return null;
   return { userId: row.userId };
+}
+
+/** Redeems a delivered code typed into the web app by the user who
+ * requested it. Returns the provider account the code was DMed to. */
+export async function consumeDeliveredLinkCode(
+  db: AppDb,
+  userId: string,
+  provider: string,
+  code: string,
+  now = Date.now(),
+): Promise<{ externalId: string } | null> {
+  const rows = await db
+    .delete(identityLinkCodes)
+    .where(
+      and(
+        eq(identityLinkCodes.userId, userId),
+        eq(identityLinkCodes.provider, provider),
+        eq(identityLinkCodes.codeHash, hashCode(code)),
+        isNotNull(identityLinkCodes.externalId),
+      ),
+    )
+    .returning();
+  const row = rows[0];
+  if (!row?.externalId || row.expiresAt < now) return null;
+  return { externalId: row.externalId };
 }
 
 export async function linkIdentity(

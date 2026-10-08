@@ -18,7 +18,7 @@ import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { eventDropLog, sessionThreads, userIdentityLinks, users } from "../schema/index.js";
-import { linkIdentity, mintLinkCode } from "./identity-links.js";
+import { linkIdentity, mintDeliveredLinkCode, mintLinkCode } from "./identity-links.js";
 import { ChannelHost } from "./host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -275,6 +275,18 @@ describe("ChannelHost.handleUpdate", () => {
 
   it("an unlinked sender's code-shaped text that matches no code replies invalid", async () => {
     await host.handleUpdate("fake", inbound({ text: "4y1f5rkUvtYjFekkULhrnA" }));
+    expect(fakeTransport.sent[0]?.message.markdown).toMatch(/invalid or expired/i);
+    const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
+    expect(links).toHaveLength(0);
+  });
+
+  // A DMed code belongs to the person who asked for it, in the web app. The
+  // recipient sending it from chat must not link their account to them.
+  it.each(["command", "bare paste"])("a DMed code sent from chat as a %s links nothing", async (form) => {
+    const code = await mintDeliveredLinkCode(testDb.appDb, USER_ID, "fake", "77");
+    await host.handleUpdate("fake", form === "command"
+      ? inbound({ kind: "command", command: { name: "start", args: code } })
+      : inbound({ text: code }));
     expect(fakeTransport.sent[0]?.message.markdown).toMatch(/invalid or expired/i);
     const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
     expect(links).toHaveLength(0);
