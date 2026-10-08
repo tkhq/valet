@@ -1144,6 +1144,18 @@ describe("UsagePage custom period controls", () => {
 
 
 describe("UsagePage view navigation", () => {
+  it.each(["loading", "error"])("keeps breakdown %s state out of Activity", (state) => {
+    breakdownResult = { data: undefined, isLoading: state === "loading", error: state === "error" ? new Error("boom-breakdown") : null };
+    render(<UsagePage />);
+    const message = state === "loading" ? "Loading…" : "Error: boom-breakdown";
+    expect(screen.getByText(message)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "activity" }));
+    expect(screen.getByRole("heading", { name: /request log/ })).toBeTruthy();
+    expect(screen.queryByText(message)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "overview" }));
+    expect(screen.getByText(message)).toBeTruthy();
+  });
+
   it("defaults to Overview and loads detail queries only in their view", () => {
     render(<UsagePage />);
     expect(screen.getByRole("button", { name: "overview" }).getAttribute("aria-current")).toBe("page");

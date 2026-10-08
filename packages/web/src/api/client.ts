@@ -427,7 +427,15 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
 
 async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const forwardAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) forwardAbort();
+  else callerSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const timer = setTimeout(() => {
+    if (controller.signal.aborted) return;
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
@@ -435,7 +443,7 @@ async function request<T>(method: string, path: string, body?: unknown, callerSi
       body: body ? JSON.stringify(body) : undefined,
       // The signal also covers reading the body below, so a response whose
       // stream stalls part way is cut off on the same deadline.
-      signal: callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal,
+      signal: controller.signal,
     });
     if (!res.ok) {
       const text = await res.text();
@@ -451,7 +459,7 @@ async function request<T>(method: string, path: string, body?: unknown, callerSi
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   } catch (err) {
-    if (controller.signal.aborted) {
+    if (timedOut) {
       throw new ApiError(
         NO_RESPONSE_STATUS,
         `${method} ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
@@ -460,6 +468,7 @@ async function request<T>(method: string, path: string, body?: unknown, callerSi
     throw err;
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", forwardAbort);
   }
 }
 

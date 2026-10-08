@@ -511,9 +511,9 @@ export function UsagePage() {
         {/* Totals + chart + by-use-case + by-model. A disabled query (scope
             still resolving) reports isLoading=false, so gate on both. */}
         {!scopeKnown || breakdownQ.isLoading ? (
-          <p className="text-sm text-muted">Loading…</p>
+          view !== "activity" && <p className="text-sm text-muted">Loading…</p>
         ) : breakdownQ.error ? (
-          <p className="text-sm text-danger-600">{usageErrorText(breakdownQ.error)}</p>
+          view !== "activity" && <p className="text-sm text-danger-600">{usageErrorText(breakdownQ.error)}</p>
         ) : breakdown ? (
           <>
             {/* Total stat cards — cost + token types + cache-hit-rate + unpriced */}

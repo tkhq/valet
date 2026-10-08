@@ -5,7 +5,7 @@
  * with Hono's own path-param parsing on some routes. Spies on global
  * `fetch` to assert the exact request URL without a real server.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { api } from "./client";
 
 function stubFetchOk(body: unknown = {}): ReturnType<typeof vi.fn> {
@@ -171,6 +171,42 @@ it("encodes receipt search and page cursor", async () => {
 });
 
 describe("usage request cancellation", () => {
+  beforeEach(() => {
+    // Older browsers have AbortController but no AbortSignal.any.
+    vi.stubGlobal("AbortSignal", { any: undefined });
+  });
+
+  it("completes requests and removes the caller listener without AbortSignal.any", async () => {
+    vi.useFakeTimers();
+    try {
+      stubFetchOk({ enabled: true });
+      const controller = new AbortController();
+      const added = vi.spyOn(controller.signal, "addEventListener");
+      const removed = vi.spyOn(controller.signal, "removeEventListener");
+      await expect(api.proxySettings(controller.signal)).resolves.toEqual({ enabled: true });
+      expect(added).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+      expect(removed).toHaveBeenCalledWith("abort", added.mock.calls[0]?.[1]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("preserves an already-aborted caller's reason", async () => {
+    pendingFetch();
+    const controller = new AbortController();
+    const reason = new DOMException("Caller stopped", "AbortError");
+    controller.abort(reason);
+    await expect(api.proxySettings(controller.signal)).rejects.toBe(reason);
+  });
+
+  it("removes the caller listener after a failed response", async () => {
+    const failure = new Error("Network failed");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(failure));
+    const controller = new AbortController();
+    const added = vi.spyOn(controller.signal, "addEventListener");
+    const removed = vi.spyOn(controller.signal, "removeEventListener");
+    await expect(api.proxySettings(controller.signal)).rejects.toBe(failure);
+    expect(removed).toHaveBeenCalledWith("abort", added.mock.calls[0]?.[1]);
+  });
   function pendingFetch() {
     vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       const signal = init?.signal;
@@ -185,10 +221,13 @@ describe("usage request cancellation", () => {
     try {
       pendingFetch();
       const controller = new AbortController();
+      const added = vi.spyOn(controller.signal, "addEventListener");
+      const removed = vi.spyOn(controller.signal, "removeEventListener");
       const result = api.usageBreakdown({ kind: "lookback", window: "7d" }, "me", undefined, controller.signal);
       const rejected = expect(result).rejects.toMatchObject({ name: "AbortError" });
       controller.abort();
       await rejected;
+      expect(removed).toHaveBeenCalledWith("abort", added.mock.calls[0]?.[1]);
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
@@ -198,11 +237,14 @@ describe("usage request cancellation", () => {
     try {
       pendingFetch();
       const controller = new AbortController();
+      const added = vi.spyOn(controller.signal, "addEventListener");
+      const removed = vi.spyOn(controller.signal, "removeEventListener");
       const result = api.proxySettings(controller.signal);
       const rejected = expect(result).rejects.toThrow("got no response in 30s");
       await vi.advanceTimersByTimeAsync(30_000);
       await rejected;
       expect(controller.signal.aborted).toBe(false);
+      expect(removed).toHaveBeenCalledWith("abort", added.mock.calls[0]?.[1]);
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
