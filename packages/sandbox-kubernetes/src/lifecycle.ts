@@ -337,13 +337,29 @@ export interface ListPodsParams {
   labelSelector?: string;
 }
 
+/** Cluster-autoscaler's own annotation (spec 2026-10-08, wakeups/leases).
+ * `"false"` tells the autoscaler not to drain this pod's node, even while
+ * the node is otherwise a scale-down candidate. The autoscaler reads this
+ * from the LIVE pod, so it must be a real annotation, not CR-level state. */
+export const EVICTION_PROTECT_ANNOTATION = "cluster-autoscaler.kubernetes.io/safe-to-evict";
+
+/** Marks a pod as currently held open by a lease. `listEvictionProtected`
+ * selects on this label rather than `EVICTION_PROTECT_ANNOTATION` because
+ * labels (not annotations) support `labelSelector` list queries. */
+export const LEASED_LABEL = "valet.dev/leased";
+
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` this module
- * drives — just enough for `resolvePodName`'s ownerReference-scan
- * fallback. Real `CoreV1Api` returns a properly typed `V1PodList`, so
- * (unlike `SandboxCustomObjectsApi`) no runtime validation is needed here
- * beyond the adapter's own defensive field access. */
+ * drives, enough for `resolvePodName`'s ownerReference-scan fallback and
+ * for the eviction-protection patch. Real `CoreV1Api` returns a properly
+ * typed `V1PodList`, so (unlike `SandboxCustomObjectsApi`) no runtime
+ * validation is needed here beyond the adapter's own defensive field
+ * access. */
 export interface SandboxPodsApi {
   listNamespacedPod(params: ListPodsParams): Promise<{ items: PodSummary[] }>;
+  /** JSON merge-patch (`Content-Type: application/merge-patch+json`), same
+   * device as `SandboxCustomObjectsApi.patchNamespacedCustomObject`. A
+   * `null` annotation/label value removes that key. */
+  patchNamespacedPod(params: { name: string; namespace: string; body: unknown }): Promise<unknown>;
 }
 
 // ── Production adapters over the real client-node classes ─────────────
@@ -379,7 +395,8 @@ function podOwnerReferencesFrom(refs: k8s.V1OwnerReference[] | undefined): PodOw
 }
 
 /** Wraps a real `k8s.CoreV1Api` instance, projecting `V1Pod` down to the
- * minimal `PodSummary` shape `resolvePodName` needs. */
+ * minimal `PodSummary` shape `resolvePodName` and the eviction-protection
+ * methods need. */
 export function podsApiAdapter(api: k8s.CoreV1Api): SandboxPodsApi {
   return {
     listNamespacedPod: async (params) => {
@@ -392,9 +409,15 @@ export function podsApiAdapter(api: k8s.CoreV1Api): SandboxPodsApi {
         .map((pod) => ({
           name: pod.metadata.name,
           ownerReferences: podOwnerReferencesFrom(pod.metadata.ownerReferences),
+          annotations: pod.metadata.annotations,
+          labels: pod.metadata.labels,
         }));
       return { items };
     },
+    // Same Content-Type device as `customObjectsApiAdapter.patchNamespacedCustomObject`
+    // above. client-node's patch negotiation otherwise picks json-patch first.
+    patchNamespacedPod: (params) =>
+      api.patchNamespacedPod(params, setHeaderOptions("Content-Type", "application/merge-patch+json")),
   };
 }
 

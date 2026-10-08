@@ -334,7 +334,7 @@ const inertObjectsApi: SandboxCustomObjectsApi = {
   listNamespacedCustomObject: unusedAsync,
   patchNamespacedCustomObject: unusedAsync,
 };
-const inertPodsApi: SandboxPodsApi = { listNamespacedPod: unusedAsync };
+const inertPodsApi: SandboxPodsApi = { listNamespacedPod: unusedAsync, patchNamespacedPod: unusedAsync };
 const inertExecApi: PodExecApi = { exec: unusedAsync };
 const inertLivenessApi: PodLivenessApi = { getPodUid: unusedAsync };
 

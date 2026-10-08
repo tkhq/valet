@@ -106,8 +106,10 @@ import {
   classifyPodPending,
   clearNeverReadyOwner,
   deleteSandbox,
+  EVICTION_PROTECT_ANNOTATION,
   getSandbox,
   imageFingerprint,
+  LEASED_LABEL,
   listSandboxMetadata,
   livePodDrift,
   podTemplateResourceFingerprint,
@@ -132,6 +134,7 @@ import {
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
+  SESSION_LABEL_KEY,
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
@@ -1339,6 +1342,59 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     } catch (err) {
       console.error(`k8s sandbox ${crName}: creds Secret ownerReference patch failed (non-fatal)`, err);
     }
+  }
+
+  /**
+   * Eviction-protection seam (spec 2026-10-08, wakeups/leases; paired with
+   * `SandboxProvider.setEvictionProtection`). The api-side `WakeWatcher`
+   * calls this around a lease window so cluster-autoscaler leaves the
+   * sandbox's node alone (`EVICTION_PROTECT_ANNOTATION`) while `LEASED_LABEL`
+   * lets `listEvictionProtected` find every protected sandbox by selector.
+   * A missing backing pod (CR not yet reconciled, or already gone) is
+   * reported as `changed: false` and logged at debug level, never thrown:
+   * eviction protection is advisory, and the caller has no pod to mark.
+   * Idempotent: a pod already in the desired state is not re-patched.
+   */
+  async setEvictionProtection(id: string, enabled: boolean): Promise<{ changed: boolean }> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
+    if (podName === null) {
+      console.debug(`k8s sandbox ${id}: setEvictionProtection(${enabled}) skipped, no backing pod`);
+      return { changed: false };
+    }
+    const { items } = await this.deps.podsApi.listNamespacedPod({ namespace: this.cfg.namespace });
+    const pod = items.find((item) => item.name === podName);
+    const hasAnnotation = pod?.annotations?.[EVICTION_PROTECT_ANNOTATION] === "false";
+    const hasLabel = pod?.labels?.[LEASED_LABEL] === "true";
+    // Enabled wants BOTH set; disabled wants BOTH absent. A partial state
+    // (e.g. a crash cleared the label but not the annotation) is not
+    // "already desired" either way, so it always falls through to patch.
+    const hasDesired = enabled ? hasAnnotation && hasLabel : !hasAnnotation && !hasLabel;
+    if (hasDesired) return { changed: false };
+    await this.deps.podsApi.patchNamespacedPod({
+      name: podName,
+      namespace: this.cfg.namespace,
+      body: {
+        metadata: {
+          annotations: { [EVICTION_PROTECT_ANNOTATION]: enabled ? "false" : null },
+          labels: { [LEASED_LABEL]: enabled ? "true" : null },
+        },
+      },
+    });
+    return { changed: true };
+  }
+
+  /** Every sandbox id (Sandbox CR name) this provider currently marks
+   * eviction-protected. The `LEASED_LABEL` selector reads straight off
+   * live pods, so this reflects reality even if a lease crashed mid-release
+   * without clearing the label. */
+  async listEvictionProtected(): Promise<string[]> {
+    const { items } = await this.deps.podsApi.listNamespacedPod({
+      namespace: this.cfg.namespace,
+      labelSelector: `${LEASED_LABEL}=true`,
+    });
+    return items
+      .map((item) => item.labels?.[SESSION_LABEL_KEY])
+      .filter((name): name is string => typeof name === "string");
   }
 
   private makeSandbox(id: string, workloadUser: boolean, browser = false): KubernetesSandbox {
