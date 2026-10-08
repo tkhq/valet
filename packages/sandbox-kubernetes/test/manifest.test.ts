@@ -12,8 +12,11 @@ import {
   imageFingerprint,
   SANDBOX_CR_API_VERSION,
   SANDBOX_POD_LABEL_KEY,
+  SCRATCH_MOUNT_PATH,
+  SCRATCH_VOLUME_NAME,
   buildSandboxManifest,
   credsSecretName,
+  ephemeralStorageSums,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
   SESSION_LABEL_KEY,
@@ -317,6 +320,50 @@ describe("buildSandboxManifest", () => {
         name: DOCKER_STATE_VOLUME_NAME,
         emptyDir: {},
       });
+    });
+  });
+
+  describe("scratch", () => {
+    it("adds the emptyDir, mount, TMPDIR, and the ephemeral sums", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "30Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", { resources: { scratch: "800Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(manifest.spec.podTemplate.spec.volumes).toContainEqual({
+        name: SCRATCH_VOLUME_NAME,
+        emptyDir: { sizeLimit: "800Gi" },
+      });
+      expect(container?.volumeMounts).toContainEqual({ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH });
+      expect(container?.env).toContainEqual({ name: "TMPDIR", value: "/scratch/tmp" });
+      expect(container?.resources?.requests?.["ephemeral-storage"]).toBe("802Gi");
+      expect(container?.resources?.limits?.["ephemeral-storage"]).toBe("830Gi");
+    });
+
+    it("uses scratch alone when a deploy knob is disabled", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", { resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources?.requests?.["ephemeral-storage"]).toBe("102Gi");
+      expect(container?.resources?.limits?.["ephemeral-storage"]).toBe("100Gi");
+    });
+
+    it("is byte-identical to today without scratch", () => {
+      const a = buildSandboxManifest(baseConfig, "sess-1", {});
+      const b = buildSandboxManifest(baseConfig, "sess-1", { resources: { cpu: 1 } });
+      expect(JSON.stringify(a)).not.toContain("scratch");
+      expect(JSON.stringify(b)).not.toContain("scratch");
+    });
+
+    it("ephemeralStorageSums adds quantities", () => {
+      expect(ephemeralStorageSums("800Gi", "2Gi", "30Gi")).toEqual({ request: "802Gi", limit: "830Gi" });
+      expect(ephemeralStorageSums(undefined, "2Gi", "30Gi")).toEqual({ request: "2Gi", limit: "30Gi" });
+      expect(ephemeralStorageSums("1Ti", undefined, undefined)).toEqual({ request: "1Ti", limit: "1Ti" });
+      expect(ephemeralStorageSums(undefined, undefined, undefined)).toEqual({});
     });
   });
 
