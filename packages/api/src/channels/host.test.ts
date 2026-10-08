@@ -18,7 +18,7 @@ import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { eventDropLog, sessionThreads, userIdentityLinks, users } from "../schema/index.js";
-import { linkIdentity, mintLinkCode } from "./identity-links.js";
+import { linkIdentity, mintDeliveredLinkCode, mintLinkCode } from "./identity-links.js";
 import { ChannelHost } from "./host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -261,6 +261,15 @@ describe("ChannelHost.handleUpdate", () => {
     const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
     expect(links[0]).toMatchObject({ externalId: "77", userId: USER_ID });
     expect(fakeTransport.sent[0]?.message.markdown).toContain("Linked");
+  });
+
+  // A code the bot DMed is entered in Valet. The person it went to holds it,
+  // so sending it from chat must not link their account to the requester.
+  it("/start with a DMed code does not link", async () => {
+    const code = await mintDeliveredLinkCode(testDb.appDb, USER_ID, "fake", "77");
+    await host.handleUpdate("fake", inbound({ kind: "command", command: { name: "start", args: code } }));
+    const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
+    expect(links).toHaveLength(0);
   });
 
   it("/start with a bad code replies invalid and does not link", async () => {

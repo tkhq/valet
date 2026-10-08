@@ -771,6 +771,9 @@ export const identityLinkCodes = pgTable(
     codeHash: text("code_hash").notNull(),
     expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** Set for a code the bot DMed to one provider account (the "DM me"
+     * flow). Only the minting user redeems it, in the web app. */
+    externalId: text("external_id"),
   },
   (t) => [index("identity_link_codes_provider").on(t.provider, t.codeHash)],
 );

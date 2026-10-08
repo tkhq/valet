@@ -20,9 +20,14 @@ import {
 } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { hasOpenDirect } from "../channels/host.js";
+import { authCodeEnvReady, findOAuthDeclaration } from "../services/integration-oauth.js";
 import {
   CODE_TTL_MS,
+  consumeDeliveredLinkCode,
+  identityForExternal,
   identityForUser,
+  linkIdentity,
+  mintDeliveredLinkCode,
   mintLinkCode,
   setNotifyAttention,
   unlinkIdentity,
@@ -38,6 +43,8 @@ import type {
   ListLinkMembersResponse,
   PatchIdentityLinkRequest,
   PatchIdentityLinkResponse,
+  VerifyIdentityLinkRequest,
+  VerifyIdentityLinkResponse,
   StartIdentityLinkResponse,
 } from "../wire/types.js";
 
@@ -56,15 +63,20 @@ function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDecla
   return map;
 }
 
-/** True when `POST .../deliver` can work: the plugin declares the anchor DM
- * and the reply builder, and the running transport can resolve a member by
- * email. */
+/** True when `POST .../deliver` can work: the plugin declares the DM and
+ * the running transport can resolve a member by email. */
 function canDeliverCode(decl: IdentityLinkDeclaration, transport: ChannelTransport | null): boolean {
-  return (
-    decl.deliveryDm !== undefined &&
-    decl.deliveryReply !== undefined &&
-    typeof transport?.lookupUserByEmail === "function"
-  );
+  return decl.deliveryDm !== undefined && typeof transport?.lookupUserByEmail === "function";
+}
+
+/** The declared OAuth service that also writes this identity link, when the
+ * deployment can run its authorization-code flow. A missing client id or
+ * secret hides the option: the connect route would fail. */
+function linkingOAuthService(plugins: ValetPlugin[], decl: IdentityLinkDeclaration): string | undefined {
+  if (!decl.oauthService) return undefined;
+  const found = findOAuthDeclaration(plugins, decl.oauthService);
+  if (!found || found.oauth.mode !== "authorization_code") return undefined;
+  return authCodeEnvReady(found.oauth, process.env) ? decl.oauthService : undefined;
 }
 
 identityLinksRouter.get("/", async (c) => {
@@ -80,6 +92,7 @@ identityLinksRouter.get("/", async (c) => {
     const channelReady = channelHost.isRunning(provider);
     const codeDelivery = channelReady && canDeliverCode(decl, transport);
     const memberSearch = channelReady && typeof transport?.listWorkspaceMembers === "function";
+    const oauthService = linkingOAuthService(plugins, decl);
     const link: IdentityLinkStatus = identity
       ? {
           provider,
@@ -90,6 +103,7 @@ identityLinksRouter.get("/", async (c) => {
           channelReady,
           codeDelivery,
           memberSearch,
+          ...(oauthService ? { oauthService } : {}),
         }
       : {
           provider,
@@ -97,6 +111,7 @@ identityLinksRouter.get("/", async (c) => {
           channelReady,
           codeDelivery,
           memberSearch,
+          ...(oauthService ? { oauthService } : {}),
         };
     links.push(link);
   }
@@ -146,26 +161,21 @@ identityLinksRouter.post("/:provider/start", async (c) => {
  * POST `/:provider/deliver` — the "DM me" flow. With no body, it resolves
  * the caller in the provider workspace by their Valet email. With
  * `{ externalId }` (the "find me by name" fallback), it DMs the member the
- * caller picked from `GET .../members`. Either way it mints a link code,
- * returns it in the authenticated response, and DMs the provider's static
- * `deliveryDm` anchor. The user completes the link the same way as the
- * show-code flow: they send `link <code>` to the bot — the DM marks the
- * conversation to reply in.
+ * caller picked from `GET .../members`. Either way it mints a code bound to
+ * that account and to the caller, and DMs it. The person reads the code in
+ * the DM and enters it through `POST .../verify` (the v1 flow).
  *
- * The DM must never carry the code. The proof the link flow rests on is
- * that only the authenticated web session knows the code, so whoever sends
- * it from a provider account owns both. A code in the DM collapses that to
- * bot→user→bot, and a DM to a picked member becomes a one-reply takeover:
- * the replier's account would link to the CALLER's Valet user. With the
- * anchor-only DM, a picked recipient holds no code, so a bare reply links
- * nothing, and the text tells an unexpecting recipient to ignore it.
+ * The code is never in this response: reading the DM is what proves control
+ * of the account. It is also never redeemable from chat, so a picked member
+ * who replies with it links nothing (`consumeLinkCode` skips bound codes).
  *
  * Outcomes:
- * - 200 `DeliverIdentityLinkResponse` — DM sent; body carries the code.
+ * - 200 `DeliverIdentityLinkResponse` — DM sent; the code is only in the DM.
  * - 202 `{ reason: "email_not_in_workspace" }` — the email names nobody;
  *   the client falls back to member search or show-code. Not an error.
  * - 400 — bad body, or the bot is missing a lookup scope (an admin can fix it).
  * - 404/409 — unknown provider, delivery unsupported, or transport down.
+ * - 409 — the account is linked to another Valet user.
  * - 502 — the provider API failed.
  */
 identityLinksRouter.post("/:provider/deliver", async (c) => {
@@ -186,13 +196,8 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     );
   }
   const transport = channelHost.transportFor(provider);
-  const { deliveryDm, deliveryReply } = decl;
-  if (
-    transport === null ||
-    deliveryDm === undefined ||
-    deliveryReply === undefined ||
-    typeof transport.lookupUserByEmail !== "function"
-  ) {
+  const { deliveryDm } = decl;
+  if (transport === null || deliveryDm === undefined || typeof transport.lookupUserByEmail !== "function") {
     return c.json(
       { error: `${provider} does not support code delivery by DM. Use the show-code flow instead.` },
       404,
@@ -242,7 +247,16 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     }
   }
 
-  const code = await mintLinkCode(db, user.id, provider);
+  // An account another Valet user linked stays theirs (verify would refuse
+  // it anyway). Refusing here also stops codes being DMed to that person.
+  const owner = await identityForExternal(db, provider, match.externalId);
+  if (owner && owner.userId !== user.id) {
+    return c.json(
+      { error: `That ${provider} account is linked to another Valet user. Ask them to unlink it, then try again.` },
+      409,
+    );
+  }
+  const code = await mintDeliveredLinkCode(db, user.id, provider, match.externalId);
   try {
     // Same default key shape as ChannelHost.attentionDeliverer: a transport
     // without openDirectConversation (Telegram) addresses a user by
@@ -250,15 +264,14 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     const conversationKey = hasOpenDirect(transport)
       ? await transport.openDirectConversation(match.externalId)
       : `${provider}:dm:${match.externalId}`;
-    // The DM is the codeless anchor (see IdentityLinkDeclaration.deliveryDm).
-    // The code goes only into this authenticated response — the user
-    // carrying it into the chat is the ownership proof the link flow rests on.
-    await transport.send(conversationKey, { markdown: deliveryDm });
+    // The code goes only into the DM (see IdentityLinkDeclaration.deliveryDm).
+    await transport.send(conversationKey, { markdown: deliveryDm({ code }) });
   } catch (err) {
     // The minted code is now unreachable, and that is fine: it is stored as
     // a hash, expires in ten minutes, and the next mint for this user +
     // provider replaces it. No rollback needed. The client falls back to
     // the show-code flow, which mints that replacement.
+    // (The mint above already replaced any earlier pending code.)
     return c.json(
       {
         error: `Could not send the ${provider} DM: ${err instanceof Error ? err.message : "unknown error"}. Use the link code shown on the card instead.`,
@@ -271,10 +284,57 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     delivered: true,
     externalId: match.externalId,
     displayName: match.displayName,
-    code,
-    replyText: deliveryReply({ code }),
     expiresInSeconds: START_LINK_TTL_SECONDS,
   };
+  return c.json(resp);
+});
+
+/**
+ * POST `/:provider/verify` — completes the deliver flow. The caller enters
+ * the code the bot DMed; a match links the account the code was DMed to.
+ * The code is bound to the caller, so another signed-in user cannot redeem
+ * it even if they see it.
+ *
+ * - 200 `VerifyIdentityLinkResponse` — linked.
+ * - 400 — missing, wrong, or expired code.
+ * - 404 — unknown provider.
+ * - 409 — the DMed account is linked to another Valet user.
+ */
+identityLinksRouter.post("/:provider/verify", async (c) => {
+  const { db, plugins } = c.var.providers;
+  const user = c.var.user;
+  const provider = c.req.param("provider");
+  if (!linkDeclarations(plugins).has(provider)) {
+    return c.json({ error: `unknown identity provider "${provider}"` }, 404);
+  }
+  let body: Partial<VerifyIdentityLinkRequest>;
+  try {
+    body = (await c.req.json()) as Partial<VerifyIdentityLinkRequest>;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  const consumed = code === "" ? null : await consumeDeliveredLinkCode(db, user.id, provider, code);
+  if (!consumed) {
+    return c.json({ error: "That code is invalid or expired. Send yourself a new DM from this card." }, 400);
+  }
+  // Same rule as the OAuth connect (`identity_conflict`): an account another
+  // Valet user linked stays theirs until they unlink it.
+  const owner = await identityForExternal(db, provider, consumed.externalId);
+  if (owner && owner.userId !== user.id) {
+    return c.json(
+      { error: `That ${provider} account is linked to another Valet user. Ask them to unlink it, then try again.` },
+      409,
+    );
+  }
+  const prior = await identityForUser(db, provider, user.id);
+  await linkIdentity(db, {
+    provider,
+    externalId: consumed.externalId,
+    userId: user.id,
+    notifyAttention: prior?.notifyAttention ?? true,
+  });
+  const resp: VerifyIdentityLinkResponse = { linked: true, externalId: consumed.externalId };
   return c.json(resp);
 });
 

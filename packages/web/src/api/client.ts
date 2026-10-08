@@ -97,6 +97,7 @@ import type {
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
   DeliverIdentityLinkResponse,
+  VerifyIdentityLinkResponse,
   ListLinkMembersResponse,
   ListCredentialsResponse,
   DelegateCredentialRequest,
@@ -1411,6 +1412,12 @@ export const api = {
       "POST",
       `/me/identity-links/${encodeURIComponent(provider)}/deliver`,
       body,
+    ),
+  verifyIdentityLink: (provider: string, code: string) =>
+    request<VerifyIdentityLinkResponse>(
+      "POST",
+      `/me/identity-links/${encodeURIComponent(provider)}/verify`,
+      { code },
     ),
   searchLinkMembers: (provider: string, query: string) =>
     request<ListLinkMembersResponse>(

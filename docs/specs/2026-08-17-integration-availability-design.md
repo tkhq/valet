@@ -166,13 +166,11 @@ disconnect), but sessions stop receiving the tools.
   - **DM me on <provider>** (`codeDelivery`) — `POST
     /api/me/identity-links/:provider/deliver` resolves the caller in the
     workspace by their Valet email (Slack: `users.lookupByEmail`, needs the
-    `users:read.email` bot scope), mints the code, and DMs the plugin's
-    static `deliveryDm` anchor. The DM never carries the code: only the
-    authenticated session knows it, and the user carrying it into the chat
-    is the ownership proof. The response returns `replyText` — the exact
-    reply the plugin's `deliveryReply(code)` builds (Slack: `link <code>`
-    with the real code) — and the card renders it as one copyable line, so
-    the user never has to assemble the command. A 202
+    `users:read.email` bot scope), mints a code bound to that account, and
+    DMs it (`deliveryDm(code)`). The person types the code into the card,
+    which calls `POST .../verify` (v1's direction, restored 2026-10-08; see
+    `2026-08-17-slack-user-integration-design.md`). A code bound to a DM is
+    never redeemable from chat. A 202
     (`email_not_in_workspace`) falls back to member search when available,
     else to the show-code flow. When the code's TTL elapses, the card
     clears the waiting state and stops polling.

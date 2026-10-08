@@ -99,8 +99,8 @@ function slackDateToken(epochMs: number): string {
 }
 
 /** Matches a `link <code>` DM that starts the identity-link flow. Exported
- * so the plugin's `deliveryDm` copy can be tested against the same parser —
- * the DM tells the user to send exactly what this regex accepts. */
+ * so the plugin's `deliveryDm` copy is tested NOT to read as a command: a
+ * code the bot DMs is entered in Valet, never sent back to the bot. */
 export const LINK_COMMAND_RE = /^\s*link\s+(\S+)\s*$/i;
 
 // ─── Conversation-key codec ─────────────────────────────────────────────────

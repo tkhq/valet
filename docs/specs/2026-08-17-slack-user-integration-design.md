@@ -241,6 +241,34 @@ into the same event shape Telegram emits
 `ChannelHost.handleStart` already consumes this shape and already treats
 an unlinked sender's first message as the link command. No host changes.
 
+### Linking from Settings (2026-10-08)
+
+On 2026-10-08 a new user could not link from Settings → Connected accounts.
+That card showed only a bare code to send the bot, while the v1 flows ("DM
+me", "Find me by name", "Sign in with Slack") lived on the Integrations tile,
+and the v2 port of "DM me" had reversed v1's code direction.
+
+- Settings renders the same `IdentityLinkBlock` as the Integrations tile.
+- "DM me" and "Find me by name" run in v1's direction: the bot DMs a code,
+  and the person types it into Valet (`POST /api/me/identity-links/:provider/verify`).
+  The code row records the account it was DMed to
+  (`identity_link_codes.external_id`) and the requesting user. Only that
+  user can redeem it, and only through verify. `consumeLinkCode`, the chat
+  path, skips bound codes, so a picked member who replies with the code
+  links nothing.
+- Deliver and verify return 409 for an account another Valet user linked,
+  the same rule as the OAuth connect's `identity_conflict`.
+- Settings also offers "Sign in with Slack". The Slack `identityLink`
+  declares `oauthService: "slack-user"`, and `GET /api/me/identity-links`
+  reports it only when that OAuth client's environment is set. The card
+  says the connect also lets Valet search, read, and post as the person.
+  It starts the connect with `landing=connected-accounts`, a fixed page
+  name in the signed state, so a successful connect returns to Settings. A
+  failure still lands on `/integrations`, which renders the error.
+
+`packages/api/src/channels/slack-link-handshake.test.ts` runs the DM flow
+with the real Slack plugin, transport, routes, and host.
+
 This closes the exact gap the `slack-webhook.ts` docblock names. Update
 that docblock in the same commit.
 

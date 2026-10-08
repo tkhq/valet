@@ -16,8 +16,7 @@ import type {
 import { ApiError } from "~/api/client";
 
 const startMutateAsync = vi.fn();
-// Controls the mocked useStartIdentityLink pending state per test.
-let startLinkState: { isPending: boolean; variables?: string } = { isPending: false };
+const deliverMutateAsync = vi.fn();
 const setNotifyMutate = vi.fn();
 const unlinkMutate = vi.fn();
 const connectGithubMutateAsync = vi.fn();
@@ -63,7 +62,9 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useIdentityLinks: () => ({ data: linksData, isLoading, error: isError ? new Error("boom") : null }),
-    useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, ...startLinkState }),
+    useStartIdentityLink: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+    useDeliverIdentityLink: () => ({ mutateAsync: deliverMutateAsync, isPending: false }),
+    useLinkMembers: () => ({ data: undefined, isLoading: false, isError: false, error: null }),
     // provider argument accepted but ignored — mocks return fixed stubs
     useSetLinkNotify: (_provider: string) => ({ mutate: setNotifyMutate }),
     useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkMutate, isPending: false , reset: vi.fn() }),
@@ -192,7 +193,7 @@ describe("ConnectedAccountsPage", () => {
         "Telegram isn't configured for this organization yet. An admin can add a bot token under Integrations.",
       ),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Connect Telegram" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Link Telegram account" })).toBeNull();
   });
 
   it("connecting starts the link flow and renders the deep link", async () => {
@@ -207,13 +208,12 @@ describe("ConnectedAccountsPage", () => {
     });
     render(<ConnectedAccountsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Connect Telegram" }));
+    fireEvent.click(screen.getByRole("button", { name: "Link Telegram account" }));
 
     await waitFor(() => expect(startMutateAsync).toHaveBeenCalled());
     expect(
       await screen.findByRole("link", { name: "Open Telegram and press Start" }),
     ).toHaveProperty("href", "https://t.me/valet_bot?start=abc123");
-    expect(screen.getByText("https://t.me/valet_bot?start=abc123")).toBeTruthy();
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
     // code and instructions always render
     expect(screen.getByText("abc123")).toBeTruthy();
@@ -231,7 +231,7 @@ describe("ConnectedAccountsPage", () => {
     );
     render(<ConnectedAccountsPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Connect Telegram" }));
+    fireEvent.click(screen.getByRole("button", { name: "Link Telegram account" }));
 
     expect(await screen.findByText("telegram bot not configured")).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Open Telegram and press Start" })).toBeNull();
@@ -638,44 +638,30 @@ describe("ConnectedAccountsPage", () => {
         ],
       };
       render(<ConnectedAccountsPage />);
-      expect(screen.getByRole("button", { name: "Connect Telegram" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Link Telegram account" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Link Slack account" })).toBeTruthy();
     });
 
-    it("one provider's in-flight start does not disable the other card's button", () => {
+    // The Settings card is where the unlinked-sender reply sends people, so
+    // it must offer the same pairing paths as the Integrations tile.
+    it("a Slack card that can DM offers DM me and Find me by name", () => {
       linksData = {
-        links: [
-          { provider: "telegram", linked: false, channelReady: true, codeDelivery: false, memberSearch: false },
-          { provider: "slack", linked: false, channelReady: true, codeDelivery: false, memberSearch: false },
-        ],
+        links: [{ provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true }],
       };
-      startLinkState = { isPending: true, variables: "slack" };
       render(<ConnectedAccountsPage />);
-      const slackBtn = screen.getByRole("button", { name: "Connecting…" });
-      expect(slackBtn).toHaveProperty("disabled", true);
-      const telegramBtn = screen.getByRole("button", { name: "Connect Telegram" });
-      expect(telegramBtn).toHaveProperty("disabled", false);
-      startLinkState = { isPending: false };
+      expect(screen.getByRole("button", { name: "DM me on Slack" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Find my Slack account by name" })).toBeTruthy();
     });
 
-    it("provider without deepLink shows code + instructions after start, no anchor", async () => {
+    it("a Slack card offers Sign in with Slack when the OAuth client is configured", () => {
       linksData = {
-        links: [{ provider: "slack", linked: false, channelReady: true, codeDelivery: false, memberSearch: false }],
+        links: [{
+          provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true,
+          oauthService: "slack-user",
+        }],
       };
-      startMutateAsync.mockResolvedValue({
-        code: "SLACK-CODE-42",
-        instructions: "Send this code to @valet in Slack.",
-        expiresInSeconds: 300,
-      });
       render(<ConnectedAccountsPage />);
-
-      fireEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
-
-      await waitFor(() => expect(startMutateAsync).toHaveBeenCalledWith("slack"));
-      expect(await screen.findByText("SLACK-CODE-42")).toBeTruthy();
-      expect(screen.getByText("Send this code to @valet in Slack.")).toBeTruthy();
-      // No deep-link anchor when deepLink is absent.
-      expect(screen.queryByRole("link", { name: "Open Telegram and press Start" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
     });
 
     it("telegram card (with deepLink) keeps the anchor after start", async () => {
@@ -690,7 +676,7 @@ describe("ConnectedAccountsPage", () => {
       });
       render(<ConnectedAccountsPage />);
 
-      fireEvent.click(screen.getByRole("button", { name: "Connect Telegram" }));
+      fireEvent.click(screen.getByRole("button", { name: "Link Telegram account" }));
 
       await waitFor(() => expect(startMutateAsync).toHaveBeenCalledWith("telegram"));
       expect(
@@ -703,6 +689,7 @@ describe("ConnectedAccountsPage", () => {
 
 describe("1Password row", () => {
   beforeEach(() => {
+    linksData = undefined;
     onePasswordSettings = { orgTokenConnected: false, personalTokenConnected: false };
   });
 
