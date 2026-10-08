@@ -13,9 +13,9 @@ import { driveActions } from '../drive-actions.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
 
-function makeCredentials(token: string | null): CredentialProvider {
+function makeCredentials(token: string | null, refreshToken = "stable-refresh"): CredentialProvider {
   return {
-    get: async (): Promise<Credential | null> => (token === null ? null : { accessToken: token }),
+    get: async (): Promise<Credential | null> => (token === null ? null : { accessToken: token, refreshToken }),
     request: async (): Promise<Credential> => {
       throw new Error('not implemented in test stub');
     },
@@ -227,9 +227,23 @@ describe('drive actions', () => {
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
+  it('skips empty folders within the request budget to reach late matches', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:Array.from({length:9}, (_,i) => ({id:`child-${i}`}))}));
+    fetchMock.mockImplementation(async (url: string) => {
+      const q = new URL(url).searchParams.get('q') ?? '';
+      return jsonResponse(200, {files: !q.includes('mimeType=') && q.includes("'child-8'") ? [{id:'late-match'}] : []});
+    });
+    const first = await searchPage();
+    expect(first.data).toMatchObject({files:[],hasMore:true});
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    const last = await searchPage(first.data?.nextPageToken);
+    expect(last.data).toMatchObject({files:[{id:'late-match'}],hasMore:false});
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+  });
+
   it('rejects changed criteria, tampering, and another account before HTTP', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child' }] }))
-      .mockResolvedValueOnce(jsonResponse(200, { files: [] }));
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{id: 'first'}] }));
     const first = await searchPage();
     const cursor = first.data!.nextPageToken!;
     expect(await searchPage(cursor, { query: 'different' })).toMatchObject({success: false, error: expect.stringContaining('Restart')});
@@ -245,16 +259,19 @@ describe('drive actions', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('expires continuations and rejects a rotated credential without HTTP', async () => {
+  it('survives OAuth refresh but rejects a different credential and expiry', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[{id:'child'}]}))
-      .mockResolvedValueOnce(jsonResponse(200, {files:[]}));
+      .mockResolvedValueOnce(jsonResponse(200, {files:[{id:'first'}]}));
     const cursor = (await searchPage()).data!.nextPageToken!;
-    const rotated = await action('drive.search_files').execute({query:'budget',folderId:'root',pageToken:cursor}, pluginCtx({credentials:makeCredentials('rotated')}));
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[]})).mockResolvedValueOnce(jsonResponse(200, {files:[{id:'match'}]}));
+    const refreshed = await action('drive.search_files').execute({query:'budget',folderId:'root',pageToken:cursor}, pluginCtx({credentials:makeCredentials('new-access-token')}));
+    expect(refreshed).toMatchObject({success:true,data:{files:[{id:'match'}],hasMore:false}});
+    const rotated = await action('drive.search_files').execute({query:'budget',folderId:'root',pageToken:cursor}, pluginCtx({credentials:makeCredentials('rotated', 'different-account-refresh')}));
     expect(rotated).toMatchObject({success:false,error:expect.stringContaining('Restart')});
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3_600_001);
     try { expect(await searchPage(cursor)).toMatchObject({success:false,error:expect.stringContaining('expired')}); }
     finally { clock.mockRestore(); }
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it.each([429, 500])('keeps a result cursor retryable after HTTP %s', async (status) => {

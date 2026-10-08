@@ -47,12 +47,12 @@ Ask the user to choose if the target remains ambiguous.
 Follow `nextPageToken` only while more results can help the task.
 Keep the same search arguments when you request another page.
 An empty page with `nextPageToken` does not mean that the search is complete.
-Stop after five pages per query unless the user requests an exhaustive search.
+For searches without a folder scope, stop after five pages unless the user requests an exhaustive search.
 If you stop before the last page, report that the results are partial.
 If a query fails, report the error instead of treating it as an empty result.
 
 A folder subtree search supports at most 100 folders and 100 discovery pages across all pages.
-Each call makes at most ten requests. Follow continuations even when a page has no files.
+Each call makes at most ten requests. For folder searches, follow continuations until complete, even when a page has no files.
 Results are ordered within each folder, not globally across the subtree.
 Continuations expire after one hour and require unchanged search arguments. Restart if the cursor expires.
 If traversal exceeds either limit, the tool returns an error. Report earlier pages as partial.

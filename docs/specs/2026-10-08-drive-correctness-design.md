@@ -26,7 +26,10 @@ For each folder, discovery reads child folder IDs without content or label filte
 Folder shortcuts are not traversed. A set of visited IDs prevents cycles.
 
 A continuation stores discovered folder IDs, the current folder, phase, and native Drive page token.
-It is authenticated with the account credential and bound to the caller, thread, root, and complete search criteria.
+It is authenticated with the OAuth refresh token and bound to the caller, thread, root, and complete search criteria.
+Access-token refresh does not invalidate a continuation. A credential without a refresh token uses its access token.
+Replacing the account credential invalidates earlier continuations.
+Empty terminal folder pages advance within the same ten-request budget.
 It expires after one hour. Invalid, changed, or expired cursors require a fresh search.
 No process-local cache or database migration is required.
 

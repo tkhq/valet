@@ -119,8 +119,8 @@ function readSubtreeCursor(cursor: string, token: string, binding: string): Subt
 }
 
 async function searchSubtree(qs: URLSearchParams, rootId: string, token: string,
-  cursor: string | undefined, binding: string, signal: AbortSignal) {
-  const state: SubtreeCursor = cursor ? readSubtreeCursor(cursor, token, binding) : {
+  cursor: string | undefined, binding: string, signingKey: string, signal: AbortSignal) {
+  const state: SubtreeCursor = cursor ? readSubtreeCursor(cursor, signingKey, binding) : {
     folders: [rootId], index: 0, phase: 'discover', discoveryPages: 0, expires: Date.now() + 3_600_000,
   };
   let files: DriveFile[] = [];
@@ -155,13 +155,13 @@ async function searchSubtree(qs: URLSearchParams, rootId: string, token: string,
     } else {
       files = data.files ?? [];
       if (!state.pageToken) { state.index++; state.phase = 'discover'; }
-      break;
+      if (files.length || state.pageToken) break;
     }
   }
   let nextPageToken: string | undefined;
   if (state.index < state.folders.length) {
     const payload = Buffer.from(JSON.stringify(state)).toString('base64url');
-    nextPageToken = `${payload}.${cursorSignature(payload, token, binding).toString('base64url')}`;
+    nextPageToken = `${payload}.${cursorSignature(payload, signingKey, binding).toString('base64url')}`;
   }
   return { files, nextPageToken };
 }
@@ -369,7 +369,8 @@ const searchFiles = action(
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
-    const token = await getAccessToken(ctx);
+    const credential = await ctx.credentials.get();
+    const token = credential?.accessToken;
     if (!token) return { success: false, error: 'Missing access token' };
     try {
       const queryParts: string[] = ['trashed=false'];
@@ -410,7 +411,9 @@ const searchFiles = action(
       let data: { files?: DriveFile[]; nextPageToken?: string; incompleteSearch?: boolean };
       if (p.folderId) {
         const binding = JSON.stringify([ctx.orgId, ctx.userId, ctx.sessionId, ctx.threadId, p.folderId, qs.toString()]);
-        data = await searchSubtree(qs, p.folderId, token, p.pageToken, binding, ctx.signal);
+        // Google keeps the refresh token across routine access-token renewal.
+        const signingKey = credential?.refreshToken || token;
+        data = await searchSubtree(qs, p.folderId, token, p.pageToken, binding, signingKey, ctx.signal);
       } else {
         if (p.pageToken) qs.set('pageToken', p.pageToken);
         const res = await driveFetch(`/files?${qs}`, token);
