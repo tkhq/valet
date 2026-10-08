@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type {
   DecisionGate,
+  Lease,
   MessageEntry,
   QueueItem,
   SessionData,
   SessionStore,
   SuspendedTurnState,
   ThreadData,
+  Wakeup,
 } from "../index.js";
 
 export interface StoreContractContext {
@@ -679,6 +681,64 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       const e = entries.find((x) => x.type === "decision_gate");
       expect(e && e.type === "decision_gate" && e.gate.status).toBe("resolved");
       expect(e && e.type === "decision_gate" && e.resolution?.actionId).toBe("approve");
+    });
+
+    describe("wakeups and leases", () => {
+      const wakeup = (over: Partial<Wakeup> = {}): Wakeup => ({
+        id: "wk_a", sessionId: "sess-1", threadId: "th-1", kind: "process", status: "running",
+        reason: "proof build", command: "lake build", execId: "job-1", leaseId: "ls_a",
+        deadlineAt: 10_000, logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1, ...over,
+      });
+      const lease = (over: Partial<Lease> = {}): Lease => ({
+        id: "ls_a", sessionId: "sess-1", sandboxId: "sb-1", ownerKind: "process", ownerId: "wk_a",
+        reason: "proof build", createdAt: 1, deadlineAt: 10_000, ...over,
+      });
+
+      it("creates, gets, and lists wakeups by status", async () => {
+        await store.createWakeup(wakeup());
+        await store.createWakeup(wakeup({ id: "wk_b", kind: "timer", status: "pending", command: undefined, execId: undefined, leaseId: undefined, prompt: "check", fireAt: 500, deadlineAt: undefined }));
+        expect(await store.getWakeup("wk_a")).toEqual(wakeup());
+        expect((await store.listWakeups("sess-1")).map((w) => w.id).sort()).toEqual(["wk_a", "wk_b"]);
+        expect((await store.listWakeups("sess-1", ["pending"])).map((w) => w.id)).toEqual(["wk_b"]);
+        expect(await store.getWakeup("missing")).toBeNull();
+      });
+
+      it("lists due wakeups: running process/watch always, pending timer only at or past fireAt", async () => {
+        await store.createWakeup(wakeup());
+        await store.createWakeup(wakeup({ id: "wk_t", kind: "timer", status: "pending", prompt: "p", fireAt: 500, command: undefined, execId: undefined, leaseId: undefined, deadlineAt: undefined }));
+        await store.createWakeup(wakeup({ id: "wk_done", status: "done" }));
+        expect((await store.listDueWakeups(100, 10)).map((w) => w.id)).toEqual(["wk_a"]);
+        expect((await store.listDueWakeups(500, 10)).map((w) => w.id).sort()).toEqual(["wk_a", "wk_t"]);
+        expect(await store.listDueWakeups(500, 1)).toHaveLength(1);
+      });
+
+      it("transitionWakeup is a CAS: the second caller gets null", async () => {
+        await store.createWakeup(wakeup());
+        const first = await store.transitionWakeup("wk_a", ["running"], "done", { cause: "exit", exitCode: 0, endedAt: 50 }, 50);
+        expect(first).toMatchObject({ status: "done", cause: "exit", exitCode: 0, endedAt: 50, updatedAt: 50 });
+        const second = await store.transitionWakeup("wk_a", ["running"], "expired", { cause: "deadline" }, 60);
+        expect(second).toBeNull();
+        expect((await store.getWakeup("wk_a"))?.status).toBe("done");
+      });
+
+      it("transitionWakeup can patch a running row in place", async () => {
+        await store.createWakeup(wakeup());
+        const patched = await store.transitionWakeup("wk_a", ["running"], "running", { logOffset: 40, logTail: "tail", eventCount: 2 }, 7);
+        expect(patched).toMatchObject({ status: "running", logOffset: 40, logTail: "tail", eventCount: 2 });
+      });
+
+      it("creates, lists, counts, and releases leases exactly once", async () => {
+        await store.createLease(lease());
+        await store.createLease(lease({ id: "ls_b", sessionId: "sess-2", ownerKind: "hold", ownerId: undefined }));
+        expect(await store.countActiveLeases("sess-1")).toBe(1);
+        expect((await store.listActiveLeases("sess-1")).map((l) => l.id)).toEqual(["ls_a"]);
+        expect((await store.listAllActiveLeases()).map((l) => l.id).sort()).toEqual(["ls_a", "ls_b"]);
+        const released = await store.releaseLease("ls_a", "owner_ended", 99);
+        expect(released).toMatchObject({ releasedAt: 99, releaseCause: "owner_ended" });
+        expect(await store.releaseLease("ls_a", "deadline", 100)).toBeNull();
+        expect(await store.countActiveLeases("sess-1")).toBe(0);
+        expect((await store.listAllActiveLeases()).map((l) => l.id)).toEqual(["ls_b"]);
+      });
     });
 
     it("latestActivityAt: null when empty, tracks the max queue-item updatedAt through admit + settle", async () => {

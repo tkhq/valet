@@ -4,6 +4,11 @@ import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
+import type { Lease, LeaseReleaseCause, Wakeup, WakeupPatch, WakeupsSeam, WakeupStatus } from "./wakeups/types.js";
+
+// Wakeup and lease contracts (spec 2026-10-08). Type-only re-export: no
+// runtime code, so the engine barrel stays browser-safe.
+export * from "./wakeups/types.js";
 
 // ── Identity / authoring ──────────────────────────────────────────
 
@@ -771,6 +776,9 @@ export interface ToolContext {
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
+  /** Host seam for wakeups and leases (spec 2026-10-08). Absent === the host
+   * wires no wakeups, and tools that need it must degrade or refuse. */
+  wakeups?: WakeupsSeam;
   /**
    * Optional host policy resolver consulted by `call_tool` before invoking a
    * plugin action. Absent === the engine's built-in riskLevel→approvalMode
@@ -1218,6 +1226,8 @@ export interface ExecOpts {
    * effect — every exec keeps the container's default user.
    */
   privileged?: boolean;
+  /** Uncapped output, not tracked as a pending job; the caller owns its lifetime. */
+  detached?: boolean;
 }
 
 export interface ExecResult {
@@ -1304,7 +1314,7 @@ export interface Sandbox {
    * Null means adopted compute has no recoverable override record. Undefined
    * means the provider does not report this metadata. Providers must persist a
    * known record before replacing compute so retries can return the same record. */
-  resourceOverrides?: Pick<SandboxResources, "cpu" | "memory"> | null;
+  resourceOverrides?: Pick<SandboxResources, "cpu" | "memory" | "scratch"> | null;
   readFile(path: string): Promise<string>;
   readBinary(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: string): Promise<void>;
@@ -1360,9 +1370,11 @@ export interface SandboxResources {
    * failing. Independent of `ephemeralStorage` — an absent side is
    * omitted, never inferred from the other. */
   ephemeralStorageLimit?: string;
+  /** Node-local /scratch emptyDir size (spec Part A). Wiped when the pod stops. */
+  scratch?: string;
 }
 
-export type SandboxResourceField = "cpu" | "memory";
+export type SandboxResourceField = "cpu" | "memory" | "scratch";
 
 export interface SandboxCreateOpts {
   browser?: { enabled: boolean; viewer?: boolean };
@@ -1597,6 +1609,15 @@ export interface SandboxProvider {
    * (SandboxCapabilities.credsMount is false or absent).
    */
   updateCreds?(id: string, files: Record<string, string>): Promise<void>;
+  /**
+   * Optional eviction-protection seam (spec 2026-10-08, wakeups/leases). When
+   * enabled, the provider marks the sandbox so the backend's own eviction or
+   * idle-reap paths leave it running while a lease holds it open. Absent ===
+   * no eviction-protection support; callers must treat it as a no-op.
+   */
+  setEvictionProtection?(id: string, enabled: boolean): Promise<{ changed: boolean }>;
+  /** Every sandbox id this provider currently marks eviction-protected. */
+  listEvictionProtected?(): Promise<string[]>;
 }
 
 // ── Blob store ─────────────────────────────────────────────────────
@@ -2135,6 +2156,27 @@ export interface SessionStore {
   ): Promise<DecisionGate[]>;
   getSuspendedTurn(sessionId: string, threadId: string): Promise<SuspendedTurnState | null>;
   deleteSession(id: string): Promise<void>;
+
+  // === Wakeups and leases (spec 2026-10-08) ===
+  createWakeup(wakeup: Wakeup): Promise<void>;
+  getWakeup(id: string): Promise<Wakeup | null>;
+  listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]>;
+  /** Running process/watch wakeups (always due) plus pending timer wakeups whose fireAt <= now. */
+  listDueWakeups(now: number, limit: number): Promise<Wakeup[]>;
+  /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */
+  transitionWakeup(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+  ): Promise<Wakeup | null>;
+  createLease(lease: Lease): Promise<void>;
+  /** CAS release: succeeds only when the lease is not already released. Null when already released. */
+  releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null>;
+  listActiveLeases(sessionId: string): Promise<Lease[]>;
+  listAllActiveLeases(): Promise<Lease[]>;
+  countActiveLeases(sessionId: string): Promise<number>;
 }
 
 // ── Sandbox spec / prep steps ─────────────────────────────────────
@@ -2167,7 +2209,7 @@ export interface DesiredSandboxSpec {
   image?: string;
   /** Repository resource overrides. Undefined gives no authoritative opinion;
    * an empty object authoritatively declares no repository overrides. */
-  resources?: Pick<SandboxResources, "cpu" | "memory">;
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
   /** Resource fields whose authority was unavailable. Adoption keeps their
    * live values while applying the other fields from resources. */
   preserveResourceFields?: readonly SandboxResourceField[];
@@ -2490,6 +2532,9 @@ export interface CreateSessionOptions {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /** Threaded onto `ToolContext.wakeups` via `buildToolContext`. Absent ===
+   * plugin actions and tools get no wakeups seam. */
+  wakeups?: WakeupsSeam;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
@@ -2738,8 +2783,8 @@ export interface SpawnChildRequest {
   repo?: string;
   branch?: string;
   model?: string;
-  /** CPU and memory overrides for the child's sandbox. Omitted fields use host defaults. */
-  resources?: Pick<SandboxResources, "cpu" | "memory">;
+  /** CPU, memory, and scratch overrides for the child's sandbox. Omitted fields use host defaults. */
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
   /** Interactive-service profile for the child's sandbox (default "headless"). */
   profile?: "headless" | "full";
   /** Request a rootless docker daemon inside the child's sandbox

@@ -1043,7 +1043,7 @@ export class SandboxAttachment {
       }
       this.persistResources(desired?.resources, desired?.preserveResourceFields);
       const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
-        (desired !== undefined && desired.resources === undefined ? (["cpu", "memory"] as const) : undefined);
+        (desired !== undefined && desired.resources === undefined ? (["cpu", "memory", "scratch"] as const) : undefined);
       const sandbox = await provider.create({
         ...this.createOpts,
         image: bootImage,
@@ -1080,7 +1080,7 @@ export class SandboxAttachment {
               resources = { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) };
             }
           }
-          if (sandbox.resourceOverrides === null && preserveResourceFieldsOnAdopt?.length === 2) {
+          if (sandbox.resourceOverrides === null && preserveResourceFieldsOnAdopt?.length === 3) {
             // Discard rejected options now so a later no-opinion replacement
             // cannot revive them. Keep any recovered applied opinion instead.
             this.persistResources(resources ?? {});

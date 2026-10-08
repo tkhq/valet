@@ -4,6 +4,8 @@ import type {
   DecisionGate,
   DecisionGateEntry,
   DecisionGateRef,
+  Lease,
+  LeaseReleaseCause,
   ListOpts,
   MessageQuery,
   QueueItem,
@@ -17,6 +19,9 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
   ThreadData,
+  Wakeup,
+  WakeupPatch,
+  WakeupStatus,
   WriteFence,
 } from "../../types.js";
 
@@ -39,6 +44,10 @@ export class InMemorySessionStore implements SessionStore {
   private rows = new Map<string, SessionRow>();
   /** Attempt markers are global evidence keyed by `${itemId}:${attemptId}`; no sessionId in the contract. */
   private attemptMarkers = new Set<string>();
+  /** Wakeups and leases are global maps, not per-session rows: listDueWakeups
+   * and listAllActiveLeases scan across every session. */
+  private wakeups = new Map<string, Wakeup>();
+  private leases = new Map<string, Lease>();
 
   private row(sessionId: string): SessionRow {
     const row = this.rows.get(sessionId);
@@ -267,6 +276,75 @@ export class InMemorySessionStore implements SessionStore {
 
   async deleteSession(id: string): Promise<void> {
     this.rows.delete(id);
+  }
+
+  // ── wakeups and leases ──────────────────────────────────────────
+
+  async createWakeup(wakeup: Wakeup): Promise<void> {
+    this.wakeups.set(wakeup.id, { ...wakeup });
+  }
+
+  async getWakeup(id: string): Promise<Wakeup | null> {
+    const w = this.wakeups.get(id);
+    return w ? { ...w } : null;
+  }
+
+  async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    return [...this.wakeups.values()]
+      .filter((w) => w.sessionId === sessionId && (!statuses || statuses.includes(w.status)))
+      .map((w) => ({ ...w }));
+  }
+
+  async listDueWakeups(now: number, limit: number): Promise<Wakeup[]> {
+    return [...this.wakeups.values()]
+      .filter(
+        (w) =>
+          (w.status === "running" && (w.kind === "process" || w.kind === "watch")) ||
+          (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now),
+      )
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(0, limit)
+      .map((w) => ({ ...w }));
+  }
+
+  async transitionWakeup(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+  ): Promise<Wakeup | null> {
+    const w = this.wakeups.get(id);
+    if (!w || !from.includes(w.status)) return null;
+    const next: Wakeup = { ...w, ...patch, status: to, updatedAt };
+    this.wakeups.set(id, next);
+    return { ...next };
+  }
+
+  async createLease(lease: Lease): Promise<void> {
+    this.leases.set(lease.id, { ...lease });
+  }
+
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
+    const l = this.leases.get(id);
+    if (!l || l.releasedAt !== undefined) return null;
+    const next: Lease = { ...l, releasedAt, releaseCause: cause };
+    this.leases.set(id, next);
+    return { ...next };
+  }
+
+  async listActiveLeases(sessionId: string): Promise<Lease[]> {
+    return [...this.leases.values()]
+      .filter((l) => l.sessionId === sessionId && l.releasedAt === undefined)
+      .map((l) => ({ ...l }));
+  }
+
+  async listAllActiveLeases(): Promise<Lease[]> {
+    return [...this.leases.values()].filter((l) => l.releasedAt === undefined).map((l) => ({ ...l }));
+  }
+
+  async countActiveLeases(sessionId: string): Promise<number> {
+    return (await this.listActiveLeases(sessionId)).length;
   }
 
   // ── submission lifecycle ───────────────────────────────────────

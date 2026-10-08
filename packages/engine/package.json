@@ -17,6 +17,10 @@
     "./test-helpers": {
       "types": "./src/test-helpers/index.ts",
       "import": "./src/test-helpers/index.ts"
+    },
+    "./wakeups-ids": {
+      "types": "./src/wakeups/ids.ts",
+      "import": "./src/wakeups/ids.ts"
     }
   },
   "scripts": {

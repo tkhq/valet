@@ -546,9 +546,13 @@ function preserveCpuMemory(
           requests?: { cpu?: string | number; memory?: string | number; "ephemeral-storage"?: string };
           limits?: { cpu?: string | number; memory?: string | number; "ephemeral-storage"?: string };
         } = { ...container.resources };
+        // Only cpu/memory live on the container's resources.requests/limits.
+        // "scratch" is a node-local emptyDir volume, handled elsewhere in the
+        // pod template, so it never applies to this preservation step.
+        const cpuMemoryFields = fields.filter((field): field is "cpu" | "memory" => field !== "scratch");
         for (const side of ["requests", "limits"] as const) {
           const values: NonNullable<typeof resources.requests> = { ...resources[side] };
-          for (const field of fields) {
+          for (const field of cpuMemoryFields) {
             delete values[field];
             const previousValue = previous[side]?.[field];
             if (previousValue !== undefined) values[field] = previousValue;
