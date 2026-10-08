@@ -295,7 +295,11 @@ export class PolicySandbox implements Sandbox {
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     if (opts?.signal?.aborted) throw this.abortError(opts.signal);
-    const effectiveOpts: ExecOpts = { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
+    const effectiveOpts: ExecOpts = opts?.detached
+      // A detached sandbox process (wakeups spec B4): uncapped output on
+      // disk, and no pending-job entry because a lease owns its lifetime.
+      ? { ...opts, maxOutputBytes: undefined }
+      : { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
     // Job-mode kickoff only — the job's own runtime is polled, not awaited,
     // so this span measures dispatch latency, not the command's duration.
     return withSpan(
@@ -313,7 +317,9 @@ export class PolicySandbox implements Sandbox {
         }, { signal: opts?.signal });
         recordSandboxExec(Date.now() - startedAt, true);
         // Track as pending until a terminal poll or cancelJob clears it.
-        this.pendingJobs.add(handle.execId);
+        // A detached process is not tracked: its lifetime belongs to a
+        // lease, not the run-start reconcile window.
+        if (!opts?.detached) this.pendingJobs.add(handle.execId);
         return handle;
       },
     );
