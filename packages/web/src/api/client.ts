@@ -425,7 +425,7 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   return requestForm<ProfilePictureUploadResponse>(path, form);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -435,7 +435,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       body: body ? JSON.stringify(body) : undefined,
       // The signal also covers reading the body below, so a response whose
       // stream stalls part way is cut off on the same deadline.
-      signal: controller.signal,
+      signal: callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal,
     });
     if (!res.ok) {
       const text = await res.text();
@@ -1079,30 +1079,30 @@ export const api = {
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`, undefined, signal);
   },
-  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`);
+    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
   },
-  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`);
+    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`, undefined, signal);
   },
-  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
+  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     qs.set("useCase", useCase);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
+    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`, undefined, signal);
   },
   usageExportCsvUrl: (
     period: UsagePeriodSelection,
@@ -1459,7 +1459,7 @@ export const api = {
     to?: number;
     cursor?: string;
     limit?: number;
-  } = {}) => {
+  } = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (opts.model) qs.set("model", opts.model);
     if (opts.harness) qs.set("harness", opts.harness);
@@ -1468,10 +1468,10 @@ export const api = {
     if (opts.cursor) qs.set("cursor", opts.cursor);
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`);
+    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`, undefined, signal);
   },
-  proxySettings: () =>
-    request<ProxySettingsResponse>("GET", "/proxy/settings"),
+  proxySettings: (signal?: AbortSignal) =>
+    request<ProxySettingsResponse>("GET", "/proxy/settings", undefined, signal),
   setProxyMode: (mode: "centralized" | "passthrough") =>
     request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
   updateProxySettings: (patch: { enabled?: boolean; mode?: "centralized" | "passthrough" }) =>

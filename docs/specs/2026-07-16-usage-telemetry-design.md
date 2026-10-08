@@ -358,3 +358,8 @@ The Activity log does not use the spend period filter.
 The period, scope, and export controls remain available across views. Switching views preserves the selected period, expanded breakdown rows, and request page.
 Switching workspaces resets the request page. Hidden breakdown details and inactive Activity queries do not fetch.
 The views do not change authorization, usage calculations, or CSV export behavior.
+
+Usage query functions forward their abort signals to the API client, which retains its separate 30-second timeout.
+Disabling a mounted Usage query cancels its pending request when no other enabled observer needs it.
+Period changes cancel unused requests for the previous period. Leaving the page cancels requests without remaining observers.
+Cancellation preserves cached data and does not report a timeout. Rapid-switch tests exercise all six query families through mocked pending fetches.

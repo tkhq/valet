@@ -169,3 +169,41 @@ it("encodes receipt search and page cursor", async () => {
   expect(url.searchParams.get("cursor")).toBe("cursor+/=");
   expect(url.searchParams.get("limit")).toBe("25");
 });
+
+describe("usage request cancellation", () => {
+  function pendingFetch() {
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) throw new Error("A cancellable request needs a signal.");
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })));
+  }
+
+  it("preserves caller cancellation instead of reporting a timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      pendingFetch();
+      const controller = new AbortController();
+      const result = api.usageBreakdown({ kind: "lookback", window: "7d" }, "me", undefined, controller.signal);
+      const rejected = expect(result).rejects.toMatchObject({ name: "AbortError" });
+      controller.abort();
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("still times out when the caller signal remains active", async () => {
+    vi.useFakeTimers();
+    try {
+      pendingFetch();
+      const controller = new AbortController();
+      const result = api.proxySettings(controller.signal);
+      const rejected = expect(result).rejects.toThrow("got no response in 30s");
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejected;
+      expect(controller.signal.aborted).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+});
