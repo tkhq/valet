@@ -3,6 +3,8 @@ import type {
   DecisionGate,
   DecisionGateEntry,
   DecisionGateRef,
+  Lease,
+  LeaseReleaseCause,
   ListOpts,
   MessageQuery,
   Principal,
@@ -19,6 +21,9 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
   ThreadData,
+  Wakeup,
+  WakeupPatch,
+  WakeupStatus,
   WriteFence,
 } from "@valet/engine";
 import { isPgUniqueViolation } from "./db.js";
@@ -30,12 +35,16 @@ import {
   parseJsonRequired,
   rawToEntryRow,
   rawToGateRow,
+  rawToLeaseRow,
   rawToQueueItemRow,
   rawToSessionRow,
   rawToSuspendedTurnRow,
   rawToThreadRow,
+  rawToWakeupRow,
   rowToEntry,
   rowToGate,
+  rowToLease,
+  rowToWakeup,
   toNum,
   toNumOrNull,
   type EntryInsertRow,
@@ -1388,6 +1397,144 @@ export class PgSessionStore implements SessionStore {
         itemId,
       ]);
     });
+  }
+
+  // === Wakeups and leases (spec 2026-10-08) ===
+
+  async createWakeup(w: Wakeup): Promise<void> {
+    await this.db.query(
+      `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
+         fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+      [
+        w.id,
+        w.sessionId,
+        w.threadId,
+        w.kind,
+        w.status,
+        w.reason,
+        w.command ?? null,
+        w.prompt ?? null,
+        w.execId ?? null,
+        w.leaseId ?? null,
+        w.fireAt ?? null,
+        w.deadlineAt ?? null,
+        w.exitCode ?? null,
+        w.cause ?? null,
+        w.logOffset,
+        w.logTail,
+        w.eventCount,
+        w.createdAt,
+        w.updatedAt,
+        w.endedAt ?? null,
+      ],
+    );
+  }
+
+  async getWakeup(id: string): Promise<Wakeup | null> {
+    const r = await this.db.query("SELECT * FROM engine_wakeups WHERE id = $1", [id]);
+    return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+  }
+
+  async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    const params: unknown[] = [sessionId];
+    let where = "session_id = $1";
+    if (statuses && statuses.length > 0) {
+      params.push([...statuses]);
+      where += ` AND status = ANY($2)`;
+    }
+    const r = await this.db.query(`SELECT * FROM engine_wakeups WHERE ${where} ORDER BY created_at, id`, params);
+    return r.rows.map((raw) => rowToWakeup(rawToWakeupRow(raw)));
+  }
+
+  async listDueWakeups(now: number, limit: number): Promise<Wakeup[]> {
+    const r = await this.db.query(
+      `SELECT * FROM engine_wakeups
+       WHERE (status = 'running' AND kind IN ('process','watch'))
+          OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
+       ORDER BY created_at, id LIMIT $2`,
+      [now, limit],
+    );
+    return r.rows.map((raw) => rowToWakeup(rawToWakeupRow(raw)));
+  }
+
+  async transitionWakeup(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+  ): Promise<Wakeup | null> {
+    const r = await this.db.query(
+      `UPDATE engine_wakeups SET status = $3, updated_at = $4,
+         cause = COALESCE($5, cause), exit_code = COALESCE($6, exit_code), ended_at = COALESCE($7, ended_at),
+         log_offset = COALESCE($8, log_offset), log_tail = COALESCE($9, log_tail), event_count = COALESCE($10, event_count),
+         exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id)
+       WHERE id = $1 AND status = ANY($2) RETURNING *`,
+      [
+        id,
+        [...from],
+        to,
+        updatedAt,
+        patch.cause ?? null,
+        patch.exitCode ?? null,
+        patch.endedAt ?? null,
+        patch.logOffset ?? null,
+        patch.logTail ?? null,
+        patch.eventCount ?? null,
+        patch.execId ?? null,
+        patch.leaseId ?? null,
+      ],
+    );
+    return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+  }
+
+  async createLease(lease: Lease): Promise<void> {
+    await this.db.query(
+      `INSERT INTO engine_leases (id, session_id, sandbox_id, owner_kind, owner_id, reason, created_at, deadline_at, released_at, release_cause)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        lease.id,
+        lease.sessionId,
+        lease.sandboxId ?? null,
+        lease.ownerKind,
+        lease.ownerId ?? null,
+        lease.reason,
+        lease.createdAt,
+        lease.deadlineAt,
+        lease.releasedAt ?? null,
+        lease.releaseCause ?? null,
+      ],
+    );
+  }
+
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
+    const r = await this.db.query(
+      `UPDATE engine_leases SET released_at = $2, release_cause = $3 WHERE id = $1 AND released_at IS NULL RETURNING *`,
+      [id, releasedAt, cause],
+    );
+    return r.rows[0] ? rowToLease(rawToLeaseRow(r.rows[0])) : null;
+  }
+
+  async listActiveLeases(sessionId: string): Promise<Lease[]> {
+    const r = await this.db.query(
+      `SELECT * FROM engine_leases WHERE session_id = $1 AND released_at IS NULL ORDER BY created_at`,
+      [sessionId],
+    );
+    return r.rows.map((raw) => rowToLease(rawToLeaseRow(raw)));
+  }
+
+  async listAllActiveLeases(): Promise<Lease[]> {
+    const r = await this.db.query(`SELECT * FROM engine_leases WHERE released_at IS NULL ORDER BY created_at`);
+    return r.rows.map((raw) => rowToLease(rawToLeaseRow(raw)));
+  }
+
+  async countActiveLeases(sessionId: string): Promise<number> {
+    const r = await this.db.query(
+      `SELECT count(*)::int AS n FROM engine_leases WHERE session_id = $1 AND released_at IS NULL`,
+      [sessionId],
+    );
+    return toNum(r.rows[0]?.n, "n");
   }
 
   async deleteSession(id: string): Promise<void> {

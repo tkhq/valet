@@ -19,6 +19,8 @@ const DATA_TABLES = [
   "engine_events",
   "engine_threads",
   "engine_sessions",
+  "engine_wakeups",
+  "engine_leases",
 ];
 
 async function truncateAll(db: PgDb): Promise<void> {
