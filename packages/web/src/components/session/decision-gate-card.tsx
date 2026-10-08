@@ -263,20 +263,29 @@ function DecisionGateResponse({
 
 function DecisionGateTitle({ id, title }: { id: string; title: string }) {
   const heading = useRef<HTMLHeadingElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [truncated, setTruncated] = useState(false);
 
   useLayoutEffect(() => {
     if (expanded) return;
+    let active = true;
     const measure = () => {
       const element = heading.current;
-      setTruncated(Boolean(element && element.scrollHeight > element.clientHeight));
+      const next = Boolean(element && element.scrollHeight > element.clientHeight + 1);
+      if (!next && document.activeElement === toggle.current) {
+        queueMicrotask(() => heading.current?.focus({ preventScroll: true }));
+      }
+      if (active) setTruncated(next);
     };
     measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(heading.current!);
-    return () => observer.disconnect();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(heading.current!);
+    void document.fonts?.ready.then(measure).catch(() => {});
+    return () => {
+      active = false;
+      observer?.disconnect();
+    };
   }, [expanded, title]);
 
   return (
@@ -284,15 +293,17 @@ function DecisionGateTitle({ id, title }: { id: string; title: string }) {
       <h3
         ref={heading}
         id={id}
+        tabIndex={expanded ? 0 : -1}
         className={cn(
           "mt-1.5 break-words text-sm font-medium leading-relaxed text-ink [overflow-wrap:anywhere]",
-          !expanded && "line-clamp-3",
+          !expanded ? "line-clamp-3" : "max-h-[min(14rem,25dvh)] overflow-y-auto",
         )}
       >
         {title}
       </h3>
       {truncated && (
         <Button
+          ref={toggle}
           variant="ghost"
           size="sm"
           className="-ml-2 mt-0.5"

@@ -291,7 +291,11 @@ describe("DecisionGateCard — long request layout", () => {
     expect(heading.className).toContain("line-clamp-3");
     expect(heading.className).toContain("[overflow-wrap:anywhere]");
     expect(screen.getByRole("dialog").getAttribute("aria-labelledby")).toBe(heading.id);
-    expect(screen.getByRole("button", { name: "Show more" }).getAttribute("aria-controls")).toBe(heading.id);
+    const titleControl = screen.getByRole("button", { name: "Show more" });
+    const action = screen.getByRole("button", { name: "Approve for session" });
+    expect(titleControl.getAttribute("aria-controls")).toBe(heading.id);
+    expect(heading.closest("header")?.contains(titleControl)).toBe(true);
+    expect(heading.closest("header")?.contains(action)).toBe(false);
     expect(request.id).toBe("gate-gate_1-body");
     expect(request.getAttribute("tabindex")).toBe("0");
     expect(request.className).toContain("max-h-[min(14rem,25dvh)]");
@@ -305,8 +309,8 @@ describe("DecisionGateCard — long request layout", () => {
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
 
-  it("does not add a title control when the title fits", () => {
-    mockTitleLayout({ scrollHeight: 68, clientHeight: 68 });
+  it("does not add a title control when the title fits within one pixel", () => {
+    mockTitleLayout({ scrollHeight: 69, clientHeight: 68 });
     renderCard(gate({ title: "Which workflow should run first?", type: "question" }));
 
     expect(screen.queryByRole("button", { name: /Show (more|less)/ })).toBeNull();
@@ -322,11 +326,15 @@ describe("DecisionGateCard — long request layout", () => {
     const control = screen.getByRole("button", { name: "Show more" });
     expect(screen.getByRole("dialog", { name: title })).toBeTruthy();
     expect(heading.className).toContain("line-clamp-3");
+    expect(heading.getAttribute("tabindex")).toBe("-1");
     expect(control.getAttribute("aria-expanded")).toBe("false");
     await user.tab();
     expect(document.activeElement).toBe(control);
     await user.keyboard("{Enter}");
     expect(heading.className).not.toContain("line-clamp-3");
+    expect(heading.className).toContain("max-h-[min(14rem,25dvh)]");
+    expect(heading.className).toContain("overflow-y-auto");
+    expect(heading.getAttribute("tabindex")).toBe("0");
     expect(screen.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
     await user.keyboard("{Enter}");
     expect(heading.className).toContain("line-clamp-3");
@@ -341,11 +349,16 @@ describe("DecisionGateCard — long request layout", () => {
     const heading = screen.getByRole("heading", { name: title });
     expect(screen.getByRole("dialog", { name: title })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Show more" }));
+    const titleControl = screen.getByRole("button", { name: "Show less" });
+    const action = screen.getByRole("button", { name: "Approve for session" });
     expect(heading.className).not.toContain("line-clamp-3");
-    expect(screen.getByRole("button", { name: "Show less" })).toBeTruthy();
+    expect(heading.className).toContain("max-h-[min(14rem,25dvh)]");
+    expect(heading.className).toContain("overflow-y-auto");
+    expect(heading.parentElement?.contains(titleControl)).toBe(true);
+    expect(heading.closest("header")?.contains(action)).toBe(false);
   });
 
-  it("updates the title control when a resize removes overflow", () => {
+  it("moves focus to the heading when resize removes the focused title control", async () => {
     let callback: ResizeObserverCallback | undefined;
     vi.stubGlobal("ResizeObserver", class {
       constructor(next: ResizeObserverCallback) { callback = next; }
@@ -356,7 +369,9 @@ describe("DecisionGateCard — long request layout", () => {
     mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
     renderCard(gate({ title: "a".repeat(300) }));
     const heading = screen.getByRole("heading");
-    expect(screen.getByRole("button", { name: "Show more" })).toBeTruthy();
+    const control = screen.getByRole("button", { name: "Show more" });
+    control.focus();
+    expect(document.activeElement).toBe(control);
     mockTitleLayout({ scrollHeight: 68, clientHeight: 68 });
     const entry: ResizeObserverEntry = {
       target: heading,
@@ -367,6 +382,8 @@ describe("DecisionGateCard — long request layout", () => {
     };
     const observer: ResizeObserver = { observe() {}, unobserve() {}, disconnect() {} };
     act(() => callback?.([entry], observer));
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    expect(heading.getAttribute("tabindex")).toBe("-1");
     expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   });
 });
