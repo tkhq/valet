@@ -840,4 +840,18 @@ describe("POST /api/me/identity-links/:provider/verify", () => {
     const owner = await identityForExternal(api.providers.db, "slack", "U777");
     expect(owner?.userId).toBe("someone-else");
   });
+
+  it("deliver refuses, and DMs nothing, when the account belongs to another Valet user", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U888", userId: "someone-else" });
+
+    const res = await fetch(`${api.baseUrl}/api/me/identity-links/slack/deliver`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ externalId: "U888", displayName: "Pat" }),
+    });
+    expect(res.status).toBe(409);
+    expect(booted.transport.sent).toHaveLength(0);
+  });
 });

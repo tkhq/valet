@@ -176,6 +176,7 @@ identityLinksRouter.post("/:provider/start", async (c) => {
  *   the client falls back to member search or show-code. Not an error.
  * - 400 — bad body, or the bot is missing a lookup scope (an admin can fix it).
  * - 404/409 — unknown provider, delivery unsupported, or transport down.
+ * - 409 — the account is linked to another Valet user.
  * - 502 — the provider API failed.
  */
 identityLinksRouter.post("/:provider/deliver", async (c) => {
@@ -247,6 +248,15 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
     }
   }
 
+  // An account another Valet user linked stays theirs (verify would refuse
+  // it anyway). Refusing here also stops codes being DMed to that person.
+  const owner = await identityForExternal(db, provider, match.externalId);
+  if (owner && owner.userId !== user.id) {
+    return c.json(
+      { error: `That ${provider} account is linked to another Valet user. Ask them to unlink it, then try again.` },
+      409,
+    );
+  }
   const code = await mintDeliveredLinkCode(db, user.id, provider, match.externalId);
   try {
     // Same default key shape as ChannelHost.attentionDeliverer: a transport

@@ -160,18 +160,21 @@ function EnterCodeForm({
 }
 
 /** The find-me-by-name step: search the workspace directory, pick yourself,
- * and the bot DMs the picked account the code. */
+ * and the bot DMs the picked account the code. The directory read is capped,
+ * so "Use a link code instead" stays available for a person it cannot find. */
 function MemberSearch({
   provider,
   title,
   onPick,
   onCancel,
+  onShowCode,
   busy,
 }: {
   provider: string;
   title: string;
   onPick: (member: LinkMemberEntry) => void;
   onCancel: () => void;
+  onShowCode: () => void;
   busy: boolean;
 }) {
   const [query, setQuery] = useState("");
@@ -208,7 +211,7 @@ function MemberSearch({
         <p className="text-xs text-danger-500">{startErrorMessage(membersQ.error, title)}</p>
       )}
       {membersQ.data && membersQ.data.members.length === 0 && (
-        <p className="text-xs text-muted">No members match. Try another name.</p>
+        <p className="text-xs text-muted">No members match. Try another name, or use a link code instead.</p>
       )}
       {membersQ.data && membersQ.data.members.length > 0 && (
         <ul className="max-h-40 space-y-1 overflow-y-auto">
@@ -227,6 +230,9 @@ function MemberSearch({
           ))}
         </ul>
       )}
+      <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onShowCode}>
+        Use a link code instead
+      </Button>
     </div>
   );
 }
@@ -387,6 +393,7 @@ export function IdentityLinkBlock({
           busy={busy}
           onPick={(member) => void deliverTo(member)}
           onCancel={() => setSearching(false)}
+          onShowCode={() => void showCode()}
         />
       ) : (
         <div className="flex flex-wrap items-center gap-2">
