@@ -64,6 +64,19 @@ skillSources:
     ref: main
     subpath: skills
 
+# KServe/vLLM custom endpoint example. Keep this block commented in generic
+# dev config. A deployment must copy it into its own valet.yaml and use its
+# private predictor service. If apiKeyEnv is set but the env var is absent,
+# Valet creates the provider as disabled. The file never holds the key.
+# llmProviders:
+#   - kind: openai_compatible
+#     name: agents-dev-kserve
+#     baseUrl: http://<predictor-service>.<inference-namespace>.svc.cluster.local/v1
+#     apiKeyEnv: VALET_KSERVE_API_KEY
+#     models:
+#       - id: <vllm-served-model-name>
+#         name: Agents Dev KServe Model
+
 # Custom MCP servers. Each entry becomes an action service at boot; tools
 # surface as <name>.<tool>. auth is one of none | oauth | api_key | bearer.
 # bearer reads an instance-wide token from tokenEnv — no secrets in this

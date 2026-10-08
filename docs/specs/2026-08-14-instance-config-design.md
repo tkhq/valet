@@ -119,6 +119,7 @@ llmProviders:
   - kind: openai_compatible
     name: local-vllm
     baseUrl: http://vllm.internal:8000/v1
+    apiKeyEnv: LOCAL_VLLM_API_KEY
     models:
       - id: qwen-coder
 
@@ -372,11 +373,17 @@ The current validator and reconciler still reject a declared config team whose n
 
 ### `llmProviders` section
 
-Non-secret provider shape only — `kind`, `name`, `baseUrl`, `models`,
-`enabled`. API keys stay in the credential store (or the existing
-`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` env handling); a declared provider
-without a connected credential reconciles fine and waits for its key,
-same as one created in the UI.
+Provider shape stays non-secret: `kind`, `name`, `baseUrl`, `models`,
+`enabled`, and optional `apiKeyEnv`. The file names an env var, not its value.
+At boot, Valet copies that value into the encrypted org credential store.
+A declared `apiKeyEnv` with no value makes the provider disabled. Valet warns
+with the provider and env names. It removes an older key only when instance
+config created it. Valet keeps manually managed credentials.
+
+If `apiKeyEnv` is absent, Valet removes a key previously created from
+instance config. It preserves a manually managed key. An admin can connect
+the key in Organization → Models. The custom provider stays inactive until a
+manual key exists. Known providers continue to use their standard env fallback.
 
 This section exists because namespaced model ids (`{kind|rowId}/{modelId}`)
 elsewhere point at provider rows — the org's tier map targets
@@ -391,11 +398,80 @@ preferences, this section's original reason for existing, were removed
   per-org singletons — the kind is the identity. The reconciler adopts
   the existing row or creates it, then overwrites the declared fields.
   `name` defaults to the kind.
-- **`openai_compatible`** entries require a `name`; the reconciler keys
-  them by name and creates missing rows as `prov_cfg_<hash>`.
+- **`openai_compatible`** entries require a `name` and `baseUrl`. The
+  reconciler derives the immutable row id `prov_cfg_<hash>` from the declared
+  name. A later display-name edit does not change that identity. This kind
+  selects the OpenAI chat-completions protocol.
+- **`apiKeyEnv`** is valid only for `openai_compatible`. If the env value is
+  present, each boot updates the encrypted `llm:<provider-id>` credential.
+  Valet warns before this update replaces a distinct manually managed key.
+  If the value is absent or blank, each boot disables the provider.
+  `enabled: false` also keeps the provider disabled when the key exists.
+  Removing `apiKeyEnv` deletes only the key that instance config created.
 - The section only asserts; it never deletes a provider row. (Deletion
   has service-level guards — the org default model's provider refuses to
   delete — and stays in the UI.)
+
+#### Upgrade note
+
+Existing `openai_compatible` entries must declare `baseUrl`; validation now
+rejects entries that omit it. Use this rollout order:
+
+1. Add `baseUrl` to old custom-provider entries before the code upgrade.
+2. Deploy the Valet code that accepts `apiKeyEnv`.
+3. Add `apiKeyEnv` and the KServe provider to Flux `api.instanceConfig`.
+
+Do not add `apiKeyEnv` before step 2 because older Valet versions reject that
+unknown key. Infra owns agents-dev activation through Flux. Valet and infra
+coordinate only through the contract below.
+
+#### agents-dev KServe contract (TKAI-251)
+
+The agents-dev deployment supplies this block in its deployment-specific
+`valet.yaml`. Generic defaults do not contain a live cluster URL.
+
+```yaml
+llmProviders:
+  - kind: openai_compatible
+    name: agents-dev-kserve
+    baseUrl: http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1
+    apiKeyEnv: VALET_KSERVE_API_KEY
+    models:
+      - id: qwen2.5-coder-7b-instruct
+        name: Qwen 2.5 Coder 7B Instruct
+```
+
+Infra PR #65 supplies this contract:
+
+- **Provider identity:** `VALET_KSERVE_PROVIDER_ID=agents-dev-kserve` maps to
+  `llmProviders[].name`. Valet derives provider id
+  `prov_cfg_e6c4a8412c73` and credential service
+  `llm:prov_cfg_e6c4a8412c73` from that name.
+- **Base URL:** `VALET_KSERVE_BASE_URL` is
+  `http://agents-dev-kserve-predictor.kserve-inference.svc.cluster.local/v1`.
+  Put that value in the deployment-specific `valet.yaml`. Valet appends paths
+  such as `/chat/completions`. Do not add that path to `baseUrl`. The endpoint
+  is a private `ClusterIP`; infra creates no public ingress or Gateway.
+- **API-key env:** `VALET_KSERVE_API_KEY` is optional in infra. When infra
+  enables bearer authentication, set `apiKeyEnv: VALET_KSERVE_API_KEY` and
+  import the Kubernetes Secret into the Valet API pod. Do not put its value in
+  `valet.yaml`. A missing or blank declared env var disables the provider and
+  removes only the key that instance config created. If infra does not enable
+  authentication, omit `apiKeyEnv`; the existing
+  custom-provider flow still requires an admin-managed credential before it
+  activates.
+- **Model id:** `VALET_KSERVE_MODEL_ID=qwen2.5-coder-7b-instruct` maps to
+  `models[].id` and vLLM's `--served-model-name`. Valet sends this value in the
+  OpenAI `model` field.
+- **Model alias:** `models[].name` is the user-facing label. Users and tier
+  targets select
+  `prov_cfg_e6c4a8412c73/qwen2.5-coder-7b-instruct`.
+- **Protocol:** `kind: openai_compatible` selects OpenAI chat completions.
+  KServe and vLLM expose that protocol at the private base URL.
+
+The committed `config/valet.dev.yaml` contains an inert, commented example
+with private-service placeholders. The agents-dev file owns the live URL,
+served model name, and display alias.
 
 Declared sources are org-owned (`owner_type='org'`) unless `team` names a
 team created by the teams pass. That field writes `owner_type='team'` and
@@ -612,8 +688,9 @@ A config change is then a PR that edits `config/valet.prod.yaml`, and
 - **Multi-org.** The file mirrors today's single-org model. When multi-org
   lands, `org:` becomes `orgs:` with a list — the version field exists for
   that break.
-- **Secrets or env interpolation.** No `${VAR}` substitution. Credentials
-  stay in env vars and the credential store.
+- **General env interpolation.** No `${VAR}` substitution. Secret-bearing
+  fields such as `llmProviders[].apiKeyEnv` and `mcpServers[].tokenEnv` name
+  one env var explicitly. The file never receives the secret value.
 - **Moving further env vars into the file.** v1 migrates exactly two
   (`AUTH_ALLOWED_EMAIL_DOMAINS`, `VALET_PLUGINS` — see Migrated env vars).
   Everything else stays where it is until a concrete need appears.

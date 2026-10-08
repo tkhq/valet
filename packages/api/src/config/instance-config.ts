@@ -101,6 +101,8 @@ export interface InstanceConfig {
     kind: "anthropic" | "openai" | "google" | "openrouter" | "openai_compatible";
     name?: string; // required when kind === "openai_compatible"
     baseUrl?: string;
+    /** Env var holding the optional provider API key. The secret never enters this file. */
+    apiKeyEnv?: string;
     enabled?: boolean;
     models?: { id: string; name?: string }[];
   }[];
@@ -509,6 +511,8 @@ function validateLlmProviders(
         entry.name = assertString(v, `llmProviders[${i}].name`, path);
       } else if (key === "baseUrl") {
         entry.baseUrl = assertString(v, `llmProviders[${i}].baseUrl`, path);
+      } else if (key === "apiKeyEnv") {
+        entry.apiKeyEnv = assertNonEmptyString(v, `llmProviders[${i}].apiKeyEnv`, path);
       } else if (key === "enabled") {
         entry.enabled = assertBoolean(v, `llmProviders[${i}].enabled`, path);
       } else if (key === "models") {
@@ -545,6 +549,16 @@ function validateLlmProviders(
     if (entry.kind === "openai_compatible" && !entry.name) {
       err(
         `${path}: llmProviders[${i}].name is required when kind is "openai_compatible". Set a unique name.`,
+      );
+    }
+    if (entry.kind === "openai_compatible" && !entry.baseUrl) {
+      err(
+        `${path}: llmProviders[${i}].baseUrl is required when kind is "openai_compatible". Set the OpenAI-compatible /v1 base URL.`,
+      );
+    }
+    if (entry.kind !== "openai_compatible" && entry.apiKeyEnv !== undefined) {
+      err(
+        `${path}: llmProviders[${i}].apiKeyEnv is only valid when kind is "openai_compatible". Use the known provider's standard deployment env var instead.`,
       );
     }
 

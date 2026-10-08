@@ -51,6 +51,7 @@ llmProviders:
   - kind: openai_compatible
     name: local-vllm
     baseUrl: http://vllm.internal:8000/v1
+    apiKeyEnv: LOCAL_VLLM_API_KEY
     models:
       - id: qwen-coder
 
@@ -99,6 +100,7 @@ describe("parseInstanceConfig", () => {
       kind: "openai_compatible",
       name: "local-vllm",
       baseUrl: "http://vllm.internal:8000/v1",
+      apiKeyEnv: "LOCAL_VLLM_API_KEY",
       models: [{ id: "qwen-coder" }],
     });
     expect(cfg.skillSources).toEqual([{ repo: "obra/superpowers", ref: "main", subpath: "skills" }]);
@@ -192,6 +194,33 @@ llmProviders:
 `.trim();
     expect(() => parseInstanceConfig(yaml, path)).toThrow(InstanceConfigError);
     expect(() => parseInstanceConfig(yaml, path)).toThrow("name");
+  });
+
+  it("requires a baseUrl for openai_compatible providers", () => {
+    const yaml = `
+version: 1
+llmProviders:
+  - kind: openai_compatible
+    name: local-vllm
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow(
+      'llmProviders[0].baseUrl is required when kind is "openai_compatible"',
+    );
+  });
+
+  it("accepts apiKeyEnv only for openai_compatible providers", () => {
+    const valid = parseInstanceConfig(
+      "version: 1\nllmProviders:\n  - kind: openai_compatible\n    name: local-vllm\n    baseUrl: http://vllm:8000/v1\n    apiKeyEnv: VLLM_API_KEY",
+      path,
+    );
+    expect(valid.llmProviders?.[0]?.apiKeyEnv).toBe("VLLM_API_KEY");
+
+    expect(() =>
+      parseInstanceConfig(
+        "version: 1\nllmProviders:\n  - kind: openai\n    apiKeyEnv: OTHER_OPENAI_KEY",
+        path,
+      ),
+    ).toThrow('llmProviders[0].apiKeyEnv is only valid when kind is "openai_compatible"');
   });
 
   it("normalizes allowedEmailDomains to lowercase trimmed, dropping empties", () => {
