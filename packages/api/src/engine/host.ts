@@ -1466,7 +1466,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...(this.opts.blobs ? ["file_attach"] : []), ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
@@ -1479,7 +1479,7 @@ export class EngineHost {
       effectivePins,
       catalogOptions,
     );
-    if (this.opts.blobs) extras.tools.push(buildFileAttachTool(this.opts.blobs, publicUrlFromEnv(process.env)));
+    if (this.opts.blobs && this.opts.db) extras.tools.push(buildFileAttachTool(this.opts.db, this.opts.blobs, publicUrlFromEnv(process.env)));
     return extras;
   }
 

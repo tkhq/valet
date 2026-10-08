@@ -2575,3 +2575,13 @@ CREATE TABLE "product_announcement_acknowledgements" (
   "announcement_id" text NOT NULL, "user_id" text NOT NULL, "acknowledged_at" bigint NOT NULL,
   PRIMARY KEY ("announcement_id", "user_id")
 );
+
+--> statement-breakpoint
+CREATE TABLE "generated_files" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,
+  "thread_id" text NOT NULL, "digest" text NOT NULL, "name" text NOT NULL,
+  "mime_type" text NOT NULL, "bytes" bigint NOT NULL, "ready" boolean NOT NULL DEFAULT false,
+  "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, session_id, thread_id, digest);

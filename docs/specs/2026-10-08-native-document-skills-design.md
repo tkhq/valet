@@ -68,6 +68,9 @@ The tool reports this limitation with instructions to configure `VALET_PUBLIC_UR
 Recipients must sign in to Valet and pass the existing download authorization checks.
 The web renderer accepts relative links and absolute links on its current origin.
 The route checks current session access and thread visibility before reading the snapshot.
+Workflow engine sessions use the run owner, current team membership, private origin visibility, and private event visibility.
+Authorization follows the workflow run detail policy (`ownedRun`), including private-event checks for personal runs.
+These sessions have no `agent_sessions` row. The route still requires the requested thread to belong to that engine session.
 It sends an attachment disposition and prevents content sniffing and caching.
 Downloads do not wake a sandbox and remain available after the source file is removed.
 The chat renderer provides a Download link from live and persisted tool results.
@@ -82,12 +85,33 @@ Its default writable container storage does not retain downloads after pod repla
 Helm operators must supply persistent blob storage before promising downloads across API rollouts.
 A filesystem-store reopen test verifies retained bytes; it does not verify a deployment's storage configuration.
 
-Generated snapshots have no expiration, automatic garbage collection, or aggregate storage quota.
-They remain on disk until an operator removes them, including after session or thread deletion.
-Deleted sessions cannot authorize downloads, but their bytes are not automatically removed.
-Each attachment is limited to 50 MiB. Repeated attachments consume additional storage.
-This follows the existing browser-evidence storage lifetime; it does not establish bounded disk usage.
-Operators must plan retained capacity and monitor disk usage before enabling channel-driven document workflows.
+Generated snapshots have no automatic expiration. Each organization can retain at most 1 GiB of payload bytes and 1,000 files.
+Each file remains limited to 50 MiB. The file-count cap also covers empty files and bounds metadata overhead.
+The `generated_files` database table stores metadata and reservations. A transaction locks the organization row before checking both caps.
+Reservations commit before blob writes and remain charged across API restarts. Independent hosts use the same database lock.
+The same filename and bytes in the same organization, session, and thread reuse a completed download.
+Other filenames or threads create separate reservations. Pending duplicates cannot start another writer.
+
+A failed write deletes partial blob data before releasing its reservation.
+A crash or failed cleanup leaves a charged pending reservation, preventing repeated failures from bypassing the caps.
+Pending files cannot be downloaded. Deleted sessions lose download access, but retained files still consume capacity.
+Capacity exhaustion refuses new attachments and asks the operator to remove retained files.
+
+To remove retained files or abandoned reservations:
+
+1. Stop attachment writers on every API replica. Confirm that no old writer can resume.
+2. Select exact file IDs from `generated_files` within the intended `org_id`.
+3. Delete each blob with `BlobStore.delete(generatedFileKey(orgId, sessionId, threadId, id))`.
+4. After deletion succeeds, delete each manifest row with both its ID and organization filter.
+5. Restart the writers. Monitor pending reservations and disk usage.
+
+Do not delete a reservation before its blob. Do not remove a reservation while a writer can still finish its upload.
+This maintenance intentionally invalidates the selected downloads. There is no automatic eviction or new administration UI.
+
+The migration and deployed schema repair create the manifest table and its scoped deduplication index.
+Pre-manifest preview blobs have no database reservations. They cannot be counted automatically through the existing BlobStore interface.
+Before upgrading such a preview, import its retained files into the manifest or stop writers and remove the legacy generated-file prefix.
+Legacy links without manifest rows return 404. Do not claim the new cap covers historical untracked blobs until maintenance finishes.
 
 Deployment requires both the API bundle and rebuilt standard sandbox image.
 Existing sandboxes retain their previous image until replaced through the normal sandbox lifecycle.
