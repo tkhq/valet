@@ -69,3 +69,17 @@ describe("refreshSelectedProfile", () => {
     expect(next.profiles?.prod?.cli?.accessToken).toBe("vltc_new");
   });
 });
+
+describe("latestCredential", () => {
+  it("returns the pair another command saved, refreshes a token near expiry, and leaves an API key alone", async () => {
+    const { latestCredential } = await import("./token-refresh.js");
+    const refreshedByOther: ValetConfig = { profiles: { prod: { url: "https://valet.example.com", cli: { accessToken: "vltc_other", refreshToken: "r", accessExpiresAt: NOW + 24 * HOUR, refreshExpiresAt: NOW + 720 * HOUR } } } };
+    expect(await latestCredential("https://valet.example.com/", "vltc_old", deps({ onDisk: refreshedByOther }))).toBe("vltc_other");
+
+    const refresh = vi.fn(async () => FRESH);
+    expect(await latestCredential("https://valet.example.com", "vltc_old", deps({ refresh, onDisk: config(NOW + HOUR) }))).toBe("vltc_new");
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    expect(await latestCredential("https://valet.example.com", "vlt_apikey", deps({ onDisk: config(NOW) }))).toBe("vlt_apikey");
+  });
+});

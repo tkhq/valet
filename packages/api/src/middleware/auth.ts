@@ -417,38 +417,46 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
 }
 
 /**
- * Writes where a person decides: approvals, the policies, grants, and
- * workflow permissions that decide what needs approval, and organization and
- * team administration (settings, members, roles, keys, credential sharing).
- * An agent (`isAgentCaller`) gets 403 on each, so it cannot approve its own
- * actions, turn `require_approval` into `allow`, or widen what it can reach
- * through the person's admin rights. Thread decision gates are checked in
- * `resolveDecision` instead, because an agent may answer a question gate.
+ * The writes an agent credential (`isAgentCaller`: an MCP app or a
+ * `valet login` CLI) may make: the routes the CLI and the MCP tools use.
+ * Every other write gets 403. An allow-list, not a deny-list, so a new
+ * route that changes approvals, policies, grants, accounts, or settings is
+ * closed to agents until someone adds it here on purpose. Reads stay open:
+ * an agent reads what its person can read.
+ *
+ * Thread and session decisions are on the list, and `resolveDecision`
+ * refuses an agent everything but a question gate.
  */
-const PERSON_ONLY_WRITES: ReadonlyArray<RegExp> = [
-  // Every organization admin write. A policy preview changes nothing.
-  /^\/api\/org(?!\/policies\/preview$)(\/|$)/,
-  /^\/api\/me\/(policy-overrides|grants|agent-access)(\/|$)/,
-  // A team's settings, deletion, policies, grants, members, and keys.
-  /^\/api\/teams\/[^/]+$/,
-  /^\/api\/teams\/[^/]+\/(policies|policy-overrides|grants|members|api-keys|deletion-requests)(\/|$)/,
-  /^\/api\/workflows\/[^/]+\/permissions(\/|$)/,
-  /^\/api\/workflows\/runs\/[^/]+\/approvals(\/|$)/,
-  /^\/api\/credentials\/[^/]+\/(delegate|delegations)(\/|$)/,
-  /^\/api\/sessions\/[^/]+\/security\/needs\/resolve$/,
+const AGENT_WRITES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
+  // Threads and sessions: start work, send prompts, upload files, answer questions.
+  { method: "POST", pattern: /^\/api\/threads$/ },
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/messages$/ },
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  { method: "POST", pattern: /^\/api\/sessions$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/messages$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/files$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  { method: "POST", pattern: /^\/api\/workspaces\/[^/]+\/runtime$/ },
+  // Tools, memory, workflow runs, and artifacts.
+  { method: "POST", pattern: /^\/api\/actions\/[^/]+\/invoke$/ },
+  { method: "PUT", pattern: /^\/api\/memory$/ },
+  { method: "POST", pattern: /^\/api\/workflows\/[^/]+\/runs$/ },
+  { method: "POST", pattern: /^\/api\/artifacts\/share$/ },
+  // A policy preview changes nothing.
+  { method: "POST", pattern: /^\/api\/org\/policies\/preview$/ },
 ];
 
 /** Whether an agent caller is refused this request. */
 export function agentRefusedRoute(method: string, path: string): boolean {
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
-  return PERSON_ONLY_WRITES.some((pattern) => pattern.test(path));
+  return !AGENT_WRITES.some((route) => route.method === method && route.pattern.test(path));
 }
 
-/** Mount after the auth middleware. Refuses `PERSON_ONLY_WRITES` to an agent caller. */
+/** Mount after the auth middleware. Refuses an agent caller every write outside `AGENT_WRITES`. */
 export function refuseAgentAuthority(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     if (c.var.authVia && isAgentCaller(c.var.authVia) && agentRefusedRoute(c.req.method, c.req.path)) {
-      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP apps and `valet login`) cannot approve requests, change policies, or administer the organization or a team." }, 403);
+      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP apps and `valet login`) can start and continue threads, answer questions, use tools, run workflows, write memory, and publish artifacts, and nothing else." }, 403);
     }
     await next();
   };

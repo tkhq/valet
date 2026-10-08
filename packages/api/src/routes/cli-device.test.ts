@@ -257,6 +257,13 @@ describe("valet login device sign-in", () => {
       ["PATCH", "/api/org/settings"],
       ["PATCH", "/api/org/members/someone"],
       ["POST", "/api/credentials/github/delegate"],
+      // Found in review: browser grants, chat identity links, workflow edits.
+      ["PATCH", "/api/sessions/s-1/browser/settings"],
+      ["POST", "/api/me/identity-links/slack/start"],
+      ["POST", "/api/me/identity-links/slack/deliver"],
+      ["PUT", "/api/workflows/wf-1"],
+      ["POST", "/api/workflows"],
+      ["PATCH", "/api/me"],
     ];
     for (const [method, path] of writes) {
       const asAgent = await fetch(`${base}${path}`, { method, headers: { "x-api-key": cliToken, "Content-Type": "application/json" }, body: "{}" });
@@ -278,14 +285,13 @@ describe("valet login device sign-in", () => {
     expect(await preview.text()).not.toContain("Agent credentials");
   });
 
-  it("revokes a workflow's pre-approvals when a CLI token changes its steps; a person's edit keeps them", async () => {
+  it("refuses a CLI token's workflow edit, keeps the person's grant, and revokes grants on an agent edit through the service", async () => {
     const { testApi, base, cookie } = await setup({ plugins: [widgetsPlugin()] });
     const cliToken = (await signIn(base, cookie).run).access_token;
     const created = await fetch(`${base}/api/workflows`, { method: "POST", headers: json(cookie, base), body: JSON.stringify({ name: "Deploy", definition: deployWorkflow("staging") }) });
     expect(created.status).toBe(201);
     const { id } = (await created.json()) as { id: string };
-    const allow = () => fetch(`${base}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: json(cookie, base), body: "{}" });
-    expect((await allow()).status).toBe(200);
+    expect((await fetch(`${base}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: json(cookie, base), body: "{}" })).status).toBe(200);
     const grants = () => testApi.providers.db.select().from(workflowActionGrants);
     expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
 
@@ -293,14 +299,24 @@ describe("valet login device sign-in", () => {
     const agentEdit = await fetch(`${base}/api/workflows/${id}`, {
       method: "PUT", headers: { "x-api-key": cliToken, "Content-Type": "application/json" }, body: JSON.stringify({ definition: deployWorkflow("production") }),
     });
-    expect(agentEdit.status).toBe(200);
-    expect(await grants()).toEqual([]);
+    expect(agentEdit.status).toBe(403);
+    expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
 
     // A person who can grant keeps the approval when they edit.
-    expect((await allow()).status).toBe(200);
     const personEdit = await fetch(`${base}/api/workflows/${id}`, { method: "PUT", headers: json(cookie, base), body: JSON.stringify({ definition: deployWorkflow("canary") }) });
     expect(personEdit.status).toBe(200);
     expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
+
+    // Valet's assistant is an agent too: its step change revokes the grant.
+    const me = (await (await fetch(`${base}/api/me`, { headers: { cookie } })).json()) as { id: string; orgId: string };
+    const { updateWorkflowDefinition } = await import("../workflows/service.js");
+    await updateWorkflowDefinition(
+      { db: testApi.providers.db, workflowStore: testApi.providers.workflowStore, workflowRunHost: testApi.providers.workflowRunHost, actionPluginByService: testApi.providers.actionPluginByService, credentials: testApi.providers.engineCredentials, engineStore: testApi.providers.engineStore },
+      { userId: me.id, orgId: me.orgId, principal: { type: "user", id: me.id }, agentEditor: true },
+      id,
+      { definition: deployWorkflow("production") },
+    );
+    expect(await grants()).toEqual([]);
   });
 
   it("keeps the replaced pair working briefly, and recovers a lost refresh response only while the new pair is unused", async () => {

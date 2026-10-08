@@ -7,7 +7,7 @@
  *   DELETE /api/me/agent-access/mcp/:clientId   delete that app's tokens and consent
  *   DELETE /api/me/agent-access/cli/:id         sign out that CLI
  *
- * An agent credential cannot call the DELETE routes (`PERSON_ONLY_WRITES`).
+ * An agent credential cannot call the DELETE routes: they are not in `AGENT_WRITES`.
  */
 import { and, eq, isNotNull } from "drizzle-orm";
 import { Hono } from "hono";

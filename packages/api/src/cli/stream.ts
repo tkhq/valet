@@ -26,7 +26,9 @@
  */
 import { WebSocket, type RawData } from "ws";
 import { UnreachableError } from "./exit.js";
+import { latestCredential } from "./token-refresh.js";
 import type { WireEvent, WireEventType } from "../wire/types.js";
+
 
 export interface StreamSessionOpts {
   url: string;
@@ -221,8 +223,11 @@ const MAX_BACKOFF_MS = 2_000;
 type ConnectionOutcome = "clean" | "reconnect" | "terminal";
 
 export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<WireEvent> {
-  const { url, apiKey, sessionId, signal } = opts;
-  const headers = apiKey ? { "x-api-key": apiKey } : undefined;
+  const { url, sessionId, signal } = opts;
+  // A reconnect can come after another command refreshed a CLI token, which
+  // retires this one after a short grace. Each connection picks up the
+  // newest credential (`latestCredential`).
+  let apiKey = opts.apiKey;
 
   const queue = new AsyncQueue<WireEvent>();
   let lastOffset = opts.fromOffset;
@@ -248,7 +253,12 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
   }
   signal?.addEventListener("abort", stop, { once: true });
 
-  const runConnection = (): Promise<ConnectionOutcome> =>
+  const runConnection = async (): Promise<ConnectionOutcome> => {
+    apiKey = await latestCredential(url, apiKey);
+    return connectOnce(apiKey ? { "x-api-key": apiKey } : undefined);
+  };
+
+  const connectOnce = (headers: Record<string, string> | undefined): Promise<ConnectionOutcome> =>
     new Promise((resolve) => {
       const wsUrl = httpToWsUrl(url, sessionId, lastOffset);
       const ws = openStreamSocket(wsUrl, headers);

@@ -130,3 +130,26 @@ export async function refreshSelectedProfile(config: ValetConfig, args: string[]
     return next;
   });
 }
+
+/**
+ * The newest credential for a long-running command that started with
+ * `stale`. Another command may have refreshed the profile since, which
+ * retires `stale` after the server's short grace, or the token may be near
+ * expiry. A non-CLI credential (an API key) comes back unchanged.
+ */
+export async function latestCredential(url: string, stale: string | undefined, deps: RefreshDeps = defaultDeps): Promise<string | undefined> {
+  if (!stale?.startsWith("vltc_")) return stale;
+  const base = url.replace(/\/$/, "");
+  let config: ValetConfig;
+  try {
+    config = deps.reload();
+  } catch {
+    return stale;
+  }
+  const entry = Object.entries(config.profiles ?? {}).find(([, p]) => p.cli !== undefined && p.url.replace(/\/$/, "") === base);
+  if (!entry) return stale;
+  const [name, profile] = entry;
+  if (profile.cli && profile.cli.accessToken !== stale) return profile.cli.accessToken;
+  const next = await refreshSelectedProfile(config, ["--instance", name], deps);
+  return next.profiles?.[name]?.cli?.accessToken ?? stale;
+}

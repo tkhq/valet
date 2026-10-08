@@ -210,27 +210,34 @@ export function mcpAuthorizeGate(auth: Pick<ValetAuth, "api">) {
 export function mcpTokenGate(db: AppDb) {
   return async (c: Context<AppEnv>, next: () => Promise<void>): Promise<void | Response> => {
     const raw = await c.req.raw.clone().text();
-    const type = c.req.header("content-type") ?? "";
+    // Parse exactly as better-call does: by the media type before any
+    // parameters. A gate that read the body differently from the handler
+    // could approve one request and let the handler run another.
+    const media = (c.req.header("content-type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
     let grant: string | undefined;
     let code: string | undefined;
-    if (type.includes("application/json")) {
+    if (media === "application/json") {
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(raw);
-        if (parsed && typeof parsed === "object") {
-          const p = parsed as Record<string, unknown>;
-          grant = typeof p.grant_type === "string" ? p.grant_type : undefined;
-          code = typeof p.code === "string" ? p.code : undefined;
-        }
+        parsed = JSON.parse(raw);
       } catch {
-        // better-auth answers a malformed body itself.
+        return c.json({ error: "invalid_request", error_description: "The request body is not valid JSON." }, 400);
       }
-    } else {
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return c.json({ error: "invalid_request", error_description: "Send the token request as a JSON object." }, 400);
+      }
+      const p = parsed as Record<string, unknown>;
+      grant = typeof p.grant_type === "string" ? p.grant_type : undefined;
+      code = typeof p.code === "string" ? p.code : undefined;
+    } else if (media === "application/x-www-form-urlencoded") {
       const form = new URLSearchParams(raw);
       if (form.getAll("grant_type").length > 1 || form.getAll("code").length > 1) {
         return c.json({ error: "invalid_request", error_description: "Send grant_type and code once each." }, 400);
       }
       grant = form.get("grant_type") ?? undefined;
       code = form.get("code") ?? undefined;
+    } else {
+      return c.json({ error: "invalid_request", error_description: "Send the token request as application/x-www-form-urlencoded." }, 400);
     }
     if (grant !== "refresh_token") {
       const consented = code

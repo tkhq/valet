@@ -13,6 +13,7 @@
  *     `apiKey` is undefined the header is simply omitted.
  */
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
+import { latestCredential } from "./token-refresh.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
@@ -52,7 +53,8 @@ export interface ListMessagesOpts {
 
 export class InstanceClient {
   private readonly base: string;
-  private readonly apiKey?: string;
+  /** Replaced when a long command picks up a refreshed CLI token (`latestCredential`). */
+  private apiKey?: string;
   /** `GET /api/me`, read once per client: a client lives for one command,
    * and the credential does not change under it. */
   private identity?: Promise<GetMeResponse>;
@@ -80,16 +82,27 @@ export class InstanceClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.base}${path}`;
     const isForm = body instanceof FormData;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method,
-        headers: this.headers(!isForm),
-        body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
-      });
-    } catch (err) {
-      // fetch rejects only on transport/network failure (DNS, refused, reset).
-      throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+    const send = async (): Promise<Response> => {
+      try {
+        return await fetch(url, {
+          method,
+          headers: this.headers(!isForm),
+          body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
+        });
+      } catch (err) {
+        // fetch rejects only on transport/network failure (DNS, refused, reset).
+        throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+      }
+    };
+    let res = await send();
+    // A CLI token this command started with may have been replaced by
+    // another command's refresh. Pick up the new one and try once more.
+    if (res.status === 401) {
+      const fresh = await latestCredential(this.base, this.apiKey);
+      if (fresh !== this.apiKey) {
+        this.apiKey = fresh;
+        res = await send();
+      }
     }
 
     if (res.status === 401) {

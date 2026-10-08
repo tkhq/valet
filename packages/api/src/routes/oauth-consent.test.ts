@@ -103,6 +103,28 @@ describe("MCP OAuth consent", () => {
     expect(await refused.text()).toContain("not approved on the Valet consent page");
   });
 
+  it("refuses a token request whose content type would make the gate and better-auth read different bodies", async () => {
+    const { testApi, cookie, clientId, verifier, challenge } = await setup();
+    const landed = await follow(testApi.baseUrl, authorizeUrl(testApi.baseUrl, clientId, challenge), cookie);
+    const code = landed.searchParams.get("consent_code") ?? "";
+    // The reviewer's repro: a body that is valid JSON (a refresh grant, which
+    // skips the consent check) and also a valid form (a code exchange). The
+    // old gate read the JSON; better-auth reads the form.
+    const form = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: verifier }).toString();
+    const both = `{"grant_type":"refresh_token","pad":"&${form}&z="}`;
+    expect(JSON.parse(both)).toMatchObject({ grant_type: "refresh_token" });
+    expect(new URLSearchParams(both).get("grant_type")).toBe("authorization_code");
+    const smuggled = await fetch(`${testApi.baseUrl}/api/auth/mcp/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded; charset=application/json" },
+      body: both,
+    });
+    expect(smuggled.status).toBe(400);
+    expect(await smuggled.text()).toContain("not approved on the Valet consent page");
+    const plain = await fetch(`${testApi.baseUrl}/api/auth/mcp/token`, { method: "POST", headers: { "Content-Type": "text/plain" }, body: `grant_type=authorization_code&code=${code}` });
+    expect(plain.status).toBe(400);
+  });
+
   it("shows who is asking, then hands the code to the client only after acceptance", async () => {
     const { testApi, cookie, clientId, verifier, challenge } = await setup();
     const landed = await follow(testApi.baseUrl, authorizeUrl(testApi.baseUrl, clientId, challenge), cookie);
