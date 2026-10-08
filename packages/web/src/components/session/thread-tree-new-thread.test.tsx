@@ -92,37 +92,37 @@ describe("ThreadTree — new thread affordance", () => {
 
   it("creates a thread inside a collapsed project and expands it", async () => {
     const key = "valet:thread-projects:user-1:team-runtime";
-    localStorage.setItem(key, JSON.stringify({ projects: [{ id: "xset", name: "XSET", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
+    localStorage.setItem(key, JSON.stringify({ projects: [{ id: "acme", name: "ACME", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
     render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
-    await userEvent.click(screen.getByRole("button", { name: "New thread in XSET" }));
+    await userEvent.click(screen.getByRole("button", { name: "New thread in ACME" }));
     expect(createThreadMutateAsync).toHaveBeenCalledOnce();
     const saved = JSON.parse(localStorage.getItem(key) ?? "null");
-    expect(saved.assignments["thread-new"]).toBe("xset");
+    expect(saved.assignments["thread-new"]).toBe("acme");
     expect(saved.projects[0].collapsed).toBe(false);
     expect(navigate).toHaveBeenCalledOnce();
   });
 
   it("does not navigate across a workspace switch during creation", async () => {
     const key = "valet:thread-projects:user-1:team-runtime";
-    localStorage.setItem(key, JSON.stringify({ projects: [{ id: "xset", name: "XSET", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
+    localStorage.setItem(key, JSON.stringify({ projects: [{ id: "acme", name: "ACME", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
     let finish: (thread: { id: string; title: null; createdAt: number }) => void = () => {};
     createThreadMutateAsync.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const view = render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
-    await userEvent.click(screen.getByRole("button", { name: "New thread in XSET" }));
+    await userEvent.click(screen.getByRole("button", { name: "New thread in ACME" }));
     view.rerender(<TooltipProvider><ThreadTree sessionId="another-runtime" /></TooltipProvider>);
     await act(async () => finish({ id: "thread-new", title: null, createdAt: 1 }));
     expect(navigate).not.toHaveBeenCalled();
-    expect(JSON.parse(localStorage.getItem(key) ?? "null").assignments["thread-new"]).toBe("xset");
+    expect(JSON.parse(localStorage.getItem(key) ?? "null").assignments["thread-new"]).toBe("acme");
     expect(localStorage.getItem("valet:thread-projects:user-1:another-runtime")).toBeNull();
   });
 
   it("keeps the project unchanged and shows retry guidance if creation fails", async () => {
     const key = "valet:thread-projects:user-1:team-runtime";
-    const original = JSON.stringify({ projects: [{ id: "xset", name: "XSET", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false });
+    const original = JSON.stringify({ projects: [{ id: "acme", name: "ACME", collapsed: true }], assignments: {}, pinned: [], grouped: true, collapsed: false });
     localStorage.setItem(key, original);
     createThreadMutateAsync.mockRejectedValueOnce(new Error("offline"));
     render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
-    await userEvent.click(screen.getByRole("button", { name: "New thread in XSET" }));
+    await userEvent.click(screen.getByRole("button", { name: "New thread in ACME" }));
     expect(screen.getByRole("alert").textContent).toContain("Try again");
     expect(localStorage.getItem(key)).toBe(original);
     expect(navigate).not.toHaveBeenCalled();
