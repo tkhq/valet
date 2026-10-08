@@ -3982,10 +3982,6 @@ export interface StartIdentityLinkResponse {
   deepLink?: string;
   /** How to deliver the code — from the plugin's identityLink.instructions. */
   instructions: string;
-  /** The exact line to send, for providers that declare a reply format
-   * (Slack: `link <code>`). The card shows and copies this, not the bare
-   * code, because the bot reads the command, not the code alone. */
-  replyText?: string;
   expiresInSeconds: number;
 }
 

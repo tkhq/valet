@@ -53,7 +53,7 @@
  * Linking works two ways. The OAuth auto-link runs when a user completes the
  * slack-user connect flow and records their Slack user id at that point. The
  * `link <code>` DM command lets a user link manually: the Slack transport
- * parses the message into a `command` event that `ChannelHost.redeemLinkCode`
+ * parses the message into a `command` event that `ChannelHost.handleStart`
  * consumes. Until a user completes one of these flows their DMs drop at
  * `unlinked_sender`.
  *

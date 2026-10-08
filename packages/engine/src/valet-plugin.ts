@@ -545,13 +545,6 @@ export interface IdentityLinkDeclaration {
    */
   deliveryDm?: (ctx: { code: string }) => string;
   /**
-   * Build the line the show-code card asks the person to send the bot
-   * (Slack: `link ${code}`). Shown only in the authenticated web response,
-   * never sent to the provider. The card renders one copyable line the
-   * transport's parser accepts verbatim. The DM flow does not use it.
-   */
-  deliveryReply?: (ctx: { code: string }) => string;
-  /**
    * The credential service whose OAuth connect also writes this identity
    * link (Slack: `slack-user`, "Sign in with Slack"). The web card offers it
    * as a one-click alternative to the code flow when the deployment has
@@ -951,14 +944,8 @@ export function validateValetPlugin(
       if (link.deepLink !== undefined && typeof link.deepLink !== "function") {
         issues.push({ path: "identityLink.deepLink", message: "must be a function when present" });
       }
-      // A string is the pre-v1-flow shape (a codeless DM). It is not an issue:
-      // an issue rejects the whole plugin. The host offers code delivery only
-      // for a function, so such a plugin keeps everything except "DM me".
-      if (link.deliveryDm !== undefined && typeof link.deliveryDm !== "function" && typeof link.deliveryDm !== "string") {
+      if (link.deliveryDm !== undefined && typeof link.deliveryDm !== "function") {
         issues.push({ path: "identityLink.deliveryDm", message: "must be a function when present" });
-      }
-      if (link.deliveryReply !== undefined && typeof link.deliveryReply !== "function") {
-        issues.push({ path: "identityLink.deliveryReply", message: "must be a function when present" });
       }
       if (link.oauthService !== undefined && (typeof link.oauthService !== "string" || !NAME_RE.test(link.oauthService))) {
         issues.push({ path: "identityLink.oauthService", message: "must match /^[a-z][a-z0-9-]*$/ when present" });

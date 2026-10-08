@@ -34,10 +34,6 @@ const plugin: ValetPlugin = {
     // packages/api/src/routes/identity-links.test.ts.
     deliveryDm: ({ code }) =>
       `Your Valet link code is \`${code}\`. Enter it in Valet to link this Slack account. The code expires in 10 minutes. If you did not ask Valet to link an account, ignore this message.`,
-    // The line the show-code card asks the person to send the bot. Must
-    // stay parseable by LINK_COMMAND_RE (transport.ts) — asserted in
-    // plugin.test.ts.
-    deliveryReply: ({ code }) => `link ${code}`,
     // "Sign in with Slack": the slack-user OAuth connect records the Slack
     // user id as this identity link, with no code to carry.
     oauthService: "slack-user",

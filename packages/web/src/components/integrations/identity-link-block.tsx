@@ -17,8 +17,8 @@
  * With `offerOAuth`, "Sign in with <title>" starts the provider's OAuth
  * connect, which links the account with no code.
  *
- * The show-code flow (`POST .../start`: the card shows the line to send the
- * bot) is never a third button. It is the single "Link account" flow for
+ * The show-code flow (`POST .../start`: the card shows the code and the
+ * provider's delivery instructions) is never a third button. It is the single "Link account" flow for
  * providers without `codeDelivery` (Telegram), and the automatic fallback
  * when the email lookup 202s and the provider has no member directory.
  *
@@ -160,21 +160,18 @@ function EnterCodeForm({
 }
 
 /** The find-me-by-name step: search the workspace directory, pick yourself,
- * and the bot DMs the picked account the code. The directory read is capped,
- * so "Use a link code instead" stays available for a person it cannot find. */
+ * and the bot DMs the picked account the code. */
 function MemberSearch({
   provider,
   title,
   onPick,
   onCancel,
-  onShowCode,
   busy,
 }: {
   provider: string;
   title: string;
   onPick: (member: LinkMemberEntry) => void;
   onCancel: () => void;
-  onShowCode: () => void;
   busy: boolean;
 }) {
   const [query, setQuery] = useState("");
@@ -211,7 +208,7 @@ function MemberSearch({
         <p className="text-xs text-danger-500">{startErrorMessage(membersQ.error, title)}</p>
       )}
       {membersQ.data && membersQ.data.members.length === 0 && (
-        <p className="text-xs text-muted">No members match. Try another name, or use a link code instead.</p>
+        <p className="text-xs text-muted">No members match. Try another name.</p>
       )}
       {membersQ.data && membersQ.data.members.length > 0 && (
         <ul className="max-h-40 space-y-1 overflow-y-auto">
@@ -230,9 +227,6 @@ function MemberSearch({
           ))}
         </ul>
       )}
-      <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onShowCode}>
-        Use a link code instead
-      </Button>
     </div>
   );
 }
@@ -382,7 +376,7 @@ export function IdentityLinkBlock({
       </p>
       {oauthService && !searching && (
         <p className="text-xs leading-relaxed text-muted">
-          Sign in with {title} also lets Valet search, read, and post in {title} as you. The code options link
+          Sign in with {title} also lets Valet search, read, and post in {title} as you. The DM options link
           your account only.
         </p>
       )}
@@ -393,7 +387,6 @@ export function IdentityLinkBlock({
           busy={busy}
           onPick={(member) => void deliverTo(member)}
           onCancel={() => setSearching(false)}
-          onShowCode={() => void showCode()}
         />
       ) : (
         <div className="flex flex-wrap items-center gap-2">
@@ -466,9 +459,7 @@ export function IdentityLinkBlock({
               </a>
             ) : undefined
           }
-          // The bot reads the whole command (Slack: `link <code>`), so the
-          // panel shows and copies that line when the provider has one.
-          value={pendingLink.replyText ?? pendingLink.code}
+          value={pendingLink.code}
           note={pendingLink.instructions}
           expiresInSeconds={pendingLink.expiresInSeconds}
         />

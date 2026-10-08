@@ -1209,31 +1209,6 @@ describe("IntegrationsPage — org-provided pairing", () => {
     await waitFor(() => expect(screen.getByText(/We DMed/)).toBeTruthy());
   });
 
-  // The directory read is capped, so a person it cannot find still needs a
-  // way to get a code. The old Settings card always offered one.
-  it("offers a link code from the member search when the directory cannot find the person", async () => {
-    identityLinksData = { links: [slackLink({ codeDelivery: true, memberSearch: true })] };
-    deliverLinkMutateAsync.mockResolvedValueOnce({ reason: "email_not_in_workspace" });
-    linkMembersData = { members: [] };
-    startLinkMutateAsync.mockResolvedValue({
-      code: "VLT-5555",
-      replyText: "link VLT-5555",
-      instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-      expiresInSeconds: 600,
-    });
-    render(<IntegrationsPage />);
-
-    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
-    await waitFor(() => expect(screen.getByText(/Pick yourself from the list/)).toBeTruthy());
-    fireEvent.change(screen.getByLabelText("Search Slack members"), { target: { value: "nobody" } });
-    fireEvent.submit(screen.getByLabelText("Search Slack members"));
-    await waitFor(() => expect(screen.getByText(/No members match/)).toBeTruthy());
-
-    fireEvent.click(screen.getByRole("button", { name: "Use a link code instead" }));
-    await waitFor(() => expect(screen.getByText("link VLT-5555")).toBeTruthy());
-    expect(startLinkMutateAsync).toHaveBeenCalledWith("slack");
-  });
-
   it("falls back to the shown code when the DM send fails, and says why", async () => {
     identityLinksData = { links: [slackLink({ codeDelivery: true })] };
     deliverLinkMutateAsync.mockRejectedValue(

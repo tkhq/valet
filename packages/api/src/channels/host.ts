@@ -70,7 +70,7 @@ import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engi
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
 import { digestGate } from "./gate-digest.js";
 import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
-import { LINK_CODE_RE, consumeLinkCode, identityForExternal, identityForUser, isDeliveredLinkCode, linkIdentity } from "./identity-links.js";
+import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
 import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
 
@@ -1359,23 +1359,13 @@ export class ChannelHost {
     // Rule 2: /start <code> — link flow. Handled before sender resolution:
     // an unlinked sender's first message IS the link command.
     if (event.kind === "command" && event.command?.name === "start") {
-      await this.redeemLinkCode(channelType, transport, event, event.command.args);
+      await this.handleStart(channelType, transport, event);
       return;
     }
 
     // Rule 3: resolve sender identity for every other event kind.
     const identity = await identityForExternal(this.deps.db, channelType, event.sender.externalId);
     if (!identity) {
-      // An unlinked person who pastes a bare code is still trying to link:
-      // either a shown code without the provider's command (Slack's `link`),
-      // or a code the bot DMed, which belongs in Valet. Only text with the
-      // exact minted shape counts, so ordinary first messages still get the
-      // link instructions below. A linked sender never reaches here.
-      const pasted = event.kind === "message" ? (event.text ?? "").trim() : "";
-      if (LINK_CODE_RE.test(pasted)) {
-        await this.redeemLinkCode(channelType, transport, event, pasted);
-        return;
-      }
       await this.dropLog(orgId, "unlinked_sender", event.conversationKey, `externalId=${event.sender.externalId}`);
       await this.maybeReplyUnlinked(transport, event.conversationKey);
       return;
@@ -1412,24 +1402,16 @@ export class ChannelHost {
     await this.dropLog(orgId, "unsupported_kind", event.conversationKey, `kind=${event.kind}`);
   }
 
-  private async redeemLinkCode(
+  private async handleStart(
     channelType: string,
     transport: ChannelTransport | undefined,
     event: InboundChannelEvent,
-    code: string | undefined,
   ): Promise<void> {
     // Rule 2's contract is reply-only (hit links + confirms, miss replies
     // invalid) — no drop-log entry either way; unlike every other routing
     // decision, an unlinked /start attempt is the expected, common case.
+    const code = event.command?.args;
     const consumed = code ? await consumeLinkCode(this.deps.db, channelType, code) : null;
-    if (!consumed && code && (await isDeliveredLinkCode(this.deps.db, channelType, code))) {
-      // A code the bot DMed is redeemed only in the web app of the person
-      // who asked for it. Say so, rather than calling a valid code invalid.
-      await transport?.send(event.conversationKey, {
-        markdown: "Enter this code in Valet, on the Connected accounts card that sent it. Codes from that DM do not work here.",
-      });
-      return;
-    }
     if (!consumed) {
       await transport?.send(event.conversationKey, {
         markdown: "That link code is invalid or expired — get a fresh one from Settings → Connected accounts.",

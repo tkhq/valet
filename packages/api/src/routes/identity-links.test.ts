@@ -211,8 +211,6 @@ describe("POST /api/me/identity-links/:provider/start", () => {
     expect(body.code).toMatch(/^[A-Za-z0-9_-]{20,}$/);
     expect(body.deepLink).toMatch(/^https:\/\/t\.me\/valet_test_bot\?start=[A-Za-z0-9_-]{20,}$/);
     expect(body.instructions).toBe("Tap the link or send /start <code> to the bot.");
-    // Telegram declares no reply format, so the card shows the code itself.
-    expect(body.replyText).toBeUndefined();
 
     const consumed = await consumeLinkCode(api.providers.db, "telegram", body.code);
     expect(consumed).toMatchObject({ userId: "local-user" });
@@ -258,7 +256,6 @@ describe("POST /api/me/identity-links/:provider/start", () => {
       identityLink: {
         provider: "slack",
         instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-        deliveryReply: ({ code }) => `link ${code}`,
       },
     };
     api = await bootTestApi({ plugins: [sl] });
@@ -275,9 +272,6 @@ describe("POST /api/me/identity-links/:provider/start", () => {
     expect(body.deepLink).toBeUndefined();
     expect(body.instructions).toBe("In Slack, open a DM with the Valet app and send: link <code>");
     expect(body.expiresInSeconds).toBe(600);
-    // The card shows and copies this line; the bot does not read a bare code
-    // as a link command.
-    expect(body.replyText).toBe(`link ${body.code}`);
   });
 });
 
@@ -489,7 +483,6 @@ function deliverySlackPlugin(): { plugin: ValetPlugin; transport: FakeDeliverySl
       provider: "slack",
       instructions: "In Slack, open a DM with the Valet app and send: link <code>",
       deliveryDm: ({ code }) => `Your Valet link code is ${code}. Enter it in Valet.`,
-      deliveryReply: ({ code }) => `link ${code}`,
     },
   };
   return { plugin, transport };

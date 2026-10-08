@@ -66,7 +66,7 @@ function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDecla
 /** True when `POST .../deliver` can work: the plugin declares the DM and
  * the running transport can resolve a member by email. */
 function canDeliverCode(decl: IdentityLinkDeclaration, transport: ChannelTransport | null): boolean {
-  return typeof decl.deliveryDm === "function" && typeof transport?.lookupUserByEmail === "function";
+  return decl.deliveryDm !== undefined && typeof transport?.lookupUserByEmail === "function";
 }
 
 /** The declared OAuth service that also writes this identity link, when the
@@ -153,7 +153,6 @@ identityLinksRouter.post("/:provider/start", async (c) => {
     instructions: decl.instructions,
     expiresInSeconds: START_LINK_TTL_SECONDS,
     ...(deepLink !== undefined ? { deepLink } : {}),
-    ...(decl.deliveryReply ? { replyText: decl.deliveryReply({ code }) } : {}),
   };
   return c.json(resp);
 });
@@ -198,7 +197,7 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
   }
   const transport = channelHost.transportFor(provider);
   const { deliveryDm } = decl;
-  if (transport === null || typeof deliveryDm !== "function" || typeof transport.lookupUserByEmail !== "function") {
+  if (transport === null || deliveryDm === undefined || typeof transport.lookupUserByEmail !== "function") {
     return c.json(
       { error: `${provider} does not support code delivery by DM. Use the show-code flow instead.` },
       404,

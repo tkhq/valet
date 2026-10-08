@@ -8,11 +8,6 @@ import { identityLinkCodes, userIdentityLinks } from "../schema/index.js";
  * asserted against it in identity-links.test.ts. */
 export const CODE_TTL_MS = 10 * 60_000;
 
-/** The exact shape `mintLinkCode` returns: 16 random bytes as base64url.
- * The channel host uses it to recognize a link code that a person pasted
- * without the provider's command, such as Slack's `link`. */
-export const LINK_CODE_RE = /^[A-Za-z0-9_-]{22}$/;
-
 function hashCode(code: string): string {
   return createHash("sha256").update(code).digest("hex");
 }
@@ -94,29 +89,6 @@ export async function consumeLinkCode(
   const row = rows[0];
   if (!row || row.expiresAt < now) return null;
   return { userId: row.userId };
-}
-
-/** True when `code` is a live code the bot DMed (the "DM me" flow). Chat
- * never redeems one, but the host uses this to tell a person who pasted it
- * into the bot DM to enter it in Valet instead. Reads only. */
-export async function isDeliveredLinkCode(
-  db: AppDb,
-  provider: string,
-  code: string,
-  now = Date.now(),
-): Promise<boolean> {
-  const rows = await db
-    .select({ expiresAt: identityLinkCodes.expiresAt })
-    .from(identityLinkCodes)
-    .where(
-      and(
-        eq(identityLinkCodes.provider, provider),
-        eq(identityLinkCodes.codeHash, hashCode(code)),
-        isNotNull(identityLinkCodes.externalId),
-      ),
-    )
-    .limit(1);
-  return rows.length > 0 && (rows[0]?.expiresAt ?? 0) >= now;
 }
 
 /** Redeems a delivered code typed into the web app by the user who

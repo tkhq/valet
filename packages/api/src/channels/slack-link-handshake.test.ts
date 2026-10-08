@@ -1,13 +1,12 @@
 /**
  * The Slack account-link handshake, end to end and without Slack
- * credentials: the real Slack plugin, the real start route, the real Slack
- * transport's `parseUpdate`, and the real `ChannelHost`. Only outbound
- * `send` is stubbed, because it would call the Slack API.
+ * credentials: the real Slack plugin, the real deliver and verify routes,
+ * the real Slack transport's `parseUpdate`, and the real `ChannelHost`. Only
+ * the Slack API calls (`send`, `openDirectConversation`) are stubbed.
  *
  * Regression (2026-10-08): a new user could not link from Settings →
  * Connected accounts. v1's flow (pick yourself, the bot DMs a code, type it
- * into Valet) existed only as a reversed v2 port on the Integrations page,
- * and Settings showed a bare code that the bot does not read as a command.
+ * into Valet) existed only as a reversed v2 port on the Integrations page.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
@@ -15,7 +14,6 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { userIdentityLinks } from "../schema/index.js";
 import { hasOpenDirect } from "./host.js";
-import type { StartIdentityLinkResponse } from "../wire/types.js";
 
 const TEAM = "T0TEST";
 const SLACK_USER = "U0NEWUSER";
@@ -53,30 +51,7 @@ function dm(text: string, eventId: string): Record<string, unknown> {
   };
 }
 
-async function startLink(booted: TestApi): Promise<StartIdentityLinkResponse> {
-  const res = await fetch(`${booted.baseUrl}/api/me/identity-links/slack/start`, { method: "POST" });
-  expect(res.status).toBe(200);
-  return (await res.json()) as StartIdentityLinkResponse;
-}
-
 describe("Slack account-link handshake", () => {
-  it.each([
-    ["the reply line the card shows", (start: StartIdentityLinkResponse) => start.replyText ?? ""],
-    ["a pasted bare code", (start: StartIdentityLinkResponse) => start.code],
-  ])("links the account from %s", async (_label, message) => {
-    const { api: booted, transport, send } = await bootSlack();
-    const start = await startLink(booted);
-    expect(start.replyText).toBe(`link ${start.code}`);
-
-    const parsed = transport.parseUpdate(dm(message(start), `Ev-${start.code}`));
-    if (!parsed) throw new Error("the Slack transport dropped the DM");
-    await booted.providers.channelHost.handleUpdate("slack", parsed);
-
-    const links = await booted.providers.db.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "slack"));
-    expect(links).toEqual([expect.objectContaining({ externalId: SLACK_USER, userId: "local-user" })]);
-    expect(send.mock.calls.at(-1)?.[1].markdown).toContain("Linked");
-  });
-
   // The intended flow, as in v1: pick yourself, the bot DMs a code, and you
   // type it into Valet.
   it("links the account the bot DMed after the code is entered in Valet", async () => {

@@ -41,7 +41,7 @@ instead of adding another provider-specific router.
   user both the act-as actions and DM routing.
 - Generalize `/api/me/identity-links` from Telegram-hardcoded routes to
   provider-parameterized routes. The Slack transport emits a `command`
-  event for `link <code>` DMs, so `ChannelHost.redeemLinkCode` consumes it
+  event for `link <code>` DMs, so `ChannelHost.handleStart` consumes it
   with no host changes. This is the fallback for users who do not want to
   grant act-as scopes.
 - Activate the `V2-GAP`: the session credential resolver enriches the org
@@ -238,64 +238,36 @@ into the same event shape Telegram emits
 { kind: "command", command: { name: "start", args: code } }
 ```
 
-`ChannelHost.redeemLinkCode` already consumes this shape and already treats
+`ChannelHost.handleStart` already consumes this shape and already treats
 an unlinked sender's first message as the link command. No host changes.
 
-### Pasted codes and the Settings card (2026-10-08)
+### Linking from Settings (2026-10-08)
 
-On 2026-10-08 a new user could not link. Settings → Connected accounts
-showed the bare code in large type, with `link <code>` only in the
-instructions below it. The user pasted the bare code into the bot DM. The
-transport reads only `link <code>` as a command, so the host answered every
-paste with the generic link instructions.
+On 2026-10-08 a new user could not link from Settings → Connected accounts.
+That card showed only a bare code to send the bot, while the v1 flows ("DM
+me", "Find me by name", "Sign in with Slack") lived on the Integrations tile,
+and the v2 port of "DM me" had reversed v1's code direction.
 
-The "DM me" and "Find me by name" flows now run in v1's direction. The
-bot DMs a code to the picked account, and the person types it into Valet
-(`POST /api/me/identity-links/:provider/verify`). The v2 port had reversed
-this: its DM carried no code, and the person carried `link <code>` from
-Valet into Slack. The code row records the account it was DMed to
-(`identity_link_codes.external_id`) and the requesting user. Only that
-user can redeem it, and only through verify. `consumeLinkCode`, the chat
-path, skips bound codes. A picked member who replies with the code from
-Slack therefore links nothing. That reply was the takeover the codeless DM
-(#372) prevented.
+- Settings renders the same `IdentityLinkBlock` as the Integrations tile.
+- "DM me" and "Find me by name" run in v1's direction: the bot DMs a code,
+  and the person types it into Valet (`POST /api/me/identity-links/:provider/verify`).
+  The code row records the account it was DMed to
+  (`identity_link_codes.external_id`) and the requesting user. Only that
+  user can redeem it, and only through verify. `consumeLinkCode`, the chat
+  path, skips bound codes, so a picked member who replies with the code
+  links nothing.
+- Deliver and verify return 409 for an account another Valet user linked,
+  the same rule as the OAuth connect's `identity_conflict`.
+- Settings also offers "Sign in with Slack". The Slack `identityLink`
+  declares `oauthService: "slack-user"`, and `GET /api/me/identity-links`
+  reports it only when that OAuth client's environment is set. The card
+  says the connect also lets Valet search, read, and post as the person.
+  It starts the connect with `landing=connected-accounts`, a fixed page
+  name in the signed state, so a successful connect returns to Settings. A
+  failure still lands on `/integrations`, which renders the error.
 
-If the person pastes a DMed code into the bot DM instead, the host does
-not consume it and does not call it invalid. It replies that the code must
-be entered in Valet (`isDeliveredLinkCode` reads, never deletes). Verify
-refuses with 409 when the DMed account is already linked to another Valet
-user, the same rule as the OAuth connect's `identity_conflict`. A plugin
-that still declares a string `deliveryDm` (the old codeless DM) still
-loads, with "DM me" off.
-
-Three more changes close this:
-
-- `POST /api/me/identity-links/:provider/start` returns `replyText` when
-  the plugin declares `deliveryReply` (Slack: `link <code>`). The code panel
-  shows and copies that line, not the bare code.
-- Settings → Connected accounts renders the same `IdentityLinkBlock` as the
-  Integrations tile. Settings now offers "DM me" and "Find me by name", and
-  the Telegram deep link moved into the shared panel.
-- When an unlinked sender sends text with the exact minted code shape
-  (`LINK_CODE_RE`, 22 base64url characters), the host tries it as a link
-  code. A miss replies "invalid or expired". Other text from an unlinked
-  sender still gets the link instructions. A linked sender never reaches
-  this check, so a code-shaped message from them stays a normal message.
-
-Settings also offers "Sign in with Slack", with a note that it also lets
-Valet search, read, and post as the person. It starts the connect with
-`landing=connected-accounts`, a fixed page name carried in the signed
-state, so a successful connect returns to Settings. A failure still lands
-on `/integrations`, which renders the error. The Slack `identityLink`
-declares `oauthService: "slack-user"`, and `GET /api/me/identity-links`
-reports it only when that OAuth client's environment is set. The button
-starts the slack-user OAuth connect, which writes the identity link on
-success. The Integrations page does not repeat the button, because the
-slack-user tile already offers that connect.
-
-`packages/api/src/channels/slack-link-handshake.test.ts` runs the handshake
-with the real Slack plugin, transport, start route, and host, for both the
-reply line and a pasted bare code.
+`packages/api/src/channels/slack-link-handshake.test.ts` runs the DM flow
+with the real Slack plugin, transport, routes, and host.
 
 This closes the exact gap the `slack-webhook.ts` docblock names. Update
 that docblock in the same commit.

@@ -610,7 +610,7 @@ describe("validateValetPlugin identityLink", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("accepts a deliveryDm function with a deliveryReply function", () => {
+  it("accepts a deliveryDm function", () => {
     const result = validateValetPlugin({
       name: "fixture",
       version: "0.1.0",
@@ -618,25 +618,13 @@ describe("validateValetPlugin identityLink", () => {
         provider: "slack",
         instructions: "DM the Valet app: link <code>",
         deliveryDm: (ctx: { code: string }) => `Your Valet link code is ${ctx.code}.`,
-        deliveryReply: (ctx: { code: string }) => `link ${ctx.code}`,
       },
     });
     expect(result.ok).toBe(true);
   });
 
-  // A string is the pre-v1-flow codeless DM. Rejecting it would drop the
-  // whole plugin; the host just keeps "DM me" off for it.
-  it("tolerates a legacy string deliveryDm", () => {
-    const result = validateValetPlugin({
-      name: "fixture",
-      version: "0.1.0",
-      identityLink: { provider: "slack", instructions: "DM the Valet app: link <code>", deliveryDm: "Reply in Valet." },
-    });
-    expect(result.ok).toBe(true);
-  });
-
-  it("rejects a deliveryDm that is neither a function nor a string", () => {
-    for (const deliveryDm of [42, { text: "dm" }]) {
+  it("rejects a deliveryDm that is not a function", () => {
+    for (const deliveryDm of ["Reply in Valet.", 42]) {
       const result = validateValetPlugin({
         name: "fixture",
         version: "0.1.0",
@@ -650,22 +638,6 @@ describe("validateValetPlugin identityLink", () => {
       if (!result.ok) {
         expect(result.issues.some((i) => i.path === "identityLink.deliveryDm")).toBe(true);
       }
-    }
-  });
-
-  it("rejects a non-function deliveryReply", () => {
-    const result = validateValetPlugin({
-      name: "fixture",
-      version: "0.1.0",
-      identityLink: {
-        provider: "slack",
-        instructions: "DM the Valet app: link <code>",
-        deliveryReply: "link <code>",
-      },
-    });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.issues.some((i) => i.path === "identityLink.deliveryReply")).toBe(true);
     }
   });
 

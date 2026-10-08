@@ -664,29 +664,6 @@ describe("ConnectedAccountsPage", () => {
       expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
     });
 
-    // The Slack bot reads `link <code>`, not a bare code. The card shows the
-    // whole line so a copied value links on the first try.
-    it("a shown Slack code renders the full reply line, not the bare code", async () => {
-      linksData = {
-        links: [{ provider: "slack", linked: false, channelReady: true, codeDelivery: false, memberSearch: false }],
-      };
-      startMutateAsync.mockResolvedValue({
-        code: "SLACK-CODE-42",
-        replyText: "link SLACK-CODE-42",
-        instructions: "In Slack, open a DM with the Valet app and send: link <code>",
-        expiresInSeconds: 300,
-      });
-      render(<ConnectedAccountsPage />);
-
-      fireEvent.click(screen.getByRole("button", { name: "Link Slack account" }));
-
-      await waitFor(() => expect(startMutateAsync).toHaveBeenCalledWith("slack"));
-      expect(await screen.findByText("link SLACK-CODE-42")).toBeTruthy();
-      expect(screen.queryByText("SLACK-CODE-42")).toBeNull();
-      // No deep-link anchor when deepLink is absent.
-      expect(screen.queryByRole("link", { name: "Open Slack and press Start" })).toBeNull();
-    });
-
     it("telegram card (with deepLink) keeps the anchor after start", async () => {
       linksData = {
         links: [{ provider: "telegram", linked: false, channelReady: true, codeDelivery: false, memberSearch: false }],
