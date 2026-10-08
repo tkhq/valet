@@ -124,13 +124,15 @@ function ItemList({
   scope,
   teamId,
   useCase,
+  active,
 }: {
+  active: boolean;
   period: UsagePeriodSelection;
   scope: UsageScopeName;
   teamId: string | undefined;
   useCase: UsageUseCase;
 }) {
-  const q = useUsageItems(period, scope, useCase, teamId);
+  const q = useUsageItems(period, scope, useCase, teamId, { enabled: active });
 
   if (q.isLoading) {
     return <p className="text-xs text-muted px-4 py-2">Loading…</p>;
@@ -196,7 +198,9 @@ function UseCaseRow({
   period,
   scope,
   teamId,
+  active,
 }: {
+  active: boolean;
   useCase: UsageUseCase;
   costUsd: number;
   totalTokens: number;
@@ -234,13 +238,14 @@ function UseCaseRow({
         <span className="tabular-nums text-muted sm:w-16 sm:text-right">{turns} turns</span>
       </div>
       {expanded && (
-        <ItemList period={period} scope={scope} teamId={teamId} useCase={useCase} />
+        <ItemList active={active} period={period} scope={scope} teamId={teamId} useCase={useCase} />
       )}
     </div>
   );
 }
 
 export function UsagePage() {
+  const [view, setView] = useState<"overview" | "breakdown" | "activity">("overview");
   const [period, setPeriod] = useState<UsagePeriodSelection>({ kind: "lookback", window: "7d" });
   const [month, setMonth] = useState("");
   const [customStart, setCustomStart] = useState("");
@@ -277,12 +282,12 @@ export function UsagePage() {
   const currentMonthUtc = todayUtc.slice(0, 7);
 
   const breakdownQ = useUsageBreakdown(period, scope, teamId, { enabled: scopeKnown });
-  const toolEfficiencyQ = useUsageToolEfficiency(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess });
-  const outcomesQ = useUsageOutcomes(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess });
+  const toolEfficiencyQ = useUsageToolEfficiency(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess && view === "breakdown" });
+  const outcomesQ = useUsageOutcomes(period, scope, teamId, { enabled: scopeKnown && breakdownQ.isSuccess && view === "breakdown" });
   // Proxy traffic is personal; every consumer of these two queries renders
   // only in the personal workspace, so do not fetch outside it.
-  const requestsQ = useProxyRequests({ limit: 25, cursor }, { enabled: personalWorkspace });
-  const settingsQ = useProxySettings({ enabled: personalWorkspace });
+  const requestsQ = useProxyRequests({ limit: 25, cursor }, { enabled: personalWorkspace && view === "activity" });
+  const settingsQ = useProxySettings({ enabled: personalWorkspace && view === "activity" });
 
   // A workspace switch resets the bounded request-log pager. Team records
   // never appear in this personal surface.
@@ -372,8 +377,18 @@ export function UsagePage() {
           </p>
         </div>
 
+        <nav aria-label="Usage views" className="flex gap-1 border-b border-line">
+          {(["overview", "breakdown", "activity"] as const).map((item) => (
+            <button type="button" key={item} aria-current={view === item ? "page" : undefined}
+              onClick={() => setView(item)}
+              className={cn("min-h-11 flex-1 border-b-2 px-3 py-2 text-sm capitalize sm:flex-none",
+                view === item ? "border-moss text-ink" : "border-transparent text-muted hover:text-ink")}
+            >{item}</button>
+          ))}
+        </nav>
+
         {/* Disabled-gateway notice */}
-        {personalWorkspace && settingsQ.data?.enabled === false && (
+        {view === "activity" && personalWorkspace && settingsQ.data?.enabled === false && (
           <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
             The recording gateway is disabled — enable it in{" "}
             <Link
@@ -496,12 +511,13 @@ export function UsagePage() {
         {/* Totals + chart + by-use-case + by-model. A disabled query (scope
             still resolving) reports isLoading=false, so gate on both. */}
         {!scopeKnown || breakdownQ.isLoading ? (
-          <p className="text-sm text-muted">Loading…</p>
+          view !== "activity" && <p className="text-sm text-muted">Loading…</p>
         ) : breakdownQ.error ? (
-          <p className="text-sm text-danger-600">{usageErrorText(breakdownQ.error)}</p>
+          view !== "activity" && <p className="text-sm text-danger-600">{usageErrorText(breakdownQ.error)}</p>
         ) : breakdown ? (
           <>
             {/* Total stat cards — cost + token types + cache-hit-rate + unpriced */}
+            <div hidden={view !== "overview"} className="space-y-8">
             <div className="grid grid-cols-1 min-[360px]:grid-cols-2 lg:grid-cols-5 gap-3">
               <StatCard label="Active agents" value={fmt(breakdown.activeAgents)} sub="Unique agents with token usage in this period." />
               <StatCard label="Total cost" value={fmtUsd(breakdown.totalCostUsd)} />
@@ -535,6 +551,8 @@ export function UsagePage() {
               <SpendChart buckets={chartBuckets} />
             </div>
 
+            </div>
+            <div hidden={view !== "breakdown"} className="space-y-8">
             <div>
               <h2 className="text-sm font-medium text-ink mb-2">Tool work per model token</h2>
               <p className="text-xs text-muted mb-3">
@@ -646,6 +664,7 @@ export function UsagePage() {
                     <UseCaseRow
                       key={uc}
                       useCase={uc}
+                      active={view === "breakdown"}
                       costUsd={bucket.costUsd}
                       totalTokens={bucket.totalTokens}
                       turns={bucket.turns}
@@ -829,13 +848,14 @@ export function UsagePage() {
                 </div>
               </div>
             )}
+            </div>
           </>
         ) : null}
 
         {/* Proxy (external tools) — request log + drill-down. Proxy traffic is
             always personal (never team-owned), so the log and the key-setup
             callout stay out of a team workspace's view. */}
-        {personalWorkspace && (
+        {view === "activity" && personalWorkspace && (
         <div>
           <h2 className="text-sm font-medium text-ink mb-1">
             Proxy (external tools) — request log
@@ -844,7 +864,7 @@ export function UsagePage() {
             Proxy costs are estimates from model rates, not provider invoices. Requests can use organization or personal provider keys.
           </p>
           <p className="text-xs text-muted mb-3">
-            Recorded prompts from external tools routed through the gateway.
+            Recent requests from external tools routed through the gateway. This log is independent of the spend period above.
           </p>
           {requestsQ.error && (
             <p className="text-sm text-danger-600 mb-2">{String(requestsQ.error)}</p>
@@ -865,8 +885,12 @@ export function UsagePage() {
         </div>
         )}
 
+        {view === "activity" && !personalWorkspace && scopeKnown && (
+          <p className="rounded border border-line p-4 text-sm text-muted">The request log contains personal proxy traffic. Switch to Personal to view it. Team spend is available in Overview and Breakdown.</p>
+        )}
+
         {/* Key setup callout */}
-        {personalWorkspace && (
+        {view === "activity" && personalWorkspace && (
         <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
           Generate a key and set up your tools in{" "}
           <Link

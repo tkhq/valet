@@ -425,9 +425,17 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   return requestForm<ProfilePictureUploadResponse>(path, form);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const forwardAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) forwardAbort();
+  else callerSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const timer = setTimeout(() => {
+    if (controller.signal.aborted) return;
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
@@ -451,7 +459,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   } catch (err) {
-    if (controller.signal.aborted) {
+    if (timedOut) {
       throw new ApiError(
         NO_RESPONSE_STATUS,
         `${method} ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
@@ -460,6 +468,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw err;
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", forwardAbort);
   }
 }
 
@@ -1085,30 +1094,30 @@ export const api = {
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`, undefined, signal);
   },
-  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`);
+    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
   },
-  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`);
+    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`, undefined, signal);
   },
-  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
+  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     qs.set("useCase", useCase);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
+    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`, undefined, signal);
   },
   usageExportCsvUrl: (
     period: UsagePeriodSelection,
@@ -1465,7 +1474,7 @@ export const api = {
     to?: number;
     cursor?: string;
     limit?: number;
-  } = {}) => {
+  } = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (opts.model) qs.set("model", opts.model);
     if (opts.harness) qs.set("harness", opts.harness);
@@ -1474,10 +1483,10 @@ export const api = {
     if (opts.cursor) qs.set("cursor", opts.cursor);
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`);
+    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`, undefined, signal);
   },
-  proxySettings: () =>
-    request<ProxySettingsResponse>("GET", "/proxy/settings"),
+  proxySettings: (signal?: AbortSignal) =>
+    request<ProxySettingsResponse>("GET", "/proxy/settings", undefined, signal),
   setProxyMode: (mode: "centralized" | "passthrough") =>
     request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
   updateProxySettings: (patch: { enabled?: boolean; mode?: "centralized" | "passthrough" }) =>

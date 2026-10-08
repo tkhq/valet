@@ -6,12 +6,13 @@
  * Routed through the central `api` client so 401→login handling and the
  * 30-second request timeout apply the same way as every other page.
  */
-import { useQuery, useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   ProxyRequestListItem,
   ProxySettingsResponse,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { useCancellableQuery } from "./use-cancellable-query";
 
 export const qkProxy = {
   requests: (filters: ProxyRequestFilters) => ["proxy", "requests", filters] as const,
@@ -38,10 +39,10 @@ export function useProxyRequests(
   filters: ProxyRequestFilters = {},
   opts?: Partial<UseQueryOptions<ProxyRequestPage>>,
 ) {
-  return useQuery<ProxyRequestPage>({
+  return useCancellableQuery<ProxyRequestPage>({
     queryKey: qkProxy.requests(filters),
-    queryFn: async () => {
-      const raw = await api.proxyRequests(filters);
+    queryFn: async ({ signal }) => {
+      const raw = await api.proxyRequests(filters, signal);
       // The backend returns `{ requests, nextCursor }` but the hook exposes
       // `{ items, nextCursor }` so callers don't need to know the key name.
       return { items: raw.requests, nextCursor: raw.nextCursor, pageSize: raw.pageSize, hasMore: raw.hasMore };
@@ -54,9 +55,9 @@ export function useProxyRequests(
 export function useProxySettings(
   opts?: Partial<UseQueryOptions<ProxySettingsResponse>>,
 ) {
-  return useQuery<ProxySettingsResponse>({
+  return useCancellableQuery<ProxySettingsResponse>({
     queryKey: qkProxy.settings(),
-    queryFn: () => api.proxySettings(),
+    queryFn: ({ signal }) => api.proxySettings(signal),
     staleTime: 60_000,
     ...opts,
   });
