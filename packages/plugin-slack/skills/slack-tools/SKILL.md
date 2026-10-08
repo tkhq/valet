@@ -7,10 +7,14 @@ description: How to effectively use Slack tools to read, understand, and interac
 
 ## Reading Channels
 
-Use `slack.list_channels` to find channel IDs. Read its `access_note` before concluding that a channel is missing.
+Use `slack.search_channels` with `query` to find channel IDs. Pass the original channel name or keyword.
+Search normalizes casing and a leading `#`. Exact names rank before substring matches.
+For example, `query="ACME"` can find `lead-acme`; the legacy `prefix="ACME"` cannot.
+Resolve ambiguous matches before posting. An empty search does not establish a permissions problem.
+Use `slack.list_channels` to browse channels. Read its `access_note` before concluding that a channel is missing.
 `scope="all"` lists public channels only. Use `scope="joined"` (the default) to find private channels where Valet is a member.
 Team and organization runs use the connected bot’s membership for private channels. Personal runs also require their linked owner to be a channel member. Direct messages remain restricted.
-Use a public channel or an authorized personal run. Do not borrow a member's access for a team workflow.
+Use a channel authorized for this run. Do not borrow a member's credentials for a team workflow.
 
 Use `slack.read_history` to read messages. Key parameters:
 
@@ -43,7 +47,15 @@ Messages include **reactions** (name + count) that signal consensus and attentio
 
 ## Images and Files
 
-Messages include a `files` array with metadata: name, mimetype, size, and URL. Use `slack.fetch_file` with the URL to view images (mockups, screenshots, diagrams, error screenshots) or read text files.
+Messages include a `files` array with ID, name, mimetype, size, and URL.
+Use `slack.fetch_file` with `file_id` to read an attachment. A Slack file URL also works.
+The tool reads images, text, PDF, and DOCX files in personal, team, and organization runs.
+It verifies a channel share before downloading. Personal private-file access requires a linked channel member. Shared runs cannot read DM-only files.
+To edit a document, set `output_path` to save the original bytes in the sandbox (maximum 25 MB).
+For example, use `file_id="F123"` and `output_path="/workspace/proposal.docx"`. Work on a copy to preserve the original.
+Use document editing tools on the saved file. Do not ask for a re-upload before trying this tool.
+If Slack reports `missing_scope`, ask an administrator to reinstall the app with `files:read`.
+For externally hosted files, use the connected provider tools.
 
 Don't fetch every file. Read the filename and surrounding message context first -- only fetch when visual understanding actually matters for the task.
 

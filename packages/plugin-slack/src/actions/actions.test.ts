@@ -81,6 +81,13 @@ function mockGuardAllowsPublicChannel(fetchMock: ReturnType<typeof vi.fn>): void
   );
 }
 
+function mockFileAccess(fetchMock: ReturnType<typeof vi.fn>, url: string): void {
+  fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, file: {
+    id: 'F1', name: url.split('/').pop(), url_private: url, channels: ['C1'],
+  } }));
+  mockGuardAllowsPublicChannel(fetchMock);
+}
+
 describe('slack actions', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -782,6 +789,7 @@ describe('slack actions', () => {
   });
 
   it('fetch_file returns text content for a text file from files.slack.com', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/note.txt');
     fetchMock.mockResolvedValueOnce(
       new Response('hello world', { status: 200, headers: { 'Content-Type': 'text/plain' } }),
     );
@@ -791,13 +799,14 @@ describe('slack actions', () => {
       pluginCtx(),
     );
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[2] as [string, RequestInit];
     expect(url).toBe('https://files.slack.com/files-pri/T1-F1/note.txt');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
     expect(result).toEqual({ success: true, data: { content: 'hello world', mimetype: 'text/plain' } });
   });
 
   it('fetch_file bounds application text before decoding it', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/data.json');
     fetchMock.mockResolvedValueOnce(
       new Response('', {
         status: 200,
@@ -823,12 +832,13 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       success: false,
-      error: 'This is an external file (e.g. Google Docs). Open the URL directly — it cannot be fetched through Slack. Only files hosted on Slack (files.slack.com) can be downloaded.',
+      error: 'Use a file ID or an HTTPS files.slack.com URL from Slack message data.',
     });
   });
 
   it('fetch_file returns an image attachment for small images', async () => {
     const bytes = new Uint8Array([137, 80, 78, 71]);
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/pic.png');
     fetchMock.mockResolvedValueOnce(
       new Response(bytes, { status: 200, headers: { 'Content-Type': 'image/png' } }),
     );
@@ -844,16 +854,6 @@ describe('slack actions', () => {
     ]);
   });
 
-  it.each(['team', 'org'] as const)('fetch_file denies %s owners before accessing a private file URL', async (type) => {
-    const extractDocument = vi.fn();
-    const result = await action('slack.fetch_file').execute(
-      { url: 'https://files.slack.com/files-pri/T1-F1/nda.docx' },
-      pluginCtx({ owner: { type, id: 'shared-owner' }, extractDocument }),
-    );
-    expect(result).toEqual({ success: false, error: 'Shared runs cannot verify access to this Slack file. Use an authorized personal assistant or a team Google Drive connection.' });
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(extractDocument).not.toHaveBeenCalled();
-  });
 
   it.each([
     ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'agreement'],
@@ -861,6 +861,7 @@ describe('slack actions', () => {
     ['application/zip', 'nda.docx'],
   ])('fetch_file extracts DOCX for %s and %s', async (mime, name) => {
     const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0]);
+    mockFileAccess(fetchMock, `https://files.slack.com/files-pri/T1-F1/${name}`);
     fetchMock.mockResolvedValueOnce(new Response(bytes, { headers: { 'Content-Type': mime } }));
     const extractDocument = vi.fn().mockResolvedValue({ markdown: 'Mutual NDA terms' });
     const result = await action('slack.fetch_file').execute(
@@ -876,6 +877,7 @@ describe('slack actions', () => {
   });
 
   it('fetch_file leaves arbitrary ZIP archives unsupported', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/archive.zip');
     fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04]), { headers: { 'Content-Type': 'application/zip' } }));
     const extractDocument = vi.fn();
     const result = await action('slack.fetch_file').execute(
@@ -886,6 +888,7 @@ describe('slack actions', () => {
   });
 
   it('fetch_file rejects a DOCX label without a ZIP signature', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/nda.docx');
     fetchMock.mockResolvedValueOnce(new Response('sign in', { headers: { 'Content-Type': 'application/octet-stream' } }));
     const extractDocument = vi.fn();
     const result = await action('slack.fetch_file').execute(
@@ -896,6 +899,7 @@ describe('slack actions', () => {
   });
 
   it('fetch_file reports the host DOCX extraction failure', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/nda.docx');
     fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04]), { headers: { 'Content-Type': 'application/octet-stream' } }));
     const extractDocument = vi.fn().mockRejectedValue(new Error('Invalid DOCX package'));
     const result = await action('slack.fetch_file').execute(
@@ -907,6 +911,7 @@ describe('slack actions', () => {
 
   it('fetch_file returns extracted text for a PDF', async () => {
     const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/report.pdf');
     fetchMock.mockResolvedValueOnce(
       new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
     );
@@ -931,6 +936,7 @@ describe('slack actions', () => {
   });
 
   it('fetch_file rejects a declared PDF without a PDF signature', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/login.pdf');
     fetchMock.mockResolvedValueOnce(
       new Response('<html>sign in</html>', { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
     );
@@ -947,6 +953,7 @@ describe('slack actions', () => {
 
   it('fetch_file normalizes PDF MIME parameters and case', async () => {
     const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/report.pdf');
     fetchMock.mockResolvedValueOnce(
       new Response(bytes, { status: 200, headers: { 'Content-Type': 'Application/PDF; charset=binary' } }),
     );
@@ -960,6 +967,7 @@ describe('slack actions', () => {
   });
 
   it('reports an oversized generic PDF candidate', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/unknown');
     fetchMock.mockResolvedValueOnce(
       new Response('%PDF-', {
         status: 200,
@@ -977,6 +985,7 @@ describe('slack actions', () => {
   });
 
   it('keeps an oversized generic non-PDF as unsupported metadata', async () => {
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/archive');
     fetchMock.mockResolvedValueOnce(
       new Response('PK\x03\x04', {
         status: 200,
@@ -994,6 +1003,7 @@ describe('slack actions', () => {
 
   it('fetch_file says why a scanned PDF has no text', async () => {
     const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/scan.pdf');
     fetchMock.mockResolvedValueOnce(
       new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
     );
@@ -1009,6 +1019,7 @@ describe('slack actions', () => {
 
   it('fetch_file reports a missing extractor instead of blaming the file type', async () => {
     const bytes = new TextEncoder().encode('%PDF-1.4 ...');
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/report.pdf');
     fetchMock.mockResolvedValueOnce(
       new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
     );
@@ -1027,6 +1038,7 @@ describe('slack actions', () => {
 
   it('fetch_file still returns metadata for a file type it cannot read', async () => {
     const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+    mockFileAccess(fetchMock, 'https://files.slack.com/files-pri/T1-F1/bundle.zip');
     fetchMock.mockResolvedValueOnce(
       new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/zip' } }),
     );
