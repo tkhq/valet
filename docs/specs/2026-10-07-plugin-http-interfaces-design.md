@@ -120,3 +120,11 @@ Route mounting retains its defensive check for invalid host configuration.
 The host removes Cookie, Authorization, X-API-Key, X-Valet-Sandbox, X-Valet-Internal, and X-Valet-Test-User-ID headers before invoking plugin code.
 Authenticated routes receive caller identity through the caller argument. Provider signatures must use separate headers, such as Linear-Signature.
 Signature headers and raw body bytes remain unchanged.
+
+## Linear client preparation
+
+The Linear plugin owns the provider HTTP client for token creation, workspace lookup, and legacy webhook deletion.
+The API compatibility module keeps host environment defaults and shares the plugin's token error constructor.
+Connection route mounting, persistence, and token renewal ownership remain in the API host.
+The next adoption step is described in [the Linear adoption plan](../plans/2026-10-08-linear-plugin-adoption.md).
+This preparation does not complete Linear connection route adoption or TKAI-377.
