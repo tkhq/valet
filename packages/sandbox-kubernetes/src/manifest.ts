@@ -44,6 +44,9 @@ const FULL_PROFILE_COMMAND = [
 
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
+/** Node-local scratch emptyDir — wiped when the pod stops (spec Part A). */
+export const SCRATCH_VOLUME_NAME = "scratch";
+export const SCRATCH_MOUNT_PATH = "/scratch";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
 export const IMAGE_FINGERPRINT_ENV = "VALET_SANDBOX_IMAGE_FINGERPRINT";
 export const NESTED_KUBERNETES_ANNOTATION_KEY = "valet.dev/capability.nested-kubernetes";
@@ -159,6 +162,7 @@ function mergeResourceOpts(
   if (overrides?.ephemeralStorageLimit !== undefined) {
     merged.ephemeralStorageLimit = overrides.ephemeralStorageLimit;
   }
+  if (overrides?.scratch !== undefined) merged.scratch = overrides.scratch;
   return merged;
 }
 
@@ -182,6 +186,42 @@ function memoryLimitFor(request: string): string {
   return formatStorageQuantity(bytes * MEMORY_LIMIT_FACTOR);
 }
 
+/** Bytes for a quantity string, or 0 for an absent/unparseable one — an
+ * absent term contributes nothing to a sum, and an unparseable one degrades
+ * to 0 rather than poisoning the whole sum (the raw string still reaches
+ * admission unmodified when scratch is absent, see `ephemeralStorageSums`). */
+function termBytes(value: string | undefined): number {
+  if (value === undefined) return 0;
+  return parseStorageQuantity(value) ?? 0;
+}
+
+/**
+ * Adds the scratch emptyDir size onto the deploy's ephemeral-storage
+ * request/limit knobs, since scratch usage counts against the same
+ * node-disk accounting (TKAI-349) as those knobs. Without scratch, the
+ * deploy knob passes through VERBATIM (not reformatted) — this keeps the
+ * manifest byte-identical to before scratch existed. A side is included
+ * only when scratch or that side's own knob is defined; both absent omits
+ * the side entirely (an operator can still disable ephemeral-storage
+ * accounting with no scratch configured).
+ */
+export function ephemeralStorageSums(
+  scratch: string | undefined,
+  request: string | undefined,
+  limit: string | undefined,
+): { request?: string; limit?: string } {
+  const scratchBytes = scratch !== undefined ? parseStorageQuantity(scratch) : null;
+  const hasScratch = scratchBytes !== null && scratchBytes > 0;
+  const result: { request?: string; limit?: string } = {};
+  if (hasScratch || request !== undefined) {
+    result.request = hasScratch ? formatStorageQuantity(scratchBytes + termBytes(request)) : request;
+  }
+  if (hasScratch || limit !== undefined) {
+    result.limit = hasScratch ? formatStorageQuantity(scratchBytes + termBytes(limit)) : limit;
+  }
+  return result;
+}
+
 /** Maps merged resource opts to `corev1.ResourceRequirements`. cpu request
  * equals limit (unchanged). The memory limit is `MEMORY_LIMIT_FACTOR` x the
  * request — the request schedules, the limit only stops a runaway.
@@ -190,7 +230,8 @@ function memoryLimitFor(request: string): string {
  * node; the limit makes the kubelet evict one runaway sandbox instead of
  * the node going NotReady. An absent side is omitted — no fallback from one
  * to the other, so an operator can disable either knob ("0" in
- * sandbox-backend.ts) alone. */
+ * sandbox-backend.ts) alone. `scratch` adds onto both sides via
+ * `ephemeralStorageSums` — the scratch emptyDir is node-local disk too. */
 function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequirements | undefined {
   const requests: ResourceList = {};
   const limits: ResourceList = {};
@@ -202,12 +243,9 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
     requests.memory = resources.memory;
     limits.memory = memoryLimitFor(resources.memory);
   }
-  if (resources.ephemeralStorage !== undefined) {
-    requests["ephemeral-storage"] = resources.ephemeralStorage;
-  }
-  if (resources.ephemeralStorageLimit !== undefined) {
-    limits["ephemeral-storage"] = resources.ephemeralStorageLimit;
-  }
+  const ephemeralSums = ephemeralStorageSums(resources.scratch, resources.ephemeralStorage, resources.ephemeralStorageLimit);
+  if (ephemeralSums.request !== undefined) requests["ephemeral-storage"] = ephemeralSums.request;
+  if (ephemeralSums.limit !== undefined) limits["ephemeral-storage"] = ephemeralSums.limit;
   if (Object.keys(requests).length === 0 && Object.keys(limits).length === 0) return undefined;
   return {
     ...(Object.keys(requests).length > 0 ? { requests } : {}),
@@ -305,6 +343,14 @@ export function buildSandboxManifest(
 
   if (resourceRequirements) {
     container.resources = resourceRequirements;
+  }
+
+  if (resourceOpts?.scratch) {
+    container.volumeMounts = [
+      ...(container.volumeMounts ?? []),
+      { name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH },
+    ];
+    container.env = [...(container.env ?? []), { name: "TMPDIR", value: "/scratch/tmp" }];
   }
 
   const isFullProfile = opts.profile === "full";
@@ -475,6 +521,13 @@ export function buildSandboxManifest(
     podSpec.volumes = [credsVolume];
   }
   if (browserClaim) podSpec.volumes = [...(podSpec.volumes ?? []), { name: "runtime-state", persistentVolumeClaim: { claimName: browserClaim } }];
+
+  if (resourceOpts?.scratch) {
+    podSpec.volumes = [
+      ...(podSpec.volumes ?? []),
+      { name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: resourceOpts.scratch } },
+    ];
+  }
 
   if (opts.docker) {
     // sizeLimit pins the docker-state emptyDir (image layers + container

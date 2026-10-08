@@ -788,6 +788,43 @@ describe("create() resource adoption and pod rollout", () => {
     expectFingerprintedTemplate(objectsApi.cr.spec.podTemplate, buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), { resources }).spec.podTemplate);
   });
 
+  it("adding scratch to authoritative resources rolls the live pod (TKAI drift: scratch is authoritative)", async () => {
+    const { provider, objectsApi, deletedPods, cfg } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+    const resources = { cpu: 4, memory: "8Gi", scratch: "50Gi" };
+
+    await provider.create({ workspace: "/ws/resources", resources });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+    expectFingerprintedTemplate(objectsApi.cr.spec.podTemplate, buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), { resources }).spec.podTemplate);
+  });
+
+  it("unchanged scratch does not roll on repeated authoritative adoption", async () => {
+    const { provider, deletedPods } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+    const resources = { cpu: 4, memory: "8Gi", scratch: "50Gi" };
+
+    await provider.create({ workspace: "/ws/resources", resources });
+    expect(deletedPods).toEqual(["pod-existing"]);
+    await provider.create({ workspace: "/ws/resources", resources });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
+  it("dropping scratch after it was authoritative rolls the pod again", async () => {
+    const { provider, deletedPods } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 4, memory: "8Gi", scratch: "50Gi" } });
+    expect(deletedPods).toEqual(["pod-existing"]);
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 4, memory: "8Gi" } });
+
+    expect(deletedPods).toEqual(["pod-existing", "pod-existing"]);
+  });
+
   it.each([undefined, { cpu: 1, memory: "2Gi" }])("authoritative empty resources roll onto deployment defaults %j", async (defaultResources) => {
     const { provider, objectsApi, deletedPods, cfg } = setup(prior, defaultResources);
 

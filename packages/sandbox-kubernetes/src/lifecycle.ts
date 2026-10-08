@@ -108,6 +108,7 @@ import {
   imageFingerprint,
   NEVER_READY_OWNER_ANNOTATION_KEY,
   SANDBOX_CONTAINER_NAME,
+  SCRATCH_VOLUME_NAME,
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type {
@@ -190,11 +191,16 @@ function withResourceFingerprint(
   return { ...template, metadata: { ...template.metadata, annotations }, spec };
 }
 
-/** Fingerprint desired requests/limits, not admission-mutated pod resources. */
+/** Fingerprint desired requests/limits, not admission-mutated pod resources.
+ * Also covers `scratch` (absent vs present counts as a change) — the
+ * scratch emptyDir is node-local disk the same way cpu/memory are node
+ * compute, so a scratch-only change must roll the pod exactly like a
+ * cpu/memory change does. */
 export function resourceFingerprint(resources: SandboxCpuMemoryResources): string {
-  const values = (["requests", "limits"] as const).flatMap((side) =>
+  const values: (string | null)[] = (["requests", "limits"] as const).flatMap((side) =>
     (["cpu", "memory"] as const).map((field) => normalizeQuantity(resources[side]?.[field]) ?? null),
   );
+  values.push(normalizeQuantity(resources.scratch) ?? null);
   return createHash("sha256").update(JSON.stringify(values)).digest("hex");
 }
 
@@ -508,25 +514,44 @@ function parseApiVersion(apiVersion: K8sProviderConfig["apiVersion"]): { group: 
 export interface SandboxCpuMemoryResources {
   requests?: { cpu?: string | number; memory?: string | number };
   limits?: { cpu?: string | number; memory?: string | number };
+  /** The `scratch` emptyDir's `sizeLimit`, read from the pod template's
+   * volumes (not a container request/limit — see `SandboxResourceOpts`). */
+  scratch?: string;
 }
 
-/** Read only the named sandbox container's CPU/memory requests and limits. */
+/** Reads the `scratch` emptyDir volume's `sizeLimit` off a pod template's
+ * `spec.volumes`, or undefined when no such volume is declared. */
+function scratchSizeLimit(spec: unknown): string | undefined {
+  if (!isRecord(spec) || !Array.isArray(spec.volumes)) return undefined;
+  const volume: unknown = spec.volumes.find(
+    (value: unknown) => isRecord(value) && value.name === SCRATCH_VOLUME_NAME,
+  );
+  if (!isRecord(volume) || !isRecord(volume.emptyDir)) return undefined;
+  return typeof volume.emptyDir.sizeLimit === "string" ? volume.emptyDir.sizeLimit : undefined;
+}
+
+/** Read the named sandbox container's CPU/memory requests and limits, plus
+ * the scratch emptyDir's size (read separately — it lives on `spec.volumes`,
+ * not the container's resources). */
 export function sandboxCpuMemoryResources(template: unknown): SandboxCpuMemoryResources {
   if (!isRecord(template) || !isRecord(template.spec) || !Array.isArray(template.spec.containers)) return {};
+  const result: SandboxCpuMemoryResources = {};
   const container: unknown = template.spec.containers.find(
     (value: unknown) => isRecord(value) && value.name === SANDBOX_CONTAINER_NAME,
   );
-  if (!isRecord(container) || !isRecord(container.resources)) return {};
-  const result: SandboxCpuMemoryResources = {};
-  for (const side of ["requests", "limits"] as const) {
-    const values = container.resources[side];
-    if (!isRecord(values)) continue;
-    const known: NonNullable<SandboxCpuMemoryResources["requests"]> = {};
-    for (const field of ["cpu", "memory"] as const) {
-      if (typeof values[field] === "string" || typeof values[field] === "number") known[field] = values[field];
+  if (isRecord(container) && isRecord(container.resources)) {
+    for (const side of ["requests", "limits"] as const) {
+      const values = container.resources[side];
+      if (!isRecord(values)) continue;
+      const known: NonNullable<SandboxCpuMemoryResources["requests"]> = {};
+      for (const field of ["cpu", "memory"] as const) {
+        if (typeof values[field] === "string" || typeof values[field] === "number") known[field] = values[field];
+      }
+      if (Object.keys(known).length > 0) result[side] = known;
     }
-    if (Object.keys(known).length > 0) result[side] = known;
   }
+  const scratch = scratchSizeLimit(template.spec);
+  if (scratch !== undefined) result.scratch = scratch;
   return result;
 }
 
@@ -1214,11 +1239,11 @@ export async function livePodDrift(
     : Boolean(liveImage) && liveImage !== manifestImage;
   const resourcesDrift = expectedResourceFingerprint !== undefined
     ? status.resourceFingerprint !== expectedResourceFingerprint
-    : resources !== undefined && (["requests", "limits"] as const).some((side) =>
+    : resources !== undefined && ((["requests", "limits"] as const).some((side) =>
     (["cpu", "memory"] as const).some((field) =>
       normalizeQuantity(status.sandboxResources?.[side]?.[field]) !== normalizeQuantity(resources[side]?.[field]),
     ),
-  );
+  ) || normalizeQuantity(status.sandboxResources?.scratch) !== normalizeQuantity(resources.scratch));
   const browserDrift = expectedBrowserFingerprint !== undefined && status.browserFingerprint !== expectedBrowserFingerprint;
   if (!imageDrift && !resourcesDrift && !browserDrift) return { differs: false };
   return { differs: true, podName, liveImage, imageDrift, resourcesDrift, ...(browserDrift ? { browserDrift } : {}) };
