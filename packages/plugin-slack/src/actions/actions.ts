@@ -19,6 +19,7 @@ import {
   type PluginActionContext,
   type PluginActionResult,
 } from "@valet/engine";
+import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
@@ -298,6 +299,7 @@ export function slimMessage(msg: Record<string, unknown>): Record<string, unknow
     .filter((f) => f.mode !== 'tombstone')
     .map((f) => {
       const entry: Record<string, unknown> = {
+        id: f.id,
         name: f.name,
         mimetype: f.mimetype || undefined,
         size: f.size,
@@ -478,17 +480,19 @@ const listChannels = action(Type.Object({
     scope: Type.Optional(Type.Union([Type.Literal('joined'), Type.Literal('all')], {
       description: 'Which channels to list: "joined" (default) = bot member channels, "all" = all public channels',
     })),
-    prefix: Type.Optional(Type.String({ description: 'Filter channels whose name starts with this prefix' })),
+    query: Type.Optional(Type.String({ minLength: 1, description: 'Channel name or part of it, such as lead-xset, #lead-xset, or XSET. Case-insensitive substring search; exact matches rank first.' })),
+    prefix: Type.Optional(Type.String({ description: 'Legacy case-insensitive starts-with filter. XSET does not match lead-xset. Prefer query for finding a channel by name.' })),
   }))({
   id: 'slack.list_channels',
   name: 'List Channels',
-  description: 'List Slack channels available to this run. "joined" lists bot member channels; "all" lists public channels only. Team and organization runs can access private channels where the connected bot is a member. Personal runs require a linked Slack identity and channel membership for private access. Read access_note before suggesting another invitation. Use prefix to filter channel names.',
+  description: 'List Slack channels available to this run. "joined" lists bot member channels; "all" lists public channels only. Team and organization runs can access private channels where the connected bot is a member. Personal runs require a linked Slack identity and channel membership for private access. Read access_note before suggesting another invitation. Use query to search names. Empty matches do not prove missing access. Resolve ambiguous matches before sending messages.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
+    if (p.query !== undefined && (!p.query.trim().replace(/^#/, '') || p.prefix !== undefined)) return { success: false, error: 'Supply a nonempty query without prefix.' };
     const wantAll = p.scope === 'all';
 
     // users.conversations = only joined channels (public + private)
@@ -521,6 +525,12 @@ const listChannels = action(Type.Object({
       channels = channels.filter((ch) => typeof ch.name === 'string' && ch.name.toLowerCase().startsWith(pfx));
     }
 
+    const query = p.query?.trim().replace(/^#/, '').toLowerCase();
+    if (query) {
+      channels = channels.filter((ch) => typeof ch.name === 'string' && ch.name.toLowerCase().includes(query));
+      channels.sort((a, b) => Number(typeof b.name === 'string' && b.name.toLowerCase() === query) - Number(typeof a.name === 'string' && a.name.toLowerCase() === query));
+    }
+
     // Filter out private channels the owner doesn't have access to
     const ownerSlackId = ownerSlackUserId(cred);
     const sharedOwner = ctx.owner?.type === 'team' || ctx.owner?.type === 'org';
@@ -550,7 +560,7 @@ const listChannels = action(Type.Object({
         : wantAll
           ? 'scope="all" lists public channels only. Use scope="joined" to find private channels where both the bot and personal owner are members.'
           : 'Private channels are included only when the linked personal owner is a member. An absent channel is not proof that the bot needs an invitation.';
-    return { success: true, data: { channels, total: channels.length, scope: wantAll ? 'all' : 'joined', visibility, access_note: accessNote } };
+    return { success: true, data: { channels, total: channels.length, scope: wantAll ? 'all' : 'joined', visibility, access_note: accessNote, ...(query ? { query, search_complete: true, ambiguous: channels.length > 1, match_status: channels.length ? 'matched' : 'no_match', search_note: 'No matches are not proof of missing access. Check the supplied name and scope. Resolve multiple matches before sending.' } : {}) } };
   },
 });
 
@@ -704,39 +714,51 @@ const listUsers = action(Type.Object({}))({
   },
 });
 
+const searchChannels = action(Type.Object({
+  query: Type.String({ minLength: 1, description: 'Original channel name or keyword, such as #lead-xset or XSET. Exact matches rank first, followed by substring matches.' }),
+  scope: Type.Optional(Type.Union([Type.Literal('joined'), Type.Literal('all')], {
+    description: 'joined (default) includes authorized private channels. all searches public channels only.',
+  })),
+}))({
+  id: 'slack.search_channels',
+  name: 'Search Channels',
+  description: 'Find accessible Slack channels by name with case-insensitive substring matching. Pass the user’s original name or keyword in query. Empty matches do not prove missing access. Resolve ambiguous matches before posting.',
+  riskLevel: 'low',
+  execute: (args, ctx) => listChannels.execute(args, ctx),
+});
+
 const fetchFile = action(Type.Object({
-    url: Type.String({ description: 'Slack file URL (from the files array in message data)' }),
+    url: Type.Optional(Type.String({ description: 'Slack file URL from message data. Prefer file_id when available.' })),
+    file_id: Type.Optional(Type.String({ pattern: '^F[A-Z0-9]+$', description: 'File ID from the message files array. Access is checked for this run.' })),
+    output_path: Type.Optional(Type.String({ minLength: 1, description: 'Optional destination in the sandbox. Saves original bytes for editing instead of extracting text. Maximum 25 MB.' })),
   }))({
   id: 'slack.fetch_file',
   name: 'Fetch File',
-  description: 'Download a file from Slack in a personal run. Team and organization runs cannot download private Slack file URLs. For images, the content is returned visually so you can see it. For text files, PDFs, and DOCX files, the content is returned as text. Use the url from the files array in message data. IMPORTANT: Call this tool one at a time, not in parallel — each image fetch interrupts the session to deliver the image to your vision.',
+  description: 'Read or download a Slack attachment using this run’s connected account. Works in personal, team, and organization runs after channel access checks. Pass file_id from message data, or its Slack URL. Images return visually; text, PDF, and DOCX return extracted text. Set output_path to save original bytes in the sandbox for editing. Shared runs cannot read DM-only files. Fetch images one at a time.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
-    if (ctx.owner?.type === 'team' || ctx.owner?.type === 'org') {
-      return { success: false, error: 'Shared runs cannot verify access to this Slack file. Use an authorized personal assistant or a team Google Drive connection.' };
-    }
-    const p = args;
     const cred = await ctx.credentials.get();
-    const token = cred?.accessToken ?? "";
-    if (!token) return { success: false, error: 'Missing bot_token' };
-
-    // Only allow files.slack.com URLs
-    let parsedUrl: URL;
+    if (!cred?.accessToken) return { success: false, error: 'Connect Slack in Settings, then retry.' };
+    const file = await authorizeSlackFile(args, cred, ctx);
+    if ('error' in file) return { success: false, error: file.error };
+    const parsedUrl = file.url;
+    let res: Response;
     try {
-      parsedUrl = new URL(p.url);
-    } catch {
-      return { success: false, error: 'Invalid URL' };
+      res = await fetch(parsedUrl.toString(), {
+        headers: { Authorization: `Bearer ${cred.accessToken}` },
+        redirect: 'error',
+        signal: ctx.signal,
+      });
+    } catch (error) {
+      if (ctx.signal.aborted) throw error;
+      return { success: false, error: 'Slack file download failed. Read the source message again, then retry.' };
     }
-    if (!parsedUrl.hostname.endsWith('.slack.com')) {
-      return { success: false, error: 'This is an external file (e.g. Google Docs). Open the URL directly — it cannot be fetched through Slack. Only files hosted on Slack (files.slack.com) can be downloaded.' };
-    }
-
-    const res = await fetch(p.url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: ctx.signal,
-    });
-    if (!res.ok) {
-      return { success: false, error: `Failed to fetch file: ${res.status} ${res.statusText}` };
+    if (!res.ok) return { success: false, error: `Slack file download failed (${res.status}). Check the Slack connection, then retry.` };
+    if (args.output_path) {
+      const downloaded = await readResponseBytes(res, MAX_PDF_DOCUMENT_BYTES, ctx.signal);
+      if (!downloaded.ok) return { success: false, error: 'File exceeds the 25 MB download limit. Use a smaller file.' };
+      await ctx.sandbox.writeBinary(args.output_path, downloaded.data);
+      return { success: true, data: { path: args.output_path, filename: file.name, size: downloaded.data.byteLength } };
     }
 
     const contentType = normalizeDocumentMime(res.headers.get('content-type') ?? undefined) || 'application/octet-stream';
@@ -748,11 +770,10 @@ const fetchFile = action(Type.Object({
 
     // Image files — return via the attachments pipeline so the user can see them in the chat UI
     if (contentType.startsWith('image/')) {
-      const buf = await res.arrayBuffer();
+      const image = await readResponseBytes(res, MAX_IMAGE_FETCH, ctx.signal);
+      if (!image.ok) return { success: false, error: 'Image exceeds the 10 MB limit. Use a smaller image.' };
+      const buf = image.data;
       const filename = parsedUrl.pathname.split('/').pop() || 'image';
-      if (buf.byteLength > MAX_IMAGE_FETCH) {
-        return { success: false, error: `Image too large (${Math.round(buf.byteLength / 1024 / 1024)}MB). Max 10MB.` };
-      }
       if (buf.byteLength > MAX_IMAGE_DISPLAY) {
         return {
           success: true,
@@ -776,7 +797,7 @@ const fetchFile = action(Type.Object({
       return { success: true, data: { content: downloaded.text, mimetype: contentType } };
     }
 
-    const documentFilename = parsedUrl.pathname.split('/').pop() || 'document';
+    const documentFilename = file.name;
     if (isDocxDocumentMime(contentType, documentFilename)) {
       const downloaded = await readResponseBytes(res, MAX_PDF_FETCH, ctx.signal);
       if (!downloaded.ok) {
@@ -862,7 +883,7 @@ const getPins = action(Type.Object({
       .filter((item) => item.type === 'file' && item.file)
       .map((item) => {
         const f = item.file as Record<string, unknown>;
-        return { type: 'file', name: f.name, mimetype: f.mimetype || undefined, size: f.size, url: f.url_private };
+        return { type: 'file', id: f.id, name: f.name, mimetype: f.mimetype || undefined, size: f.size, url: f.url_private };
       });
 
     // The guard read conversations.info for this channel. Message text cannot
@@ -1352,6 +1373,7 @@ export const slackPlugin: ActionPlugin = {
     lookupUserByEmail,
     addReaction,
     listChannels,
+    searchChannels,
     readHistory,
     readThread,
     listUsers,
