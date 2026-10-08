@@ -60,3 +60,24 @@ describe("nodeServerAdapter.createWebSocket", () => {
     }
   });
 });
+
+describe("bunServerAdapter", () => {
+  it("raises Bun's idle timeout above the longest MCP wait", async () => {
+    // Bun's 10-second default closed a 45-second MCP wait mid-response.
+    const g = globalThis as { Bun?: unknown };
+    const seen: Array<Record<string, unknown>> = [];
+    g.Bun = { serve: (options: Record<string, unknown>) => {
+      seen.push(options);
+      return { port: 1234, stop: async () => undefined };
+    } };
+    try {
+      const { bunServerAdapter } = await import("./server-adapter.bun.js");
+      const { Hono } = await import("hono");
+      const binding = bunServerAdapter.createWebSocket(new Hono());
+      binding.serve({ port: 0 });
+      expect(seen[0]?.idleTimeout).toBe(255);
+    } finally {
+      delete g.Bun;
+    }
+  });
+});

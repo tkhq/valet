@@ -915,7 +915,8 @@ CREATE TABLE "action_invocations" (
 	"duration_ms" bigint,
 	"error" text,
 	"started_at" bigint,
-	"resolved_by" text
+	"resolved_by" text,
+	"caller" text
 );
 --> statement-breakpoint
 CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");
@@ -2585,3 +2586,27 @@ CREATE TABLE "generated_files" (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, session_id, thread_id, digest);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "cli_device_requests" (
+  "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
+  "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "cli_tokens" (
+  "id" text PRIMARY KEY NOT NULL, "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE cascade,
+  "device" text NOT NULL, "access_hash" text NOT NULL, "refresh_hash" text NOT NULL,
+  "access_expires_at" bigint NOT NULL, "refresh_expires_at" bigint NOT NULL,
+  "created_at" bigint NOT NULL, "last_used_at" bigint,
+  "prev_access_hash" text, "prev_refresh_hash" text, "rotated_at" bigint
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_access" ON "cli_tokens" ("access_hash");
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_refresh" ON "cli_tokens" ("refresh_hash");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cli_tokens_user" ON "cli_tokens" ("user_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");

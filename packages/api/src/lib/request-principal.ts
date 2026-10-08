@@ -4,7 +4,18 @@
  * session and a personal key authenticate as the user. `user` stays on the
  * context for audit (the creating admin on a team key).
  */
-export type AuthVia = "session" | "apiKey" | "stub";
+/**
+ * How the caller authenticated. `mcp` and `cli` are agent credentials: an
+ * MCP OAuth token, or the CLI token `valet login` gets (`auth/cli-tokens.ts`).
+ * An agent may answer a question, but it cannot approve a gate or change
+ * policy (`isAgentCaller`).
+ */
+export type AuthVia = "session" | "apiKey" | "cli" | "stub" | "mcp";
+
+/** Whether the caller is an agent, which must leave approvals and policy to a person. */
+export function isAgentCaller(authVia: AuthVia): boolean {
+  return authVia === "mcp" || authVia === "cli";
+}
 
 export type RequestPrincipal = { type: "user"; id: string } | { type: "team"; id: string };
 
@@ -104,7 +115,7 @@ export async function resolveCreateOwner(opts: {
     return { ok: true, owner: { type: "team", id: principal.id } };
   }
 
-  if (authVia === "apiKey" && typeof bodyTeamId === "string") {
+  if ((authVia === "apiKey" || authVia === "cli") && typeof bodyTeamId === "string") {
     return {
       ok: false,
       status: 403,

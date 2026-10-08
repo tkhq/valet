@@ -24,7 +24,7 @@ import {
   ValidationError,
 } from "@valet/engine";
 import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
-import type { RequestPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
@@ -1457,6 +1457,12 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   const pending = await visibleGates(c, session, engineSession);
   const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
+  // An MCP client or a `valet login` key is an agent. It may answer a
+  // question, but an approval or a credential request needs a person, or
+  // require_approval policy would let one agent approve another's actions.
+  if (isAgentCaller(c.var.authVia) && gate.type !== "question") {
+    return c.json({ error: "A person must approve this request. Open the thread in Valet to approve or deny it." }, 403);
+  }
   if (body.attachments?.length && gate.type !== "question") {
     return c.json({ error: "Images can only answer questions. Use the approval buttons for this request." }, 400);
   }

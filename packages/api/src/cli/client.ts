@@ -13,6 +13,7 @@
  *     `apiKey` is undefined the header is simply omitted.
  */
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
+import { latestCredential } from "./token-refresh.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
@@ -30,6 +31,10 @@ import type {
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
+  ActionDescribeResponse,
+  ActionInvokeRequest,
+  ActionInvokeResponse,
+  ActionSearchResponse,
 } from "../wire/types.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -48,7 +53,8 @@ export interface ListMessagesOpts {
 
 export class InstanceClient {
   private readonly base: string;
-  private readonly apiKey?: string;
+  /** Replaced when a long command picks up a refreshed CLI token (`latestCredential`). */
+  private apiKey?: string;
   /** `GET /api/me`, read once per client: a client lives for one command,
    * and the credential does not change under it. */
   private identity?: Promise<GetMeResponse>;
@@ -76,20 +82,31 @@ export class InstanceClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.base}${path}`;
     const isForm = body instanceof FormData;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method,
-        headers: this.headers(!isForm),
-        body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
-      });
-    } catch (err) {
-      // fetch rejects only on transport/network failure (DNS, refused, reset).
-      throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+    const send = async (): Promise<Response> => {
+      try {
+        return await fetch(url, {
+          method,
+          headers: this.headers(!isForm),
+          body: isForm ? body : body !== undefined ? JSON.stringify(body) : undefined,
+        });
+      } catch (err) {
+        // fetch rejects only on transport/network failure (DNS, refused, reset).
+        throw new UnreachableError(`could not reach ${url}: ${(err as Error).message}`);
+      }
+    };
+    let res = await send();
+    // A CLI token this command started with may have been replaced by
+    // another command's refresh. Pick up the new one and try once more.
+    if (res.status === 401) {
+      const fresh = await latestCredential(this.apiKey);
+      if (fresh !== this.apiKey) {
+        this.apiKey = fresh;
+        res = await send();
+      }
     }
 
     if (res.status === 401) {
-      throw new AuthError(`authentication failed (401) for ${url}`);
+      throw new AuthError(`authentication failed (401) for ${url}. Run \`valet login ${this.base}\` to sign in again.`);
     }
     if (!res.ok) {
       throw new ApiError(res.status, await res.text());
@@ -101,6 +118,30 @@ export class InstanceClient {
     const text = await res.text();
     if (text === "") return undefined as T;
     return JSON.parse(text) as T;
+  }
+
+  // ── tool broker (`/api/actions`) ───────────────────────────────────────
+
+  searchTools(opts: { query?: string; service?: string; workspace?: string; limit?: number }): Promise<ActionSearchResponse> {
+    const params = new URLSearchParams();
+    if (opts.query) params.set("q", opts.query);
+    if (opts.service) params.set("service", opts.service);
+    if (opts.workspace) params.set("workspace", opts.workspace);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request<ActionSearchResponse>("GET", `/api/actions${suffix}`);
+  }
+
+  describeTool(toolId: string, workspace?: string, params?: Record<string, unknown>): Promise<ActionDescribeResponse> {
+    const q = new URLSearchParams();
+    if (workspace) q.set("workspace", workspace);
+    if (params) q.set("params", JSON.stringify(params));
+    const suffix = q.size > 0 ? `?${q.toString()}` : "";
+    return this.request<ActionDescribeResponse>("GET", `/api/actions/${encodeURIComponent(toolId)}${suffix}`);
+  }
+
+  callTool(toolId: string, body: ActionInvokeRequest): Promise<ActionInvokeResponse> {
+    return this.request<ActionInvokeResponse>("POST", `/api/actions/${encodeURIComponent(toolId)}/invoke`, body);
   }
 
   // ── auth / identity ────────────────────────────────────────────────────

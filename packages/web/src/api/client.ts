@@ -526,6 +526,17 @@ export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearch
 }
 
 export const api = {
+  oauthConsent: (consentCode: string) =>
+    request<import("@valet/api/wire").OAuthConsentInfo>("GET", `/oauth/consent?consent_code=${encodeURIComponent(consentCode)}`),
+  decideOAuthConsent: (consentCode: string, accept: boolean) =>
+    request<import("@valet/api/wire").OAuthConsentDecision>("POST", "/oauth/consent", { consent_code: consentCode, accept }),
+  cliDevice: (userCode: string) =>
+    request<import("@valet/api/wire").CliDeviceInfo>("GET", `/cli/device?user_code=${encodeURIComponent(userCode)}`),
+  decideCliDevice: (userCode: string, accept: boolean) =>
+    request<{ ok: true }>("POST", "/cli/device", { user_code: userCode, accept }),
+  agentAccess: () => request<import("@valet/api/wire").AgentAccessResponse>("GET", "/me/agent-access"),
+  disconnectMcpApp: (clientId: string) => request<{ ok: true }>("DELETE", `/me/agent-access/mcp/${encodeURIComponent(clientId)}`),
+  disconnectCliDevice: (id: string) => request<{ ok: true }>("DELETE", `/me/agent-access/cli/${encodeURIComponent(id)}`),
   productAnnouncements: () => request<import("@valet/api/wire").ProductAnnouncementsResponse>("GET", "/product-announcements"),
   acknowledgeProductAnnouncement: (id: string) => request<{ acknowledged: true }>("POST", `/product-announcements/${encodeURIComponent(id)}/acknowledge`),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {

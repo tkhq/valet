@@ -8,7 +8,10 @@ import { isValidInternalToken } from "../lib/internal-auth.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
+import { mcpCallerFor, mcpRouteAllowed } from "../auth/mcp-caller.js";
+import { CLI_ACCESS_PREFIX, verifyCliAccessToken } from "../auth/cli-tokens.js";
 import {
+  isAgentCaller,
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
   userPrincipal,
@@ -133,12 +136,23 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
 export interface RequestIdentity {
   user: AuthUser;
   principal: RequestPrincipal;
+  /** A `valet login` CLI token (`auth/cli-tokens.ts`), not an API key. */
+  cli?: boolean;
 }
 
 /** The AuthUser (and team principal, when metadata carries `teamId`)
  * behind a valid api key, or `undefined` for an invalid, malformed,
  * dangling, or orphaned-team key. Shared by rung 4 and `resolveOptionalIdentity`. */
 async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<RequestIdentity | undefined> {
+  // A `valet login` CLI token travels in the same header as an API key.
+  if (key.startsWith(CLI_ACCESS_PREFIX)) {
+    const token = await verifyCliAccessToken(db, key);
+    if (!token) return undefined;
+    const [row] = await db.select().from(users).where(eq(users.id, token.userId)).limit(1);
+    if (!row) return undefined;
+    const user: AuthUser = { id: row.id, email: row.email, name: row.name ?? undefined, role: row.role, orgId: await resolveOrgId(db) };
+    return { user, principal: userPrincipal(user.id), cli: true };
+  }
   let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
   try {
     result = await auth.api.verifyApiKey({ body: { key } });
@@ -257,6 +271,10 @@ export async function resolveOptionalIdentity(
  * Auth middleware ladder (auth-v2 design). First match wins:
  *
  *   1. `x-valet-internal` valid → `next()`, no `c.var.user`/`c.var.sandbox`.
+ *   1b. An MCP tool call: the `/mcp` handler attached an OAuth-verified user to
+ *      this in-process `Request` (`auth/mcp-caller.ts`). Sets a user principal
+ *      with `authVia: "mcp"` on the MCP allow-listed routes and 403s every
+ *      other route. No header can produce this identity.
  *   2. `x-valet-sandbox` present → `verifySandboxToken`; invalid 401s even
  *      in stub mode — an explicit credential beats every fallback below it.
  *      Valid tokens only set `c.var.sandbox` and `next()` when the path
@@ -306,6 +324,20 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
       return;
     }
 
+    // 1b. MCP tool call. The `/mcp` handler verified the OAuth bearer token
+    // and attached the user to this in-process `Request` object. No header
+    // can produce this identity, and it applies only to the MCP routes.
+    const mcpCaller = mcpCallerFor(c.req.raw);
+    if (mcpCaller) {
+      if (!mcpRouteAllowed(c.req.method, c.req.path)) {
+        return c.json({ error: "This route is not available to MCP clients." }, 403);
+      }
+      setCaller(c, mcpCaller.user, "mcp", userPrincipal(mcpCaller.user.id), auth);
+      c.set("mcpClientId", mcpCaller.clientId);
+      await next();
+      return;
+    }
+
     // 2. Sandbox token — explicit credential, invalid always 401s. Valid
     // sandbox principals are only accepted on the allow-listed prefixes
     // (memory + git-credential routes) — every other route reads
@@ -345,7 +377,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         if (!identity) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        setCaller(c, identity.user, "apiKey", identity.principal, auth);
+        setCaller(c, identity.user, identity.cli ? "cli" : "apiKey", identity.principal, auth);
         await next();
         return;
       }
@@ -381,5 +413,51 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
 
     // 6. Nothing matched.
     return c.json({ error: "unauthorized" }, 401);
+  };
+}
+
+/**
+ * The writes an agent credential (`isAgentCaller`: an MCP app or a
+ * `valet login` CLI) may make: the routes the CLI and the MCP tools use.
+ * Every other write gets 403. An allow-list, not a deny-list, so a new
+ * route that changes approvals, policies, grants, accounts, or settings is
+ * closed to agents until someone adds it here on purpose. Reads stay open:
+ * an agent reads what its person can read.
+ *
+ * Thread and session decisions are on the list, and `resolveDecision`
+ * refuses an agent everything but a question gate.
+ */
+const AGENT_WRITES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
+  // Threads and sessions: start work, send prompts, upload files, answer questions.
+  { method: "POST", pattern: /^\/api\/threads$/ },
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/messages$/ },
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  { method: "POST", pattern: /^\/api\/sessions$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/messages$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/files$/ },
+  { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  { method: "POST", pattern: /^\/api\/workspaces\/[^/]+\/runtime$/ },
+  // Tools, memory, workflow runs, and artifacts.
+  { method: "POST", pattern: /^\/api\/actions\/[^/]+\/invoke$/ },
+  { method: "PUT", pattern: /^\/api\/memory$/ },
+  { method: "POST", pattern: /^\/api\/workflows\/[^/]+\/runs$/ },
+  { method: "POST", pattern: /^\/api\/artifacts\/share$/ },
+  // A policy preview changes nothing.
+  { method: "POST", pattern: /^\/api\/org\/policies\/preview$/ },
+];
+
+/** Whether an agent caller is refused this request. */
+export function agentRefusedRoute(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  return !AGENT_WRITES.some((route) => route.method === method && route.pattern.test(path));
+}
+
+/** Mount after the auth middleware. Refuses an agent caller every write outside `AGENT_WRITES`. */
+export function refuseAgentAuthority(): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    if (c.var.authVia && isAgentCaller(c.var.authVia) && agentRefusedRoute(c.req.method, c.req.path)) {
+      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP apps and `valet login`) can start and continue threads, answer questions, use tools, run workflows, write memory, and publish artifacts, and nothing else." }, 403);
+    }
+    await next();
   };
 }

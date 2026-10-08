@@ -5523,3 +5523,111 @@ export interface ProductAnnouncement {
   action: { label: string; href: string };
 }
 export interface ProductAnnouncementsResponse { announcements: ProductAnnouncement[] }
+
+// ── Tool broker (`/api/actions`, docs/specs/2026-10-07-mcp-agent-tools-design.md) ──
+
+/** One brokered action, as search and describe return it. */
+export interface ActionToolSummary {
+  /** `service.action`, e.g. `github.create_issue`. */
+  tool_id: string;
+  service: string;
+  name: string;
+  description: string;
+  risk_level: "low" | "medium" | "high" | "critical";
+}
+
+/** `GET /api/actions` */
+export interface ActionSearchResponse {
+  tools: ActionToolSummary[];
+  /** Matches before `limit` applied. */
+  total: number;
+  /** Services that could not list tools, with the reason. */
+  unavailable?: Array<{ service: string; reason: string }>;
+}
+
+/** `GET /api/actions/:toolId` */
+export interface ActionDescribeResponse extends ActionToolSummary {
+  /** JSON Schema for `params`. */
+  parameters: unknown;
+  /** What a call resolves to now under the policy hierarchy. */
+  policy: "allow" | "require_approval" | "deny";
+  /** Whether `policy` was resolved for specific params or without them. */
+  policy_for: string;
+}
+
+/** `POST /api/actions/:toolId/invoke` request. */
+export interface ActionInvokeRequest {
+  params?: Record<string, unknown>;
+  /** `user` or a team id. Default: `user`. */
+  workspace?: string;
+  /** A repeated key returns the first result instead of running again. */
+  idempotencyKey?: string;
+}
+
+/** `POST /api/actions/:toolId/invoke` response. */
+export type ActionInvokeResponse =
+  | { tool_id: string; status: "completed"; result: unknown }
+  | { tool_id: string; status: "failed"; error: string }
+  | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string }; next_step: string }
+  /** A call with the same idempotency key, tool, and params is still running. */
+  | { tool_id: string; status: "in_progress"; next_step: string };
+
+// ── MCP OAuth consent (`/api/oauth/consent`) ──
+
+/** `GET /api/oauth/consent?consent_code=` */
+export interface OAuthConsentInfo {
+  /** The name the app registered with. The app chooses it, so it is not proof of identity. */
+  client_name: string;
+  /** Where the browser sends the authorization code after approval. */
+  redirect_origin: string;
+  /** True when the code goes to this computer (localhost), as with Claude Code. */
+  redirect_is_local: boolean;
+  /** The signed-in Valet account the app would act as. */
+  account: string;
+  /** What an approved app can do. */
+  access: string[];
+  /** What the app cannot do. */
+  limits: string[];
+}
+
+/** `POST /api/oauth/consent` response: where to send the browser next. */
+export interface OAuthConsentDecision {
+  redirect: string;
+}
+
+/** `POST /api/cli/device/code` response: what `valet login` shows and polls with. */
+export interface CliDeviceCodeResponse {
+  device_code: string;
+  /** Shown in the terminal; the person types it on the Valet page. */
+  user_code: string;
+  /** Path of the page where the person enters the code, on the instance URL. */
+  verification_path: string;
+  expires_in: number;
+  /** Seconds between polls. */
+  interval: number;
+}
+
+/** CLI token pair (`POST /api/cli/device/token` and `POST /api/cli/token/refresh`). Times are epoch ms. */
+export interface CliTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  access_expires_at: number;
+  refresh_expires_at: number;
+}
+
+/** `GET /api/cli/device` response: what the browser sign-in page shows for `valet login`. */
+export interface CliDeviceInfo {
+  account: string;
+  /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
+  device: string;
+  user_code: string;
+  access: string[];
+  /** What the CLI cannot do. */
+  limits: string[];
+}
+
+/** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */
+export interface AgentAccessResponse {
+  mcp_apps: Array<{ client_id: string; name: string; connected_at: number | null; expires_at: number | null }>;
+  cli_devices: Array<{ id: string; device: string; signed_in_at: number; last_used_at: number | null }>;
+}
