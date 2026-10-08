@@ -177,3 +177,10 @@ describe("sortThreads", () => {
     expect(defaultThreadId(sortThreads([olderActive, newer], "created"))).toBe("newer");
   });
 });
+
+it("uses the same implicit thread for tied timestamps in every activity order", () => {
+  const a = { id: "a", sessionId: "s", createdAt: 1000, lastUserActivityAt: 1000 };
+  const b = { ...a, id: "b", lastUserActivityAt: 2000 };
+  expect(defaultThreadId([b, a])).toBe("a");
+  expect(defaultThreadId([a, b])).toBe("a");
+});

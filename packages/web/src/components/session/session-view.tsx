@@ -141,7 +141,7 @@ export function SessionView({
   const stream = useSessionStream(sessionId);
 
   // The shared default keeps an omitted ?thread aligned with the sidebar, regardless of its sort mode.
-  const effectiveThreadId = activeThreadId ?? defaultThreadId(threads.data?.threads ?? []);
+  const effectiveThreadId = activeThreadId ?? threads.data?.defaultThreadId ?? defaultThreadId(threads.data?.threads ?? []);
   const helperThread = threads.data?.threads.find((thread) => thread.id === effectiveThreadId);
   const hideBrowser = chatOnly || Boolean(helperThread && isAppAssistantThread(helperThread));
   const tab = hideBrowser ? "chat" : activeTab ?? localTab;

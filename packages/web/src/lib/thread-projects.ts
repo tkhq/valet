@@ -30,5 +30,21 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     safeLocalStorage().setItem(key, JSON.stringify(next));
     setSaved({ key, value: next });
   }
-  return { value, update };
+  return { value, update, readCurrent: () => read(key) };
+}
+
+/** Includes pinned, collapsed, filtered, and unloaded chats. */
+export function projectThreadIds(value: ThreadProjects, projectId: string): string[] {
+  return Object.keys(value.assignments).filter(id => value.assignments[id] === projectId);
+}
+
+/** Keep the folder if another tab assigned a new chat while archiving. */
+export function removeArchivedProject(value: ThreadProjects, projectId: string, archivedIds: Set<string>): ThreadProjects {
+  if (projectThreadIds(value, projectId).some(id => !archivedIds.has(id))) return value;
+  return {
+    ...value,
+    projects: value.projects.filter(project => project.id !== projectId),
+    assignments: Object.fromEntries(Object.entries(value.assignments).filter(([, id]) => id !== projectId)),
+    pinned: value.pinned.filter(id => !archivedIds.has(id)),
+  };
 }

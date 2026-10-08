@@ -4,12 +4,18 @@
  * historical-state side of the picture (initial fetch + cache-invalidation
  * on mutations).
  */
+import { threadOriginBucket } from "~/lib/thread-origin";
+import { isAppAssistantThread } from "~/lib/thread-default";
 import {
+  useInfiniteQuery,
+  isCancelledError,
+  type InfiniteData,
   useMutation,
   useQuery,
   useQueryClient,
   type UseQueryOptions,
   type Query,
+  type QueryClient,
 } from "@tanstack/react-query";
 import type {
   CreateSessionRequest,
@@ -27,6 +33,7 @@ import type {
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
   ListThreadsResponse,
+  ThreadSummary,
   PatchIdentityLinkRequest,
   PatchSessionResponse,
   PatchThreadResponse,
@@ -50,6 +57,7 @@ export const qk = {
     ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
+  threadPages: (id: string, options?: object) => ["sessions", id, "threads", "pages", ...(options ? [options] : [])] as const,
   threadSearch: (id: string, query: string) => ["sessions", id, "threads", "search", query] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
   messages: (id: string, threadId?: string) =>
@@ -70,6 +78,10 @@ export function threadListFilters(sessionId: string) {
     if (queryKey[0] !== "sessions" || queryKey[2] !== "threads") return false;
     if (queryKey[1] === sessionId) return true;
     const data = state.data;
+    if (data && typeof data === "object" && "pages" in data && Array.isArray(data.pages)) {
+      return data.pages.some(page => page && typeof page === "object" && "threads" in page && Array.isArray(page.threads)
+        && page.threads.some((thread: unknown) => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
+    }
     return Boolean(data && typeof data === "object" && "threads" in data && Array.isArray(data.threads)
       && data.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
   } };
@@ -89,16 +101,79 @@ export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSession
 export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>, selectedThreadId?: string) {
   return useQuery<ListThreadsResponse>({
     queryKey: selectedThreadId ? [...qk.threads(id), "selected", selectedThreadId] : qk.threads(id),
-    queryFn: () => api.listThreads(id, { threadId: selectedThreadId }),
+    queryFn: () => api.listThreads(id, { threadId: selectedThreadId, limit: 10 }),
     enabled: !!id,
     ...opts,
   });
 }
 
-export function useThreadSearch(id: string, query: string, enabled: boolean) {
+/** Keep each fixed-row request below common proxy URL limits, including encoded IDs. */
+export function fixedThreadBatches(ids: string[]): string[][] {
+  const batches: string[][] = [];
+  let bytes = 0;
+  for (const id of [...new Set(ids)].sort()) {
+    const size = encodeURIComponent(id).length + 9;
+    if (size > 2048) throw new Error("A saved thread ID is too long. Remove the invalid pin or project assignment.");
+    if (!batches.length || batches[batches.length - 1].length >= 50 || bytes + size > 3000) {
+      batches.push([]);
+      bytes = 0;
+    }
+    batches[batches.length - 1].push(id);
+    bytes += size;
+  }
+  return batches;
+}
+
+async function readFixedThreads(id: string, fixedIds: string[], threadId?: string): Promise<ListThreadsResponse> {
+  const batches = fixedThreadBatches(fixedIds);
+  if (!batches.length && threadId) batches.push([]);
+  const threads: ThreadSummary[] = [];
+  // Serial batches bound concurrent workspace metadata reads for large projects.
+  for (const fixedIds of batches) {
+    const page = await api.listThreads(id, { fixedIds, fixedOnly: true, threadId });
+    threads.push(...page.threads);
+  }
+  return { threads: [...new Map(threads.map(thread => [thread.id, thread])).values()] };
+}
+
+export function useSidebarThreads(id: string, options: { sort: string; origin: string; fixedIds: string[]; threadId?: string }) {
+  const { sort, origin, threadId } = options;
+  const fixedIds = [...new Set(options.fixedIds)].sort();
+  const query = useInfiniteQuery({
+    queryKey: qk.threadPages(id, { sort, origin }),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.listThreads(id, { sort, origin, limit: 10, cursor: pageParam }),
+    getNextPageParam: page => page.nextCursor,
+    enabled: !!id,
+  });
+  const fixed = useQuery({
+    queryKey: [...qk.threads(id), "fixed", fixedIds, threadId],
+    queryFn: () => readFixedThreads(id, fixedIds, threadId),
+    placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === id ? previous : undefined,
+    enabled: !!id && (fixedIds.length > 0 || !!threadId),
+  });
+  const pages = query.data?.pages;
+  return { ...query, fixedReady: !fixed.isFetching && !fixed.isError,
+    fixedError: fixed.error, refetchFixed: fixed.refetch,
+    data: pages ? {
+      ...pages[0], threads: [...new Map([...pages.flatMap(page => page.threads), ...(fixed.data?.threads.filter(thread => fixedIds.includes(thread.id) || thread.id === threadId) ?? [])].map(thread => [thread.id, thread])).values()],
+    } : undefined };
+}
+
+export function mapThreadData(current: ListThreadsResponse | InfiniteData<ListThreadsResponse> | undefined, change: (thread: ThreadSummary) => ThreadSummary) {
+  if (!current) return current;
+  if ("pages" in current) return { ...current, pages: current.pages.map(page => ({ ...page, threads: page.threads.map(change) })) };
+  return { ...current, threads: current.threads.map(change) };
+}
+
+export function useThreadSearch(id: string, query: string, enabled: boolean, fixedIds: string[] = []) {
   return useQuery<ListThreadsResponse>({
-    queryKey: qk.threadSearch(id, query),
-    queryFn: () => api.listThreads(id, { q: query }),
+    queryKey: [...qk.threadSearch(id, query), fixedIds],
+    queryFn: async () => {
+      const matches = await api.listThreads(id, { q: query });
+      const fixed = await readFixedThreads(id, fixedIds);
+      return { ...matches, threads: [...new Map([...matches.threads, ...fixed.threads].map(thread => [thread.id, thread])).values()] };
+    },
     enabled: enabled && !!id && !!query,
     staleTime: 0,
   });
@@ -298,13 +373,9 @@ export function useSetThreadModel(sessionId: string) {
       await qc.cancelQueries(threadListFilters(sessionId));
       // PATCH confirms the pin. Update only that field so newer activity
       // and title updates survive a slower model save.
-      qc.setQueriesData<ListThreadsResponse>(
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
         threadListFilters(sessionId),
-        (current) => current && ({
-          ...current,
-          threads: current.threads.map((thread) =>
-            thread.id === saved.id ? { ...thread, model: saved.model } : thread),
-        }),
+        (current) => mapThreadData(current, thread => thread.id === saved.id ? { ...thread, model: saved.model } : thread),
       );
     },
   });
@@ -331,12 +402,11 @@ export function useMarkThreadsRead(sessionId: string) {
     mutationFn: ({ threadIds }) => api.markThreadsRead(sessionId, threadIds),
     onMutate: ({ threadIds }) => {
       const at = Date.now();
-      const ids = threadIds ?? qc.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads.map(thread => thread.id);
-      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
-        ...current,
-        threads: current.threads.map((thread) =>
-          (ids ? ids.includes(thread.id) : thread.sessionId === sessionId) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread),
-      }));
+      const ids = new Set(threadIds ?? qc.getQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>({ queryKey: qk.threads(sessionId) })
+        .flatMap(([, data]) => !data ? [] : "pages" in data ? data.pages.flatMap(page => page.threads) : data.threads)
+        .map(thread => thread.id));
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread =>
+        (ids.has(thread.id) || (!threadIds && thread.sessionId === sessionId)) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread));
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["workspace-waiting"] });
@@ -349,7 +419,10 @@ export function useSetThreadArchived(sessionId: string) {
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
     mutationFn: ({ threadId, archived }) =>
       api.patchThread(threadId, { archived }),
-    onSuccess: () => {
+    onSuccess: async (_saved, { threadId }) => {
+      // An older supplemental activity read must not reinsert the archived row.
+      await qc.cancelQueries({ predicate: query => query.queryKey[0] === "sessions"
+        && query.queryKey[2] === "threads" && query.queryKey[3] === "activity" && query.queryKey[4] === threadId });
       qc.invalidateQueries(threadListFilters(sessionId));
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
     },
@@ -460,14 +533,8 @@ export function useSendPrompt(sessionId: string) {
     // Socket events update other viewers; a later thread-list fetch reconciles
     // this cache with the persisted value.
     onSuccess: (data, { text }) => {
-      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
-        ...current,
-        threads: current.threads.map((thread) =>
-          thread.id === data.threadId
-            ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) }
-            : thread,
-        ),
-      }));
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), (current) => mapThreadData(current, thread => thread.id === data.threadId
+        ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, data.activityAt) } : thread));
       if (text.startsWith("/")) void qc.invalidateQueries({ queryKey: qk.messages(sessionId) });
     },
   });
@@ -589,4 +656,44 @@ export function useUnlinkIdentity(provider: string) {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
   });
+}
+
+/** Read only the promoted row; keep loaded pages and their cursor chain. */
+export async function refreshMissingActivityThread(client: QueryClient, threadId: string) {
+  // An execution socket may name a row absent from its root workspace cache.
+  // Let each active runtime's authorized fixed-row endpoint resolve membership.
+  const queries = client.getQueryCache().findAll({ type: "active", predicate: query =>
+    query.queryKey[0] === "sessions" && query.queryKey[2] === "threads" && query.queryKey[3] === "pages",
+  });
+  await Promise.all(queries.map(async query => {
+    const options = query.queryKey[4] as { sort?: string; origin?: string } | undefined;
+    const data = query.state.data as InfiniteData<ListThreadsResponse> | undefined;
+    if (!data || options?.sort === "created" || data.pages.some(page => page.threads.some(thread => thread.id === threadId))) return;
+    const runtimeId = query.queryKey[1] as string;
+    let response: ListThreadsResponse;
+    try {
+      response = await client.fetchQuery({
+        queryKey: [...qk.threads(runtimeId), "activity", threadId],
+        queryFn: () => api.listThreads(runtimeId, { fixedOnly: true, fixedIds: [threadId] }),
+        staleTime: 0,
+      });
+    } catch (error) {
+      if (!isCancelledError(error) && query.isActive()) {
+        // The list owns retry/error UI; do not refresh other cached workspaces.
+        await client.invalidateQueries({ queryKey: query.queryKey, exact: true });
+      }
+      return;
+    }
+    if (!query.isActive()) return;
+    const rows = response.threads.filter(thread => thread.archivedAt === undefined && !isAppAssistantThread(thread)
+      && (!options?.origin || options.origin === "all" || threadOriginBucket(thread) === options.origin));
+    if (!rows.length) return;
+    // A pending next-page response must not overwrite the inserted row.
+    await client.cancelQueries({ queryKey: query.queryKey, exact: true });
+    client.setQueryData<InfiniteData<ListThreadsResponse>>(query.queryKey, current => current && ({
+      ...current, pages: current.pages.map((page, index) => index ? page : ({
+        ...page, threads: [...new Map([...rows, ...page.threads].map(thread => [thread.id, thread])).values()],
+      })),
+    }));
+  }));
 }

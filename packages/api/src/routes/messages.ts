@@ -11,6 +11,7 @@
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { threadPage } from "../services/thread-page.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
@@ -460,15 +461,19 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
           and role in ('user', 'assistant')
           and strpos(lower(content), ${query}) > 0`)
     : [];
-  const matchingIds = new Set(contentMatches.map((row) => row.threadId));
+  const matchingIds = new Set([...contentMatches.map((row) => row.threadId), ...(c.req.queries("fixedId") ?? [])]);
   const summaries = threads
     .filter(t => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
     .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map(t => threadToSummary(t.id, t.createdAt, t.sessionId,
       metaById.get(t.id)?.lastUserActivityAt ?? t.createdAt, metaById.get(t.id)?.title,
       t.model, t.key, metaById.get(t.id)?.archivedAt, t.reasoning ?? null));
+  let body: ListThreadsResponse;
+  try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
+  catch (error) { return c.json({ error: error instanceof Error ? error.message : "Refresh the thread list." }, 400); }
   for (const group of groups) {
-    const groupSummaries = summaries.filter(t => t.sessionId === group.session.id);
+    const groupSummaries = body.threads.filter(t => t.sessionId === group.session.id);
+    if (!groupSummaries.length) continue;
     const activity = await listThreadActivity(db, c.var.user.id, group.session.id, groupSummaries.map(t => t.id));
     for (const summary of groupSummaries) {
       Object.assign(summary, activity.get(summary.id));
@@ -476,7 +481,6 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
       if (channel) summary.channel = channel;
     }
   }
-  const body: ListThreadsResponse = { threads: summaries };
   return c.json(body);
 }
 
