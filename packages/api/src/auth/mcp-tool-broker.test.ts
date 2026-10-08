@@ -9,12 +9,12 @@
  */
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
-import { like } from "drizzle-orm";
+import { and, eq, like, lt } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { clearDiscoveryCache } from "../routes/actions.js";
-import { actionInvocations, oauthAccessToken, orgMembers, orgs, users } from "../schema/index.js";
+import { actionInvocations, actionPolicies, oauthAccessToken, orgMembers, orgs, users } from "../schema/index.js";
 
 let api: TestApi | undefined;
 
@@ -221,6 +221,20 @@ describe("MCP tool broker", () => {
     expect(demo.calls["demo.ping"]).toBe(2);
   });
 
+  it("records each retry attempt in its own audit row after a policy change", async () => {
+    const { testApi, demo, alice } = await setup();
+    const denied = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.blocked", idempotency_key: "audit-1" });
+    expect(denied.data).toMatchObject({ status: "failed" });
+    // An admin lifts the deny policy; the caller retries with the same key.
+    await testApi.providers.db.delete(actionPolicies).where(eq(actionPolicies.actionId, "demo.blocked"));
+    const retried = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.blocked", idempotency_key: "audit-1" });
+    expect(retried.data).toMatchObject({ status: "completed" });
+    expect(demo.calls["demo.blocked"]).toBe(1);
+    const rows = await testApi.providers.db.select().from(actionInvocations).where(like(actionInvocations.invocationId, "pol:ext:%"));
+    const attempts = rows.filter((row) => row.actionId === "demo.blocked").map((row) => [row.resolvedMode, row.status]).sort();
+    expect(attempts).toEqual([["allow", "completed"], ["deny", "denied"]]);
+  });
+
   it("does not keep a failure, so a retry with the same key runs again", async () => {
     const { testApi, demo, alice } = await setup();
     const failed = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.flaky", idempotency_key: "retry-1" });
@@ -228,6 +242,37 @@ describe("MCP tool broker", () => {
     const retried = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.flaky", idempotency_key: "retry-1" });
     expect(retried.data).toMatchObject({ status: "completed", result: { ok: true } });
     expect(demo.calls["demo.flaky"]).toBe(2);
+  });
+
+  it("takes over an abandoned claim once, and holds it against a retry during the run", async () => {
+    const { testApi, demo, alice } = await setup();
+    const db = testApi.providers.db;
+    const { createHash } = await import("node:crypto");
+    const digest = createHash("sha256").update(JSON.stringify({})).digest("hex").slice(0, 24);
+    const claimId = `claim:ext:alice:user:alice:demo.slow:${digest}:stale-1`;
+    // A crash left a claim older than the takeover window.
+    await db.insert(actionInvocations).values({ invocationId: claimId, result: { claim: true }, createdAt: Date.now() - 60 * 60_000 });
+
+    const first = tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.slow", idempotency_key: "stale-1" });
+    await demo.slowStarted;
+    const retry = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.slow", idempotency_key: "stale-1" });
+    expect(retry.data).toMatchObject({ status: "in_progress" });
+    demo.releaseSlow();
+    expect((await first).data).toMatchObject({ status: "completed" });
+    expect(demo.calls["demo.slow"]).toBe(1);
+  });
+
+  it("lets only one of two simultaneous takeovers of a stale claim succeed", async () => {
+    const { testApi } = await setup();
+    const db = testApi.providers.db;
+    await db.insert(actionInvocations).values({ invocationId: "claim:race", result: { claim: true }, createdAt: 1 });
+    // Both retries saw the same stale claim and compute the same cutoff.
+    const now = Date.now();
+    const takeover = () => db.update(actionInvocations).set({ createdAt: now })
+      .where(and(eq(actionInvocations.invocationId, "claim:race"), lt(actionInvocations.createdAt, now - 15 * 60_000)))
+      .returning({ id: actionInvocations.invocationId });
+    const results = await Promise.all([takeover(), takeover()]);
+    expect(results.map((r) => r.length).sort()).toEqual([0, 1]);
   });
 
   it("answers a duplicate with in_progress while the first call runs, and never runs it twice", async () => {

@@ -15,7 +15,7 @@
  * `approval_required` and names the next step.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { PluginAction } from "@valet/engine";
 import type { AppEnv } from "../env.js";
@@ -111,7 +111,7 @@ async function callerContext(c: Context<AppEnv>, workspace: string | undefined):
   const requested = workspace ?? (c.var.principal.type === "team" ? c.var.principal.id : "user");
   const owner = await authorizedWorkspaceOwner(c, requested);
   if (!owner) return undefined;
-  return { userId: c.var.user.id, orgId: c.var.user.orgId, owner, external: { client: c.var.authVia } };
+  return { userId: c.var.user.id, orgId: c.var.user.orgId, owner, external: { client: c.var.authVia, attempt: randomUUID() } };
 }
 
 /** Split `service.action` on the longest registered service prefix. */
@@ -218,16 +218,19 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
     const claimed = await db.insert(actionInvocations).values({ invocationId: claimId, result: { claim: true }, createdAt: Date.now() })
       .onConflictDoNothing().returning({ id: actionInvocations.invocationId });
     if (claimed.length === 0) {
-      const [held] = await db.select({ createdAt: actionInvocations.createdAt }).from(actionInvocations)
-        .where(eq(actionInvocations.invocationId, claimId)).limit(1);
-      if (held && Date.now() - held.createdAt < CLAIM_STALE_MS) {
+      // A claim older than any call is left over from a crash. Taking it over
+      // is one conditional UPDATE, so of two concurrent retries only one wins;
+      // the other sees zero rows and reports in_progress.
+      const now = Date.now();
+      const takenOver = await db.update(actionInvocations).set({ createdAt: now })
+        .where(and(eq(actionInvocations.invocationId, claimId), lt(actionInvocations.createdAt, now - CLAIM_STALE_MS)))
+        .returning({ id: actionInvocations.invocationId });
+      if (takenOver.length === 0) {
         return c.json({
           tool_id: toolId, status: "in_progress",
           next_step: "A call with this idempotency_key is still running. Call again with the same key and params to get its result.",
         } satisfies ActionInvokeResponse);
       }
-      // A claim older than any call is left over from a crash. Take it over.
-      await db.update(actionInvocations).set({ createdAt: Date.now() }).where(eq(actionInvocations.invocationId, claimId));
     }
   }
 

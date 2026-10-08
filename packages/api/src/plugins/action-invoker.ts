@@ -113,17 +113,23 @@ export interface ActionInvocationContext {
    * Set for a call from an external agent harness (MCP or the CLI) acting
    * for `userId`. The call resolves policy exactly as the person's own Valet
    * agent does (`appliesIn: "session"`), so the policy hierarchy is inherited,
-   * and it writes an audit row keyed `pol:ext:{invocationId}`. `client` names
+   * and it writes an audit row keyed `pol:ext:{invocationId}:{attempt}`. `client` names
    * the caller for the audit trail, e.g. the OAuth client id.
    */
-  external?: { client: string };
+  external?: {
+    client: string;
+    /** Unique per request. A retry reuses the invocation id for result
+     * deduplication, so the audit row needs its own key per attempt: one
+     * row records one decision and that attempt's outcome. */
+    attempt: string;
+  };
 }
 
 /** The audit-row key for a policy-enforced invocation, or undefined when none is written. */
 function auditKey(req: WorkflowInvokeActionRequest, ctx: ActionInvocationContext): string | undefined {
   if (!ctx.orgId) return undefined;
   if (ctx.workflowExecutionId) return `pol:wf:${req.invocationId}`;
-  if (ctx.external) return `pol:ext:${req.invocationId}`;
+  if (ctx.external) return `pol:ext:${req.invocationId}:${ctx.external.attempt}`;
   return undefined;
 }
 

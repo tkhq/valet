@@ -42,7 +42,7 @@ The routes run the headless `ActionInvoker` with `external` set. That mode resol
 - `deny`: the tool does not run. The response is `failed` and names the policy.
 - `require_approval`: the tool does not run. The response is `approval_required` with a `next_step`. An external call cannot open an approval yet, because a decision gate resumes a paused agent turn and an external call has none. The caller delegates with `start_thread`, which raises a normal approval, or an admin changes the policy.
 
-Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}`, with the caller's user id, the decision, the parameters, and the outcome. With an `idempotency_key`, the invocation id is `ext:{userId}:{ownerType}:{ownerId}:{toolId}:{paramsDigest}:{key}`. A repeat with the same tool and params returns the stored result. The same key for another tool, other params, or another caller runs separately. A failed result is not kept, so a retry after a fix runs again. While a keyed call runs, it holds a `claim:` row, and a duplicate gets `in_progress` instead of a second run. A claim older than 15 minutes is treated as left over from a crash.
+Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}:{attempt}`, one row per attempt, so a retry after a policy change records its own decision, with the caller's user id, the decision, the parameters, and the outcome. With an `idempotency_key`, the invocation id is `ext:{userId}:{ownerType}:{ownerId}:{toolId}:{paramsDigest}:{key}`. A repeat with the same tool and params returns the stored result. The same key for another tool, other params, or another caller runs separately. A failed result is not kept, so a retry after a fix runs again. While a keyed call runs, it holds a `claim:` row, and a duplicate gets `in_progress` instead of a second run. A claim older than 15 minutes is treated as left over from a crash. Taking it over is one conditional `UPDATE`, so only one of two concurrent retries runs the action.
 
 ### Workspace tools
 
@@ -95,6 +95,10 @@ The queue item read uses ids that an authorized route call returned, so it widen
 ### Results
 
 Each tool returns JSON text and the same value as `structuredContent`. Message and reply text is capped at 8,000 characters. A failed route call returns an MCP tool error with a corrective action, for example "Thread not found, or you do not have access to it. Use list_threads or list_workspaces to find a valid id."
+
+### Sign-in and consent
+
+Every MCP authorization goes through Valet's consent page (`routes/oauth-consent.ts`, web `/oauth/consent`). A handler before better-auth adds `prompt=consent` to each authorize request, so no client can skip the page. A signed-out request is sent to `/login?next=<authorize URL>`, and the login page loads `next` after sign-in, which resumes the authorization. The client receives its code only after the person chooses Allow. A consent decision is accepted from the public origin (`VALET_PUBLIC_URL` or `BETTER_AUTH_URL`) or the request origin, because a TLS-terminating ingress shows the server an `http` request origin.
 
 ### Sign-in
 
