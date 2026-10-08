@@ -25,6 +25,7 @@ import type { ValetAuth } from "../auth/index.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { AGENT_KEY_PREFIX } from "../lib/request-principal.js";
 import { verification } from "../schema/index.js";
 import type { CliLoginDecision, CliLoginInfo, CliLoginTokenResponse } from "../wire/types.js";
 import { trustedRequestOrigins } from "./oauth-consent.js";
@@ -42,6 +43,7 @@ const CLI_ACCESS = [
   "Act as you in Valet from that computer's terminal, with the same access you have in the browser",
   "Start and continue threads, run workflows, and use your connected integrations",
   "Keep this access until you revoke the key in Settings > API keys",
+  "It cannot approve requests or change policies. You do that in the browser",
 ];
 
 interface PendingLogin {
@@ -171,7 +173,12 @@ export function cliLoginTokenHandler(deps: { auth: Pick<ValetAuth, "api">; db: A
     if (!pending || pending.redirectUri !== redirect.toString() || pending.challenge !== s256(verifier)) {
       return c.json({ error: "This sign-in expired or was already used. Run `valet login` again." }, 400);
     }
-    const created = await deps.auth.api.createApiKey({ body: { name: `valet CLI (${pending.device})`, userId: pending.userId } });
+    // The agent prefix marks the key as an agent credential (`isAgentCaller`):
+    // the onboarding has the person's agent run `valet login`, so this key
+    // must not approve gates or change policy. A prefix cannot be changed later.
+    const created = await deps.auth.api.createApiKey({
+      body: { name: `valet CLI (${pending.device})`, userId: pending.userId, prefix: AGENT_KEY_PREFIX },
+    });
     if (!created?.key) return c.json({ error: "Valet could not create the CLI key. Run `valet login` again." }, 500);
     return c.json({ key: created.key, name: created.name ?? "" } satisfies CliLoginTokenResponse);
   };

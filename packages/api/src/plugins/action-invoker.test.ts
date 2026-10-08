@@ -815,6 +815,26 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(1);
   });
 
+  it("external call for a team: names the member whose shared account it needs, and never borrows it", async () => {
+    const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "demo", { type: "api_key", apiKey: "bea-key" });
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, external: { client: "mcp:c1", attempt: "a1" } };
+    const req = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "ext:al:team:t1:demo.ping:d:k" };
+
+    expect(await invoke(req, ctx)).toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account", approver: { userId: "bea" } });
+    // A grant for some run does not let an external call borrow the account.
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "demo", "bea"))!, sessionId: "wf:run1", service: "demo", memberId: "bea" });
+    expect(await invoke({ ...req, invocationId: `${req.invocationId}:2` }, { ...ctx, external: { client: "mcp:c1", attempt: "a2" } }))
+      .toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account" });
+    expect(fixture.calls()).toBe(0);
+  });
+
   it("does not borrow a second service's member account during dynamic discovery", async () => {
     const db = await makeDb();
     await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });

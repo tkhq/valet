@@ -4,7 +4,21 @@
  * session and a personal key authenticate as the user. `user` stays on the
  * context for audit (the creating admin on a team key).
  */
-export type AuthVia = "session" | "apiKey" | "stub" | "mcp";
+/**
+ * How the caller authenticated. `mcp` and `agentKey` are agent credentials:
+ * an MCP OAuth token, or the personal key `valet login` mints through the
+ * browser (prefix `AGENT_KEY_PREFIX`). An agent may answer a question, but it
+ * cannot approve a gate or change policy (`isAgentCaller`).
+ */
+export type AuthVia = "session" | "apiKey" | "agentKey" | "stub" | "mcp";
+
+/** Prefix of the key `valet login` mints. better-auth cannot change a key's prefix after creation. */
+export const AGENT_KEY_PREFIX = "vlt_agent_";
+
+/** Whether the caller is an agent, which must leave approvals and policy to a person. */
+export function isAgentCaller(authVia: AuthVia): boolean {
+  return authVia === "mcp" || authVia === "agentKey";
+}
 
 export type RequestPrincipal = { type: "user"; id: string } | { type: "team"; id: string };
 
@@ -104,7 +118,7 @@ export async function resolveCreateOwner(opts: {
     return { ok: true, owner: { type: "team", id: principal.id } };
   }
 
-  if (authVia === "apiKey" && typeof bodyTeamId === "string") {
+  if ((authVia === "apiKey" || authVia === "agentKey") && typeof bodyTeamId === "string") {
     return {
       ok: false,
       status: 403,

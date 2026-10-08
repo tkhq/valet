@@ -466,6 +466,8 @@ export interface AuditInvocationRow {
   durationMs?: number | null;
   startedAt?: number | null;
   createdAt?: number;
+  /** External caller label (`ActionInvocationContext.external.client`). */
+  caller?: string | null;
 }
 
 /**
@@ -510,6 +512,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         error,
         durationMs: row.durationMs ?? null,
         startedAt: row.startedAt ?? null,
+        caller: row.caller ?? null,
       })
       .onConflictDoNothing();
   } catch (err) {

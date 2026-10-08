@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { clearDiscoveryCache } from "../routes/actions.js";
-import { actionInvocations, actionPolicies, oauthAccessToken, orgMembers, orgs, users } from "../schema/index.js";
+import { actionInvocations, actionPolicies, oauthAccessToken, oauthApplication, orgMembers, orgs, users } from "../schema/index.js";
 
 let api: TestApi | undefined;
 
@@ -90,10 +90,11 @@ async function seedUser(testApi: TestApi, id: string): Promise<string> {
   await db.insert(users).values({ id, name: `User ${id}`, email: `${id}@nowhere.test`, role: "member", createdAt: new Date(now), updatedAt: new Date(now) });
   await db.insert(orgMembers).values({ orgId: "broker-org", userId: id, role: "member", createdAt: now });
   const token = `token-${id}`;
+  await db.insert(oauthApplication).values({ id: `app-${id}`, name: "Claude Code", clientId: `client-${id}`, type: "public", createdAt: new Date(now), updatedAt: new Date(now) });
   await db.insert(oauthAccessToken).values({
     id: `oauth-${id}`, accessToken: token, refreshToken: `refresh-${id}`,
     accessTokenExpiresAt: new Date(now + 600_000), refreshTokenExpiresAt: new Date(now + 3_600_000),
-    clientId: null, userId: id, scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now),
+    clientId: `client-${id}`, userId: id, scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now),
   });
   return token;
 }
@@ -188,9 +189,10 @@ describe("MCP tool broker", () => {
     expect(demo.calls["demo.risky"]).toBeUndefined();
 
     const audit = await testApi.providers.db.select().from(actionInvocations).where(like(actionInvocations.invocationId, "pol:ext:%"));
-    expect(audit.map((row) => [row.actionId, row.status, row.userId]).sort()).toEqual([
-      ["demo.blocked", "denied", "alice"],
-      ["demo.risky", "pending", "alice"],
+    // Each row names the caller: MCP and the OAuth client the token belongs to.
+    expect(audit.map((row) => [row.actionId, row.status, row.userId, row.caller]).sort()).toEqual([
+      ["demo.blocked", "denied", "alice", "mcp:client-alice"],
+      ["demo.risky", "pending", "alice", "mcp:client-alice"],
     ]);
   });
 

@@ -10,6 +10,8 @@ import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
 import { mcpCallerFor, mcpRouteAllowed } from "../auth/mcp-caller.js";
 import {
+  AGENT_KEY_PREFIX,
+  isAgentCaller,
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
   userPrincipal,
@@ -134,6 +136,8 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
 export interface RequestIdentity {
   user: AuthUser;
   principal: RequestPrincipal;
+  /** A key minted by `valet login` (`AGENT_KEY_PREFIX`). */
+  agent?: boolean;
 }
 
 /** The AuthUser (and team principal, when metadata carries `teamId`)
@@ -168,7 +172,7 @@ async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Prom
     if (!team || team.orgId !== user.orgId) return undefined;
     return { user, principal: { type: "team", id: teamId } };
   }
-  return { user, principal: userPrincipal(user.id) };
+  return { user, principal: userPrincipal(user.id), agent: result.key.prefix === AGENT_KEY_PREFIX };
 }
 
 function setCaller(
@@ -314,12 +318,13 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
     // 1b. MCP tool call. The `/mcp` handler verified the OAuth bearer token
     // and attached the user to this in-process `Request` object. No header
     // can produce this identity, and it applies only to the MCP routes.
-    const mcpUser = mcpCallerFor(c.req.raw);
-    if (mcpUser) {
+    const mcpCaller = mcpCallerFor(c.req.raw);
+    if (mcpCaller) {
       if (!mcpRouteAllowed(c.req.method, c.req.path)) {
         return c.json({ error: "This route is not available to MCP clients." }, 403);
       }
-      setCaller(c, mcpUser, "mcp", userPrincipal(mcpUser.id), auth);
+      setCaller(c, mcpCaller.user, "mcp", userPrincipal(mcpCaller.user.id), auth);
+      c.set("mcpClientId", mcpCaller.clientId);
       await next();
       return;
     }
@@ -363,7 +368,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         if (!identity) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        setCaller(c, identity.user, "apiKey", identity.principal, auth);
+        setCaller(c, identity.user, identity.agent ? "agentKey" : "apiKey", identity.principal, auth);
         await next();
         return;
       }
@@ -399,5 +404,37 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
 
     // 6. Nothing matched.
     return c.json({ error: "unauthorized" }, 401);
+  };
+}
+
+/**
+ * Routes where a person decides: approvals, and the policies and grants that
+ * decide what needs approval. An agent (`isAgentCaller`) gets 403 on a write
+ * to any of them, so an agent cannot approve its own actions or turn a
+ * `require_approval` policy into `allow`. Thread decision gates are checked
+ * in `resolveDecision` instead, because an agent may answer a question gate.
+ */
+const PERSON_ONLY_WRITES: ReadonlyArray<RegExp> = [
+  /^\/api\/org\/policies(?!\/preview$)(\/|$)/,
+  /^\/api\/me\/policy-overrides(\/|$)/,
+  /^\/api\/me\/grants(\/|$)/,
+  /^\/api\/workflows\/runs\/[^/]+\/approvals\//,
+  /^\/api\/sessions\/[^/]+\/security\/needs\/resolve$/,
+  /^\/api\/teams\/[^/]+\/deletion-requests\/[^/]+\/[^/]+$/,
+];
+
+/** Whether an agent caller is refused this request. */
+export function agentRefusedRoute(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  return PERSON_ONLY_WRITES.some((pattern) => pattern.test(path));
+}
+
+/** Mount after the auth middleware. Refuses `PERSON_ONLY_WRITES` to an agent caller. */
+export function refuseAgentAuthority(): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    if (c.var.authVia && isAgentCaller(c.var.authVia) && agentRefusedRoute(c.req.method, c.req.path)) {
+      return c.json({ error: "A person must do this in Valet. Agent credentials (MCP and `valet login` keys) cannot approve requests or change policies." }, 403);
+    }
+    await next();
   };
 }

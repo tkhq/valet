@@ -595,6 +595,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "thread_id" text',
   },
   {
+    describe: "action_invocations.caller column",
+    probe: { kind: "column", table: "action_invocations", column: "caller" },
+    sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "caller" text',
+  },
+  {
     describe: "event_subscriptions.audience column",
     probe: { kind: "column", table: "event_subscriptions", column: "audience" },
     sql: 'ALTER TABLE "event_subscriptions" ADD COLUMN IF NOT EXISTS "audience" text',

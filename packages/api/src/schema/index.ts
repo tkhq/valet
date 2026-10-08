@@ -1591,6 +1591,9 @@ export const actionInvocations = pgTable(
     error: text("error"),
     startedAt: bigint("started_at", { mode: "number" }),
     resolvedBy: text("resolved_by"),
+    /** Who made an external call (`pol:ext:` rows): `mcp:<OAuth client id>`,
+     * `agentKey`, `apiKey`, or `session`. Null on other rows. */
+    caller: text("caller"),
   },
   (t) => [
     index("action_invocations_session").on(t.sessionId),

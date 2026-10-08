@@ -195,10 +195,10 @@ describe("MCP route allow-list", () => {
     app.patch("/api/me", (c) => c.json({ changed: true }));
     const user = { id: "alice", email: "alice@nowhere.test", role: "member", orgId: "mcp-org" } as const;
 
-    const allowed = await app.fetch(attachMcpCaller(new Request("http://x/api/me"), user));
+    const allowed = await app.fetch(attachMcpCaller(new Request("http://x/api/me"), { user, clientId: "c1" }));
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toEqual({ id: "alice", via: "mcp" });
-    const refused = await app.fetch(attachMcpCaller(new Request("http://x/api/me", { method: "PATCH", body: "{}" }), user));
+    const refused = await app.fetch(attachMcpCaller(new Request("http://x/api/me", { method: "PATCH", body: "{}" }), { user, clientId: "c1" }));
     expect(refused.status).toBe(403);
     // Without the attachment the same request is anonymous.
     expect((await app.fetch(new Request("http://x/api/me"))).status).toBe(401);
@@ -257,10 +257,10 @@ describe("get_thread turn targeting", () => {
 describe("attachMcpCaller", () => {
   it("binds the identity to the exact Request object only", () => {
     const user = { id: "u", email: "u@x", role: "member", orgId: "o" } as const;
-    const attached = attachMcpCaller(new Request("http://x/api/threads"), user);
+    const attached = attachMcpCaller(new Request("http://x/api/threads"), { user, clientId: "c1" });
     const copy = new Request(attached);
     return import("./mcp-caller.js").then(({ mcpCallerFor }) => {
-      expect(mcpCallerFor(attached)).toEqual(user);
+      expect(mcpCallerFor(attached)).toEqual({ user, clientId: "c1" });
       expect(mcpCallerFor(copy)).toBeUndefined();
     });
   });

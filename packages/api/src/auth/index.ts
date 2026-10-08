@@ -151,6 +151,7 @@ export interface ValetAuth {
         name?: string;
         metadata?: Record<string, unknown>;
         userId?: string;
+        prefix?: string;
       };
       headers?: Headers;
     }) => Promise<{

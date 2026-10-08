@@ -16,16 +16,22 @@
  */
 import type { AuthUser } from "../middleware/auth.js";
 
-const callers = new WeakMap<Request, AuthUser>();
+export interface McpCaller {
+  user: AuthUser;
+  /** The OAuth client the token was issued to. */
+  clientId: string;
+}
+
+const callers = new WeakMap<Request, McpCaller>();
 
 /** Attach a verified MCP user to a request before the app handles it. */
-export function attachMcpCaller(req: Request, user: AuthUser): Request {
-  callers.set(req, user);
+export function attachMcpCaller(req: Request, caller: McpCaller): Request {
+  callers.set(req, caller);
   return req;
 }
 
-/** The verified MCP user attached to this exact request, if any. */
-export function mcpCallerFor(req: Request): AuthUser | undefined {
+/** The verified MCP caller attached to this exact request, if any. */
+export function mcpCallerFor(req: Request): McpCaller | undefined {
   return callers.get(req);
 }
 

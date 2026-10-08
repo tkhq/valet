@@ -40,9 +40,10 @@ The routes run the headless `ActionInvoker` with `external` set. That mode resol
 
 - `allow`: the tool runs. The response is `completed` or `failed`.
 - `deny`: the tool does not run. The response is `failed` and names the policy.
+- A team call that only a teammate's shared account can answer: the tool does not run. The response is `approval_required` and names that member. An external call never borrows the account, because the member's approval attaches to a thread or workflow run. The caller delegates with `start_thread` in the team workspace.
 - `require_approval`: the tool does not run. The response is `approval_required` with a `next_step`. An external call cannot open an approval yet, because a decision gate resumes a paused agent turn and an external call has none. The caller delegates with `start_thread`, which raises a normal approval, or an admin changes the policy.
 
-Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}:{attempt}`, one row per attempt, so a retry after a policy change records its own decision, with the caller's user id, the decision, the parameters, and the outcome. With an `idempotency_key`, the invocation id is `ext:{userId}:{ownerType}:{ownerId}:{toolId}:{paramsDigest}:{key}`. A repeat with the same tool and params returns the stored result. The same key for another tool, other params, or another caller runs separately. A failed result is not kept, so a retry after a fix runs again. While a keyed call runs, it holds a `claim:` row, and a duplicate gets `in_progress` instead of a second run. A claim older than 15 minutes is treated as left over from a crash. Taking it over is one conditional `UPDATE`, so only one of two concurrent retries runs the action.
+Each call writes an `action_invocations` audit row keyed `pol:ext:{invocationId}:{attempt}`, one row per attempt, so a retry after a policy change records its own decision, with the caller's user id, the caller type in `caller` (`mcp:<OAuth client id>`, `agentKey`, `apiKey`, or `session`), the decision, the parameters, and the outcome. With an `idempotency_key`, the invocation id is `ext:{userId}:{ownerType}:{ownerId}:{toolId}:{paramsDigest}:{key}`. A repeat with the same tool and params returns the stored result. The same key for another tool, other params, or another caller runs separately. A failed result is not kept, so a retry after a fix runs again. While a keyed call runs, it holds a `claim:` row, and a duplicate gets `in_progress` instead of a second run. A claim older than 15 minutes is treated as left over from a crash. Taking it over is one conditional `UPDATE`, so only one of two concurrent retries runs the action.
 
 ### Workspace tools
 
@@ -63,7 +64,9 @@ MCP prompts are not exposed. The server is created for each request, so listing 
 
 ### Agents answer questions; people approve
 
-An MCP client is an agent. The thread decision route refuses an `approval` or `credential_request` gate when `authVia` is `mcp`, and returns "A person must approve this request." Without this rule, one agent could approve another agent's `require_approval` action. An agent can still answer a `question` gate. `list_inbox` marks each thread decision with `agent_can_answer`. No MCP tool resolves a workflow approval: the workflow approval route records every resolution as `via: "web"`, so it cannot tell an agent from a person.
+An MCP client is an agent, and so is the key that browser `valet login` mints (`authVia: "agentKey"`, see "CLI browser sign-in" in the auth spec), because the onboarding has the agent run that login. `isAgentCaller` covers both. The thread decision route refuses an `approval` or `credential_request` gate from an agent, and returns "A person must approve this request." Without this rule, one agent could approve another agent's `require_approval` action. An agent can still answer a `question` gate. `list_inbox` marks each thread decision with `agent_can_answer`.
+
+`refuseAgentAuthority` also gives an agent 403 on writes where a person decides: workflow approvals, policies (a preview is allowed), policy overrides, grants, security needs, and team deletion requests. Otherwise an agent could turn a `require_approval` policy into `allow`. A key created in Settings keeps full authority.
 
 ### Agent onboarding
 

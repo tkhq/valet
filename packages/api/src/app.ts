@@ -18,7 +18,7 @@ import type { RunningServer, ServerAdapter } from "./server-adapter.js";
 import { nodeServerAdapter } from "./server-adapter.node.js";
 import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
-import { buildAuthMiddleware, refuseTeamKeyOutsideScope } from "./middleware/auth.js";
+import { buildAuthMiddleware, refuseAgentAuthority, refuseTeamKeyOutsideScope } from "./middleware/auth.js";
 import { filterTeamKeysFromPersonalApiKeyList } from "./lib/personal-api-key-list.js";
 import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
@@ -326,6 +326,7 @@ export function createApp(
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
+  app.use("/api/*", refuseAgentAuthority());
   mountPluginHttpRoutes(app, providers.plugins, "authenticated");
 
   app.route("/api/threads", threadsRouter);

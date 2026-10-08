@@ -190,6 +190,12 @@ Inspect and resolve pending decision gates (approvals, questions,
 credential requests) without an interactive session. These commands
 default to the orchestrator session. `--session <id>` overrides.
 
+A key from browser `valet login` is an agent key (prefix `vlt_agent_`). It
+can answer a question, but it cannot approve a request or change a policy,
+because the onboarding has a coding agent run `valet login`. Approve in the
+browser. To approve from a terminal, create a key in Settings > API keys and
+log in with `valet login <url> --api-key -`.
+
 ### `valet status`
 
 Instance health plus client/server version skew. Skew is a warning

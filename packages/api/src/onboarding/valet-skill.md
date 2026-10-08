@@ -10,7 +10,7 @@ Valet runs at {{VALET_URL}}. It holds the organization's integration credentials
 ## Rules
 
 - Never ask for, print, or save an API key, token, or password. Valet keeps the credentials. You never need them.
-- Do not approve Valet approval requests. You can answer a question with `resolve_decision`. An approval needs the person: give them the link.
+- Do not approve Valet approval requests. You can answer a question with `resolve_decision`. An approval needs the person: give them the link. Valet refuses an approval or a policy change from your MCP token and your `valet login` key.
 - Do not save secrets or personal data to Valet memory or artifacts.
 - When a result says `approval_required`, the action did not run. Do not retry it to get around the policy.
 

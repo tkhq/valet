@@ -4,16 +4,35 @@
  * driving the same routes the `/cli/login` page calls.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import type { PluginAction, ValetPlugin } from "@valet/engine";
+import { Type } from "typebox";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { browserLogin } from "../cli/browser-login.js";
 import { AuthError } from "../cli/exit.js";
+import { like } from "drizzle-orm";
+import { createPolicy } from "../policies/admin.js";
+import { actionInvocations } from "../schema/index.js";
 
 let api: TestApi | undefined;
+let faux: FauxProviderRegistration | undefined;
 afterEach(async () => {
+  faux?.unregister();
+  faux = undefined;
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
+
+function riskyPlugin(): ValetPlugin {
+  const risky: PluginAction = {
+    id: "demo.risky", name: "risky", description: "A gated demo action.", riskLevel: "low",
+    parameters: Type.Object({}),
+    execute: async () => ({ success: true, data: { ran: true } }),
+  };
+  return { name: "demo", version: "0.0.1", actions: [{ service: "demo", actions: [risky] }] };
+}
 
 function sessionCookie(setCookie: string | null): string {
   const match = setCookie?.match(/better-auth\.session_token=[^;]+/);
@@ -21,8 +40,8 @@ function sessionCookie(setCookie: string | null): string {
   return match[0];
 }
 
-async function setup() {
-  const testApi = await bootTestApi({ auth: true });
+async function setup(opts: { plugins?: ValetPlugin[] } = {}) {
+  const testApi = await bootTestApi({ auth: true, ...(opts.plugins ? { plugins: opts.plugins } : {}) });
   api = testApi;
   const signUp = await fetch(`${testApi.baseUrl}/api/auth/sign-up/email`, {
     method: "POST",
@@ -52,6 +71,27 @@ async function approveInBrowser(base: string, cookie: string, approveUrl: string
   return ((await decided.json()) as { redirect: string }).redirect;
 }
 
+/** Run the CLI's browser sign-in with the person allowing it, and return the key. */
+async function cliKey(base: string, cookie: string): Promise<string> {
+  return browserLogin({
+    url: base, device: "test-box", log: () => undefined,
+    openUrl: async (url) => {
+      await fetch(await approveInBrowser(base, cookie, url, true));
+      return true;
+    },
+  });
+}
+
+async function waitForGate(base: string, key: string, threadId: string): Promise<{ id: string; actions: Array<{ id: string }> }> {
+  for (let i = 0; i < 100; i++) {
+    const res = await fetch(`${base}/api/threads/${threadId}/decisions`, { headers: { "x-api-key": key } });
+    const { gates } = (await res.json()) as { gates: Array<{ id: string; actions: Array<{ id: string }> }> };
+    if (gates[0]) return gates[0];
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error("no gate");
+}
+
 describe("valet login browser sign-in", () => {
   it("returns a working personal API key after the person allows it", async () => {
     const { base, cookie } = await setup();
@@ -69,7 +109,8 @@ describe("valet login browser sign-in", () => {
         return true;
       },
     });
-    expect(key.startsWith("vlt_")).toBe(true);
+    // The agent prefix marks it as an agent credential (lib/request-principal.ts).
+    expect(key.startsWith("vlt_agent_")).toBe(true);
     expect(lines.join("\n")).not.toContain(key);
     const me = await fetch(`${base}/api/me`, { headers: { "x-api-key": key } });
     expect(me.status).toBe(200);
@@ -136,5 +177,64 @@ describe("valet login browser sign-in", () => {
     expect(foreign.status).toBe(403);
 
     expect((await fetch(`${base}/api/cli/login?${q("http://127.0.0.1:4000/callback")}`)).status).toBe(401);
+  });
+
+  it("does not let a valet login key approve a gate or change policy; a Settings key still can", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    const { testApi, base, cookie } = await setup({ plugins: [riskyPlugin()] });
+    const agentKey = await cliKey(base, cookie);
+    const created = await fetch(`${base}/api/auth/api-key/create`, {
+      method: "POST", headers: { cookie, "Content-Type": "application/json" }, body: JSON.stringify({ name: "settings key" }),
+    });
+    const { key: personKey } = (await created.json()) as { key: string };
+    const me = (await (await fetch(`${base}/api/me`, { headers: { "x-api-key": agentKey } })).json()) as { orgId: string };
+    await createPolicy(testApi.providers.db, { orgId: me.orgId, type: "org", id: me.orgId }, { actionId: "demo.risky", mode: "require_approval", managedBy: "test", now: Date.now() });
+
+    // The reviewer's repro: the agent's key starts work that raises an approval gate.
+    faux.appendResponses([
+      fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "demo.risky", params: {}, summary: "Run the risky action" }, { id: "tc-risky" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const thread = (await (await fetch(`${base}/api/threads`, {
+      method: "POST", headers: { "x-api-key": agentKey, "Content-Type": "application/json" }, body: "{}",
+    })).json()) as { id: string };
+    await fetch(`${base}/api/threads/${thread.id}/messages`, {
+      method: "POST", headers: { "x-api-key": agentKey, "Content-Type": "application/json" }, body: JSON.stringify({ text: "Run demo.risky." }),
+    });
+    const gate = await waitForGate(base, agentKey, thread.id);
+    const resolve = (key: string) => fetch(`${base}/api/threads/${thread.id}/decisions/${gate.id}/resolve`, {
+      method: "POST", headers: { "x-api-key": key, "Content-Type": "application/json" }, body: JSON.stringify({ actionId: gate.actions[0]?.id }),
+    });
+    const refused = await resolve(agentKey);
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain("A person must approve this request");
+    expect((await resolve(personKey)).status).toBe(200);
+
+    // Policy and approval routes refuse the agent key before the route runs.
+    const writes: Array<[string, string]> = [
+      ["POST", "/api/org/policies"],
+      ["PUT", "/api/me/policy-overrides"],
+      ["DELETE", "/api/me/grants"],
+      ["POST", "/api/workflows/runs/run-1/approvals/node-1"],
+    ];
+    for (const [method, path] of writes) {
+      const asAgent = await fetch(`${base}${path}`, { method, headers: { "x-api-key": agentKey, "Content-Type": "application/json" }, body: "{}" });
+      expect(asAgent.status, `${method} ${path}`).toBe(403);
+      expect(await asAgent.text()).toContain("Agent credentials");
+      const asPerson = await fetch(`${base}${path}`, { method, headers: { "x-api-key": personKey, "Content-Type": "application/json" }, body: "{}" });
+      expect(await asPerson.text(), `${method} ${path}`).not.toContain("Agent credentials");
+    }
+    // A brokered call records which kind of credential made it.
+    const call = await fetch(`${base}/api/actions/demo.risky/invoke`, {
+      method: "POST", headers: { "x-api-key": agentKey, "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }),
+    });
+    expect(((await call.json()) as { status: string }).status).toBe("approval_required");
+    const audit = await testApi.providers.db.select().from(actionInvocations).where(like(actionInvocations.invocationId, "pol:ext:%"));
+    expect(audit.map((row) => row.caller)).toEqual(["agentKey"]);
+
+    // A policy preview changes nothing, so an agent may run it.
+    const preview = await fetch(`${base}/api/org/policies/preview`, { method: "POST", headers: { "x-api-key": agentKey, "Content-Type": "application/json" }, body: "{}" });
+    expect(await preview.text()).not.toContain("Agent credentials");
   });
 });

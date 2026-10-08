@@ -65,7 +65,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
           method,
           headers: body === undefined ? {} : { "Content-Type": "application/json" },
           body: body === undefined ? undefined : JSON.stringify(body),
-        }), caller);
+        }), { user: caller, clientId: session.clientId });
         const res = await dispatch(inner);
         const text = await res.text();
         let parsed: unknown = text;

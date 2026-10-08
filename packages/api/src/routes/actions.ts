@@ -111,7 +111,7 @@ async function callerContext(c: Context<AppEnv>, workspace: string | undefined):
   const requested = workspace ?? (c.var.principal.type === "team" ? c.var.principal.id : "user");
   const owner = await authorizedWorkspaceOwner(c, requested);
   if (!owner) return undefined;
-  return { userId: c.var.user.id, orgId: c.var.user.orgId, owner, external: { client: c.var.authVia, attempt: randomUUID() } };
+  return { userId: c.var.user.id, orgId: c.var.user.orgId, owner, external: { client: externalClient(c), attempt: randomUUID() } };
 }
 
 /** Split `service.action` on the longest registered service prefix. */
@@ -259,3 +259,9 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   }
   return c.json({ tool_id: toolId, status: "failed", error: result.error } satisfies ActionInvokeResponse);
 });
+
+/** The caller label for the audit row: the credential type, and the OAuth client for MCP. */
+function externalClient(c: Context<AppEnv>): string {
+  if (c.var.authVia === "mcp") return `mcp:${c.var.mcpClientId ?? "unknown"}`;
+  return c.var.authVia;
+}

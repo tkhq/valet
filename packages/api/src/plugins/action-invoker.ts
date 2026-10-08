@@ -114,7 +114,8 @@ export interface ActionInvocationContext {
    * for `userId`. The call resolves policy exactly as the person's own Valet
    * agent does (`appliesIn: "session"`), so the policy hierarchy is inherited,
    * and it writes an audit row keyed `pol:ext:{invocationId}:{attempt}`. `client` names
-   * the caller for the audit trail, e.g. the OAuth client id.
+   * the caller in the row's `caller` column: `mcp:<OAuth client id>`, or the
+   * credential type (`agentKey`, `apiKey`, `session`).
    */
   external?: {
     client: string;
@@ -578,6 +579,7 @@ async function enforceWorkflowPolicy(
         matchedOverrideId: null,
         status: "approved",
         workflowExecutionId: ctx.workflowExecutionId,
+        caller: ctx.external?.client,
         userId: ctx.userId,
         orgId: ctx.orgId,
         params: req.params,
@@ -601,6 +603,7 @@ async function enforceWorkflowPolicy(
       matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
       status: "allowed",
       workflowExecutionId: ctx.workflowExecutionId,
+      caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
       params: req.params,
@@ -622,6 +625,7 @@ async function enforceWorkflowPolicy(
       matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
       status: "denied",
       workflowExecutionId: ctx.workflowExecutionId,
+      caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
       params: req.params,
@@ -645,6 +649,7 @@ async function enforceWorkflowPolicy(
       matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
       status: "approved",
       workflowExecutionId: ctx.workflowExecutionId,
+      caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
       params: req.params,
@@ -668,6 +673,7 @@ async function enforceWorkflowPolicy(
     matchedOverrideId: decision.provenance.matchedOverrideId ?? null,
     status: "pending",
     workflowExecutionId: ctx.workflowExecutionId,
+    caller: ctx.external?.client,
     userId: ctx.userId,
     orgId: ctx.orgId,
     params: req.params,
@@ -860,7 +866,11 @@ async function sharedAccountApprover(
   teamId: string,
   service: string,
 ): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
-  if (service === "github" || !ctx.workflowExecutionId) return undefined;
+  // An external call has no run to attach a member's approval to, so it
+  // never borrows. It still reports whose approval the account needs, so the
+  // caller hears to delegate with start_thread instead of "no credential".
+  if (service === "github" || (!ctx.workflowExecutionId && !ctx.external)) return undefined;
+  const runId = ctx.workflowExecutionId;
   const sharers = await membersSharing(opts.db, teamId, service);
   if (sharers.length === 0) return undefined;
   let approvalFrom: string | undefined;
@@ -869,7 +879,9 @@ async function sharedAccountApprover(
       { credentials: opts.credentials, onePassword: opts.onePassword, shares: async () => sharers },
       {
         orgId: ctx.orgId, teamId, userId: ctx.userId, scopes: onePasswordScopesFor("team", teamId),
-        mayBorrow: (memberId) => canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service, memberId }),
+        mayBorrow: (memberId) => runId
+          ? canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId, actorId: ctx.userId, sessionId: `wf:${runId}`, service, memberId })
+          : Promise.resolve(false),
       },
       service,
       orgFallbackPolicy(registryOf(opts), service),
