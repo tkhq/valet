@@ -4,7 +4,7 @@
  * run": unknown model specs and unknown tool service/actions fail at SAVE
  * with an actionable message, instead of at run time inside a node.
  */
-import { bundledModel, isDisabledModel } from "@valet/engine/model-catalog";
+import { bundledModel } from "@valet/engine/model-catalog";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { ValidateEnvironment } from "@valet/workflow";
 import { buildOrgCatalog, openrouterRegistryIds, type CatalogEntry } from "../services/model-catalog.js";
@@ -102,7 +102,6 @@ export function buildValidateEnvironment(
     // save keep a model the org disabled or never approved, which the
     // model-only update path rejects and the run then fails on.
     isKnownModel: (spec) => {
-      if (isDisabledModel(spec)) return "Astra is disabled in Valet. Choose GPT-6.1 Sol or Claude Opus 5.5.";
       if (!orgModelIds) return isKnownModelSpec(spec);
       // Tiers are case-insensitive at run time (`resolveModelSpec`), so a
       // definition that carries `L` must stay valid.

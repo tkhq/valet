@@ -37,7 +37,6 @@
 import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import { registryModels } from "./model-registry.js";
-import { isDisabledModel } from "@valet/engine/model-catalog";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
@@ -236,7 +235,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
     }
   }
 
-  return orderEntries(entries.filter((entry) => !isDisabledModel(entry.id)));
+  return orderEntries(entries);
 }
 
 /**
@@ -248,7 +247,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
 export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
   const ids = new Set<string>();
   for (const entry of entries) {
-    if (!entry.active || isDisabledModel(entry.id)) continue;
+    if (!entry.active) continue;
     ids.add(entry.id);
     const { namespace, modelId } = parseModelId(entry.id);
     if (namespace === "anthropic") ids.add(modelId);
@@ -285,7 +284,7 @@ export async function openrouterRegistryIds(
   const ids = new Set<string>();
   for (const modelId of openrouterRegistry().keys()) {
     const id = `openrouter/${modelId}`;
-    if (!isDisabledModel(id) && isApproved(approvedList, id)) ids.add(id);
+    if (isApproved(approvedList, id)) ids.add(id);
   }
   return ids;
 }

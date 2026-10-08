@@ -21,8 +21,8 @@ import {
 } from "./validation-env.js";
 
 describe("workflow model validation", () => {
-  it.each(["gpt-6-astra", "openai/gpt-6-astra"])("rejects disabled model %s", (spec) => {
-    expect(isKnownModelSpec(spec)).toBe(false);
+  it.each(["gpt-6-astra", "openai/gpt-6-astra"])("accepts bundled Astra model %s", (spec) => {
+    expect(isKnownModelSpec(spec)).toBe(true);
   });
   it.each(["openai/gpt-6.1-sol", "gpt-6.1-sol"])("accepts the supplemental model %s", (spec) => {
     expect(isKnownModelSpec(spec)).toBe(true);

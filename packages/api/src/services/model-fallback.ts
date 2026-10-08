@@ -1,5 +1,4 @@
 import { NoCredentialsError, type CreateSessionOptions, type CredentialStore, type ResolvedModel } from "@valet/engine";
-import { isDisabledModel } from "@valet/engine/model-catalog";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { parseModelId } from "./llm-providers.js";
 import { buildOrgCatalog } from "./model-catalog.js";
@@ -31,7 +30,7 @@ export async function resolveModelFallback(
   const eligible = new Set(catalog.filter(entry => entry.active && entry.resolvable && entry.approved).map(entry => entry.id));
   const attempted = new Set([...request.attemptedProviderIds, request.failedModel.model.provider]);
   for (const spec of tiers[tier]) {
-    if (isDisabledModel(spec) || !eligible.has(canonical(spec)) || attempted.has(parseModelId(spec).namespace)) continue;
+    if (!eligible.has(canonical(spec)) || attempted.has(parseModelId(spec).namespace)) continue;
     try {
       // Re-read provider state and credentials; a rotated key takes effect now.
       const resolved = await resolveModelSpec(db, credentials, orgId, spec);

@@ -23,18 +23,6 @@ const supplementalModels: Model<Api>[] = [
   },
 ];
 
-/** Astra is excluded across providers, aliases, and dated model IDs. */
-export function isDisabledModel(spec: string): boolean {
-  const id = spec.trim().toLowerCase().split("/").at(-1) ?? "";
-  return /(^|[^a-z0-9])astra($|[^a-z0-9])/.test(id);
-}
-
-export function assertModelEnabled(spec: string): void {
-  if (isDisabledModel(spec)) {
-    throw new Error("Astra is disabled in Valet. Choose GPT-6.1 Sol or Claude Opus 5.5.");
-  }
-}
-
 function bundledMetadata(provider: string): Model<Api>[] {
   const builtinProvider = getBuiltinProviders().find((id) => id === provider);
   const upstream = builtinProvider ? [...getBuiltinModels(builtinProvider)] : [];
@@ -44,10 +32,10 @@ function bundledMetadata(provider: string): Model<Api>[] {
 
 /** Retired choices remain resolvable for existing sessions, but cannot be selected anew. */
 export function isCatalogModel(provider: string, modelId: string): boolean {
-  return !isDisabledModel(modelId) && !(provider === "openai" && modelId === "gpt-5.6-sol");
+  return !(provider === "openai" && modelId === "gpt-5.6-sol");
 }
 
-/** Selectable bundled models. Disabled metadata remains available for billing. */
+/** Selectable bundled models. Retired metadata remains available for billing. */
 export function bundledModels(provider: string): Model<Api>[] {
   return bundledMetadata(provider).filter((model) => isCatalogModel(provider, model.id));
 }
@@ -59,6 +47,5 @@ export function bundledPricingModel(provider: string, modelId: string): Model<Ap
 
 /** One bundled model by provider and wire id, or undefined when unknown. */
 export function bundledModel(provider: string, modelId: string): Model<Api> | undefined {
-  if (isDisabledModel(modelId)) return undefined;
   return bundledMetadata(provider).find((model) => model.id === modelId);
 }

@@ -1,4 +1,3 @@
-import { isDisabledModel } from "@valet/engine/model-catalog";
 /**
  * OpenRouter provider support (llm-providers design, openrouter extension).
  *
@@ -147,7 +146,7 @@ export async function mergedOpenrouterModels(): Promise<{ models: LlmProviderMod
     // Network/timeout — registry-only result is still useful.
   }
 
-  const models = Array.from(byId.values()).filter((model) => !isDisabledModel(model.id));
+  const models = Array.from(byId.values());
   models.sort((a, b) => a.id.localeCompare(b.id));
   return { models, live };
 }

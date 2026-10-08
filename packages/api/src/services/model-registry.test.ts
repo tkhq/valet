@@ -401,20 +401,20 @@ describe("ModelRegistry", () => {
       expect(model?.maxTokens).toBe(128_000);
     });
 
-    it("never serves Astra from fetched or persisted catalogs", async () => {
-      const disabled = validModel({ id: "gpt-6-astra", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" });
-      await new PgModelsStore(db).write("openai", { models: [disabled], checkedAt: Date.now() });
+    it("serves Astra from fetched and persisted catalogs", async () => {
+      const astra = validModel({ id: "gpt-6-astra", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" });
+      await new PgModelsStore(db).write("openai", { models: [astra], checkedAt: Date.now() });
       const registry = new ModelRegistry(db);
       vi.stubEnv("VALET_MODEL_REGISTRY_URL", "");
       await registry.start();
       vi.stubEnv("VALET_MODEL_REGISTRY_URL", REGISTRY_URL);
       try {
-        expect(registry.getModel("openai", disabled.id)).toBeUndefined();
-        expect(registry.listModels("openai").some((model) => model.id === disabled.id)).toBe(false);
-        fetchMock.mockImplementation(async () => jsonResponse({ "openai-responses": { [disabled.id]: disabled } }));
+        expect(registry.getModel("openai", astra.id)?.id).toBe(astra.id);
+        expect(registry.listModels("openai").some((model) => model.id === astra.id)).toBe(true);
+        fetchMock.mockImplementation(async () => jsonResponse({ "openai-responses": { [astra.id]: astra } }));
         await registry.refresh();
-        expect(registry.getModel("openai", disabled.id)).toBeUndefined();
-        expect(registry.listModels("openai").some((model) => model.id === disabled.id)).toBe(false);
+        expect(registry.getModel("openai", astra.id)?.id).toBe(astra.id);
+        expect(registry.listModels("openai").some((model) => model.id === astra.id)).toBe(true);
       } finally { registry.stop(); }
     });
 

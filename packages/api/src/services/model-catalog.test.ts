@@ -71,7 +71,7 @@ describe("model catalog", () => {
     });
   });
 
-  it("lists Claude Fable 5.1 and excludes Astra", async () => {
+  it("lists Claude Fable 5.1 and Astra", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     try {
@@ -79,8 +79,8 @@ describe("model catalog", () => {
       const fable = entries.find((entry) => entry.id === "anthropic/claude-fable-5-1");
       expect(fable).toMatchObject({ name: "Claude Fable 5.1", contextWindow: 1_000_000, active: true });
       const astra = entries.find((entry) => entry.id === "openai/gpt-6-astra");
-      expect(astra).toBeUndefined();
-      expect(catalogValidIds(entries).has("openai/gpt-6-astra")).toBe(false);
+      expect(astra).toMatchObject({ active: true });
+      expect(catalogValidIds(entries).has("openai/gpt-6-astra")).toBe(true);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -92,7 +92,7 @@ describe("model catalog", () => {
     try {
       await setApprovedModels(db, orgId, ["openai/gpt-6.1-sol"]);
       const entries = await buildOrgCatalog(db, credentials, orgId);
-      for (const id of ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5-5"]) {
+      for (const id of ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5-5", "openai/gpt-6-astra"]) {
         expect(entries.filter((entry) => entry.id === id)).toHaveLength(1);
         expect(entries.find((entry) => entry.id === id)).toMatchObject({
           active: true, resolvable: true, approved: id === "openai/gpt-6.1-sol",

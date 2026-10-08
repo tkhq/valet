@@ -61,6 +61,22 @@ describe("PUT /api/org/approved-models", () => {
     expect((await getOrgTierMap(api.providers.db, "local-org")).l).toEqual(["openai/gpt-6.1-sol"]);
   });
 
+  it("saves Astra approval without changing configured tiers", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test");
+    api = await bootTestApi();
+    await setOrgTierMap(api.providers.db, "local-org", TIER_MAP);
+    const approved = [...new Set(Object.values(TIER_MAP).flat()), "openai/gpt-6-astra"];
+    const response = await fetch(`${api.baseUrl}/api/org/approved-models`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ approved });
+    expect(await getOrgTierMap(api.providers.db, "local-org")).toEqual(TIER_MAP);
+  });
+
   it("allows null to clear the restriction", async () => {
     api = await bootTestApi();
     await setOrgTierMap(api.providers.db, "local-org", TIER_MAP);
