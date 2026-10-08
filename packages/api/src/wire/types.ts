@@ -2842,6 +2842,8 @@ export interface PluginActionServiceSummary {
 }
 
 export interface PluginSummary {
+  /** Installed playbooks shipped by this plugin; does not imply a connected account. */
+  skills?: Array<{ name: string; description?: string }>;
   name: string;
   version: string;
   /** Human-readable name from the plugin manifest, e.g. "Grafana Cloud".

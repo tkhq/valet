@@ -1,3 +1,4 @@
+import { IntegrationDetails } from "./integration-details";
 import { useEffect, useState, type ReactNode } from "react";
 import type { PluginServiceSummary } from "@valet/api/wire";
 import { useConnectCredential, useCredentials, usePlugins } from "~/api/integrations";
@@ -6,7 +7,7 @@ import { SearchInput } from "~/components/search-input";
 import { SubSection } from "~/components/settings/section";
 import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
 import { errorText } from "~/lib/error-text";
-import { displayName } from "./display-name";
+import { displayName, pluginDisplayName } from "./display-name";
 
 /** Connect an account intended for one team. Organization connections live in Organization settings. */
 export function TeamConnectionSetup({ teamId, canManage, children }: {
@@ -58,6 +59,13 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
         })}
       </div>
       {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
+    </SubSection>
+    <SubSection title="Tools and skills" description="Installed capabilities for this team. Connection details appear above.">
+      {plugins.error && <ErrorRow>Could not load plugin details. Reload the page to try again.</ErrorRow>}
+      {!plugins.error && plugins.data?.plugins.filter((plugin) => plugin.services.length > 0).map((plugin) => <div key={plugin.name}>
+        <h4 className="mt-4 text-sm font-medium">{pluginDisplayName(plugin)}</h4>
+        <IntegrationDetails plugin={plugin} />
+      </div>)}
     </SubSection>
   </div>;
 }

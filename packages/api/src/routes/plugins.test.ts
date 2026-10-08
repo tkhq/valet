@@ -35,6 +35,7 @@ const FIXTURE_PLUGIN: ValetPlugin = {
   name: "fixture-plugin",
   version: "0.1.0",
   description: "A fixture plugin for route tests",
+  skills: [{ name: "fixture-guide", description: "Use fixture tools.", content: "Private playbook body" }],
   actions: [
     {
       service: "fixture",
@@ -70,6 +71,8 @@ describe("GET /api/plugins", () => {
     const fixture = plugins.find((p) => p.name === "fixture-plugin");
     expect(fixture).toBeDefined();
     expect(fixture?.version).toBe("0.1.0");
+    expect(fixture?.skills).toEqual([{ name: "fixture-guide", description: "Use fixture tools." }]);
+    expect(JSON.stringify(fixture)).not.toContain("Private playbook body");
     // Static actions only — the resolveActions-produced "fixture.dynamic" doesn't count.
     expect(fixture?.actionCount).toBe(2);
     expect(fixture?.services).toEqual([

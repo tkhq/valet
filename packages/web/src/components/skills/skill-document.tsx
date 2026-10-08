@@ -15,6 +15,8 @@
  * reading a skill is not invoking it — the agent's `skill` tool fills them
  * at invoke time.
  */
+import type { SkillSummary } from "@valet/api/wire";
+import { SkillUsage } from "./skill-usage";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Spinner, pageClass } from "~/components/primitives";
@@ -31,9 +33,11 @@ export function SkillDocument({
   isLoading,
   error,
   skillName,
+  skill,
   children,
 }: {
   title: string;
+  skill?: SkillSummary;
   description?: string;
   /** Mono line on the right of the header: where the skill comes from. */
   meta?: ReactNode;
@@ -68,6 +72,8 @@ export function SkillDocument({
         </div>
 
         {notice && <div className="mt-4 text-sm text-danger-500">{notice}</div>}
+
+        {!children && !isLoading && !error && skill && <SkillUsage skill={skill} />}
 
         <div className="mt-10">
           {children ?? (

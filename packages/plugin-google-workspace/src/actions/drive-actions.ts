@@ -24,6 +24,8 @@ import { insertMarkdown } from './docs-markdown.js';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DOCS_API = 'https://docs.googleapis.com/v1';
+const MAX_SUBTREE_FOLDERS = 100;
+const MAX_SUBTREE_PAGES = 100;
 
 const MIME_TYPE_SHORTCUTS: Record<string, string> = {
   document: 'application/vnd.google-apps.document',
@@ -85,6 +87,51 @@ function isGoogleWorkspaceMimeType(mimeType: string | undefined): boolean {
 
 function getExportMimeType(googleMimeType: string | undefined): string | null {
   return googleMimeType ? WORKSPACE_EXPORT_DEFAULTS[googleMimeType] || null : null;
+}
+
+/** Discover folder IDs before searching, so Drive retains global ordering and pagination. */
+async function subtreeParentsQuery(rootId: string, token: string): Promise<string> {
+  const folders = [rootId];
+  const seen = new Set(folders);
+  let pages = 0;
+  for (const folderId of folders) {
+    let pageToken: string | undefined;
+    do {
+      if (pages >= MAX_SUBTREE_PAGES) {
+        throw new Error('Folder search exceeded 100 discovery pages. Search a smaller folder subtree.');
+      }
+      const qs = new URLSearchParams({
+        q: `trashed=false and mimeType='application/vnd.google-apps.folder' and '${escapeDriveQuery(folderId)}' in parents`,
+        fields: 'nextPageToken,incompleteSearch,files(id)',
+        pageSize: '1000',
+        supportsAllDrives: 'true',
+        includeItemsFromAllDrives: 'true',
+      });
+      if (pageToken) qs.set('pageToken', pageToken);
+      const res = await driveFetch(`/files?${qs}`, token);
+      pages++;
+      if (!res.ok) throw new Error((await driveError(res)).error);
+      const data = (await res.json()) as {
+        files?: Array<{ id: string }>;
+        nextPageToken?: string;
+        incompleteSearch?: boolean;
+      };
+      if (data.incompleteSearch) {
+        throw new Error('Drive returned an incomplete folder search. Search a smaller folder subtree.');
+      }
+      for (const folder of data.files || []) {
+        if (seen.has(folder.id)) continue;
+        if (folders.length >= MAX_SUBTREE_FOLDERS) {
+          throw new Error('Folder search exceeded 100 folders. Search a smaller folder subtree.');
+        }
+        seen.add(folder.id);
+        folders.push(folder.id);
+      }
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+  }
+  // Stable query order keeps native page tokens usable across calls on an unchanged subtree.
+  return `(${folders.sort().map((id) => `'${escapeDriveQuery(id)}' in parents`).join(' or ')})`;
 }
 
 /** Resolve a MIME type shortcut or return the value as-is. */
@@ -270,7 +317,7 @@ const searchFiles = action(
     mimeType: Type.Optional(
       Type.String({ description: 'Restrict to a specific file type (shortcuts or full MIME type)' }),
     ),
-    folderId: Type.Optional(Type.String({ description: 'Restrict to files inside this folder' })),
+    folderId: Type.Optional(Type.String({ description: 'Restrict to this folder subtree (at most 100 folders and 100 discovery pages)' })),
     orderBy: Type.Optional(
       Type.Union([Type.Literal('name'), Type.Literal('modifiedTime'), Type.Literal('createdTime')]),
     ),
@@ -307,7 +354,7 @@ const searchFiles = action(
       }
 
       if (p.mimeType) queryParts.push(`mimeType='${escapeDriveQuery(resolveMimeType(p.mimeType))}'`);
-      if (p.folderId) queryParts.push(`'${escapeDriveQuery(p.folderId)}' in ancestors`);
+      if (p.folderId) queryParts.push(await subtreeParentsQuery(p.folderId, token));
       if (p.modifiedAfter) {
         const cutoff = new Date(p.modifiedAfter).toISOString();
         queryParts.push(`modifiedTime > '${escapeDriveQuery(cutoff)}'`);
@@ -322,7 +369,7 @@ const searchFiles = action(
 
       const qs = new URLSearchParams({
         q: finalQuery,
-        fields: `nextPageToken,files(${LIST_FILE_FIELDS})`,
+        fields: `nextPageToken,incompleteSearch,files(${LIST_FILE_FIELDS})`,
         pageSize: String(p.maxResults || 10),
         supportsAllDrives: 'true',
         includeItemsFromAllDrives: 'true',
@@ -332,7 +379,14 @@ const searchFiles = action(
 
       const res = await driveFetch(`/files?${qs}`, token);
       if (!res.ok) return driveError(res);
-      const data = (await res.json()) as { files: DriveFile[]; nextPageToken?: string };
+      const data = (await res.json()) as {
+        files: DriveFile[];
+        nextPageToken?: string;
+        incompleteSearch?: boolean;
+      };
+      if (data.incompleteSearch) {
+        return { success: false, error: 'Drive returned an incomplete search. Narrow the search to a smaller folder subtree.' };
+      }
       const files = (data.files || []).map((f) => ({
         id: f.id,
         name: f.name,

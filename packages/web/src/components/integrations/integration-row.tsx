@@ -31,6 +31,7 @@
  * is named "Connect" end to end (button → screen → form submit), never
  * "Save".
  */
+import { IntegrationDetails } from "./integration-details";
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
@@ -166,6 +167,7 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
           )}
         </>
       )}
+      <IntegrationDetails plugin={plugin} />
     </IntegrationCard>
   );
 }
@@ -336,6 +338,7 @@ function ServiceBlock({
         description={description}
         state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
       />
+      <p className="mt-2 text-xs text-muted">{orgProvided ? "Organization-managed connection" : "Your account · team access requires sharing"}</p>
       {connectionDetails}
       <CardFooter meta={meta} right={controls} />
       <ConnectDialog

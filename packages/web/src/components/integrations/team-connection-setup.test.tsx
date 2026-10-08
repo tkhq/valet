@@ -2,7 +2,7 @@
 import { expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 vi.mock("~/api/integrations", () => ({
-  usePlugins: () => ({ data: { plugins: [{ services: [{ service: "linear", type: "oauth2", configKeys: ["accessToken"], connect: "oauth", connected: false, actions: [] }] }] } }),
+  usePlugins: () => ({ data: { plugins: [{ name: "linear", version: "1", actionCount: 0, services: [{ service: "linear", type: "oauth2", configKeys: ["accessToken"], connect: "oauth", connected: false, actions: [] }] }] } }),
   useCredentials: () => ({ data: { credentials: [] } }),
   useConnectCredential: () => ({ mutate: vi.fn(), isPending: false }),
 }));

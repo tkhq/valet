@@ -168,6 +168,96 @@ describe('drive actions', () => {
     });
   });
 
+  it('search_files traverses nested folders through empty pages and preserves result filters and pagination', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { files: [], nextPageToken: 'folders-next' }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'nested' }, { id: 'root' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'match', name: 'Budget' }], nextPageToken: 'results-next' }));
+
+    const result = await action('drive.search_files').execute({
+      query: 'budget', folderId: 'root', mimeType: 'document', searchIn: 'name',
+      modifiedAfter: '2026-01-01', orderBy: 'name', sortDirection: 'asc',
+      maxResults: 3, pageToken: 'results-current', __labelFilter: "'labels/required' in labels",
+    }, pluginCtx());
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const requests = fetchMock.mock.calls.map(([url]) => new URL(String(url)).searchParams);
+    expect(requests[0].get('q')).toBe("trashed=false and mimeType='application/vnd.google-apps.folder' and 'root' in parents");
+    expect(requests[0].has('pageToken')).toBe(false);
+    expect(requests[1].get('pageToken')).toBe('folders-next');
+    expect(requests[2].get('q')).toContain("'child' in parents");
+    expect(requests[3].get('q')).toContain("'nested' in parents");
+    expect(requests[4].get('q')).toBe("(trashed=false and name contains 'budget' and mimeType='application/vnd.google-apps.document' and ('child' in parents or 'nested' in parents or 'root' in parents) and modifiedTime > '2026-01-01T00:00:00.000Z') and 'labels/required' in labels");
+    expect(requests[4].get('pageToken')).toBe('results-current');
+    expect(requests[4].get('orderBy')).toBe('name');
+    expect(requests[4].get('pageSize')).toBe('3');
+    expect(result).toMatchObject({ success: true, data: { files: [{ id: 'match' }], nextPageToken: 'results-next', hasMore: true } });
+  });
+
+  it('search_files escapes folder IDs and search text in every query', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [] }));
+    const value = "a'" + String.fromCharCode(92) + 'b';
+    await action('drive.search_files').execute({ query: value, folderId: value }, pluginCtx());
+    const escaped = "a" + String.fromCharCode(92) + "'" + String.fromCharCode(92, 92) + 'b';
+    for (const [url] of fetchMock.mock.calls) {
+      expect(new URL(String(url)).searchParams.get('q')).toContain(`'${escaped}' in parents`);
+    }
+    expect(new URL(String(fetchMock.mock.calls[1][0])).searchParams.get('q')).toContain(`name contains '${escaped}'`);
+  });
+
+  it.each([403, 404, 429, 500])('search_files propagates discovery HTTP %s without returning partial results', async (status) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child' }] }))
+      .mockResolvedValueOnce(jsonResponse(status, { error: { message: 'Discovery failed' } }));
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root' }, pluginCtx());
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining(`Drive API ${status}: Discovery failed`) });
+    expect(result).not.toHaveProperty('data');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('search_files fails explicitly when folder count exceeds the traversal bound', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      files: Array.from({ length: 100 }, (_, i) => ({ id: `child-${i}` })),
+    }));
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root' }, pluginCtx());
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('exceeded 100 folders') });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('search_files accepts exactly 100 folders and 100 discovery pages', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      files: Array.from({ length: 99 }, (_, i) => ({ id: `child-${i}` })),
+    })).mockImplementation(async () => jsonResponse(200, { files: [] }));
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root' }, pluginCtx());
+    expect(result).toMatchObject({ success: true, data: { files: [], hasMore: false } });
+    expect(fetchMock).toHaveBeenCalledTimes(101);
+  });
+
+  it('search_files propagates the final search failure after successful discovery', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [] }))
+      .mockResolvedValueOnce(jsonResponse(403, { error: { message: 'Search denied' } }));
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root' }, pluginCtx());
+    expect(result).toEqual({ success: false, error: 'Drive API 403: Search denied' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('search_files bounds empty discovery pages with continuation tokens', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(200, { files: [], nextPageToken: 'more' }));
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root' }, pluginCtx());
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('exceeded 100 discovery pages') });
+    expect(fetchMock).toHaveBeenCalledTimes(100);
+  });
+
+  it.each([true, false])('search_files rejects incompleteSearch during discovery=%s', async (discovery) => {
+    if (!discovery) fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [] }));
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [], incompleteSearch: true }));
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root' }, pluginCtx());
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('incomplete') });
+    expect(result).not.toHaveProperty('data');
+  });
+
   it('list_documents filters to Google Docs mimeType', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
