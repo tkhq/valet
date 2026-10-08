@@ -31,6 +31,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Trash2,
   X,
 } from "lucide-react";
 import type {
@@ -52,7 +53,7 @@ import {
 import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
-import { useThreadProjects } from "~/lib/thread-projects";
+import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
 import { useMe } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { ThreadStatusIcon } from "./thread-status-icon";
@@ -61,6 +62,7 @@ import { createDebouncer } from "~/lib/debounce";
 import { formatChord } from "~/lib/chat-keybindings";
 import {
   Button,
+  ConfirmDialog,
   Dialog,
   DialogContent,
   DialogTitle,
@@ -272,6 +274,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
   const [projectDialog, setProjectDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [projectMenu, setProjectMenu] = useState<string>();
+  const [deleteProject, setDeleteProject] = useState<{ id: string; name: string }>();
+  const [deletingProject, setDeletingProject] = useState(false);
+  const deletingRef = useRef(false);
+  const [deleteError, setDeleteError] = useState<string>();
+
   const [projectError, setProjectError] = useState<string>();
   function createProject() {
     const name = projectName.trim();
@@ -406,6 +414,41 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
       useComposerPrefillStore.getState().requestFocus();
     } catch {
       if (currentSession.current === sessionId) setCreationError("Could not create the thread. Try again.");
+    }
+  }
+
+  async function confirmDeleteProject() {
+    if (!deleteProject || deletingRef.current) return;
+    deletingRef.current = true;
+    setDeletingProject(true);
+    setDeleteError(undefined);
+    const ids = projectThreadIds(projects.readCurrent(), deleteProject.id);
+    const archivedIds = new Set<string>();
+    // Bound concurrency and attempt every chat, even when an earlier archive fails.
+    for (const threadId of ids) {
+      try {
+        await setArchived.mutateAsync({ threadId, archived: true });
+        archivedIds.add(threadId);
+      } catch { /* Keep the folder and offer a retry after all attempts. */ }
+    }
+    let removed = false;
+    if (archivedIds.size === ids.length) {
+      projects.update(current => {
+        const next = removeArchivedProject(current, deleteProject.id, archivedIds);
+        removed = !next.projects.some(project => project.id === deleteProject.id);
+        return next;
+      });
+    }
+    deletingRef.current = false;
+    if (currentSession.current !== sessionId) return;
+    setDeletingProject(false);
+    if (removed) {
+      setDeleteProject(undefined);
+      if (activeThreadId && archivedIds.has(activeThreadId)) {
+        navigate({ search: prev => ({ ...prev, thread: undefined, child: undefined }) });
+      }
+    } else {
+      setDeleteError("The project was kept because some chats could not be archived or its assignments changed. Already archived chats stay archived. Try again to finish deleting the project.");
     }
   }
 
@@ -596,6 +639,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             </DialogContent>
           </Dialog>
 
+          <ConfirmDialog open={!!deleteProject} onOpenChange={open => { if (!open && !deletingRef.current) { setDeleteProject(undefined); setDeleteError(undefined); } }}
+            title={`Delete project “${deleteProject?.name ?? ""}”?`}
+            description="All chats assigned to this project will be archived, including chats outside the loaded list. You can restore them from archived chats. The project folder will be removed."
+            confirmLabel={deleteError ? "Retry delete project" : "Delete project"} pendingLabel="Archiving chats…" pending={deletingProject}
+            error={deleteError ? <span role="alert">{deleteError}</span> : undefined} onConfirm={() => void confirmDeleteProject()} />
+
           {threadsQ.isLoading && (
             <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading…
@@ -610,9 +659,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           {visible.some((thread) => projects.value.pinned.includes(thread.id)) && <section aria-label="Pinned"><h2 className="px-4 pb-1 pt-3 text-xs font-medium text-muted">Pinned</h2>{visible.filter((thread) => projects.value.pinned.includes(thread.id)).map(renderThread)}</section>}
           {projects.value.grouped && !projects.value.collapsed && projects.value.projects.map((project) => {
             const members = visible.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
-            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 rounded-lg transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
-              <div className="flex items-center pr-2">
-              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
+            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
+              <div className="flex items-center pr-2" onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
+              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
                 {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
                 <span className="truncate">{project.name}</span>{members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
               </button>
@@ -621,6 +670,10 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                   className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss disabled:opacity-50 sm:h-8 sm:w-8">
                   <Plus className="h-4 w-4" aria-hidden />
                 </button>
+                <DropdownMenu open={projectMenu === project.id} onOpenChange={open => setProjectMenu(open ? project.id : undefined)}>
+                  <DropdownMenuTrigger asChild><button type="button" aria-label={`Project menu: ${project.name}`} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss sm:h-8 sm:w-8"><MoreHorizontal className="h-4 w-4" aria-hidden /></button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => { setDeleteError(undefined); setDeleteProject({ id: project.id, name: project.name }); }}><Trash2 aria-hidden />Delete project</DropdownMenuItem></DropdownMenuContent>
+                </DropdownMenu>
               </div>
               {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted">Start a thread with + or move one here</p>}</div>}
             </section>;

@@ -127,3 +127,21 @@ The button creates a thread with workspace defaults and assigns it to that proje
 Creation expands the project, opens the thread, and focuses the composer.
 If creation fails, the project stays unchanged and the sidebar shows retry guidance.
 Switching workspaces while creation is pending must not navigate to the previous workspace's thread.
+
+Project folder hover and focus highlights use square corners, matching the adjacent thread selection rows.
+
+
+### Delete a project
+
+Right-click a project folder header or use its visible menu button to select
+**Delete project**. The confirmation explains that every assigned chat will be
+archived, including pinned chats and chats outside the loaded pages. An empty
+folder can also be deleted. Archived chats remain available in **Show archived**.
+
+The folder and its assignments are removed only after every archive succeeds.
+If an archive fails, the folder stays and the dialog offers **Retry delete
+project**; chats already archived remain archived. A new assignment from another
+tab during the operation also keeps the folder for retry. Deletion uses the
+original workspace even if the user switches workspaces while it runs, and does
+not navigate or change preferences in the new workspace. Project folders remain
+personal browser preferences; archiving uses the existing chat access checks.
