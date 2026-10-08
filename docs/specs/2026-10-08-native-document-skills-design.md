@@ -70,6 +70,7 @@ The web renderer accepts relative links and absolute links on its current origin
 The route checks current session access and thread visibility before reading the snapshot.
 Workflow engine sessions use the run owner, current team membership, private origin visibility, and private event visibility.
 Authorization follows the workflow run detail policy (`ownedRun`), including private-event checks for personal runs.
+HTTP access uses the stored run owner. Credential-specific normalization of synthetic owners does not grant download access.
 These sessions have no `agent_sessions` row. The route still requires the requested thread to belong to that engine session.
 It sends an attachment disposition and prevents content sniffing and caching.
 Downloads do not wake a sandbox and remain available after the source file is removed.

@@ -305,6 +305,11 @@ describe("file_attach", () => {
     expect((await fetch(`${api.baseUrl}/api/workflows/runs/download-run`, member)).status).toBe(404);
     await p.db.delete(teamMembers).where(and(eq(teamMembers.teamId, "download-team"), eq(teamMembers.userId, "local-user")));
     expect((await fetch(url)).status).toBe(404);
+    await p.db.insert(teamMembers).values({ teamId: "download-team", userId: "local-user", role: "admin" });
+    // Credential ownership normalizes this synthetic user to a team. HTTP run access does not.
+    await p.db.update(workflowRuns).set({ ownerType: "user", ownerId: "team:download-team" }).where(eq(workflowRuns.id, "download-run"));
+    expect((await fetch(`${api.baseUrl}/api/workflows/runs/download-run`)).status).toBe(404);
+    expect((await fetch(url)).status).toBe(404);
   });
 
 });

@@ -542,18 +542,19 @@ fileUploadRouter.get("/:id/threads/:threadId/files/:fileId", async (c) => {
     if (!await canAccessSessionResources(c.var.providers, ordinary, c.var.principal)) return c.json({ error: "file not found" }, 404);
   } else {
     // Workflow engine sessions intentionally have no agent_sessions row.
+    // The helper checks the tenant; HTTP access uses the raw run owner, as ownedRun does.
     const owner = await workflowSessionOwner(db, sessionId, c.var.user.orgId);
     if (!owner) return c.json({ error: "file not found" }, 404);
     const run = await workflowStore.getRun(parseWorkflowSessionId(sessionId).runId);
     const viewer = viewerOf(c);
-    if (!run || !await isAuthorizedForOwner(db, {
+    if (!run?.owner || !await isAuthorizedForOwner(db, {
       orgId: c.var.user.orgId,
       userId: c.var.principal?.type === "team" ? `team:${c.var.principal.id}` : c.var.user.id,
       principal: c.var.principal,
-    }, { ownerType: owner.type, ownerId: owner.id })
-      || !await runOriginVisible(c.var.providers, viewer, { ownerType: owner.type, origin: run.params.origin, actorUserId: run.actorUserId })
+    }, run.owner)
+      || !await runOriginVisible(c.var.providers, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId })
       || !await runEventVisible(c.var.providers, viewer, run.params)) return c.json({ error: "file not found" }, 404);
-    row = { id: sessionId, orgId: c.var.user.orgId, ownerType: owner.type };
+    row = { id: sessionId, orgId: c.var.user.orgId, ownerType: run.owner.ownerType };
   }
   const thread = await engineStore.getThread(row.id, c.req.param("threadId"));
   const fileId = c.req.param("fileId");
