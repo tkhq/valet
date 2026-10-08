@@ -81,6 +81,7 @@
     "@valet/plugin-google-workspace": "workspace:*",
     "@valet/plugin-linear": "workspace:*",
     "@valet/plugin-memory": "workspace:*",
+    "@valet/plugin-native-documents": "workspace:*",
     "@valet/plugin-notion": "workspace:*",
     "@valet/plugin-openai": "workspace:*",
     "@valet/plugin-sandbox-tunnels": "workspace:*",

@@ -164,6 +164,7 @@ export const TESTED_PLUGINS = [
   "@valet/plugin-google-calendar",
   "@valet/plugin-google-workspace",
   "@valet/plugin-linear",
+  "@valet/plugin-native-documents",
   "@valet/plugin-openai",
   "@valet/plugin-security",
   "@valet/plugin-slack",

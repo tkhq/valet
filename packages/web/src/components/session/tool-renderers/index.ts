@@ -14,6 +14,7 @@ import { bashRenderer } from "./bash";
 import { browserRenderer } from "./browser";
 import { editRenderer } from "./edit";
 import { fallbackRenderer } from "./fallback";
+import { fileAttachRenderer } from "./file-attach";
 import { findReplaceRenderer } from "./find-replace";
 import { memPatchRenderer } from "./mem-patch";
 import { memReadRenderer } from "./mem-read";
@@ -37,6 +38,7 @@ const RENDERERS: ToolRenderer[] = [
   memPatchRenderer,
   memReadRenderer,
   memShareRenderer,
+  fileAttachRenderer,
   memWriteRenderer,
   skillRenderer,
   threadReadRenderer,

@@ -133,6 +133,7 @@ import {
 import securityPlugin from "@valet/plugin-security/plugin";
 import { codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
+import { buildFileAttachTool } from "../services/generated-files.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
@@ -1464,20 +1465,21 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...(this.opts.blobs ? ["file_attach"] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
     const browserPins = this.opts.sandboxProvider.capabilities().browserAutomation && plugins.some((plugin) => plugin.name === 'browser')
       ? ['browser.describe', 'browser.execute', 'browser.reset'].map((actionId) => ({ actionId })) : [];
     const effectivePins = [...pins, ...browserPins];
-    if (!this.opts.db) return pluginSessionExtras(plugins, [], effectivePins, catalogOptions);
-    return pluginSessionExtras(
+    const extras = pluginSessionExtras(
       plugins,
-      await listSkillSourcesFor(this.opts.db, owner, orgId),
+      this.opts.db ? await listSkillSourcesFor(this.opts.db, owner, orgId) : [],
       effectivePins,
       catalogOptions,
     );
+    if (this.opts.blobs) extras.tools.push(buildFileAttachTool(this.opts.blobs));
+    return extras;
   }
 
   /**

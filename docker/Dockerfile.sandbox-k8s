@@ -68,6 +68,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /workspace
 WORKDIR /workspace
 
+# Native document libraries and render tools for both sandbox profiles.
+# This stage can be built alone to test the office runtime.
+FROM base AS office-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv \
+      libreoffice-writer libreoffice-calc libreoffice-impress \
+      poppler-utils fonts-liberation fonts-dejavu-core fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/native-documents /opt/valet-office-src
+RUN python3 -m venv /opt/valet-office \
+    && /opt/valet-office/bin/python -m pip install --no-cache-dir --only-binary=:all: --require-hashes \
+         -r /opt/valet-office-src/requirements.txt \
+    && cp /opt/valet-office-src/office.py /opt/valet-office/office.py \
+    && /opt/valet-office/bin/python /opt/valet-office/office.py check \
+    && /opt/valet-office/bin/python /opt/valet-office-src/test_office.py
+
 # ─── Gateway build stage ────────────────────────────────────────────────
 # Builds @valet/sandbox-gateway's dist/ and produces a self-contained,
 # production-only package dir (workspace deps resolved to real files, no
@@ -98,7 +114,7 @@ RUN pnpm --filter @valet/shared build && pnpm --filter @valet/browser-runtime bu
 RUN pnpm --filter @valet/browser-runtime deploy --legacy --prod /out/browser
 
 # ─── Final image ────────────────────────────────────────────────────────
-FROM base
+FROM office-runtime
 
 # Package-manager shims for the SHIPPED image, not just build stages.
 # node:22 bundles corepack but leaves it disabled: without `corepack
@@ -152,10 +168,9 @@ RUN curl -fsSL -o /tmp/gh.deb \
 # image"): pinned, read-only, offline-capable — personas run them against
 # the clone, and rule updates ride image rebuilds, not runtime downloads,
 # so sandbox egress stays closed. gitleaks ships its default ruleset inside
-# the binary. gitleaks ONLY: semgrep is a Python package and this image
-# carries no Python runtime, so baking it would add a whole toolchain for
-# one tool (spec implementation deviation; plan risk 6 pre-authorizes
-# gitleaks-only). Release assets are per-arch tarballs with a published
+# the binary. gitleaks ONLY: semgrep remains outside the baked scanner scope
+# (spec implementation deviation; plan risk 6 pre-authorizes gitleaks-only).
+# Release assets are per-arch tarballs with a published
 # checksums.txt — the sha256 per arch is pinned below, so a GITLEAKS_VERSION
 # bump must also update both hashes from the new checksums.txt.
 ARG GITLEAKS_VERSION=8.30.1

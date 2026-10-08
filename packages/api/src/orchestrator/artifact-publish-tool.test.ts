@@ -269,3 +269,15 @@ describe("artifact_publish: canonical key normalization", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+
+it("rejects native binary documents before reading or publishing them", async () => {
+  const { fetchMock } = stubFetchOk({ url: "https://example.test/page" });
+  const sandbox = stubSandbox({ "/workspace/report.docx": "binary" });
+  sandbox.readFile = vi.fn(sandbox.readFile);
+  const result = await publishTool.execute({ path: "/workspace/report.docx" }, makeCtx(sandbox));
+  expect(result.ok).toBe(false);
+  expect(result.text).toContain("file_attach");
+  expect(sandbox.readFile).not.toHaveBeenCalled();
+  expect(fetchMock).not.toHaveBeenCalled();
+});
