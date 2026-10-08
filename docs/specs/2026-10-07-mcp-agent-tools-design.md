@@ -91,6 +91,8 @@ The `/mcp` handler verifies the OAuth bearer token and attaches the user to each
 - A decision is pending. The result is `waiting_for_decision` with each gate's `gate_id` and options.
 - The time runs out. The result is `running`, not an error. The agent calls `get_thread` with `wait_seconds` to wait again.
 
+A prompt that is a slash command starts no turn: the send route runs it at once and returns `messageId: null`. `start_thread` and `send_message` then return `command_ran` with a message, and do not wait. The agent calls `get_thread` to see the command's effect. Each tool description lists every status the tool can return.
+
 The maximum stays under 60 seconds because an ingress commonly ends a request at 60 seconds (nginx's default) while the turn keeps running. The wait finds the turn by its queue item, the thread's newest one for `get_thread` and `resolve_decision`, because a long turn's tool messages can push its prompt out of any fixed message window.
 
 The queue item read uses ids that an authorized route call returned, so it widens no access.

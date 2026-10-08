@@ -144,14 +144,30 @@ function replyFor(messages: Message[], queueItemId: string): string | undefined 
   return final ? clip(final.content) : undefined;
 }
 
-export type TurnStatus = "completed" | "failed" | "aborted" | "superseded" | "waiting_for_decision" | "running";
+/**
+ * The status of one prompt. `command_ran` means the text was a slash command:
+ * the route ran it at once and started no assistant turn, so there is no
+ * reply to wait for.
+ */
+export type TurnStatus = "completed" | "failed" | "aborted" | "superseded" | "waiting_for_decision" | "running" | "command_ran";
+
+/** Every status `waitForTurn` returns, for tool descriptions. */
+const TURN_STATUSES =
+  "completed (the turn finished; reply has the answer), failed (error says why), aborted (a person stopped the turn), " +
+  "superseded (a newer message replaced the turn), waiting_for_decision (answer pending_decisions with resolve_decision), " +
+  "or running (the wait ended first; call get_thread with wait_seconds to wait again)";
+const COMMAND_STATUS = "command_ran (the prompt was a slash command, so no turn started; call get_thread to see its effect)";
+const IDLE_STATUS = "idle (the thread has no turns)";
 
 export interface TurnView {
   thread_id: string;
-  message_id: string;
+  /** The queue item of the turn. Absent for `command_ran`, which starts no turn. */
+  message_id?: string;
   status: TurnStatus;
   reply?: string;
   error?: string;
+  /** What happened, for a status with no reply. */
+  message?: string;
   pending_decisions?: ReturnType<typeof gateView>[];
   url: string;
 }
@@ -203,7 +219,12 @@ async function sendAndWait(deps: McpToolDeps, threadId: string, prompt: string, 
   const sessionId = await sessionOf(deps, threadId);
   const sent = await call<SendPromptResponse>(deps, "POST", `/api/threads/${encodeURIComponent(threadId)}/messages`, "Thread", { text: prompt });
   if (sent.messageId === null) {
-    return { thread_id: threadId, message_id: "", status: "completed", reply: "The text ran as a slash command. Call get_thread to read its result.", url: threadUrl(deps, threadId) };
+    return {
+      thread_id: threadId,
+      status: "command_ran",
+      message: "Valet ran the prompt as a slash command, and no assistant turn started. Call get_thread to see its effect.",
+      url: threadUrl(deps, threadId),
+    };
   }
   return waitForTurn(deps, { sessionId, threadId, queueItemId: sent.messageId, waitSeconds });
 }
@@ -275,7 +296,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
       description:
         "Delegates a task to the Valet assistant in a new thread and, by default, waits for its reply. " +
         "Write the prompt as a complete brief: goal, context, repository, constraints, and what done looks like. " +
-        "If the result status is waiting_for_decision, answer with resolve_decision. If it is running, call get_thread later.",
+        `Result status: ${TURN_STATUSES}, or ${COMMAND_STATUS}.`,
       inputSchema: {
         prompt: z.string().min(1).describe("The task for the assistant, written as a self-contained brief."),
         workspace: workspaceArg,
@@ -292,7 +313,9 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
   server.registerTool(
     "send_message",
     {
-      description: "Sends a follow-up message to an existing thread and, by default, waits for the assistant's reply.",
+      description:
+        "Sends a follow-up message to an existing thread and, by default, waits for the assistant's reply. " +
+        `Result status: ${TURN_STATUSES}, or ${COMMAND_STATUS}.`,
       inputSchema: {
         thread_id: z.string().min(1).describe("Thread id from start_thread or list_threads."),
         prompt: z.string().min(1).describe("The message to send."),
@@ -308,7 +331,8 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     {
       description:
         "Reads a thread: its status, recent messages, and pending decisions. " +
-        "With wait_seconds above 0, it first waits for the latest turn to finish.",
+        "With wait_seconds above 0, it first waits for the latest turn to finish. " +
+        `Status of the latest turn: ${TURN_STATUSES}, or ${IDLE_STATUS}.`,
       inputSchema: {
         thread_id: z.string().min(1).describe("Thread id from start_thread or list_threads."),
         messages: z.number().int().min(1).max(50).optional().describe("Number of recent messages to return. Default: 10."),
@@ -428,7 +452,8 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
         "Answers a pending question, then, by default, waits for the turn that asked it to continue. " +
         "Send the action_id of one of its options, or value for a typed answer. " +
         "Use gate_id and action_id exactly as list_decisions or a waiting_for_decision result returned them. " +
-        "Approvals and credential requests need a person: give them the thread url instead.",
+        "Approvals and credential requests need a person: give them the thread url instead. " +
+        `Result status: ${TURN_STATUSES}, or ${IDLE_STATUS}.`,
       inputSchema: {
         thread_id: z.string().min(1).describe("Thread id."),
         gate_id: z.string().min(1).describe("The decision's gate_id."),

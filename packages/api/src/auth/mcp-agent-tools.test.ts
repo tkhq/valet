@@ -300,6 +300,84 @@ describe("resolve_decision turn targeting", () => {
   });
 });
 
+describe("slash command prompts", () => {
+  async function connect(deps: Parameters<typeof import("./mcp-tools.js")["registerAgentTools"]>[1]) {
+    const { registerAgentTools } = await import("./mcp-tools.js");
+    const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const server = new McpServer({ name: "t", version: "0" });
+    registerAgentTools(server, deps);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(clientSide);
+    return client;
+  }
+
+  it("reports command_ran, not completed, when the send route runs a slash command", async () => {
+    const client = await connect({
+      // The send route answers a slash command with messageId null: no turn starts.
+      api: async (method, path) => {
+        if (method === "POST" && path === "/api/threads") return { status: 200, body: { id: "t" } };
+        if (method === "POST") return { status: 200, body: { messageId: null } };
+        return { status: 200, body: { sessionId: "s" } };
+      },
+      engineStore: { getQueueItem: async () => { throw new Error("a command has no queue item to read"); } },
+      latestQueueItem: async () => undefined,
+      origin: "https://valet.test",
+    });
+    for (const [name, args] of [["send_message", { thread_id: "t", prompt: "/model haiku" }], ["start_thread", { prompt: "/model haiku" }]] as const) {
+      const res = await client.callTool({ name, arguments: args });
+      expect(res.structuredContent).toEqual({
+        thread_id: "t",
+        status: "command_ran",
+        message: expect.stringContaining("slash command"),
+        url: "https://valet.test/threads/t",
+      });
+    }
+    await client.close();
+  });
+
+  it("lists every status each tool can return in its description", async () => {
+    const { registerAgentTools } = await import("./mcp-tools.js");
+    const { registerWorkspaceTools } = await import("./mcp-workspace-tools.js");
+    const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const server = new McpServer({ name: "t", version: "0" });
+    const deps = {
+      api: async () => ({ status: 200, body: {} }),
+      engineStore: { getQueueItem: async () => null },
+      latestQueueItem: async () => undefined,
+      origin: "https://valet.test",
+    };
+    registerAgentTools(server, deps);
+    registerWorkspaceTools(server, deps);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(clientSide);
+    const { tools } = await client.listTools();
+    const description = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    const turn = ["completed", "failed", "aborted", "superseded", "waiting_for_decision", "running"];
+    const expected: Record<string, string[]> = {
+      start_thread: [...turn, "command_ran"],
+      send_message: [...turn, "command_ran"],
+      get_thread: [...turn, "idle"],
+      resolve_decision: [...turn, "idle"],
+      call_tool: ["completed", "failed", "approval_required", "in_progress"],
+      describe_tool: ["allow", "require_approval", "deny"],
+      ...Object.fromEntries(["list_workflows", "run_workflow", "get_workflow_run"].map((name) => [name,
+        ["pending", "running", "parked", "terminalizing", "settled", "completed", "failed", "cancelled"]])),
+    };
+    for (const [name, statuses] of Object.entries(expected)) {
+      for (const status of statuses) expect(description(name), `${name} lists ${status}`).toContain(status);
+    }
+    await client.close();
+  });
+});
+
 describe("attachMcpCaller", () => {
   it("binds the identity to the exact Request object only", () => {
     const user = { id: "u", email: "u@x", role: "member", orgId: "o" } as const;

@@ -21,6 +21,8 @@ import type {
   ListWorkflowsResponse,
   ShareArtifactResponse,
   StartWorkflowRunResponse,
+  WorkflowRunOutcome,
+  WorkflowRunStatus,
 } from "../wire/types.js";
 import type { McpToolDeps } from "./mcp-tools.js";
 import { capOutput } from "./mcp-output.js";
@@ -75,14 +77,19 @@ function withQuery(path: string, params: URLSearchParams): string {
   return params.size > 0 ? `${path}?${params.toString()}` : path;
 }
 
+/** Every workflow run status and outcome, for tool descriptions (`WorkflowRunStatus`, `WorkflowRunOutcome`). */
+const RUN_STATUSES =
+  "Run status: pending or running (in progress), parked (stopped for an approval; see pending_approvals), " +
+  "terminalizing (finishing), or settled (done). A settled run has an outcome: completed, failed, or cancelled.";
+
 const workspaceArg = z.string().min(1).optional()
   .describe('Workspace: "user" for your personal workspace, or a team id from list_workspaces. Default: "user".');
 
 type RunView = {
   run_id: string;
   workflow_id: string;
-  status: string;
-  outcome?: string;
+  status: WorkflowRunStatus;
+  outcome?: WorkflowRunOutcome;
   pending_approvals?: Array<{ node_id: string; kind: string; summary?: string; action?: string; risk_level?: string }>;
   url: string;
 };
@@ -262,7 +269,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
   server.registerTool(
     "list_workflows",
     {
-      description: "Lists the Valet workflows (saved automations) you can run, with each one's latest run.",
+      description: `Lists the Valet workflows (saved automations) you can run, with each one's latest run. ${RUN_STATUSES}`,
       inputSchema: { workspace: workspaceArg },
       annotations: { readOnlyHint: true },
     },
@@ -284,7 +291,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     {
       description:
         "Starts a workflow run and, by default, waits for it to finish. If it stops for approval, a person approves it in Valet; " +
-        "check again later with get_workflow_run.",
+        `check again later with get_workflow_run. ${RUN_STATUSES}`,
       inputSchema: {
         workflow_id: z.string().min(1).describe("Workflow id from list_workflows."),
         input: z.record(z.string(), z.unknown()).optional().describe("Run input, when the workflow declares inputs."),
@@ -301,7 +308,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
   server.registerTool(
     "get_workflow_run",
     {
-      description: "Reads a workflow run's status, outcome, and pending approvals. With wait_seconds, it waits for the run to finish first.",
+      description: `Reads a workflow run's status, outcome, and pending approvals. With wait_seconds, it waits for the run to finish first. ${RUN_STATUSES}`,
       inputSchema: {
         run_id: z.string().min(1).describe("Run id from run_workflow or list_workflows."),
         wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe("Seconds to wait for the run to finish. Default: 0."),
